@@ -15,6 +15,11 @@ import {
   PdfPageView,
   type PdfPageLayout,
 } from "./pdf-page-view";
+import {
+  buildSpeechChunk,
+  isRetryableSpeechError,
+  speechFailureMessage,
+} from "./speech-utils.mjs";
 
 type DocumentKind = "demo" | "pdf" | "epub" | "txt";
 type HighlightMode = "both" | "word" | "sentence";
@@ -477,6 +482,8 @@ export default function Home() {
   const speechOffsetRef = useRef(0);
   const boundarySeenRef = useRef(false);
   const fallbackTimerRef = useRef<number | null>(null);
+  const speechStartTimerRef = useRef<number | null>(null);
+  const speechSessionRef = useRef(0);
   const programmaticScrollRef = useRef(false);
   const activeWordRef = useRef(0);
 
@@ -596,14 +603,23 @@ export default function Home() {
     }
   }, []);
 
+  const clearSpeechStartTimer = useCallback(() => {
+    if (speechStartTimerRef.current) {
+      window.clearTimeout(speechStartTimerRef.current);
+      speechStartTimerRef.current = null;
+    }
+  }, []);
+
   const stopSpeech = useCallback(() => {
+    speechSessionRef.current += 1;
+    clearSpeechStartTimer();
     if (typeof window !== "undefined" && "speechSynthesis" in window) {
       window.speechSynthesis.cancel();
     }
     clearFallbackTimer();
     utteranceRef.current = null;
     setIsPlaying(false);
-  }, [clearFallbackTimer]);
+  }, [clearFallbackTimer, clearSpeechStartTimer]);
 
   useEffect(() => stopSpeech, [stopSpeech]);
 
@@ -644,68 +660,164 @@ export default function Home() {
         Math.max(0, startIndex),
         model.tokens.length - 1,
       );
+      const sessionId = speechSessionRef.current + 1;
+      speechSessionRef.current = sessionId;
       window.speechSynthesis.cancel();
+      clearSpeechStartTimer();
       clearFallbackTimer();
       setActiveWord(safeIndex);
       activeWordRef.current = safeIndex;
-
-      const offset = model.tokens[safeIndex].start;
-      const utterance = new SpeechSynthesisUtterance(
-        model.fullText.slice(offset),
-      );
-      utterance.rate = settings.rate;
-      utterance.pitch = 1;
       const selectedVoice = voices.find(
         (voice) => voice.voiceURI === settings.voiceURI,
       );
-      if (selectedVoice) utterance.voice = selectedVoice;
+      const initialVoiceURI = selectedVoice?.voiceURI ?? "";
 
-      speechOffsetRef.current = offset;
-      boundarySeenRef.current = false;
-      utteranceRef.current = utterance;
+      if (settings.voiceURI && !selectedVoice) {
+        setSettings((current) => ({ ...current, voiceURI: "" }));
+      }
 
-      utterance.onstart = () => {
-        setIsPlaying(true);
-        setNotice("");
-      };
-      utterance.onboundary = (event) => {
-        if (event.name && event.name !== "word") return;
-        boundarySeenRef.current = true;
-        const nextWord = findWordAtCharacter(
+      function scheduleChunk(
+        chunkStartIndex: number,
+        voiceURI: string,
+        retryCount: number,
+        preserveNotice: boolean,
+        delay: number,
+      ) {
+        if (speechSessionRef.current !== sessionId) return;
+        clearSpeechStartTimer();
+        speechStartTimerRef.current = window.setTimeout(() => {
+          speechStartTimerRef.current = null;
+          speakChunk(
+            chunkStartIndex,
+            voiceURI,
+            retryCount,
+            preserveNotice,
+          );
+        }, delay);
+      }
+
+      function speakChunk(
+        chunkStartIndex: number,
+        voiceURI: string,
+        retryCount: number,
+        preserveNotice: boolean,
+      ) {
+        if (speechSessionRef.current !== sessionId) return;
+
+        const chunk = buildSpeechChunk(
+          model.fullText,
           model.tokens,
-          speechOffsetRef.current + event.charIndex,
+          chunkStartIndex,
         );
-        activeWordRef.current = nextWord;
-        setActiveWord(nextWord);
-      };
-      utterance.onend = () => {
-        clearFallbackTimer();
-        utteranceRef.current = null;
-        setIsPlaying(false);
-      };
-      utterance.onerror = (event) => {
-        clearFallbackTimer();
-        utteranceRef.current = null;
-        setIsPlaying(false);
-        if (event.error !== "canceled" && event.error !== "interrupted") {
-          setNotice("The selected voice stopped unexpectedly. Try another voice.");
+        if (!chunk) {
+          setIsPlaying(false);
+          return;
         }
-      };
 
-      window.speechSynthesis.speak(utterance);
+        const utterance = new SpeechSynthesisUtterance(chunk.text);
+        utterance.rate = settings.rate;
+        utterance.pitch = 1;
+        const voice = voices.find(
+          (candidate) => candidate.voiceURI === voiceURI,
+        );
+        if (voice) {
+          utterance.voice = voice;
+          utterance.lang = voice.lang;
+        }
 
-      const interval = Math.max(130, 60_000 / (180 * settings.rate));
-      fallbackTimerRef.current = window.setInterval(() => {
-        if (boundarySeenRef.current || window.speechSynthesis.paused) return;
-        setActiveWord((current) => {
-          const next = Math.min(current + 1, model.tokens.length - 1);
-          activeWordRef.current = next;
-          return next;
-        });
-      }, interval);
+        speechOffsetRef.current = chunk.startChar;
+        boundarySeenRef.current = false;
+        utteranceRef.current = utterance;
+
+        utterance.onstart = () => {
+          if (speechSessionRef.current !== sessionId) return;
+          setIsPlaying(true);
+          if (!preserveNotice) setNotice("");
+        };
+        utterance.onboundary = (event) => {
+          if (speechSessionRef.current !== sessionId) return;
+          if (event.name && event.name !== "word") return;
+          boundarySeenRef.current = true;
+          const nextWord = findWordAtCharacter(
+            model.tokens,
+            speechOffsetRef.current + event.charIndex,
+          );
+          activeWordRef.current = nextWord;
+          setActiveWord(nextWord);
+        };
+        utterance.onend = () => {
+          clearFallbackTimer();
+          if (speechSessionRef.current !== sessionId) return;
+          utteranceRef.current = null;
+
+          if (chunk.nextIndex < model.tokens.length) {
+            activeWordRef.current = chunk.nextIndex;
+            setActiveWord(chunk.nextIndex);
+            scheduleChunk(chunk.nextIndex, voiceURI, 0, false, 45);
+            return;
+          }
+
+          setIsPlaying(false);
+        };
+        utterance.onerror = (event) => {
+          clearFallbackTimer();
+          if (speechSessionRef.current !== sessionId) return;
+          utteranceRef.current = null;
+
+          if (event.error === "canceled") {
+            setIsPlaying(false);
+            return;
+          }
+
+          const resumeIndex = Math.max(
+            chunk.startIndex,
+            activeWordRef.current,
+          );
+
+          if (voiceURI) {
+            setSettings((current) =>
+              current.voiceURI === voiceURI
+                ? { ...current, voiceURI: "" }
+                : current,
+            );
+            setNotice(
+              `${voice?.name ?? "The selected voice"} failed in Brave. Continuing with System default.`,
+            );
+            scheduleChunk(resumeIndex, "", 0, true, 180);
+            return;
+          }
+
+          if (isRetryableSpeechError(event.error) && retryCount < 1) {
+            setNotice(
+              "Narration paused briefly while LineLight reconnects to Ubuntu's speech service.",
+            );
+            scheduleChunk(resumeIndex, "", retryCount + 1, true, 350);
+            return;
+          }
+
+          setIsPlaying(false);
+          setNotice(speechFailureMessage(event.error, voices.length > 0));
+        };
+
+        window.speechSynthesis.speak(utterance);
+
+        const interval = Math.max(130, 60_000 / (180 * settings.rate));
+        fallbackTimerRef.current = window.setInterval(() => {
+          if (boundarySeenRef.current || window.speechSynthesis.paused) return;
+          setActiveWord((current) => {
+            const next = Math.min(current + 1, chunk.nextIndex - 1);
+            activeWordRef.current = next;
+            return next;
+          });
+        }, interval);
+      }
+
+      setIsPlaying(true);
+      scheduleChunk(safeIndex, initialVoiceURI, 0, false, 80);
     },
     [
       clearFallbackTimer,
+      clearSpeechStartTimer,
       model.fullText,
       model.tokens,
       settings.rate,
@@ -887,9 +999,6 @@ export default function Home() {
     "--reader-size": `${settings.fontSize}px`,
     "--reader-leading": settings.lineHeight,
   } as CSSProperties;
-
-  const currentVoice =
-    voices.find((voice) => voice.voiceURI === settings.voiceURI) ?? voices[0];
 
   const changeViewMode = (mode: ReaderViewMode) => {
     if (mode === viewMode) return;
@@ -1521,7 +1630,13 @@ export default function Home() {
                 <label className="select-setting stacked">
                   <span>Voice</span>
                   <select
-                    value={currentVoice?.voiceURI ?? ""}
+                    value={
+                      voices.some(
+                        (voice) => voice.voiceURI === settings.voiceURI,
+                      )
+                        ? settings.voiceURI
+                        : ""
+                    }
                     onChange={(event) => {
                       stopSpeech();
                       setSettings((current) => ({
@@ -1530,15 +1645,13 @@ export default function Home() {
                       }));
                     }}
                   >
-                    {voices.length ? (
-                      voices.map((voice) => (
-                        <option key={voice.voiceURI} value={voice.voiceURI}>
-                          {voice.name} · {voice.lang}
-                        </option>
-                      ))
-                    ) : (
-                      <option value="">System voice</option>
-                    )}
+                    <option value="">System default</option>
+                    {voices.map((voice) => (
+                      <option key={voice.voiceURI} value={voice.voiceURI}>
+                        {voice.name} · {voice.lang}
+                        {voice.localService ? " · local" : " · online"}
+                      </option>
+                    ))}
                   </select>
                 </label>
 
