@@ -55,6 +55,30 @@ export function buildSpeechChunk(
   };
 }
 
+/**
+ * Find the most recent Azure word boundary reached by an audio element.
+ *
+ * @param {Array<{ audioOffsetSeconds: number }>} boundaries
+ * @param {number} currentTime
+ */
+export function findTimedBoundaryIndex(boundaries, currentTime) {
+  let low = 0;
+  let high = boundaries.length - 1;
+  let best = -1;
+
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    if (boundaries[middle].audioOffsetSeconds <= currentTime) {
+      best = middle;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+
+  return best;
+}
+
 const RETRYABLE_SPEECH_ERRORS = new Set([
   "interrupted",
   "audio-busy",

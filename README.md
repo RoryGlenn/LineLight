@@ -17,6 +17,7 @@ release.
 
 - Import PDF, EPUB, and plain-text files
 - Highlight the current word and sentence during narration
+- Choose a private device voice or optional Azure neural narration
 - Automatically follow the narration or return to the spoken position
 - Switch between a reflowed focus view and the original PDF page
 - Adjust font, text size, line spacing, colors, reading ruler, and speed
@@ -25,18 +26,26 @@ release.
 
 ## How narration works
 
-LineLight currently uses the browser's Web Speech API. The operating system or
-browser supplies the available voices. As the voice reports word boundaries,
-LineLight moves the highlight to the matching word.
+LineLight has two narration modes:
 
-No paid voice API or LineLight account is required. Voice quality and exact
-word-boundary support vary by browser, operating system, and selected voice.
+- **Private device** uses the browser's Web Speech API. The operating system or
+  browser supplies the voice, so no LineLight voice service is required.
+- **Natural online** uses optional Azure AI Speech neural voices. LineLight
+  exchanges the server-side subscription key for a short-lived token, requests
+  audio for the current passage, and follows Azure's timed word boundaries.
+  The key is never sent to the browser.
+
+Natural narration prefetches one passage ahead for smooth playback. If Azure is
+not configured or becomes unavailable, LineLight continues with the device
+voice when one is available.
 
 ## Privacy
 
 Imported documents are parsed in the browser and stored locally on the device.
-LineLight does not upload them to an application server. Some system voices may
-use processing supplied by the operating system or voice provider.
+LineLight does not upload whole documents to an application server. Private
+device narration may use processing supplied by the operating system or voice
+provider. When Natural online is selected, only short narration passages
+(including one prepared ahead) are sent to Azure AI Speech for synthesis.
 
 ## Known limitations
 
@@ -58,6 +67,22 @@ npm ci
 npm run dev
 ```
 
+To enable Natural online narration locally, copy the example environment file
+and add the key and region from an Azure AI Speech resource:
+
+```bash
+cp .env.example .env
+```
+
+```dotenv
+AZURE_SPEECH_KEY=your-resource-key
+AZURE_SPEECH_REGION=your-resource-region
+```
+
+Restart the development server after changing `.env`. For a deployed site, set
+the same names as protected runtime environment variables. Do not expose the
+key through a `NEXT_PUBLIC_` or `VITE_` variable.
+
 Useful checks:
 
 ```bash
@@ -71,10 +96,9 @@ and GNU `timeout`.
 ## Roadmap
 
 - OCR for scanned PDFs
-- More robust cross-browser word synchronization
 - Keyboard and screen-reader accessibility review
 - Expanded automated tests
-- Optional higher-quality narration providers
+- Optional local neural narration
 
 ## License
 

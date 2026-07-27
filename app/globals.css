@@ -1275,6 +1275,10 @@ input:focus-visible {
   grid-template-columns: repeat(3, 1fr);
 }
 
+.segmented.two {
+  grid-template-columns: repeat(2, 1fr);
+}
+
 .segmented button {
   min-height: 38px;
   border: 0;
@@ -1374,6 +1378,21 @@ input:focus-visible {
 
 .select-setting.stacked select {
   width: 100%;
+}
+
+.narration-source {
+  margin-bottom: 16px;
+}
+
+.online-voice-note {
+  margin: 12px 0 0;
+  padding: 12px 13px;
+  border: 1px solid color-mix(in srgb, var(--accent) 20%, var(--line));
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--accent) 6%, var(--paper));
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.55;
 }
 
 .switch-row {

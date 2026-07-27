@@ -17,15 +17,22 @@ import {
 } from "./pdf-page-view";
 import {
   buildSpeechChunk,
+  findTimedBoundaryIndex,
   isRetryableSpeechError,
   speechFailureMessage,
 } from "./speech-utils.mjs";
+import {
+  AzureSpeechError,
+  synthesizeAzureSpeech,
+  type AzureSpeechResult,
+} from "./azure-speech";
 
 type DocumentKind = "demo" | "pdf" | "epub" | "txt";
 type HighlightMode = "both" | "word" | "sentence";
 type ReadingTheme = "cream" | "white" | "dark";
 type ReadingFont = "serif" | "sans" | "system";
 type ReaderViewMode = "focus" | "page";
+type NarrationEngine = "device" | "azure";
 
 type ReaderDocument = {
   id: string;
@@ -67,7 +74,15 @@ type ReaderSettings = {
   follow: boolean;
   ruler: boolean;
   rate: number;
+  narrationEngine: NarrationEngine;
   voiceURI: string;
+  azureVoice: string;
+};
+
+type AzureVoiceOption = {
+  value: string;
+  label: string;
+  description: string;
 };
 
 const DEMO_DOCUMENT: ReaderDocument = {
@@ -92,8 +107,35 @@ const DEFAULT_SETTINGS: ReaderSettings = {
   follow: true,
   ruler: false,
   rate: 1,
+  narrationEngine: "device",
   voiceURI: "",
+  azureVoice: "en-US-AvaMultilingualNeural",
 };
+
+const AZURE_VOICES: AzureVoiceOption[] = [
+  {
+    value: "en-US-AvaMultilingualNeural",
+    label: "Ava",
+    description: "US English · warm",
+  },
+  {
+    value: "en-US-AndrewMultilingualNeural",
+    label: "Andrew",
+    description: "US English · calm",
+  },
+  {
+    value: "en-GB-SoniaNeural",
+    label: "Sonia",
+    description: "UK English · clear",
+  },
+  {
+    value: "en-GB-RyanNeural",
+    label: "Ryan",
+    description: "UK English · steady",
+  },
+];
+
+const AZURE_SPEECH_CHUNK_CHARACTERS = 700;
 
 const WORD_PATTERN =
   /[\p{L}\p{N}]+(?:[’'-][\p{L}\p{N}]+)*|[^\s]/gu;
@@ -445,6 +487,7 @@ export default function Home() {
   const [viewMode, setViewMode] = useState<ReaderViewMode>("focus");
   const [activeWord, setActiveWord] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [isPreparingSpeech, setIsPreparingSpeech] = useState(false);
   const [followPaused, setFollowPaused] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -483,6 +526,10 @@ export default function Home() {
   const boundarySeenRef = useRef(false);
   const fallbackTimerRef = useRef<number | null>(null);
   const speechStartTimerRef = useRef<number | null>(null);
+  const azureAudioRef = useRef<HTMLAudioElement | null>(null);
+  const azureAudioUrlRef = useRef("");
+  const azureAnimationFrameRef = useRef<number | null>(null);
+  const azureAbortRef = useRef<AbortController | null>(null);
   const speechSessionRef = useRef(0);
   const programmaticScrollRef = useRef(false);
   const activeWordRef = useRef(0);
@@ -610,6 +657,33 @@ export default function Home() {
     }
   }, []);
 
+  const clearAzurePlayback = useCallback(() => {
+    azureAbortRef.current?.abort();
+    azureAbortRef.current = null;
+
+    if (azureAnimationFrameRef.current !== null) {
+      window.cancelAnimationFrame(azureAnimationFrameRef.current);
+      azureAnimationFrameRef.current = null;
+    }
+
+    const audio = azureAudioRef.current;
+    if (audio) {
+      audio.onplay = null;
+      audio.onpause = null;
+      audio.onended = null;
+      audio.onerror = null;
+      audio.pause();
+      audio.removeAttribute("src");
+      audio.load();
+    }
+    azureAudioRef.current = null;
+
+    if (azureAudioUrlRef.current) {
+      URL.revokeObjectURL(azureAudioUrlRef.current);
+      azureAudioUrlRef.current = "";
+    }
+  }, []);
+
   const stopSpeech = useCallback(() => {
     speechSessionRef.current += 1;
     clearSpeechStartTimer();
@@ -617,9 +691,11 @@ export default function Home() {
       window.speechSynthesis.cancel();
     }
     clearFallbackTimer();
+    clearAzurePlayback();
     utteranceRef.current = null;
     setIsPlaying(false);
-  }, [clearFallbackTimer, clearSpeechStartTimer]);
+    setIsPreparingSpeech(false);
+  }, [clearAzurePlayback, clearFallbackTimer, clearSpeechStartTimer]);
 
   useEffect(() => stopSpeech, [stopSpeech]);
 
@@ -647,8 +723,12 @@ export default function Home() {
     }
   }, [activeWord, followPaused, isPlaying, scrollToActiveWord, settings.follow]);
 
-  const startSpeech = useCallback(
-    (startIndex = activeWordRef.current) => {
+  const startDeviceSpeech = useCallback(
+    (
+      startIndex = activeWordRef.current,
+      preserveInitialNotice = false,
+      fallbackContext = "",
+    ) => {
       if (!speechAvailable || !model.tokens.length) {
         setNotice(
           "Narration is not available in this browser. Safari on iPhone and Chrome on desktop are supported.",
@@ -663,8 +743,10 @@ export default function Home() {
       const sessionId = speechSessionRef.current + 1;
       speechSessionRef.current = sessionId;
       window.speechSynthesis.cancel();
+      clearAzurePlayback();
       clearSpeechStartTimer();
       clearFallbackTimer();
+      setIsPreparingSpeech(false);
       setActiveWord(safeIndex);
       activeWordRef.current = safeIndex;
       const selectedVoice = voices.find(
@@ -781,7 +863,12 @@ export default function Home() {
                 : current,
             );
             setNotice(
-              `${voice?.name ?? "The selected voice"} failed in Brave. Continuing with System default.`,
+              [
+                fallbackContext,
+                `${voice?.name ?? "The selected voice"} failed in Brave. Continuing with System default.`,
+              ]
+                .filter(Boolean)
+                .join(" "),
             );
             scheduleChunk(resumeIndex, "", 0, true, 180);
             return;
@@ -789,14 +876,26 @@ export default function Home() {
 
           if (isRetryableSpeechError(event.error) && retryCount < 1) {
             setNotice(
-              "Narration paused briefly while LineLight reconnects to Ubuntu's speech service.",
+              [
+                fallbackContext,
+                "Narration paused briefly while LineLight reconnects to Ubuntu's speech service.",
+              ]
+                .filter(Boolean)
+                .join(" "),
             );
             scheduleChunk(resumeIndex, "", retryCount + 1, true, 350);
             return;
           }
 
           setIsPlaying(false);
-          setNotice(speechFailureMessage(event.error, voices.length > 0));
+          setNotice(
+            [
+              fallbackContext,
+              speechFailureMessage(event.error, voices.length > 0),
+            ]
+              .filter(Boolean)
+              .join(" "),
+          );
         };
 
         window.speechSynthesis.speak(utterance);
@@ -813,9 +912,16 @@ export default function Home() {
       }
 
       setIsPlaying(true);
-      scheduleChunk(safeIndex, initialVoiceURI, 0, false, 80);
+      scheduleChunk(
+        safeIndex,
+        initialVoiceURI,
+        0,
+        preserveInitialNotice,
+        80,
+      );
     },
     [
+      clearAzurePlayback,
       clearFallbackTimer,
       clearSpeechStartTimer,
       model.fullText,
@@ -827,25 +933,329 @@ export default function Home() {
     ],
   );
 
-  const togglePlayback = useCallback(() => {
-    if (!speechAvailable) {
-      setNotice(
-        "Narration is not available in this browser. Try Safari on iPhone or Chrome on desktop.",
+  const startAzureSpeech = useCallback(
+    (startIndex = activeWordRef.current) => {
+      if (!model.tokens.length) return;
+
+      const safeIndex = Math.min(
+        Math.max(0, startIndex),
+        model.tokens.length - 1,
       );
+      const sessionId = speechSessionRef.current + 1;
+      speechSessionRef.current = sessionId;
+
+      if ("speechSynthesis" in window) {
+        window.speechSynthesis.cancel();
+      }
+      clearSpeechStartTimer();
+      clearFallbackTimer();
+      clearAzurePlayback();
+
+      const abortController = new AbortController();
+      const audio = new Audio();
+      audio.preload = "auto";
+      azureAbortRef.current = abortController;
+      azureAudioRef.current = audio;
+
+      setActiveWord(safeIndex);
+      activeWordRef.current = safeIndex;
+      setIsPlaying(false);
+      setIsPreparingSpeech(true);
+      setNotice("Preparing a natural voice…");
+
+      type SpeechChunk = NonNullable<ReturnType<typeof buildSpeechChunk>>;
+      type PreparedChunk = {
+        chunk: SpeechChunk;
+        synthesis: AzureSpeechResult;
+      };
+
+      const clearBoundaryAnimation = () => {
+        if (azureAnimationFrameRef.current !== null) {
+          window.cancelAnimationFrame(azureAnimationFrameRef.current);
+          azureAnimationFrameRef.current = null;
+        }
+      };
+
+      const revokeCurrentAudio = () => {
+        if (azureAudioUrlRef.current) {
+          URL.revokeObjectURL(azureAudioUrlRef.current);
+          azureAudioUrlRef.current = "";
+        }
+      };
+
+      const prepareChunk = async (
+        chunkStartIndex: number,
+      ): Promise<PreparedChunk> => {
+        const chunk = buildSpeechChunk(
+          model.fullText,
+          model.tokens,
+          chunkStartIndex,
+          AZURE_SPEECH_CHUNK_CHARACTERS,
+        );
+        if (!chunk) {
+          throw new AzureSpeechError(
+            "There is no text left to narrate.",
+            "empty_text",
+          );
+        }
+
+        const synthesis = await synthesizeAzureSpeech({
+          text: chunk.text,
+          voice: settings.azureVoice,
+          signal: abortController.signal,
+        });
+        return { chunk, synthesis };
+      };
+
+      const continueWithDeviceVoice = (
+        error: unknown,
+        resumeIndex: number,
+      ) => {
+        if (
+          speechSessionRef.current !== sessionId ||
+          abortController.signal.aborted
+        ) {
+          return;
+        }
+
+        const message =
+          error instanceof AzureSpeechError
+            ? error.message
+            : "The natural voice could not continue.";
+        clearAzurePlayback();
+        setIsPreparingSpeech(false);
+        setIsPlaying(false);
+
+        if (!speechAvailable) {
+          setNotice(`${message} No device voice is available as a fallback.`);
+          return;
+        }
+
+        setNotice(`${message} Continuing with the private device voice.`);
+        window.setTimeout(() => {
+          if (speechSessionRef.current !== sessionId) return;
+          startDeviceSpeech(resumeIndex, true, message);
+        }, 120);
+      };
+
+      const playPreparedChunk = async (
+        prepared: PreparedChunk,
+      ): Promise<void> => {
+        if (
+          speechSessionRef.current !== sessionId ||
+          abortController.signal.aborted
+        ) {
+          return;
+        }
+
+        clearBoundaryAnimation();
+        revokeCurrentAudio();
+
+        const { chunk, synthesis } = prepared;
+        const timedWords = synthesis.boundaries.map((boundary) => ({
+          ...boundary,
+          tokenIndex: findWordAtCharacter(
+            model.tokens,
+            chunk.startChar + boundary.textOffset,
+          ),
+        }));
+        const audioUrl = URL.createObjectURL(
+          new Blob([synthesis.audioData], { type: "audio/mpeg" }),
+        );
+        azureAudioUrlRef.current = audioUrl;
+        audio.src = audioUrl;
+        audio.defaultPlaybackRate = settings.rate;
+        audio.playbackRate = settings.rate;
+        audio.load();
+
+        let prefetchError: unknown;
+        const nextPrepared =
+          chunk.nextIndex < model.tokens.length
+            ? prepareChunk(chunk.nextIndex).catch((error: unknown) => {
+                prefetchError = error;
+                return null;
+              })
+            : null;
+
+        const updateBoundary = () => {
+          if (
+            speechSessionRef.current !== sessionId ||
+            audio.paused ||
+            audio.ended
+          ) {
+            azureAnimationFrameRef.current = null;
+            return;
+          }
+
+          const boundaryIndex = findTimedBoundaryIndex(
+            timedWords,
+            audio.currentTime + 0.025,
+          );
+          if (boundaryIndex >= 0) {
+            const nextWord = timedWords[boundaryIndex].tokenIndex;
+            if (nextWord !== activeWordRef.current) {
+              activeWordRef.current = nextWord;
+              setActiveWord(nextWord);
+            }
+          }
+          azureAnimationFrameRef.current =
+            window.requestAnimationFrame(updateBoundary);
+        };
+
+        audio.onplay = () => {
+          if (speechSessionRef.current !== sessionId) return;
+          setIsPreparingSpeech(false);
+          setIsPlaying(true);
+          setNotice("");
+          clearBoundaryAnimation();
+          azureAnimationFrameRef.current =
+            window.requestAnimationFrame(updateBoundary);
+        };
+        audio.onpause = () => {
+          clearBoundaryAnimation();
+          if (
+            speechSessionRef.current === sessionId &&
+            !audio.ended
+          ) {
+            setIsPlaying(false);
+          }
+        };
+        audio.onerror = () => {
+          continueWithDeviceVoice(
+            new AzureSpeechError(
+              "The natural voice audio could not be played.",
+              "audio_failed",
+            ),
+            Math.max(chunk.startIndex, activeWordRef.current),
+          );
+        };
+        audio.onended = async () => {
+          clearBoundaryAnimation();
+          if (
+            speechSessionRef.current !== sessionId ||
+            abortController.signal.aborted
+          ) {
+            return;
+          }
+
+          setIsPlaying(false);
+          revokeCurrentAudio();
+
+          if (!nextPrepared) {
+            azureAudioRef.current = null;
+            azureAbortRef.current = null;
+            return;
+          }
+
+          setActiveWord(chunk.nextIndex);
+          activeWordRef.current = chunk.nextIndex;
+          setIsPreparingSpeech(true);
+          setNotice("Preparing the next passage…");
+          const nextChunk = await nextPrepared;
+          if (!nextChunk) {
+            continueWithDeviceVoice(
+              prefetchError,
+              Math.max(chunk.nextIndex, activeWordRef.current),
+            );
+            return;
+          }
+          await playPreparedChunk(nextChunk);
+        };
+
+        try {
+          await audio.play();
+        } catch (error) {
+          if (
+            error instanceof DOMException &&
+            error.name === "NotAllowedError"
+          ) {
+            setIsPreparingSpeech(false);
+            setIsPlaying(false);
+            setNotice("Natural voice is ready. Press Play once more to hear it.");
+            return;
+          }
+          continueWithDeviceVoice(
+            error,
+            Math.max(chunk.startIndex, activeWordRef.current),
+          );
+        }
+      };
+
+      void prepareChunk(safeIndex)
+        .then(playPreparedChunk)
+        .catch((error: unknown) => {
+          continueWithDeviceVoice(error, safeIndex);
+        });
+    },
+    [
+      clearAzurePlayback,
+      clearFallbackTimer,
+      clearSpeechStartTimer,
+      model.fullText,
+      model.tokens,
+      settings.azureVoice,
+      settings.rate,
+      speechAvailable,
+      startDeviceSpeech,
+    ],
+  );
+
+  const startSpeech = useCallback(
+    (startIndex = activeWordRef.current) => {
+      if (settings.narrationEngine === "azure") {
+        startAzureSpeech(startIndex);
+        return;
+      }
+      startDeviceSpeech(startIndex);
+    },
+    [settings.narrationEngine, startAzureSpeech, startDeviceSpeech],
+  );
+
+  const togglePlayback = useCallback(() => {
+    if (isPreparingSpeech) {
+      stopSpeech();
+      setNotice("Narration stopped.");
       return;
     }
+
     if (isPlaying) {
-      window.speechSynthesis.pause();
+      if (azureAudioRef.current) {
+        azureAudioRef.current.pause();
+      } else if (speechAvailable) {
+        window.speechSynthesis.pause();
+      }
       setIsPlaying(false);
       return;
     }
+
+    const azureAudio = azureAudioRef.current;
+    if (
+      azureAudio &&
+      azureAudio.src &&
+      !azureAudio.ended &&
+      azureAudio.paused
+    ) {
+      void azureAudio.play().catch(() => {
+        setNotice(
+          "Brave blocked audio playback. Allow sound for this site, then press Play again.",
+        );
+      });
+      return;
+    }
+
     if (utteranceRef.current && window.speechSynthesis.paused) {
       window.speechSynthesis.resume();
       setIsPlaying(true);
       return;
     }
     startSpeech();
-  }, [isPlaying, speechAvailable, startSpeech]);
+  }, [
+    isPlaying,
+    isPreparingSpeech,
+    speechAvailable,
+    startSpeech,
+    stopSpeech,
+  ]);
 
   const moveBySentence = useCallback(
     (direction: -1 | 1) => {
@@ -1316,10 +1726,16 @@ export default function Home() {
           <div className="player-content">
             <div className="now-playing">
               <div className="now-playing-mark" aria-hidden="true">
-                {isPlaying ? "≋" : "¶"}
+                {isPreparingSpeech ? "…" : isPlaying ? "≋" : "¶"}
               </div>
               <div>
-                <p>{isPlaying ? "Reading now" : "Ready to read"}</p>
+                <p>
+                  {isPreparingSpeech
+                    ? "Preparing natural voice"
+                    : isPlaying
+                      ? "Reading now"
+                      : "Ready to read"}
+                </p>
                 <span>
                   {activeToken?.text ?? "Start"} · {progress}%
                 </span>
@@ -1341,9 +1757,15 @@ export default function Home() {
                 type="button"
                 className="play-button"
                 onClick={togglePlayback}
-                aria-label={isPlaying ? "Pause narration" : "Play narration"}
+                aria-label={
+                  isPreparingSpeech
+                    ? "Cancel narration"
+                    : isPlaying
+                      ? "Pause narration"
+                      : "Play narration"
+                }
               >
-                {isPlaying ? "Ⅱ" : "▶"}
+                {isPreparingSpeech ? "■" : isPlaying ? "Ⅱ" : "▶"}
               </button>
               <button
                 type="button"
@@ -1627,33 +2049,92 @@ export default function Home() {
 
               <fieldset>
                 <legend>Narration</legend>
-                <label className="select-setting stacked">
-                  <span>Voice</span>
-                  <select
-                    value={
-                      voices.some(
-                        (voice) => voice.voiceURI === settings.voiceURI,
-                      )
-                        ? settings.voiceURI
-                        : ""
-                    }
-                    onChange={(event) => {
-                      stopSpeech();
-                      setSettings((current) => ({
-                        ...current,
-                        voiceURI: event.target.value,
-                      }));
-                    }}
-                  >
-                    <option value="">System default</option>
-                    {voices.map((voice) => (
-                      <option key={voice.voiceURI} value={voice.voiceURI}>
-                        {voice.name} · {voice.lang}
-                        {voice.localService ? " · local" : " · online"}
-                      </option>
-                    ))}
-                  </select>
-                </label>
+                <div
+                  className="segmented two narration-source"
+                  aria-label="Narration source"
+                >
+                  {(
+                    [
+                      ["device", "Private device"],
+                      ["azure", "Natural online"],
+                    ] as [NarrationEngine, string][]
+                  ).map(([value, label]) => (
+                    <button
+                      type="button"
+                      className={
+                        settings.narrationEngine === value ? "selected" : ""
+                      }
+                      aria-pressed={settings.narrationEngine === value}
+                      onClick={() => {
+                        stopSpeech();
+                        setSettings((current) => ({
+                          ...current,
+                          narrationEngine: value,
+                        }));
+                      }}
+                      key={value}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+
+                {settings.narrationEngine === "azure" ? (
+                  <>
+                    <label className="select-setting stacked">
+                      <span>Natural voice</span>
+                      <select
+                        value={settings.azureVoice}
+                        onChange={(event) => {
+                          stopSpeech();
+                          setSettings((current) => ({
+                            ...current,
+                            azureVoice: event.target.value,
+                          }));
+                        }}
+                      >
+                        {AZURE_VOICES.map((voice) => (
+                          <option key={voice.value} value={voice.value}>
+                            {voice.label} · {voice.description}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <p className="online-voice-note">
+                      Sends only short narration passages to Azure for speech;
+                      one may be prepared ahead. Imported files and reading
+                      progress remain on this device.
+                    </p>
+                  </>
+                ) : (
+                  <label className="select-setting stacked">
+                    <span>Device voice</span>
+                    <select
+                      value={
+                        voices.some(
+                          (voice) => voice.voiceURI === settings.voiceURI,
+                        )
+                          ? settings.voiceURI
+                          : ""
+                      }
+                      onChange={(event) => {
+                        stopSpeech();
+                        setSettings((current) => ({
+                          ...current,
+                          voiceURI: event.target.value,
+                        }));
+                      }}
+                    >
+                      <option value="">System default</option>
+                      {voices.map((voice) => (
+                        <option key={voice.voiceURI} value={voice.voiceURI}>
+                          {voice.name} · {voice.lang}
+                          {voice.localService ? " · local" : " · online"}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
 
                 <div className="replay-grid">
                   <button type="button" onClick={() => replayUnit("word")}>

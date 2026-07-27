@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   buildSpeechChunk,
+  findTimedBoundaryIndex,
   isRetryableSpeechError,
   speechFailureMessage,
 } from "../app/speech-utils.mjs";
@@ -67,6 +68,19 @@ test("classifies transient speech errors for one retry", () => {
   assert.equal(isRetryableSpeechError("audio-busy"), true);
   assert.equal(isRetryableSpeechError("not-allowed"), false);
   assert.equal(isRetryableSpeechError("audio-hardware"), false);
+});
+
+test("matches playback time to the latest Azure word boundary", () => {
+  const boundaries = [
+    { audioOffsetSeconds: 0.12 },
+    { audioOffsetSeconds: 0.48 },
+    { audioOffsetSeconds: 0.91 },
+  ];
+
+  assert.equal(findTimedBoundaryIndex(boundaries, 0), -1);
+  assert.equal(findTimedBoundaryIndex(boundaries, 0.12), 0);
+  assert.equal(findTimedBoundaryIndex(boundaries, 0.72), 1);
+  assert.equal(findTimedBoundaryIndex(boundaries, 4), 2);
 });
 
 test("provides Ubuntu-specific failure guidance", () => {

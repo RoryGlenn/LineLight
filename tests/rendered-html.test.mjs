@@ -4,10 +4,20 @@ import test from "node:test";
 const developmentPreviewMeta =
   /<meta(?=[^>]*\bname=["']codex-preview["'])(?=[^>]*\bcontent=["']development["'])[^>]*>/i;
 
+let workerPromise;
+
+function loadBuiltWorker() {
+  workerPromise ??= import(
+    new URL(
+      `../dist/server/index.js?test=${process.pid}-${Date.now()}`,
+      import.meta.url,
+    ).href
+  );
+  return workerPromise;
+}
+
 test("renders development preview metadata", async () => {
-  const workerUrl = new URL("../dist/server/index.js", import.meta.url);
-  workerUrl.searchParams.set("test", `${process.pid}-${Date.now()}`);
-  const { default: worker } = await import(workerUrl.href);
+  const { default: worker } = await loadBuiltWorker();
 
   const response = await worker.fetch(
     new Request("http://localhost/", {
@@ -30,4 +40,28 @@ test("renders development preview metadata", async () => {
     /^text\/html\b/i,
   );
   assert.match(await response.text(), developmentPreviewMeta);
+});
+
+test("keeps Azure Speech credentials on the server", async () => {
+  const { default: worker } = await loadBuiltWorker();
+  const response = await worker.fetch(
+    new Request("http://localhost/api/speech/token"),
+    {
+      ASSETS: {
+        fetch: async () => new Response("Not found", { status: 404 }),
+      },
+    },
+    {
+      waitUntil() {},
+      passThroughOnException() {},
+    },
+  );
+
+  assert.equal(response.status, 503);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  assert.deepEqual(await response.json(), {
+    code: "not_configured",
+    message:
+      "Natural voice is not configured yet. Add Azure Speech credentials, or use the private device voice.",
+  });
 });
