@@ -16,11 +16,14 @@
     "db:generate": "bash scripts/sites-env.sh -- drizzle-kit generate"
   },
   "dependencies": {
+    "@huggingface/transformers": "3.8.1",
     "drizzle-orm": "0.45.2",
     "jszip": "^3.10.1",
+    "kokoro-js": "1.2.1",
     "microsoft-cognitiveservices-speech-sdk": "^1.51.0",
     "next": "16.2.6",
     "pdfjs-dist": "^5.4.54",
+    "phonemizer": "1.2.1",
     "react": "19.2.6",
     "react-dom": "19.2.6"
   },

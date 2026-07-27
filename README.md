@@ -17,7 +17,8 @@ release.
 
 - Import PDF, EPUB, and plain-text files
 - Highlight the current word and sentence during narration
-- Choose a private device voice or optional Azure neural narration
+- Choose a private device voice, downloaded offline neural voices, or optional
+  Azure neural narration
 - Automatically follow the narration or return to the spoken position
 - Switch between a reflowed focus view and the original PDF page
 - Adjust font, text size, line spacing, colors, reading ruler, and speed
@@ -26,33 +27,57 @@ release.
 
 ## How narration works
 
-LineLight has two narration modes:
+LineLight has three narration modes:
 
 - **Private device** uses the browser's Web Speech API. The operating system or
   browser supplies the voice, so no LineLight voice service is required.
+- **Offline natural** downloads approximately 120 MB on first install after the
+  reader explicitly asks for it. That includes a roughly 95 MB Kokoro model,
+  five English voices, and the local inference runtime. Speech then runs in a
+  dedicated browser worker using WebGPU when available and WebAssembly as a
+  compatibility fallback. The model, voice data, and generated audio stay on
+  the device. The pack can be removed from Narration settings.
 - **Natural online** uses optional Azure AI Speech neural voices. LineLight
   exchanges the server-side subscription key for a short-lived token, requests
   audio for the current passage, and follows Azure's timed word boundaries.
   The key is never sent to the browser.
 
-Natural narration prefetches one passage ahead for smooth playback. If Azure is
-not configured or becomes unavailable, LineLight continues with the device
-voice when one is available.
+Natural narration prefetches one passage ahead for smooth playback. If an
+offline or Azure voice becomes unavailable, LineLight continues with the
+device voice when one is available.
+
+The offline model is
+[Kokoro-82M v1.0 ONNX](https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX).
+The model and
+[kokoro-js](https://github.com/hexgrad/kokoro) are
+available under the Apache 2.0 license. LineLight stores the quantized model in
+the browser's Cache Storage and asks the browser to make that storage
+persistent. Browser storage can still be cleared or evicted; the settings panel
+will offer the download again if any required file is missing.
+The distributed license text is available at
+[`public/offline-voice-license.txt`](public/offline-voice-license.txt).
 
 ## Privacy
 
 Imported documents are parsed in the browser and stored locally on the device.
 LineLight does not upload whole documents to an application server. Private
 device narration may use processing supplied by the operating system or voice
-provider. When Natural online is selected, only short narration passages
-(including one prepared ahead) are sent to Azure AI Speech for synthesis.
+provider. Offline natural narration performs synthesis entirely in the browser
+after the one-time model download. When Natural online is selected, only short
+narration passages (including one prepared ahead) are sent to Azure AI Speech
+for synthesis.
 
 ## Known limitations
 
 - Scanned or image-only PDFs need OCR, which is not implemented yet.
-- Highlight timing depends on the boundary events supplied by the selected
-  system voice.
+- Device-voice highlight timing depends on boundary events supplied by the
+  selected system voice.
+- Kokoro's public ONNX output contains audio but not exact word timestamps.
+  Offline highlighting therefore uses the waveform's real duration, per-word
+  phoneme counts, and punctuation pauses to estimate word timing.
 - Browser support and available voices differ across iPhone, macOS, and Ubuntu.
+- Offline model loading and synthesis speed depend on device memory and WebGPU
+  support. The WebAssembly fallback works on more browsers but is slower.
 - The app has not yet completed a formal accessibility audit.
 
 ## Local development
@@ -98,7 +123,6 @@ and GNU `timeout`.
 - OCR for scanned PDFs
 - Keyboard and screen-reader accessibility review
 - Expanded automated tests
-- Optional local neural narration
 
 ## License
 

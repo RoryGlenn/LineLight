@@ -26,13 +26,35 @@ import {
   synthesizeAzureSpeech,
   type AzureSpeechResult,
 } from "./azure-speech";
+import {
+  OFFLINE_PACK_BYTES,
+  OFFLINE_SPEECH_CHUNK_CHARACTERS,
+  OFFLINE_VOICES,
+  type OfflineVoiceId,
+} from "./offline-speech-config";
+import {
+  OfflineSpeechError,
+  disposeOfflineSpeechWorker,
+  installOfflineVoicePack,
+  isOfflineVoicePackInstalled,
+  removeOfflineVoicePack,
+  synthesizeOfflineSpeech,
+  type OfflineSpeechResult,
+} from "./offline-speech";
 
 type DocumentKind = "demo" | "pdf" | "epub" | "txt";
 type HighlightMode = "both" | "word" | "sentence";
 type ReadingTheme = "cream" | "white" | "dark";
 type ReadingFont = "serif" | "sans" | "system";
 type ReaderViewMode = "focus" | "page";
-type NarrationEngine = "device" | "azure";
+type NarrationEngine = "device" | "offline" | "azure";
+type OfflinePackState =
+  | "checking"
+  | "missing"
+  | "installing"
+  | "ready"
+  | "removing"
+  | "error";
 
 type ReaderDocument = {
   id: string;
@@ -76,6 +98,7 @@ type ReaderSettings = {
   rate: number;
   narrationEngine: NarrationEngine;
   voiceURI: string;
+  offlineVoice: OfflineVoiceId;
   azureVoice: string;
 };
 
@@ -109,6 +132,7 @@ const DEFAULT_SETTINGS: ReaderSettings = {
   rate: 1,
   narrationEngine: "device",
   voiceURI: "",
+  offlineVoice: "af_heart",
   azureVoice: "en-US-AvaMultilingualNeural",
 };
 
@@ -136,6 +160,9 @@ const AZURE_VOICES: AzureVoiceOption[] = [
 ];
 
 const AZURE_SPEECH_CHUNK_CHARACTERS = 700;
+const OFFLINE_PACK_SIZE_LABEL = `${Math.round(
+  OFFLINE_PACK_BYTES / 1_000_000,
+)} MB`;
 
 const WORD_PATTERN =
   /[\p{L}\p{N}]+(?:[’'-][\p{L}\p{N}]+)*|[^\s]/gu;
@@ -495,6 +522,12 @@ export default function Home() {
   const [isImporting, setIsImporting] = useState(false);
   const [notice, setNotice] = useState("");
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
+  const [offlinePackState, setOfflinePackState] =
+    useState<OfflinePackState>("checking");
+  const [offlineInstallProgress, setOfflineInstallProgress] = useState(0);
+  const [offlineInstallLabel, setOfflineInstallLabel] = useState(
+    "Checking this device…",
+  );
   const speechAvailable =
     typeof window === "undefined" ||
     ("speechSynthesis" in window && "SpeechSynthesisUtterance" in window);
@@ -526,10 +559,10 @@ export default function Home() {
   const boundarySeenRef = useRef(false);
   const fallbackTimerRef = useRef<number | null>(null);
   const speechStartTimerRef = useRef<number | null>(null);
-  const azureAudioRef = useRef<HTMLAudioElement | null>(null);
-  const azureAudioUrlRef = useRef("");
-  const azureAnimationFrameRef = useRef<number | null>(null);
-  const azureAbortRef = useRef<AbortController | null>(null);
+  const bufferedAudioRef = useRef<HTMLAudioElement | null>(null);
+  const bufferedAudioUrlRef = useRef("");
+  const bufferedAnimationFrameRef = useRef<number | null>(null);
+  const bufferedAbortRef = useRef<AbortController | null>(null);
   const speechSessionRef = useRef(0);
   const programmaticScrollRef = useRef(false);
   const activeWordRef = useRef(0);
@@ -596,9 +629,21 @@ export default function Home() {
     if ("serviceWorker" in navigator) {
       navigator.serviceWorker.register("/sw.js").catch(() => undefined);
     }
+
+    isOfflineVoicePackInstalled()
+      .then((installed) => {
+        if (!cancelled) {
+          setOfflinePackState(installed ? "ready" : "missing");
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setOfflinePackState("missing");
+      });
+
     return () => {
       cancelled = true;
       if (restoreTimer) window.clearTimeout(restoreTimer);
+      disposeOfflineSpeechWorker();
     };
   }, []);
 
@@ -657,16 +702,16 @@ export default function Home() {
     }
   }, []);
 
-  const clearAzurePlayback = useCallback(() => {
-    azureAbortRef.current?.abort();
-    azureAbortRef.current = null;
+  const clearBufferedPlayback = useCallback(() => {
+    bufferedAbortRef.current?.abort();
+    bufferedAbortRef.current = null;
 
-    if (azureAnimationFrameRef.current !== null) {
-      window.cancelAnimationFrame(azureAnimationFrameRef.current);
-      azureAnimationFrameRef.current = null;
+    if (bufferedAnimationFrameRef.current !== null) {
+      window.cancelAnimationFrame(bufferedAnimationFrameRef.current);
+      bufferedAnimationFrameRef.current = null;
     }
 
-    const audio = azureAudioRef.current;
+    const audio = bufferedAudioRef.current;
     if (audio) {
       audio.onplay = null;
       audio.onpause = null;
@@ -676,11 +721,11 @@ export default function Home() {
       audio.removeAttribute("src");
       audio.load();
     }
-    azureAudioRef.current = null;
+    bufferedAudioRef.current = null;
 
-    if (azureAudioUrlRef.current) {
-      URL.revokeObjectURL(azureAudioUrlRef.current);
-      azureAudioUrlRef.current = "";
+    if (bufferedAudioUrlRef.current) {
+      URL.revokeObjectURL(bufferedAudioUrlRef.current);
+      bufferedAudioUrlRef.current = "";
     }
   }, []);
 
@@ -691,13 +736,80 @@ export default function Home() {
       window.speechSynthesis.cancel();
     }
     clearFallbackTimer();
-    clearAzurePlayback();
+    clearBufferedPlayback();
     utteranceRef.current = null;
     setIsPlaying(false);
     setIsPreparingSpeech(false);
-  }, [clearAzurePlayback, clearFallbackTimer, clearSpeechStartTimer]);
+  }, [clearBufferedPlayback, clearFallbackTimer, clearSpeechStartTimer]);
 
   useEffect(() => stopSpeech, [stopSpeech]);
+
+  const downloadOfflineVoice = useCallback(async () => {
+    if (offlinePackState === "installing") return;
+
+    stopSpeech();
+    setOfflinePackState("installing");
+    setOfflineInstallProgress(0);
+    setOfflineInstallLabel("Starting the offline voice download…");
+    setNotice("");
+
+    try {
+      await navigator.storage?.persist?.().catch(() => false);
+      await installOfflineVoicePack({
+        onProgress: ({ progress, label }) => {
+          setOfflineInstallProgress(progress);
+          setOfflineInstallLabel(label);
+        },
+      });
+
+      if (!(await isOfflineVoicePackInstalled())) {
+        throw new OfflineSpeechError(
+          "The download finished, but Brave did not keep every voice file. Check storage permissions and try again.",
+        );
+      }
+
+      setOfflinePackState("ready");
+      setOfflineInstallProgress(100);
+      setOfflineInstallLabel("Offline voices are ready.");
+      setNotice(
+        "Offline natural voices are ready. Narration text now stays on this device.",
+      );
+    } catch (error) {
+      setOfflinePackState("error");
+      const message =
+        error instanceof Error
+          ? error.message
+          : "The offline voice pack could not be installed.";
+      setOfflineInstallLabel(message);
+      setNotice(message);
+    }
+  }, [offlinePackState, stopSpeech]);
+
+  const deleteOfflineVoice = useCallback(async () => {
+    stopSpeech();
+    setOfflinePackState("removing");
+    setOfflineInstallLabel("Removing the offline voice pack…");
+
+    try {
+      await removeOfflineVoicePack();
+      setOfflinePackState("missing");
+      setOfflineInstallProgress(0);
+      setOfflineInstallLabel("Offline voice pack removed.");
+      setSettings((current) =>
+        current.narrationEngine === "offline"
+          ? { ...current, narrationEngine: "device" }
+          : current,
+      );
+      setNotice(
+        "The offline voice pack was removed. You can download it again at any time.",
+      );
+    } catch {
+      setOfflinePackState("error");
+      setOfflineInstallLabel(
+        "Brave could not remove every offline voice file.",
+      );
+    }
+  }, [stopSpeech]);
 
   const scrollToActiveWord = useCallback((behavior: ScrollBehavior = "smooth") => {
     const word = wordRefs.current.get(activeWordRef.current);
@@ -743,7 +855,7 @@ export default function Home() {
       const sessionId = speechSessionRef.current + 1;
       speechSessionRef.current = sessionId;
       window.speechSynthesis.cancel();
-      clearAzurePlayback();
+      clearBufferedPlayback();
       clearSpeechStartTimer();
       clearFallbackTimer();
       setIsPreparingSpeech(false);
@@ -921,7 +1033,7 @@ export default function Home() {
       );
     },
     [
-      clearAzurePlayback,
+      clearBufferedPlayback,
       clearFallbackTimer,
       clearSpeechStartTimer,
       model.fullText,
@@ -933,9 +1045,23 @@ export default function Home() {
     ],
   );
 
-  const startAzureSpeech = useCallback(
-    (startIndex = activeWordRef.current) => {
+  const startBufferedSpeech = useCallback(
+    (
+      engine: Exclude<NarrationEngine, "device">,
+      startIndex = activeWordRef.current,
+    ) => {
       if (!model.tokens.length) return;
+      const isOffline = engine === "offline";
+
+      if (isOffline && offlinePackState !== "ready") {
+        setIsPlaying(false);
+        setIsPreparingSpeech(false);
+        setShowSettings(true);
+        setNotice(
+          "Download the offline voice pack in Narration settings before pressing Play.",
+        );
+        return;
+      }
 
       const safeIndex = Math.min(
         Math.max(0, startIndex),
@@ -949,37 +1075,41 @@ export default function Home() {
       }
       clearSpeechStartTimer();
       clearFallbackTimer();
-      clearAzurePlayback();
+      clearBufferedPlayback();
 
       const abortController = new AbortController();
       const audio = new Audio();
       audio.preload = "auto";
-      azureAbortRef.current = abortController;
-      azureAudioRef.current = audio;
+      bufferedAbortRef.current = abortController;
+      bufferedAudioRef.current = audio;
 
       setActiveWord(safeIndex);
       activeWordRef.current = safeIndex;
       setIsPlaying(false);
       setIsPreparingSpeech(true);
-      setNotice("Preparing a natural voice…");
+      setNotice(
+        isOffline
+          ? "Preparing a natural voice on this device…"
+          : "Preparing a natural voice…",
+      );
 
       type SpeechChunk = NonNullable<ReturnType<typeof buildSpeechChunk>>;
       type PreparedChunk = {
         chunk: SpeechChunk;
-        synthesis: AzureSpeechResult;
+        synthesis: AzureSpeechResult | OfflineSpeechResult;
       };
 
       const clearBoundaryAnimation = () => {
-        if (azureAnimationFrameRef.current !== null) {
-          window.cancelAnimationFrame(azureAnimationFrameRef.current);
-          azureAnimationFrameRef.current = null;
+        if (bufferedAnimationFrameRef.current !== null) {
+          window.cancelAnimationFrame(bufferedAnimationFrameRef.current);
+          bufferedAnimationFrameRef.current = null;
         }
       };
 
       const revokeCurrentAudio = () => {
-        if (azureAudioUrlRef.current) {
-          URL.revokeObjectURL(azureAudioUrlRef.current);
-          azureAudioUrlRef.current = "";
+        if (bufferedAudioUrlRef.current) {
+          URL.revokeObjectURL(bufferedAudioUrlRef.current);
+          bufferedAudioUrlRef.current = "";
         }
       };
 
@@ -990,7 +1120,9 @@ export default function Home() {
           model.fullText,
           model.tokens,
           chunkStartIndex,
-          AZURE_SPEECH_CHUNK_CHARACTERS,
+          isOffline
+            ? OFFLINE_SPEECH_CHUNK_CHARACTERS
+            : AZURE_SPEECH_CHUNK_CHARACTERS,
         );
         if (!chunk) {
           throw new AzureSpeechError(
@@ -999,11 +1131,17 @@ export default function Home() {
           );
         }
 
-        const synthesis = await synthesizeAzureSpeech({
-          text: chunk.text,
-          voice: settings.azureVoice,
-          signal: abortController.signal,
-        });
+        const synthesis = isOffline
+          ? await synthesizeOfflineSpeech({
+              text: chunk.text,
+              voice: settings.offlineVoice,
+              signal: abortController.signal,
+            })
+          : await synthesizeAzureSpeech({
+              text: chunk.text,
+              voice: settings.azureVoice,
+              signal: abortController.signal,
+            });
         return { chunk, synthesis };
       };
 
@@ -1018,11 +1156,14 @@ export default function Home() {
           return;
         }
 
-        const message =
-          error instanceof AzureSpeechError
+        const message = isOffline
+          ? error instanceof OfflineSpeechError
+            ? error.message
+            : "The offline voice could not continue."
+          : error instanceof AzureSpeechError
             ? error.message
             : "The natural voice could not continue.";
-        clearAzurePlayback();
+        clearBufferedPlayback();
         setIsPreparingSpeech(false);
         setIsPlaying(false);
 
@@ -1060,9 +1201,11 @@ export default function Home() {
           ),
         }));
         const audioUrl = URL.createObjectURL(
-          new Blob([synthesis.audioData], { type: "audio/mpeg" }),
+          new Blob([synthesis.audioData], {
+            type: isOffline ? "audio/wav" : "audio/mpeg",
+          }),
         );
-        azureAudioUrlRef.current = audioUrl;
+        bufferedAudioUrlRef.current = audioUrl;
         audio.src = audioUrl;
         audio.defaultPlaybackRate = settings.rate;
         audio.playbackRate = settings.rate;
@@ -1083,7 +1226,7 @@ export default function Home() {
             audio.paused ||
             audio.ended
           ) {
-            azureAnimationFrameRef.current = null;
+            bufferedAnimationFrameRef.current = null;
             return;
           }
 
@@ -1098,7 +1241,7 @@ export default function Home() {
               setActiveWord(nextWord);
             }
           }
-          azureAnimationFrameRef.current =
+          bufferedAnimationFrameRef.current =
             window.requestAnimationFrame(updateBoundary);
         };
 
@@ -1108,7 +1251,7 @@ export default function Home() {
           setIsPlaying(true);
           setNotice("");
           clearBoundaryAnimation();
-          azureAnimationFrameRef.current =
+          bufferedAnimationFrameRef.current =
             window.requestAnimationFrame(updateBoundary);
         };
         audio.onpause = () => {
@@ -1122,10 +1265,14 @@ export default function Home() {
         };
         audio.onerror = () => {
           continueWithDeviceVoice(
-            new AzureSpeechError(
-              "The natural voice audio could not be played.",
-              "audio_failed",
-            ),
+            isOffline
+              ? new OfflineSpeechError(
+                  "The offline voice audio could not be played.",
+                )
+              : new AzureSpeechError(
+                  "The natural voice audio could not be played.",
+                  "audio_failed",
+                ),
             Math.max(chunk.startIndex, activeWordRef.current),
           );
         };
@@ -1142,8 +1289,8 @@ export default function Home() {
           revokeCurrentAudio();
 
           if (!nextPrepared) {
-            azureAudioRef.current = null;
-            azureAbortRef.current = null;
+            bufferedAudioRef.current = null;
+            bufferedAbortRef.current = null;
             return;
           }
 
@@ -1171,7 +1318,9 @@ export default function Home() {
           ) {
             setIsPreparingSpeech(false);
             setIsPlaying(false);
-            setNotice("Natural voice is ready. Press Play once more to hear it.");
+            setNotice(
+              "Natural voice is ready. Press Play once more to hear it.",
+            );
             return;
           }
           continueWithDeviceVoice(
@@ -1188,12 +1337,14 @@ export default function Home() {
         });
     },
     [
-      clearAzurePlayback,
+      clearBufferedPlayback,
       clearFallbackTimer,
       clearSpeechStartTimer,
       model.fullText,
       model.tokens,
+      offlinePackState,
       settings.azureVoice,
+      settings.offlineVoice,
       settings.rate,
       speechAvailable,
       startDeviceSpeech,
@@ -1202,13 +1353,13 @@ export default function Home() {
 
   const startSpeech = useCallback(
     (startIndex = activeWordRef.current) => {
-      if (settings.narrationEngine === "azure") {
-        startAzureSpeech(startIndex);
+      if (settings.narrationEngine !== "device") {
+        startBufferedSpeech(settings.narrationEngine, startIndex);
         return;
       }
       startDeviceSpeech(startIndex);
     },
-    [settings.narrationEngine, startAzureSpeech, startDeviceSpeech],
+    [settings.narrationEngine, startBufferedSpeech, startDeviceSpeech],
   );
 
   const togglePlayback = useCallback(() => {
@@ -1219,8 +1370,8 @@ export default function Home() {
     }
 
     if (isPlaying) {
-      if (azureAudioRef.current) {
-        azureAudioRef.current.pause();
+      if (bufferedAudioRef.current) {
+        bufferedAudioRef.current.pause();
       } else if (speechAvailable) {
         window.speechSynthesis.pause();
       }
@@ -1228,14 +1379,14 @@ export default function Home() {
       return;
     }
 
-    const azureAudio = azureAudioRef.current;
+    const bufferedAudio = bufferedAudioRef.current;
     if (
-      azureAudio &&
-      azureAudio.src &&
-      !azureAudio.ended &&
-      azureAudio.paused
+      bufferedAudio &&
+      bufferedAudio.src &&
+      !bufferedAudio.ended &&
+      bufferedAudio.paused
     ) {
-      void azureAudio.play().catch(() => {
+      void bufferedAudio.play().catch(() => {
         setNotice(
           "Brave blocked audio playback. Allow sound for this site, then press Play again.",
         );
@@ -2050,13 +2201,14 @@ export default function Home() {
               <fieldset>
                 <legend>Narration</legend>
                 <div
-                  className="segmented two narration-source"
+                  className="segmented three narration-source"
                   aria-label="Narration source"
                 >
                   {(
                     [
-                      ["device", "Private device"],
-                      ["azure", "Natural online"],
+                      ["device", "Device"],
+                      ["offline", "Offline natural"],
+                      ["azure", "Online natural"],
                     ] as [NarrationEngine, string][]
                   ).map(([value, label]) => (
                     <button
@@ -2106,6 +2258,116 @@ export default function Home() {
                       progress remain on this device.
                     </p>
                   </>
+                ) : settings.narrationEngine === "offline" ? (
+                  <div className="offline-voice-settings">
+                    {offlinePackState === "ready" ? (
+                      <>
+                        <label className="select-setting stacked">
+                          <span>Offline natural voice</span>
+                          <select
+                            value={settings.offlineVoice}
+                            onChange={(event) => {
+                              stopSpeech();
+                              setSettings((current) => ({
+                                ...current,
+                                offlineVoice: event.target
+                                  .value as OfflineVoiceId,
+                              }));
+                            }}
+                          >
+                            {OFFLINE_VOICES.map((voice) => (
+                              <option key={voice.value} value={voice.value}>
+                                {voice.label} · {voice.description}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <div className="offline-pack-ready">
+                          <span>
+                            <strong>Stored on this device</strong>
+                            Five voices are available without internet.
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => void deleteOfflineVoice()}
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      </>
+                    ) : (
+                      <div className="offline-pack-download">
+                        <span className="offline-pack-icon" aria-hidden="true">
+                          ↓
+                        </span>
+                        <div>
+                          <strong>Offline voice pack</strong>
+                          <p>
+                            About 120 MB on first install, including a{" "}
+                            {OFFLINE_PACK_SIZE_LABEL} model-and-voice pack with
+                            five natural English voices.
+                          </p>
+                        </div>
+
+                        {(offlinePackState === "installing" ||
+                          offlinePackState === "removing") && (
+                          <div
+                            className="offline-pack-progress"
+                            role="progressbar"
+                            aria-valuemin={0}
+                            aria-valuemax={100}
+                            aria-valuenow={offlineInstallProgress}
+                          >
+                            <span
+                              style={{
+                                width: `${offlineInstallProgress}%`,
+                              }}
+                            />
+                          </div>
+                        )}
+
+                        <p className="offline-pack-status" aria-live="polite">
+                          {offlinePackState === "checking"
+                            ? "Checking this device…"
+                            : offlinePackState === "missing"
+                              ? "Download once while connected to the internet."
+                              : offlineInstallLabel}
+                        </p>
+                        <button
+                          type="button"
+                          className="voice-pack-button"
+                          disabled={
+                            offlinePackState === "checking" ||
+                            offlinePackState === "installing" ||
+                            offlinePackState === "removing"
+                          }
+                          onClick={() => void downloadOfflineVoice()}
+                        >
+                          {offlinePackState === "installing"
+                            ? `${offlineInstallProgress}% downloaded`
+                            : offlinePackState === "removing"
+                              ? "Removing…"
+                              : offlinePackState === "error"
+                                ? "Try download again"
+                                : "Download offline voices"}
+                        </button>
+                      </div>
+                    )}
+                    <p className="online-voice-note offline-voice-note">
+                      After installation, speech is generated locally and
+                      narration text never leaves this device. Word highlighting
+                      follows an audio-synchronized phoneme estimate because
+                      Kokoro does not provide exact word timestamps.{" "}
+                      <a
+                        href="/offline-voice-license.txt"
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        Open-source license
+                      </a>
+                      .
+                    </p>
+                  </div>
                 ) : (
                   <label className="select-setting stacked">
                     <span>Device voice</span>

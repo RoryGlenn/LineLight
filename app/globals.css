@@ -1395,6 +1395,127 @@ input:focus-visible {
   line-height: 1.55;
 }
 
+.online-voice-note a {
+  color: var(--accent);
+  font-weight: 650;
+}
+
+.offline-voice-settings {
+  display: grid;
+  gap: 12px;
+}
+
+.offline-pack-ready {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 11px 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 25%, var(--line));
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--accent) 5%, var(--paper));
+}
+
+.offline-pack-ready span {
+  display: grid;
+  gap: 3px;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.4;
+}
+
+.offline-pack-ready strong {
+  color: var(--accent);
+  font-size: 10px;
+}
+
+.offline-pack-ready button,
+.voice-pack-button {
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line));
+  border-radius: 8px;
+  background: var(--paper);
+  color: var(--accent);
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.offline-pack-download {
+  display: grid;
+  grid-template-columns: 32px 1fr;
+  gap: 8px 10px;
+  padding: 14px;
+  border: 1px solid color-mix(in srgb, var(--accent) 25%, var(--line));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 5%, var(--paper));
+}
+
+.offline-pack-icon {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--accent) 13%, var(--paper));
+  color: var(--accent);
+  font-size: 17px;
+  font-weight: 700;
+}
+
+.offline-pack-download > div > strong {
+  color: var(--ink);
+  font-size: 11px;
+}
+
+.offline-pack-download > div > p {
+  margin: 3px 0 0;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.offline-pack-progress {
+  grid-column: 1 / -1;
+  height: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 12%, var(--line));
+}
+
+.offline-pack-progress span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 180ms ease;
+}
+
+.offline-pack-status {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.voice-pack-button {
+  grid-column: 1 / -1;
+  width: 100%;
+  min-height: 40px;
+  background: var(--accent);
+  color: #fffaf4;
+}
+
+.voice-pack-button:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+.offline-voice-note {
+  margin-top: 0;
+}
+
 .switch-row {
   display: flex;
   min-height: 64px;
