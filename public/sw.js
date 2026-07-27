@@ -1,4 +1,4 @@
-const CACHE_NAME = "guided-reader-v1";
+const CACHE_NAME = "linelight-v2";
 
 self.addEventListener("install", (event) => {
   event.waitUntil(

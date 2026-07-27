@@ -68,7 +68,7 @@ type ReaderSettings = {
 const DEMO_DOCUMENT: ReaderDocument = {
   id: "gentle-start",
   title: "A Gentle Start",
-  author: "Guided Reader",
+  author: "LineLight",
   kind: "demo",
   paragraphs: [
     "Reading is not a race. It is a place to arrive, one sentence at a time.",
@@ -907,10 +907,10 @@ export default function Home() {
       <aside className={`sidebar ${showSidebar ? "sidebar-open" : ""}`}>
         <div className="brand-row">
           <div className="brand-mark" aria-hidden="true">
-            gr
+            ll
           </div>
           <div>
-            <p className="brand-name">Guided Reader</p>
+            <p className="brand-name">LineLight</p>
             <p className="brand-note">Your quiet reading space</p>
           </div>
           <button

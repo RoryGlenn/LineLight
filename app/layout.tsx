@@ -13,15 +13,15 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Guided Reader",
+  title: "LineLight",
   description:
     "A private, dyslexia-friendly read-along space with synchronized highlighting.",
-  applicationName: "Guided Reader",
+  applicationName: "LineLight",
   manifest: "/manifest.webmanifest",
   appleWebApp: {
     capable: true,
     statusBarStyle: "default",
-    title: "Guided Reader",
+    title: "LineLight",
   },
   formatDetection: {
     telephone: false,

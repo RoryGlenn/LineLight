@@ -2,8 +2,8 @@ import type { MetadataRoute } from "next";
 
 export default function manifest(): MetadataRoute.Manifest {
   return {
-    name: "Guided Reader",
-    short_name: "Reader",
+    name: "LineLight",
+    short_name: "LineLight",
     description:
       "A private read-along space with narration, word highlighting, and comfortable reading controls.",
     start_url: "/",
