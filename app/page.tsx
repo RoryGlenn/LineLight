@@ -11,11 +11,16 @@ import {
   useState,
 } from "react";
 import JSZip from "jszip";
+import {
+  PdfPageView,
+  type PdfPageLayout,
+} from "./pdf-page-view";
 
 type DocumentKind = "demo" | "pdf" | "epub" | "txt";
 type HighlightMode = "both" | "word" | "sentence";
 type ReadingTheme = "cream" | "white" | "dark";
 type ReadingFont = "serif" | "sans" | "system";
+type ReaderViewMode = "focus" | "page";
 
 type ReaderDocument = {
   id: string;
@@ -23,6 +28,8 @@ type ReaderDocument = {
   author: string;
   kind: DocumentKind;
   paragraphs: string[];
+  pdfData?: Uint8Array;
+  pdfPages?: PdfPageLayout[];
 };
 
 type WordToken = {
@@ -220,6 +227,14 @@ function filenameWithoutExtension(name: string) {
   return name.replace(/\.[^.]+$/, "");
 }
 
+function countWords(value: string) {
+  let count = 0;
+  for (const match of value.matchAll(WORD_PATTERN)) {
+    if (IS_WORD.test(match[0])) count += 1;
+  }
+  return count;
+}
+
 async function parsePdf(file: File): Promise<ReaderDocument> {
   const pdfjs = await import("pdfjs-dist");
   pdfjs.GlobalWorkerOptions.workerSrc = new URL(
@@ -227,19 +242,60 @@ async function parsePdf(file: File): Promise<ReaderDocument> {
     import.meta.url,
   ).toString();
 
-  const data = new Uint8Array(await file.arrayBuffer());
-  const pdf = await pdfjs.getDocument({ data }).promise;
+  const sourceData = new Uint8Array(await file.arrayBuffer());
+  const pdf = await pdfjs.getDocument({ data: sourceData.slice() }).promise;
   const paragraphs: string[] = [];
+  const pdfPages: PdfPageLayout[] = [];
+  let globalWordCount = 0;
 
   for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
     const page = await pdf.getPage(pageNumber);
+    const viewport = page.getViewport({ scale: 1 });
     const content = await page.getTextContent();
     let pageText = "";
+    const items: PdfPageLayout["items"] = [];
 
     content.items.forEach((item) => {
       if (!("str" in item)) return;
+      const itemWordCount = countWords(item.str);
+      const transformed = pdfjs.Util.transform(
+        viewport.transform,
+        item.transform,
+      );
+      const fontSize = Math.max(
+        1,
+        Math.hypot(transformed[2], transformed[3]),
+      );
+      const textStyle = content.styles[item.fontName];
+      const ascent =
+        textStyle?.ascent ??
+        (textStyle?.descent ? 1 + textStyle.descent : 0.82);
+      const angle =
+        (Math.atan2(transformed[1], transformed[0]) * 180) / Math.PI;
+
+      if (item.str && itemWordCount) {
+        items.push({
+          text: item.str,
+          left: transformed[4],
+          top: transformed[5] - fontSize * ascent,
+          width: Math.max(Math.abs(item.width * viewport.scale), 1),
+          height: fontSize,
+          fontSize,
+          angle,
+          wordStart: globalWordCount,
+          wordCount: itemWordCount,
+        });
+      }
+      globalWordCount += itemWordCount;
       pageText += item.str;
       pageText += "hasEOL" in item && item.hasEOL ? "\n" : " ";
+    });
+
+    pdfPages.push({
+      pageNumber,
+      width: viewport.width,
+      height: viewport.height,
+      items,
     });
 
     const cleaned = cleanText(pageText);
@@ -252,19 +308,24 @@ async function parsePdf(file: File): Promise<ReaderDocument> {
     }
   }
 
-  const wordCount = paragraphs.join(" ").split(/\s+/).filter(Boolean).length;
+  const wordCount = countWords(paragraphs.join(" "));
   if (wordCount < 8) {
+    await pdf.destroy();
     throw new Error(
       "This PDF looks like a scan and has very little selectable text. OCR support is planned for the next version.",
     );
   }
 
+  const pageCount = pdf.numPages;
+  await pdf.destroy();
   return {
     id: `pdf-${Date.now()}`,
     title: filenameWithoutExtension(file.name),
-    author: `${pdf.numPages} page PDF`,
+    author: `${pageCount} page PDF`,
     kind: "pdf",
     paragraphs,
+    pdfData: sourceData,
+    pdfPages,
   };
 }
 
@@ -376,6 +437,7 @@ export default function Home() {
   const [readerDocument, setReaderDocument] =
     useState<ReaderDocument>(DEMO_DOCUMENT);
   const [settings, setSettings] = useState<ReaderSettings>(DEFAULT_SETTINGS);
+  const [viewMode, setViewMode] = useState<ReaderViewMode>("focus");
   const [activeWord, setActiveWord] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [followPaused, setFollowPaused] = useState(false);
@@ -395,6 +457,13 @@ export default function Home() {
   );
   const activeToken = model.tokens[activeWord] ?? model.tokens[0];
   const activeSentence = activeToken?.sentenceIndex ?? 0;
+  const tokenSentences = useMemo(
+    () => model.tokens.map((token) => token.sentenceIndex),
+    [model.tokens],
+  );
+  const supportsPageView =
+    readerDocument.kind === "pdf" &&
+    Boolean(readerDocument.pdfData?.length && readerDocument.pdfPages?.length);
   const progress = model.tokens.length
     ? Math.round(((activeWord + 1) / model.tokens.length) * 100)
     : 0;
@@ -453,6 +522,20 @@ export default function Home() {
         setReaderDocument(storedDocument);
         setActiveWord(storedProgress);
         activeWordRef.current = storedProgress;
+        if (
+          storedDocument.kind === "pdf" &&
+          storedDocument.pdfData?.length &&
+          storedDocument.pdfPages?.length
+        ) {
+          try {
+            const savedView = localStorage.getItem(
+              `guided-reader-view-${storedDocument.id}`,
+            );
+            setViewMode(savedView === "focus" ? "focus" : "page");
+          } catch {
+            setViewMode("page");
+          }
+        }
       })
       .catch(() => undefined);
 
@@ -483,6 +566,17 @@ export default function Home() {
       // Ignore private-browsing storage limitations.
     }
   }, [activeWord, readerDocument.id]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        `guided-reader-view-${readerDocument.id}`,
+        viewMode,
+      );
+    } catch {
+      // View preference is optional.
+    }
+  }, [readerDocument.id, viewMode]);
 
   useEffect(() => {
     if (!speechAvailable) return;
@@ -753,6 +847,13 @@ export default function Home() {
         setReaderDocument(imported);
         setActiveWord(0);
         activeWordRef.current = 0;
+        setViewMode(
+          imported.kind === "pdf" &&
+            imported.pdfData?.length &&
+            imported.pdfPages?.length
+            ? "page"
+            : "focus",
+        );
         setFollowPaused(false);
         setShowImport(false);
         setShowSidebar(false);
@@ -789,6 +890,14 @@ export default function Home() {
 
   const currentVoice =
     voices.find((voice) => voice.voiceURI === settings.voiceURI) ?? voices[0];
+
+  const changeViewMode = (mode: ReaderViewMode) => {
+    if (mode === viewMode) return;
+    wordRefs.current.clear();
+    setViewMode(mode);
+    setFollowPaused(false);
+    window.setTimeout(() => scrollToActiveWord("smooth"), 80);
+  };
 
   return (
     <main
@@ -902,11 +1011,37 @@ export default function Home() {
               <p className="eyebrow">
                 {readerDocument.kind === "demo"
                   ? "A quiet place to begin"
-                  : `${readerDocument.kind.toUpperCase()} · Focus view`}
+                  : `${readerDocument.kind.toUpperCase()} · ${
+                      viewMode === "page" && supportsPageView
+                        ? "Original page view"
+                        : "Focus view"
+                    }`}
               </p>
               <h1>{readerDocument.title}</h1>
             </div>
           </div>
+          {supportsPageView && (
+            <div className="view-switcher" role="group" aria-label="PDF view">
+              <button
+                type="button"
+                className={viewMode === "focus" ? "selected" : ""}
+                onClick={() => changeViewMode("focus")}
+                aria-pressed={viewMode === "focus"}
+              >
+                <span aria-hidden="true">Aa</span>
+                Focus
+              </button>
+              <button
+                type="button"
+                className={viewMode === "page" ? "selected" : ""}
+                onClick={() => changeViewMode("page")}
+                aria-pressed={viewMode === "page"}
+              >
+                <span aria-hidden="true">▧</span>
+                Page
+              </button>
+            </div>
+          )}
           <div className="top-actions">
             <span className="saved-status">
               <span aria-hidden="true">✓</span> Saved locally
@@ -949,75 +1084,102 @@ export default function Home() {
             }
           }}
         >
-          <article
-            className={`reading-page font-${settings.font} highlight-${settings.highlightMode}`}
-          >
-            <div className="chapter-heading">
-              <span className="chapter-rule" aria-hidden="true" />
-              <p>
-                {readerDocument.kind === "demo"
-                  ? "A reading sample"
-                  : "Imported document"}
-              </p>
-              <h2>{readerDocument.title}</h2>
-            </div>
+          {supportsPageView &&
+          viewMode === "page" &&
+          readerDocument.pdfData &&
+          readerDocument.pdfPages ? (
+            <PdfPageView
+              data={readerDocument.pdfData}
+              pages={readerDocument.pdfPages}
+              activeWord={activeWord}
+              activeSentence={activeSentence}
+              tokenSentences={tokenSentences}
+              highlightMode={settings.highlightMode}
+              registerWord={(index, element) => {
+                if (element) wordRefs.current.set(index, element);
+                else wordRefs.current.delete(index);
+              }}
+              onSelectWord={(index) => {
+                stopSpeech();
+                setActiveWord(index);
+                activeWordRef.current = index;
+              }}
+              onRenderError={setNotice}
+            />
+          ) : (
+            <article
+              className={`reading-page font-${settings.font} highlight-${settings.highlightMode}`}
+            >
+              <div className="chapter-heading">
+                <span className="chapter-rule" aria-hidden="true" />
+                <p>
+                  {readerDocument.kind === "demo"
+                    ? "A reading sample"
+                    : "Imported document"}
+                </p>
+                <h2>{readerDocument.title}</h2>
+              </div>
 
-            <div className="reading-copy">
-              {model.paragraphs.map((paragraph, paragraphIndex) => (
-                <p key={`${readerDocument.id}-${paragraphIndex}`}>
-                  {paragraph.map((segment, segmentIndex) => {
-                    const isCurrentSentence =
-                      segment.sentenceIndex === activeSentence;
-                    if (segment.tokenIndex === undefined) {
+              <div className="reading-copy">
+                {model.paragraphs.map((paragraph, paragraphIndex) => (
+                  <p key={`${readerDocument.id}-${paragraphIndex}`}>
+                    {paragraph.map((segment, segmentIndex) => {
+                      const isCurrentSentence =
+                        segment.sentenceIndex === activeSentence;
+                      if (segment.tokenIndex === undefined) {
+                        return (
+                          <span
+                            className={
+                              isCurrentSentence ? "sentence-active" : undefined
+                            }
+                            key={`${paragraphIndex}-${segmentIndex}`}
+                          >
+                            {segment.text}
+                          </span>
+                        );
+                      }
+                      const isActive = segment.tokenIndex === activeWord;
                       return (
                         <span
-                          className={
-                            isCurrentSentence ? "sentence-active" : undefined
-                          }
+                          className={[
+                            "spoken-word",
+                            isCurrentSentence ? "sentence-active" : "",
+                            isActive ? "word-active" : "",
+                          ]
+                            .filter(Boolean)
+                            .join(" ")}
+                          id={isActive ? "active-spoken-word" : undefined}
                           key={`${paragraphIndex}-${segmentIndex}`}
+                          ref={(element) => {
+                            if (element) {
+                              wordRefs.current.set(
+                                segment.tokenIndex!,
+                                element,
+                              );
+                            } else {
+                              wordRefs.current.delete(segment.tokenIndex!);
+                            }
+                          }}
+                          onClick={() => {
+                            stopSpeech();
+                            setActiveWord(segment.tokenIndex!);
+                            activeWordRef.current = segment.tokenIndex!;
+                          }}
                         >
                           {segment.text}
                         </span>
                       );
-                    }
-                    const isActive = segment.tokenIndex === activeWord;
-                    return (
-                      <span
-                        className={[
-                          "spoken-word",
-                          isCurrentSentence ? "sentence-active" : "",
-                          isActive ? "word-active" : "",
-                        ]
-                          .filter(Boolean)
-                          .join(" ")}
-                        id={isActive ? "active-spoken-word" : undefined}
-                        key={`${paragraphIndex}-${segmentIndex}`}
-                        ref={(element) => {
-                          if (element) {
-                            wordRefs.current.set(segment.tokenIndex!, element);
-                          } else {
-                            wordRefs.current.delete(segment.tokenIndex!);
-                          }
-                        }}
-                        onClick={() => {
-                          stopSpeech();
-                          setActiveWord(segment.tokenIndex!);
-                          activeWordRef.current = segment.tokenIndex!;
-                        }}
-                      >
-                        {segment.text}
-                      </span>
-                    );
-                  })}
-                </p>
-              ))}
-            </div>
+                    })}
+                  </p>
+                ))}
+              </div>
 
-            <footer className="document-end">
-              <span aria-hidden="true">✦</span>
-              <p>End of document</p>
-            </footer>
-          </article>
+              <footer className="document-end">
+                <span aria-hidden="true">✦</span>
+                <p>End of document</p>
+              </footer>
+            </article>
+          )}
 
         </div>
 
@@ -1141,7 +1303,8 @@ export default function Home() {
             <h2 id="import-title">Import something to read</h2>
             <p className="modal-intro">
               Choose a text-based PDF, EPUB, or TXT file. It is processed in
-              your browser and is not uploaded to a server.
+              your browser and is not uploaded to a server. PDFs include both
+              the original page layout and a calmer Focus view.
             </p>
 
             <div
