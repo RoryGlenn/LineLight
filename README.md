@@ -22,7 +22,7 @@ release.
 - Automatically follow the narration or return to the spoken position
 - Switch between a reflowed focus view and the original PDF page
 - Adjust font, text size, line spacing, colors, reading ruler, and speed
-- Save the active document, preferences, and reading position on the device
+- Keep a searchable private library with per-document progress on the device
 - Install as a progressive web app
 
 ## How narration works
