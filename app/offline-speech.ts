@@ -1,8 +1,9 @@
 import {
   KOKORO_VOICE_CACHE_NAME,
+  LEGACY_OFFLINE_MODEL_URLS,
   OFFLINE_MODEL_ID,
   OFFLINE_MODEL_URLS,
-  OFFLINE_VOICE_URLS,
+  OFFLINE_VOICE_CACHE_URLS,
   TRANSFORMERS_CACHE_NAME,
   type OfflineVoiceId,
 } from "./offline-speech-config";
@@ -230,13 +231,37 @@ async function cacheContainsEvery(
   return matches.every(Boolean);
 }
 
+async function cacheContainsEachAlternative(
+  cacheName: string,
+  urls: readonly string[],
+  alternatives: readonly string[],
+) {
+  const cache = await caches.open(cacheName);
+  const matches = await Promise.all(
+    urls.map(async (url, index) =>
+      Boolean(
+        (await cache.match(url)) ??
+          (await cache.match(alternatives[index])),
+      ),
+    ),
+  );
+  return matches.every(Boolean);
+}
+
 export async function isOfflineVoicePackInstalled() {
   if (typeof caches === "undefined") return false;
 
   try {
     const [hasModel, hasVoices] = await Promise.all([
-      cacheContainsEvery(TRANSFORMERS_CACHE_NAME, OFFLINE_MODEL_URLS),
-      cacheContainsEvery(KOKORO_VOICE_CACHE_NAME, OFFLINE_VOICE_URLS),
+      cacheContainsEachAlternative(
+        TRANSFORMERS_CACHE_NAME,
+        OFFLINE_MODEL_URLS,
+        LEGACY_OFFLINE_MODEL_URLS,
+      ),
+      cacheContainsEvery(
+        KOKORO_VOICE_CACHE_NAME,
+        OFFLINE_VOICE_CACHE_URLS,
+      ),
     ]);
     return hasModel && hasVoices;
   } catch {

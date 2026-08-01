@@ -5,6 +5,8 @@ import {
   handleSpeechTokenRequest,
   type SpeechEnvironment,
 } from "./speech-token";
+import { OFFLINE_MODEL_ROUTE_BASE } from "../app/offline-model-manifest.mjs";
+import { handleOfflineModelRequest } from "./offline-model.mjs";
 
 interface Env extends SpeechEnvironment {
   ASSETS: Fetcher;
@@ -47,6 +49,12 @@ const worker = {
     if (url.pathname === "/api/speech/token") {
       return withCrossOriginIsolation(
         await handleSpeechTokenRequest(request, env),
+      );
+    }
+
+    if (url.pathname.startsWith(OFFLINE_MODEL_ROUTE_BASE)) {
+      return withCrossOriginIsolation(
+        await handleOfflineModelRequest(request),
       );
     }
 

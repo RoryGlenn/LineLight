@@ -1,6 +1,18 @@
-export const OFFLINE_MODEL_ID =
-  "onnx-community/Kokoro-82M-v1.0-ONNX";
-export const OFFLINE_MODEL_REVISION = "main";
+import {
+  OFFLINE_MODEL_FILES,
+  OFFLINE_MODEL_ID,
+  OFFLINE_MODEL_LOCAL_PATH,
+  OFFLINE_MODEL_REVISION,
+  OFFLINE_VOICE_IDS,
+} from "./offline-model-manifest.mjs";
+
+export {
+  OFFLINE_MODEL_FILES,
+  OFFLINE_MODEL_ID,
+  OFFLINE_MODEL_LOCAL_PATH,
+  OFFLINE_MODEL_REVISION,
+};
+
 export const OFFLINE_MODEL_DTYPE = "q8";
 export const OFFLINE_MODEL_BYTES = 92_361_116;
 export const OFFLINE_VOICE_BYTES = 522_240;
@@ -38,21 +50,26 @@ export const OFFLINE_VOICES = [
 
 export type OfflineVoiceId = (typeof OFFLINE_VOICES)[number]["value"];
 
-const MODEL_ROOT = `https://huggingface.co/${OFFLINE_MODEL_ID}/resolve/${OFFLINE_MODEL_REVISION}`;
-
-export const OFFLINE_MODEL_FILES = [
-  "config.json",
-  "tokenizer.json",
-  "tokenizer_config.json",
-  "onnx/model_quantized.onnx",
-] as const;
+const LOCAL_MODEL_ROOT = `${OFFLINE_MODEL_LOCAL_PATH}${OFFLINE_MODEL_ID}`;
+const KOKORO_VOICE_CACHE_ROOT =
+  `https://huggingface.co/${OFFLINE_MODEL_ID}/resolve/main`;
+const LEGACY_MODEL_CACHE_ROOT = KOKORO_VOICE_CACHE_ROOT;
 
 export const OFFLINE_MODEL_URLS = OFFLINE_MODEL_FILES.map(
-  (file) => `${MODEL_ROOT}/${file}`,
+  (file) => `${LOCAL_MODEL_ROOT}/${file}`,
 );
 
-export const OFFLINE_VOICE_URLS = OFFLINE_VOICES.map(
-  (voice) => `${MODEL_ROOT}/voices/${voice.value}.bin`,
+export const LEGACY_OFFLINE_MODEL_URLS = OFFLINE_MODEL_FILES.map(
+  (file) => `${LEGACY_MODEL_CACHE_ROOT}/${file}`,
+);
+
+export const OFFLINE_VOICE_SOURCE_URLS = OFFLINE_VOICE_IDS.map(
+  (voice) => `${LOCAL_MODEL_ROOT}/voices/${voice}.bin`,
+);
+
+// kokoro-js currently looks up voice files under this exact cache key.
+export const OFFLINE_VOICE_CACHE_URLS = OFFLINE_VOICE_IDS.map(
+  (voice) => `${KOKORO_VOICE_CACHE_ROOT}/voices/${voice}.bin`,
 );
 
 export const OFFLINE_PACK_BYTES =

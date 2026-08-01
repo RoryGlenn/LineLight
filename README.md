@@ -29,16 +29,17 @@ release.
 
 LineLight has three narration modes:
 
+- **Offline natural** is the default for new readers. On first launch,
+  LineLight automatically stores its included roughly 95 MB Kokoro model and
+  five English voices in browser Cache Storage. The pinned files are delivered
+  through an allowlisted LineLight route rather than fetched by the browser
+  from a third-party model host. Speech then runs in a dedicated browser worker
+  using WebGPU when available and WebAssembly as a compatibility fallback.
+  LineLight opts into cross-origin isolation so ONNX can use multiple CPU
+  threads for WebAssembly on browsers that support them. The pack can be
+  removed or restored from Narration settings.
 - **Private device** uses the browser's Web Speech API. The operating system or
   browser supplies the voice, so no LineLight voice service is required.
-- **Offline natural** downloads approximately 120 MB on first install after the
-  reader explicitly asks for it. That includes a roughly 95 MB Kokoro model,
-  five English voices, and the local inference runtime. Speech then runs in a
-  dedicated browser worker using WebGPU when available and WebAssembly as a
-  compatibility fallback. LineLight opts into cross-origin isolation so ONNX
-  can use multiple CPU threads for WebAssembly on browsers that support them.
-  The model, voice data, and generated audio stay on the device. The pack can
-  be removed from Narration settings.
 - **Natural online** uses optional Azure AI Speech neural voices. LineLight
   exchanges the server-side subscription key for a short-lived token, requests
   audio for the current passage, and follows Azure's timed word boundaries.
@@ -58,7 +59,7 @@ The model and
 available under the Apache 2.0 license. LineLight stores the quantized model in
 the browser's Cache Storage and asks the browser to make that storage
 persistent. Browser storage can still be cleared or evicted; the settings panel
-will offer the download again if any required file is missing.
+prepares the included voice again if any required file is missing.
 The distributed license text is available at
 [`public/offline-voice-license.txt`](public/offline-voice-license.txt).
 
@@ -68,9 +69,10 @@ Imported documents are parsed in the browser and stored locally on the device.
 LineLight does not upload whole documents to an application server. Private
 device narration may use processing supplied by the operating system or voice
 provider. Offline natural narration performs synthesis entirely in the browser
-after the one-time model download. When Natural online is selected, only short
-narration passages (including one prepared ahead) are sent to Azure AI Speech
-for synthesis.
+after its included model files have been stored. The model route handles only
+the pinned public model assets; it never receives imported documents or
+narration text. When Natural online is selected, only short narration passages
+(including one prepared ahead) are sent to Azure AI Speech for synthesis.
 
 ## Known limitations
 

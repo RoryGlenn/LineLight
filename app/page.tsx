@@ -43,6 +43,7 @@ import {
   type OfflineSpeechResult,
 } from "./offline-speech";
 import { createSpeechPrefetchQueue } from "./speech-prefetch.mjs";
+import { DEFAULT_NARRATION_ENGINE } from "./narration-defaults.mjs";
 
 type DocumentKind = "demo" | "pdf" | "epub" | "txt";
 type HighlightMode = "both" | "word" | "sentence";
@@ -139,7 +140,7 @@ const DEFAULT_SETTINGS: ReaderSettings = {
   follow: true,
   ruler: false,
   rate: 1,
-  narrationEngine: "device",
+  narrationEngine: DEFAULT_NARRATION_ENGINE,
   voiceURI: "",
   offlineVoice: "af_heart",
   azureVoice: "en-US-AvaMultilingualNeural",
@@ -535,10 +536,11 @@ export default function Home() {
     useState<OfflinePackState>("checking");
   const [offlineInstallProgress, setOfflineInstallProgress] = useState(0);
   const [offlineInstallLabel, setOfflineInstallLabel] = useState(
-    "Checking this device…",
+    "Checking the included voice…",
   );
   const [offlineRuntimeInfo, setOfflineRuntimeInfo] =
     useState<OfflineRuntimeInfo | null>(null);
+  const [settingsRestored, setSettingsRestored] = useState(false);
   const speechAvailable =
     typeof window === "undefined" ||
     ("speechSynthesis" in window && "SpeechSynthesisUtterance" in window);
@@ -576,6 +578,7 @@ export default function Home() {
   const bufferedAbortRef = useRef<AbortController | null>(null);
   const bufferedPrefetchDisposeRef = useRef<(() => void) | null>(null);
   const speechSessionRef = useRef(0);
+  const automaticOfflineInstallAttemptedRef = useRef(false);
   const programmaticScrollRef = useRef(false);
   const activeWordRef = useRef(0);
 
@@ -592,16 +595,25 @@ export default function Home() {
         `guided-reader-progress-${DEMO_DOCUMENT.id}`,
       );
       restoreTimer = window.setTimeout(() => {
-        if (savedSettings) {
-          setSettings((current) => ({
-            ...current,
-            ...(JSON.parse(savedSettings) as Partial<ReaderSettings>),
-          }));
+        if (cancelled) return;
+        try {
+          if (savedSettings) {
+            setSettings((current) => ({
+              ...current,
+              ...(JSON.parse(savedSettings) as Partial<ReaderSettings>),
+            }));
+          }
+        } catch {
+          // Invalid saved preferences should not block the included voice.
         }
         if (savedProgress) setActiveWord(Number(savedProgress) || 0);
+        setSettingsRestored(true);
       }, 0);
     } catch {
       // Local storage is optional; the reader still works without it.
+      restoreTimer = window.setTimeout(() => {
+        if (!cancelled) setSettingsRestored(true);
+      }, 0);
     }
 
     loadReaderDocument()
@@ -660,12 +672,13 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    if (!settingsRestored) return;
     try {
       localStorage.setItem("guided-reader-settings", JSON.stringify(settings));
     } catch {
       // Ignore private-browsing storage limitations.
     }
-  }, [settings]);
+  }, [settings, settingsRestored]);
 
   useEffect(() => {
     try {
@@ -763,14 +776,18 @@ export default function Home() {
 
   useEffect(() => stopSpeech, [stopSpeech]);
 
-  const downloadOfflineVoice = useCallback(async () => {
+  const downloadOfflineVoice = useCallback(async (automatic = false) => {
     if (offlinePackState === "installing") return;
 
     stopSpeech();
     setOfflinePackState("installing");
     setOfflineInstallProgress(0);
-    setOfflineInstallLabel("Starting the offline voice download…");
-    setNotice("");
+    setOfflineInstallLabel("Preparing LineLight's included offline voice…");
+    setNotice(
+      automatic
+        ? "Preparing LineLight's included offline voice in the background…"
+        : "",
+    );
 
     try {
       await navigator.storage?.persist?.().catch(() => false);
@@ -783,50 +800,81 @@ export default function Home() {
 
       if (!(await isOfflineVoicePackInstalled())) {
         throw new OfflineSpeechError(
-          "The download finished, but Brave did not keep every voice file. Check storage permissions and try again.",
+          "The included voice finished loading, but the browser did not keep every file. Check storage permissions and try again.",
         );
       }
 
       setOfflinePackState("ready");
       setOfflineInstallProgress(100);
-      setOfflineInstallLabel("Offline voices are ready.");
+      setOfflineInstallLabel("The included offline voices are ready.");
       setNotice(
-        "Offline natural voices are ready. Narration text now stays on this device.",
+        "LineLight's included natural voice is ready. Narration text now stays on this device.",
       );
     } catch (error) {
       setOfflinePackState("error");
       const message =
         error instanceof Error
           ? error.message
-          : "The offline voice pack could not be installed.";
-      setOfflineInstallLabel(message);
-      setNotice(message);
+          : "The included offline voice could not be prepared.";
+      const displayMessage = automatic
+        ? "The included offline voice is not available yet. Reconnect and select Offline natural to try again."
+        : message;
+      setOfflineInstallLabel(displayMessage);
+      if (automatic && speechAvailable) {
+        setSettings((current) =>
+          current.narrationEngine === "offline"
+            ? { ...current, narrationEngine: "device" }
+            : current,
+        );
+        setNotice(`${displayMessage} Using the device voice instead.`);
+      } else {
+        setNotice(displayMessage);
+      }
     }
-  }, [offlinePackState, stopSpeech]);
+  }, [offlinePackState, speechAvailable, stopSpeech]);
+
+  useEffect(() => {
+    if (
+      !settingsRestored ||
+      settings.narrationEngine !== "offline" ||
+      offlinePackState !== "missing" ||
+      automaticOfflineInstallAttemptedRef.current
+    ) {
+      return;
+    }
+
+    automaticOfflineInstallAttemptedRef.current = true;
+    void downloadOfflineVoice(true);
+  }, [
+    downloadOfflineVoice,
+    offlinePackState,
+    settings.narrationEngine,
+    settingsRestored,
+  ]);
 
   const deleteOfflineVoice = useCallback(async () => {
     stopSpeech();
     setOfflinePackState("removing");
-    setOfflineInstallLabel("Removing the offline voice pack…");
+    setOfflineInstallLabel("Removing the included offline voice…");
 
     try {
       await removeOfflineVoicePack();
       setOfflinePackState("missing");
       setOfflineRuntimeInfo(null);
       setOfflineInstallProgress(0);
-      setOfflineInstallLabel("Offline voice pack removed.");
+      setOfflineInstallLabel("Included offline voice removed.");
       setSettings((current) =>
         current.narrationEngine === "offline"
           ? { ...current, narrationEngine: "device" }
           : current,
       );
       setNotice(
-        "The offline voice pack was removed. You can download it again at any time.",
+        "The included offline voice was removed. Select Offline natural to restore it at any time.",
       );
     } catch {
       setOfflinePackState("error");
       setOfflineInstallLabel(
-        "Brave could not remove every offline voice file.",
+        "The browser could not remove every offline voice file.",
       );
     }
   }, [stopSpeech]);
@@ -1074,11 +1122,20 @@ export default function Home() {
       const isOffline = engine === "offline";
 
       if (isOffline && offlinePackState !== "ready") {
+        if (
+          offlinePackState === "missing" ||
+          offlinePackState === "error"
+        ) {
+          automaticOfflineInstallAttemptedRef.current = true;
+          void downloadOfflineVoice(true);
+        }
         setIsPlaying(false);
         setIsPreparingSpeech(false);
         setShowSettings(true);
         setNotice(
-          "Download the offline voice pack in Narration settings before pressing Play.",
+          offlinePackState === "installing"
+            ? "LineLight is still preparing the included offline voice."
+            : "Preparing LineLight's included offline voice before narration starts…",
         );
         return;
       }
@@ -1408,6 +1465,7 @@ export default function Home() {
       clearBufferedPlayback,
       clearFallbackTimer,
       clearSpeechStartTimer,
+      downloadOfflineVoice,
       model.fullText,
       model.tokens,
       offlinePackState,
@@ -2275,8 +2333,8 @@ export default function Home() {
                 >
                   {(
                     [
-                      ["device", "Device"],
                       ["offline", "Offline natural"],
+                      ["device", "Device"],
                       ["azure", "Online natural"],
                     ] as [NarrationEngine, string][]
                   ).map(([value, label]) => (
@@ -2393,11 +2451,10 @@ export default function Home() {
                           ↓
                         </span>
                         <div>
-                          <strong>Offline voice pack</strong>
+                          <strong>Included offline voice</strong>
                           <p>
-                            About 120 MB on first install, including a{" "}
-                            {OFFLINE_PACK_SIZE_LABEL} model-and-voice pack with
-                            five natural English voices.
+                            LineLight stores about {OFFLINE_PACK_SIZE_LABEL} on
+                            this device for five natural English voices.
                           </p>
                         </div>
 
@@ -2420,9 +2477,9 @@ export default function Home() {
 
                         <p className="offline-pack-status" aria-live="polite">
                           {offlinePackState === "checking"
-                            ? "Checking this device…"
+                            ? "Checking the included voice…"
                             : offlinePackState === "missing"
-                              ? "Download once while connected to the internet."
+                              ? "Preparing automatically while connected…"
                               : offlineInstallLabel}
                         </p>
                         <button
@@ -2436,20 +2493,22 @@ export default function Home() {
                           onClick={() => void downloadOfflineVoice()}
                         >
                           {offlinePackState === "installing"
-                            ? `${offlineInstallProgress}% downloaded`
+                            ? `${offlineInstallProgress}% prepared`
                             : offlinePackState === "removing"
                               ? "Removing…"
                               : offlinePackState === "error"
-                                ? "Try download again"
-                                : "Download offline voices"}
+                                ? "Try preparing again"
+                                : "Prepare offline voices now"}
                         </button>
                       </div>
                     )}
                     <p className="online-voice-note offline-voice-note">
-                      After installation, speech is generated locally and
-                      narration text never leaves this device. Word highlighting
-                      follows an audio-synchronized phoneme estimate because
-                      Kokoro does not provide exact word timestamps.{" "}
+                      LineLight includes this voice and stores it locally on
+                      first launch. After preparation, speech is generated on
+                      this device and narration text never leaves it. Word
+                      highlighting follows an audio-synchronized phoneme
+                      estimate because Kokoro does not provide exact word
+                      timestamps.{" "}
                       <a
                         href="/offline-voice-license.txt"
                         target="_blank"

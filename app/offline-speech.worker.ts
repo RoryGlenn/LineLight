@@ -3,13 +3,16 @@ import { KokoroTTS } from "kokoro-js";
 import { phonemize } from "phonemizer";
 import {
   KOKORO_VOICE_CACHE_NAME,
+  LEGACY_OFFLINE_MODEL_URLS,
   OFFLINE_MODEL_BYTES,
   OFFLINE_MODEL_DTYPE,
   OFFLINE_MODEL_ID,
+  OFFLINE_MODEL_LOCAL_PATH,
   OFFLINE_MODEL_URLS,
   OFFLINE_VOICES,
   OFFLINE_VOICE_BYTES,
-  OFFLINE_VOICE_URLS,
+  OFFLINE_VOICE_CACHE_URLS,
+  OFFLINE_VOICE_SOURCE_URLS,
   OFFLINE_WASM_MAX_THREADS,
   TRANSFORMERS_CACHE_NAME,
   type OfflineVoiceId,
@@ -107,19 +110,24 @@ async function assertOfflineFilesAvailable(voice: OfflineVoiceId) {
     caches.open(TRANSFORMERS_CACHE_NAME),
     caches.open(KOKORO_VOICE_CACHE_NAME),
   ]);
-  const selectedVoiceUrl = OFFLINE_VOICE_URLS.find((url) =>
+  const selectedVoiceUrl = OFFLINE_VOICE_CACHE_URLS.find((url) =>
     url.endsWith(`/voices/${voice}.bin`),
   );
-  const matches = await Promise.all([
-    ...OFFLINE_MODEL_URLS.map((url) => modelCache.match(url)),
-    selectedVoiceUrl
-      ? voiceCache.match(selectedVoiceUrl)
-      : Promise.resolve(undefined),
-  ]);
+  const modelMatches = await Promise.all(
+    OFFLINE_MODEL_URLS.map(async (url, index) =>
+      Boolean(
+        (await modelCache.match(url)) ??
+          (await modelCache.match(LEGACY_OFFLINE_MODEL_URLS[index])),
+      ),
+    ),
+  );
+  const voiceMatch = selectedVoiceUrl
+    ? await voiceCache.match(selectedVoiceUrl)
+    : undefined;
 
-  if (matches.some((match) => !match)) {
+  if (modelMatches.some((match) => !match) || !voiceMatch) {
     throw new Error(
-      "The offline voice pack is incomplete. Reconnect to the internet and download it again.",
+      "The included offline voice is incomplete. Reconnect to the internet and prepare it again.",
     );
   }
 }
@@ -127,10 +135,8 @@ async function assertOfflineFilesAvailable(voice: OfflineVoiceId) {
 async function loadModel(
   id: number,
   {
-    offlineOnly,
     preferredDevice,
   }: {
-    offlineOnly: boolean;
     preferredDevice?: KokoroDevice;
   },
 ) {
@@ -144,8 +150,12 @@ async function loadModel(
       Math.max(1, Math.floor((navigator.hardwareConcurrency || 1) / 2)),
     );
   }
-  transformersEnv.allowLocalModels = offlineOnly;
-  transformersEnv.allowRemoteModels = !offlineOnly;
+  transformersEnv.localModelPath = new URL(
+    OFFLINE_MODEL_LOCAL_PATH,
+    globalThis.location.origin,
+  ).href;
+  transformersEnv.allowLocalModels = true;
+  transformersEnv.allowRemoteModels = false;
   const loadedByFile = new Map<string, number>();
   const totalByFile = new Map<string, number>();
 
@@ -176,8 +186,8 @@ async function loadModel(
         ? (knownLoaded / Math.max(knownTotal, OFFLINE_MODEL_BYTES)) * 92
         : (event.progress ?? 0) * 0.92;
     const fileLabel = event.file?.includes("onnx/")
-      ? "Downloading the neural voice model…"
-      : "Preparing the voice model…";
+      ? "Loading the included neural voice model…"
+      : "Preparing the included voice model…";
     postProgress(id, Math.min(92, modelProgress), fileLabel);
   };
 
@@ -202,26 +212,27 @@ async function loadModel(
 async function installVoices(id: number) {
   const voiceCache = await caches.open(KOKORO_VOICE_CACHE_NAME);
 
-  for (let index = 0; index < OFFLINE_VOICE_URLS.length; index += 1) {
-    const url = OFFLINE_VOICE_URLS[index];
-    const cached = await voiceCache.match(url);
+  for (let index = 0; index < OFFLINE_VOICE_SOURCE_URLS.length; index += 1) {
+    const sourceUrl = OFFLINE_VOICE_SOURCE_URLS[index];
+    const cacheUrl = OFFLINE_VOICE_CACHE_URLS[index];
+    const cached = await voiceCache.match(cacheUrl);
     if (!cached) {
-      const response = await fetch(url);
+      const response = await fetch(sourceUrl);
       if (!response.ok) {
         throw new Error(
-          `The ${OFFLINE_VOICES[index].label} voice could not be downloaded.`,
+          `The included ${OFFLINE_VOICES[index].label} voice could not be prepared.`,
         );
       }
-      await voiceCache.put(url, response);
+      await voiceCache.put(cacheUrl, response);
     }
 
     const voiceProgress =
       ((index + 1) * OFFLINE_VOICE_BYTES) /
-      (OFFLINE_VOICE_URLS.length * OFFLINE_VOICE_BYTES);
+      (OFFLINE_VOICE_SOURCE_URLS.length * OFFLINE_VOICE_BYTES);
     postProgress(
       id,
       92 + voiceProgress * 6,
-      `Adding ${OFFLINE_VOICES[index].label}…`,
+      `Adding included ${OFFLINE_VOICES[index].label}…`,
     );
   }
 }
@@ -258,7 +269,6 @@ async function generateSpeech(
     verifiedOfflineVoices.add(voice);
   }
   const model = await loadModel(id, {
-    offlineOnly,
     preferredDevice,
   });
 
@@ -307,9 +317,8 @@ async function handleRequest(message: RequestMessage) {
   try {
     let result: unknown;
     if (message.type === "install") {
-      postProgress(id, 0, "Starting the offline voice download…");
+      postProgress(id, 0, "Preparing LineLight's included offline voice…");
       await loadModel(id, {
-        offlineOnly: false,
         preferredDevice: message.device,
       });
       await installVoices(id);
