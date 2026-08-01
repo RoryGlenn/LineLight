@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { readFile, readdir } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 
@@ -84,5 +84,52 @@ test("production artifacts exclude native Sharp and libvips files", async () => 
     const source = await readFile(worker, "utf8");
     assert.match(source, /sharp \(ignored\)/u);
     assert.doesNotMatch(source, /@img[/\\]sharp|sharp-libvips|sharp\.node/iu);
+  }
+});
+
+test("production ships a working untransformed phonemizer runtime", async () => {
+  const files = await listFiles("dist");
+  const phonemizerRuntimes = files.filter((path) =>
+    /^phonemizer-.*\.js$/u.test(basename(path)),
+  );
+  const runtimeBasenames = new Set(
+    phonemizerRuntimes.map((path) => basename(path)),
+  );
+  const clientRuntime = phonemizerRuntimes.find((path) =>
+    path.startsWith(join("dist", "client")),
+  );
+
+  assert.equal(runtimeBasenames.size, 1);
+  assert.ok(clientRuntime);
+
+  const [source, emitted] = await Promise.all([
+    readFile("node_modules/phonemizer/dist/phonemizer.js"),
+    readFile(clientRuntime),
+  ]);
+  assert.deepEqual(emitted, source);
+
+  const { stdout } = await execFileAsync(
+    process.execPath,
+    [
+      "--experimental-vm-modules",
+      "tests/helpers/phonemizer-worker-probe.mjs",
+      resolve(clientRuntime),
+    ],
+    { timeout: 30_000 },
+  );
+  const probe = JSON.parse(stdout);
+
+  assert.ok(probe.voiceCount > 0);
+  assert.ok(probe.languageIdentifiers.includes("en-us"));
+  assert.ok(probe.phonemes.some((entry) => entry.length > 0));
+
+  const offlineWorkers = files.filter((path) =>
+    /^offline-speech\.worker-.*\.js$/u.test(basename(path)),
+  );
+  assert.ok(offlineWorkers.length >= 1);
+  for (const worker of offlineWorkers) {
+    const workerSource = await readFile(worker, "utf8");
+    assert.match(workerSource, /phonemizer-.*\.js/u);
+    assert.doesNotMatch(workerSource, /Invalid language identifier/u);
   }
 });
