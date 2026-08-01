@@ -4,6 +4,7 @@ import {
   type CSSProperties,
   type ChangeEvent,
   type DragEvent,
+  type FormEvent,
   useCallback,
   useEffect,
   useMemo,
@@ -47,6 +48,18 @@ import {
 } from "./offline-speech";
 import { createSpeechPrefetchQueue } from "./speech-prefetch.mjs";
 import { DEFAULT_NARRATION_ENGINE } from "./narration-defaults.mjs";
+import {
+  addReaderDocument,
+  calculateLibraryProgress,
+  countDocumentWords,
+  filterLibraryEntries,
+  getReaderDocument,
+  loadReaderLibrary,
+  openReaderDocument,
+  removeReaderDocument,
+  renameReaderDocument,
+  sortLibraryEntries,
+} from "./reader-library.mjs";
 
 type DocumentKind = "demo" | "pdf" | "epub" | "txt";
 type HighlightMode = "both" | "word" | "sentence";
@@ -88,6 +101,16 @@ type ReaderDocument = {
   paragraphs: string[];
   pdfData?: Uint8Array;
   pdfPages?: PdfPageLayout[];
+};
+
+type LibraryEntry = {
+  id: string;
+  title: string;
+  author: string;
+  kind: DocumentKind;
+  wordCount: number;
+  createdAt: number;
+  lastOpenedAt: number;
 };
 
 type WordToken = {
@@ -191,53 +214,6 @@ const OFFLINE_PACK_SIZE_LABEL = `${Math.round(
 const WORD_PATTERN =
   /[\p{L}\p{N}]+(?:[’'-][\p{L}\p{N}]+)*|[^\s]/gu;
 const IS_WORD = /^[\p{L}\p{N}]/u;
-const READER_DB = "guided-reader-library";
-const DOCUMENT_STORE = "documents";
-const ACTIVE_DOCUMENT_KEY = "active-document";
-
-function openReaderDatabase() {
-  return new Promise<IDBDatabase>((resolve, reject) => {
-    const request = indexedDB.open(READER_DB, 1);
-    request.onupgradeneeded = () => {
-      if (!request.result.objectStoreNames.contains(DOCUMENT_STORE)) {
-        request.result.createObjectStore(DOCUMENT_STORE);
-      }
-    };
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
-}
-
-async function saveReaderDocument(documentToSave: ReaderDocument) {
-  const database = await openReaderDatabase();
-  await new Promise<void>((resolve, reject) => {
-    const transaction = database.transaction(DOCUMENT_STORE, "readwrite");
-    transaction
-      .objectStore(DOCUMENT_STORE)
-      .put(documentToSave, ACTIVE_DOCUMENT_KEY);
-    transaction.oncomplete = () => resolve();
-    transaction.onerror = () => reject(transaction.error);
-  });
-  database.close();
-}
-
-async function loadReaderDocument() {
-  const database = await openReaderDatabase();
-  const documentFromStorage = await new Promise<ReaderDocument | undefined>(
-    (resolve, reject) => {
-      const request = database
-        .transaction(DOCUMENT_STORE, "readonly")
-        .objectStore(DOCUMENT_STORE)
-        .get(ACTIVE_DOCUMENT_KEY);
-      request.onsuccess = () =>
-        resolve(request.result as ReaderDocument | undefined);
-      request.onerror = () => reject(request.error);
-    },
-  );
-  database.close();
-  return documentFromStorage;
-}
-
 function buildDocumentModel(paragraphs: string[]): DocumentModel {
   const fullText = paragraphs.join("\n\n");
   const tokens: WordToken[] = [];
@@ -531,9 +507,54 @@ function formatTime(seconds: number) {
   return `${minutes}:${remainder.toString().padStart(2, "0")}`;
 }
 
+function storedProgressFor(documentId: string) {
+  try {
+    const stored = localStorage.getItem(`guided-reader-progress-${documentId}`);
+    if (stored === null) return null;
+    const progress = Number(stored);
+    return Number.isFinite(progress) ? Math.max(0, progress) : null;
+  } catch {
+    return null;
+  }
+}
+
+function initialViewFor(document: ReaderDocument): ReaderViewMode {
+  if (
+    document.kind !== "pdf" ||
+    !document.pdfData?.length ||
+    !document.pdfPages?.length
+  ) {
+    return "focus";
+  }
+
+  try {
+    return localStorage.getItem(`guided-reader-view-${document.id}`) === "focus"
+      ? "focus"
+      : "page";
+  } catch {
+    return "page";
+  }
+}
+
+function clampStoredProgress(document: ReaderDocument) {
+  const storedProgress = storedProgressFor(document.id) ?? 0;
+  return Math.min(
+    storedProgress,
+    Math.max(0, countDocumentWords(document) - 1),
+  );
+}
+
 export default function Home() {
   const [readerDocument, setReaderDocument] =
     useState<ReaderDocument>(DEMO_DOCUMENT);
+  const [libraryEntries, setLibraryEntries] = useState<LibraryEntry[]>([]);
+  const [librarySearch, setLibrarySearch] = useState("");
+  const [libraryReady, setLibraryReady] = useState(false);
+  const [libraryBusyId, setLibraryBusyId] = useState<string | null>(null);
+  const [renamingDocumentId, setRenamingDocumentId] = useState<string | null>(
+    null,
+  );
+  const [renameDraft, setRenameDraft] = useState("");
   const [settings, setSettings] = useState<ReaderSettings>(DEFAULT_SETTINGS);
   const [viewMode, setViewMode] = useState<ReaderViewMode>("focus");
   const [activeWord, setActiveWord] = useState(0);
@@ -568,6 +589,14 @@ export default function Home() {
   const tokenSentences = useMemo(
     () => model.tokens.map((token) => token.sentenceIndex),
     [model.tokens],
+  );
+  const visibleLibraryEntries = useMemo(
+    () =>
+      filterLibraryEntries(
+        libraryEntries,
+        librarySearch,
+      ) as LibraryEntry[],
+    [libraryEntries, librarySearch],
   );
   const sentenceStarts = useMemo(
     () => buildSentenceStartIndices(model.tokens),
@@ -635,39 +664,31 @@ export default function Home() {
       }, 0);
     }
 
-    loadReaderDocument()
-      .then((storedDocument) => {
+    loadReaderLibrary()
+      .then(async (snapshot) => {
+        if (cancelled) return;
+        setLibraryEntries(snapshot.entries as LibraryEntry[]);
+        if (!snapshot.activeDocumentId) return;
+        const storedDocument = (await getReaderDocument(
+          snapshot.activeDocumentId,
+        )) as ReaderDocument | null;
         if (!storedDocument || cancelled) return;
-        let storedProgress = 0;
-        try {
-          storedProgress =
-            Number(
-              localStorage.getItem(
-                `guided-reader-progress-${storedDocument.id}`,
-              ),
-            ) || 0;
-        } catch {
-          // The document can still be restored without its progress.
-        }
+        const storedProgress = clampStoredProgress(storedDocument);
         setReaderDocument(storedDocument);
         setActiveWord(storedProgress);
         activeWordRef.current = storedProgress;
-        if (
-          storedDocument.kind === "pdf" &&
-          storedDocument.pdfData?.length &&
-          storedDocument.pdfPages?.length
-        ) {
-          try {
-            const savedView = localStorage.getItem(
-              `guided-reader-view-${storedDocument.id}`,
-            );
-            setViewMode(savedView === "focus" ? "focus" : "page");
-          } catch {
-            setViewMode("page");
-          }
+        setViewMode(initialViewFor(storedDocument));
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setNotice(
+            "LineLight could not open the private library. The starter document is still available.",
+          );
         }
       })
-      .catch(() => undefined);
+      .finally(() => {
+        if (!cancelled) setLibraryReady(true);
+      });
 
     if ("serviceWorker" in navigator) {
       navigator.serviceWorker.register("/sw.js").catch(() => undefined);
@@ -1676,6 +1697,184 @@ export default function Home() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [moveBySentence, returnToNarration, togglePlayback]);
 
+  const openLibraryDocument = useCallback(
+    async (documentId: string) => {
+      if (documentId === readerDocument.id) {
+        setShowSidebar(false);
+        return;
+      }
+
+      setLibraryBusyId(documentId);
+      setNotice("");
+      try {
+        const opened = (await openReaderDocument(documentId)) as {
+          document: ReaderDocument | null;
+          entry: LibraryEntry | null;
+        };
+        if (!opened.document || !opened.entry) {
+          throw new Error("This document is no longer in the library.");
+        }
+
+        stopSpeech();
+        wordRefs.current.clear();
+        const storedProgress = clampStoredProgress(opened.document);
+        setReaderDocument(opened.document);
+        setActiveWord(storedProgress);
+        activeWordRef.current = storedProgress;
+        setViewMode(initialViewFor(opened.document));
+        setFollowPaused(false);
+        setLibraryEntries((current) =>
+          sortLibraryEntries([
+            opened.entry!,
+            ...current.filter((entry) => entry.id !== documentId),
+          ]) as LibraryEntry[],
+        );
+        setShowSidebar(false);
+        window.setTimeout(() => {
+          if (storedProgress > 0) scrollToActiveWord("auto");
+          else readerRef.current?.scrollTo({ top: 0, behavior: "auto" });
+        }, 80);
+      } catch (error) {
+        setNotice(
+          error instanceof Error
+            ? error.message
+            : "This document could not be opened.",
+        );
+      } finally {
+        setLibraryBusyId(null);
+      }
+    },
+    [readerDocument.id, scrollToActiveWord, stopSpeech],
+  );
+
+  const submitDocumentRename = useCallback(
+    async (event: FormEvent<HTMLFormElement>) => {
+      event.preventDefault();
+      if (!renamingDocumentId) return;
+      const documentId = renamingDocumentId;
+      setLibraryBusyId(documentId);
+      try {
+        const renamed = (await renameReaderDocument(
+          documentId,
+          renameDraft,
+        )) as {
+          document: ReaderDocument;
+          entry: LibraryEntry;
+        };
+        setLibraryEntries((current) =>
+          sortLibraryEntries(
+            current.map((entry) =>
+              entry.id === documentId ? renamed.entry : entry,
+            ),
+          ) as LibraryEntry[],
+        );
+        if (readerDocument.id === documentId) {
+          setReaderDocument(renamed.document);
+        }
+        setRenamingDocumentId(null);
+        setRenameDraft("");
+        setNotice(`Renamed to ${renamed.document.title}.`);
+      } catch (error) {
+        setNotice(
+          error instanceof Error
+            ? error.message
+            : "This document could not be renamed.",
+        );
+      } finally {
+        setLibraryBusyId(null);
+      }
+    },
+    [readerDocument.id, renameDraft, renamingDocumentId],
+  );
+
+  const deleteLibraryDocument = useCallback(
+    async (entryToDelete: LibraryEntry) => {
+      if (
+        !window.confirm(
+          `Remove “${entryToDelete.title}” from this device? This cannot be undone.`,
+        )
+      ) {
+        return;
+      }
+
+      const wasActive = readerDocument.id === entryToDelete.id;
+      const remainingEntries = libraryEntries.filter(
+        (entry) => entry.id !== entryToDelete.id,
+      );
+      setLibraryBusyId(entryToDelete.id);
+      try {
+        if (wasActive) stopSpeech();
+        await removeReaderDocument(entryToDelete.id);
+        try {
+          localStorage.removeItem(
+            `guided-reader-progress-${entryToDelete.id}`,
+          );
+          localStorage.removeItem(`guided-reader-view-${entryToDelete.id}`);
+        } catch {
+          // IndexedDB removal still succeeds if local storage is unavailable.
+        }
+        setLibraryEntries(remainingEntries);
+        if (renamingDocumentId === entryToDelete.id) {
+          setRenamingDocumentId(null);
+          setRenameDraft("");
+        }
+
+        if (wasActive && remainingEntries.length) {
+          const nextDocument = (await openReaderDocument(
+            remainingEntries[0].id,
+          )) as {
+            document: ReaderDocument | null;
+            entry: LibraryEntry | null;
+          };
+          if (!nextDocument.document || !nextDocument.entry) {
+            throw new Error("The next document could not be opened.");
+          }
+          wordRefs.current.clear();
+          const storedProgress = clampStoredProgress(nextDocument.document);
+          setReaderDocument(nextDocument.document);
+          setActiveWord(storedProgress);
+          activeWordRef.current = storedProgress;
+          setViewMode(initialViewFor(nextDocument.document));
+          setLibraryEntries((current) =>
+            sortLibraryEntries(
+              current.map((entry) =>
+                entry.id === nextDocument.entry!.id
+                  ? nextDocument.entry!
+                  : entry,
+              ),
+            ) as LibraryEntry[],
+          );
+          window.setTimeout(() => scrollToActiveWord("auto"), 80);
+        } else if (wasActive) {
+          const starterProgress = clampStoredProgress(DEMO_DOCUMENT);
+          wordRefs.current.clear();
+          setReaderDocument(DEMO_DOCUMENT);
+          setActiveWord(starterProgress);
+          activeWordRef.current = starterProgress;
+          setViewMode("focus");
+          readerRef.current?.scrollTo({ top: 0, behavior: "auto" });
+        }
+
+        setNotice(`${entryToDelete.title} was removed from this device.`);
+      } catch (error) {
+        setNotice(
+          error instanceof Error
+            ? error.message
+            : "This document could not be removed.",
+        );
+      } finally {
+        setLibraryBusyId(null);
+      }
+    },
+    [
+      libraryEntries,
+      readerDocument.id,
+      renamingDocumentId,
+      scrollToActiveWord,
+      stopSpeech,
+    ],
+  );
+
   const importFile = useCallback(
     async (file?: File) => {
       if (!file) return;
@@ -1693,9 +1892,18 @@ export default function Home() {
         else if (extension === "epub") imported = await parseEpub(file);
         else imported = await parseText(file);
 
-        await saveReaderDocument(imported).catch(() => undefined);
+        const libraryEntry = (await addReaderDocument(
+          imported,
+        )) as LibraryEntry;
         stopSpeech();
+        wordRefs.current.clear();
         setReaderDocument(imported);
+        setLibraryEntries((current) =>
+          sortLibraryEntries([
+            libraryEntry,
+            ...current.filter((entry) => entry.id !== imported.id),
+          ]) as LibraryEntry[],
+        );
         setActiveWord(0);
         activeWordRef.current = 0;
         setViewMode(
@@ -1732,6 +1940,16 @@ export default function Home() {
   const handleDrop = (event: DragEvent<HTMLDivElement>) => {
     event.preventDefault();
     void importFile(event.dataTransfer.files?.[0]);
+  };
+
+  const progressForLibraryEntry = (entry: LibraryEntry) => {
+    if (entry.id === readerDocument.id) return progress;
+    const storedProgress = storedProgressFor(entry.id);
+    return calculateLibraryProgress(
+      storedProgress ?? 0,
+      entry.wordCount,
+      storedProgress !== null,
+    );
   };
 
   const readerStyle = {
@@ -1780,38 +1998,141 @@ export default function Home() {
           Import a book
         </button>
 
-        <nav className="library-nav" aria-label="Reading library">
-          <p className="nav-label">Your library</p>
-          <button className="nav-item nav-item-active" type="button">
-            <span className="nav-symbol" aria-hidden="true">
-              ▤
-            </span>
-            <span>Now reading</span>
-          </button>
-          <button
-            className="nav-item"
-            type="button"
-            onClick={() => setShowImport(true)}
-          >
-            <span className="nav-symbol" aria-hidden="true">
-              ⤒
-            </span>
-            <span>Imports</span>
-          </button>
-        </nav>
+        <section className="library-section" aria-labelledby="library-title">
+          <div className="library-heading">
+            <p className="nav-label" id="library-title">
+              Your library
+            </p>
+            <span>{libraryEntries.length} saved</span>
+          </div>
 
-        <section className="book-card" aria-label="Current book">
-          <div className="book-cover" aria-hidden="true">
-            <span>{readerDocument.kind === "demo" ? "GR" : readerDocument.kind.toUpperCase()}</span>
+          {libraryEntries.length > 1 && (
+            <input
+              className="library-search"
+              type="search"
+              value={librarySearch}
+              onChange={(event) => setLibrarySearch(event.target.value)}
+              placeholder="Search books"
+              aria-label="Search your library"
+            />
+          )}
+
+          {!libraryReady && (
+            <p className="library-empty" role="status">
+              Opening your private library…
+            </p>
+          )}
+
+          {libraryReady && libraryEntries.length === 0 && (
+            <p className="library-empty">
+              Imported books will stay here. The starter document is ready
+              whenever you need it.
+            </p>
+          )}
+
+          <div className="library-books">
+            {visibleLibraryEntries.map((entry) => {
+              const entryProgress = progressForLibraryEntry(entry);
+              const isActive = entry.id === readerDocument.id;
+              const isBusy = libraryBusyId === entry.id;
+              const isRenaming = renamingDocumentId === entry.id;
+
+              return (
+                <article
+                  className={`library-book ${
+                    isActive ? "library-book-active" : ""
+                  }`}
+                  key={entry.id}
+                >
+                  {isRenaming ? (
+                    <form
+                      className="library-rename"
+                      onSubmit={submitDocumentRename}
+                    >
+                      <label htmlFor={`rename-${entry.id}`}>Book title</label>
+                      <input
+                        id={`rename-${entry.id}`}
+                        value={renameDraft}
+                        onChange={(event) => setRenameDraft(event.target.value)}
+                        maxLength={160}
+                        autoFocus
+                      />
+                      <div>
+                        <button type="submit" disabled={isBusy}>
+                          Save
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setRenamingDocumentId(null);
+                            setRenameDraft("");
+                          }}
+                          disabled={isBusy}
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </form>
+                  ) : (
+                    <>
+                      <button
+                        className="library-book-open"
+                        type="button"
+                        onClick={() => void openLibraryDocument(entry.id)}
+                        disabled={isBusy}
+                        aria-current={isActive ? "page" : undefined}
+                      >
+                        <span className="book-cover" aria-hidden="true">
+                          <span>{entry.kind.toUpperCase()}</span>
+                        </span>
+                        <span className="book-card-copy">
+                          <span className="library-book-title">
+                            {entry.title}
+                          </span>
+                          <span className="library-book-author">
+                            {entry.author}
+                          </span>
+                          <span className="mini-progress" aria-hidden="true">
+                            <span style={{ width: `${entryProgress}%` }} />
+                          </span>
+                          <small>
+                            {isBusy ? "Opening…" : `${entryProgress}% complete`}
+                          </small>
+                        </span>
+                      </button>
+                      <div className="library-book-actions">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setRenamingDocumentId(entry.id);
+                            setRenameDraft(entry.title);
+                          }}
+                          aria-label={`Rename ${entry.title}`}
+                          title="Rename"
+                        >
+                          ✎
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void deleteLibraryDocument(entry)}
+                          aria-label={`Remove ${entry.title}`}
+                          title="Remove"
+                        >
+                          ×
+                        </button>
+                      </div>
+                    </>
+                  )}
+                </article>
+              );
+            })}
           </div>
-          <div className="book-card-copy">
-            <p>{readerDocument.title}</p>
-            <span>{readerDocument.author}</span>
-            <div className="mini-progress" aria-hidden="true">
-              <span style={{ width: `${progress}%` }} />
-            </div>
-            <small>{progress}% complete</small>
-          </div>
+
+          {libraryReady &&
+            libraryEntries.length > 0 &&
+            visibleLibraryEntries.length === 0 && (
+              <p className="library-empty">No saved books match that search.</p>
+            )}
         </section>
 
         <div className="privacy-note">

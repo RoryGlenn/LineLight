@@ -211,8 +211,21 @@ input:focus-visible {
   font-weight: 300;
 }
 
-.library-nav {
+.library-section {
   margin-top: 32px;
+}
+
+.library-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.library-heading > span {
+  padding-right: 4px;
+  color: var(--muted);
+  font-size: 9px;
 }
 
 .nav-label {
@@ -224,48 +237,70 @@ input:focus-visible {
   text-transform: uppercase;
 }
 
-.nav-item {
-  display: flex;
-  align-items: center;
+.library-search {
   width: 100%;
-  min-height: 46px;
-  gap: 12px;
-  padding: 0 12px;
-  border: 0;
+  height: 38px;
+  margin-bottom: 10px;
+  padding: 0 11px;
+  border: 1px solid var(--line);
   border-radius: 10px;
-  background: transparent;
+  background: var(--paper);
   color: var(--muted-strong);
-  text-align: left;
-  font-size: 13px;
-  font-weight: 500;
+  font-size: 11px;
 }
 
-.nav-item:hover {
-  background: color-mix(in srgb, var(--accent-soft) 55%, transparent);
+.library-search::placeholder {
+  color: var(--muted);
 }
 
-.nav-item-active {
-  background: var(--accent-soft);
-  color: var(--accent);
-  font-weight: 650;
+.library-books {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
 }
 
-.nav-symbol {
-  width: 22px;
-  color: currentColor;
-  font-size: 18px;
-  text-align: center;
+.library-empty {
+  margin: 4px 8px 0;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.55;
 }
 
-.book-card {
-  display: grid;
-  grid-template-columns: 54px minmax(0, 1fr);
-  gap: 13px;
-  margin-top: 22px;
-  padding: 15px;
+.library-book {
+  position: relative;
+  overflow: hidden;
   border: 1px solid var(--line);
   border-radius: 14px;
   background: color-mix(in srgb, var(--paper) 78%, transparent);
+  transition:
+    border-color 140ms ease,
+    background-color 140ms ease;
+}
+
+.library-book:hover {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
+}
+
+.library-book-active {
+  border-color: color-mix(in srgb, var(--accent) 58%, var(--line));
+  background: color-mix(in srgb, var(--accent-soft) 52%, var(--paper));
+}
+
+.library-book-open {
+  display: grid;
+  grid-template-columns: 54px minmax(0, 1fr);
+  width: 100%;
+  gap: 13px;
+  padding: 12px 38px 12px 12px;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+}
+
+.library-book-open:disabled {
+  cursor: wait;
+  opacity: 0.7;
 }
 
 .book-cover {
@@ -295,7 +330,8 @@ input:focus-visible {
   min-width: 0;
 }
 
-.book-card-copy > p {
+.library-book-title {
+  display: block;
   overflow: hidden;
   font-size: 12px;
   font-weight: 650;
@@ -304,7 +340,7 @@ input:focus-visible {
   white-space: nowrap;
 }
 
-.book-card-copy > span {
+.library-book-author {
   display: block;
   margin-top: 4px;
   overflow: hidden;
@@ -315,6 +351,7 @@ input:focus-visible {
 }
 
 .mini-progress {
+  display: block;
   height: 3px;
   margin-top: 13px;
   overflow: hidden;
@@ -331,11 +368,85 @@ input:focus-visible {
   transition: width 180ms linear;
 }
 
-.book-card small {
+.library-book small {
   display: block;
   margin-top: 6px;
   color: var(--muted);
   font-size: 9px;
+}
+
+.library-book-actions {
+  position: absolute;
+  top: 8px;
+  right: 7px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.library-book-actions button {
+  display: grid;
+  width: 28px;
+  height: 27px;
+  place-items: center;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.library-book-actions button:hover {
+  background: var(--paper);
+  color: var(--accent);
+}
+
+.library-rename {
+  padding: 12px;
+}
+
+.library-rename label {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.library-rename input {
+  width: 100%;
+  height: 38px;
+  padding: 0 10px;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  background: var(--paper);
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.library-rename > div {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.library-rename button {
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--paper);
+  color: var(--muted-strong);
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.library-rename button:first-child {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fffaf4;
 }
 
 .privacy-note {
