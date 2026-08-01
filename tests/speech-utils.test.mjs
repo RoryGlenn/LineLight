@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  buildSentenceStartIndices,
   buildSpeechChunk,
+  findAdjacentSentenceStart,
+  findBufferedSeekOffset,
   findTimedBoundaryIndex,
   isRetryableSpeechError,
   speechFailureMessage,
@@ -81,6 +84,35 @@ test("matches playback time to the latest Azure word boundary", () => {
   assert.equal(findTimedBoundaryIndex(boundaries, 0.12), 0);
   assert.equal(findTimedBoundaryIndex(boundaries, 0.72), 1);
   assert.equal(findTimedBoundaryIndex(boundaries, 4), 2);
+});
+
+test("precomputes sentence starts and navigates them without rescanning tokens", () => {
+  const tokens = tokenize("Alpha beta. Gamma delta! Epsilon zeta?");
+  const sentenceStarts = buildSentenceStartIndices(tokens);
+
+  assert.deepEqual(sentenceStarts, [0, 2, 4]);
+  assert.equal(findAdjacentSentenceStart(sentenceStarts, 1, 1), 2);
+  assert.equal(findAdjacentSentenceStart(sentenceStarts, 3, -1), 0);
+  assert.equal(findAdjacentSentenceStart(sentenceStarts, 0, -1), 0);
+  assert.equal(findAdjacentSentenceStart(sentenceStarts, 5, 1), null);
+});
+
+test("finds seek offsets only for tokens in the active buffered chunk", () => {
+  const chunk = {
+    startIndex: 8,
+    nextIndex: 12,
+    boundaries: [
+      { tokenIndex: 8, audioOffsetSeconds: 0 },
+      { tokenIndex: 9, audioOffsetSeconds: 0.4 },
+      { tokenIndex: 11, audioOffsetSeconds: 1.2 },
+    ],
+  };
+
+  assert.equal(findBufferedSeekOffset(chunk, 8), 0);
+  assert.equal(findBufferedSeekOffset(chunk, 11), 1.2);
+  assert.equal(findBufferedSeekOffset(chunk, 7), null);
+  assert.equal(findBufferedSeekOffset(chunk, 10), null);
+  assert.equal(findBufferedSeekOffset(chunk, 12), null);
 });
 
 test("provides Ubuntu-specific failure guidance", () => {
