@@ -3,19 +3,24 @@ import { KokoroTTS } from "kokoro-js";
 import { phonemize } from "phonemizer";
 import {
   KOKORO_VOICE_CACHE_NAME,
+  LEGACY_OFFLINE_MODEL_URLS,
   OFFLINE_MODEL_BYTES,
   OFFLINE_MODEL_DTYPE,
   OFFLINE_MODEL_ID,
+  OFFLINE_MODEL_LOCAL_PATH,
   OFFLINE_MODEL_URLS,
   OFFLINE_VOICES,
   OFFLINE_VOICE_BYTES,
-  OFFLINE_VOICE_URLS,
+  OFFLINE_VOICE_CACHE_URLS,
+  OFFLINE_VOICE_SOURCE_URLS,
+  OFFLINE_WASM_MAX_THREADS,
   TRANSFORMERS_CACHE_NAME,
   type OfflineVoiceId,
 } from "./offline-speech-config";
 import {
+  buildWordPhonemeBatch,
   buildPhonemeWeightedBoundaries,
-  countPronouncedSymbols,
+  countBatchedWordPhonemes,
   extractTimedWords,
 } from "./offline-speech-utils.mjs";
 
@@ -25,6 +30,7 @@ type RequestMessage =
       type: "synthesize";
       text: string;
       voice: OfflineVoiceId;
+      rate: number;
       device?: KokoroDevice;
     }
   | { id: number; type: "install"; device?: KokoroDevice }
@@ -56,6 +62,7 @@ const canceledRequests = new Set<number>();
 let tts: KokoroTTS | null = null;
 let activeDevice: KokoroDevice = "wasm";
 let operationQueue = Promise.resolve();
+const verifiedOfflineVoices = new Set<OfflineVoiceId>();
 
 function postProgress(
   id: number,
@@ -103,19 +110,24 @@ async function assertOfflineFilesAvailable(voice: OfflineVoiceId) {
     caches.open(TRANSFORMERS_CACHE_NAME),
     caches.open(KOKORO_VOICE_CACHE_NAME),
   ]);
-  const selectedVoiceUrl = OFFLINE_VOICE_URLS.find((url) =>
+  const selectedVoiceUrl = OFFLINE_VOICE_CACHE_URLS.find((url) =>
     url.endsWith(`/voices/${voice}.bin`),
   );
-  const matches = await Promise.all([
-    ...OFFLINE_MODEL_URLS.map((url) => modelCache.match(url)),
-    selectedVoiceUrl
-      ? voiceCache.match(selectedVoiceUrl)
-      : Promise.resolve(undefined),
-  ]);
+  const modelMatches = await Promise.all(
+    OFFLINE_MODEL_URLS.map(async (url, index) =>
+      Boolean(
+        (await modelCache.match(url)) ??
+          (await modelCache.match(LEGACY_OFFLINE_MODEL_URLS[index])),
+      ),
+    ),
+  );
+  const voiceMatch = selectedVoiceUrl
+    ? await voiceCache.match(selectedVoiceUrl)
+    : undefined;
 
-  if (matches.some((match) => !match)) {
+  if (modelMatches.some((match) => !match) || !voiceMatch) {
     throw new Error(
-      "The offline voice pack is incomplete. Reconnect to the internet and download it again.",
+      "The included offline voice is incomplete. Reconnect to the internet and prepare it again.",
     );
   }
 }
@@ -123,10 +135,8 @@ async function assertOfflineFilesAvailable(voice: OfflineVoiceId) {
 async function loadModel(
   id: number,
   {
-    offlineOnly,
     preferredDevice,
   }: {
-    offlineOnly: boolean;
     preferredDevice?: KokoroDevice;
   },
 ) {
@@ -134,8 +144,18 @@ async function loadModel(
 
   const selectedDevice =
     preferredDevice ?? (await preferredRuntimeDevice());
-  transformersEnv.allowLocalModels = offlineOnly;
-  transformersEnv.allowRemoteModels = !offlineOnly;
+  if (selectedDevice === "wasm" && globalThis.crossOriginIsolated) {
+    transformersEnv.backends.onnx.wasm.numThreads = Math.min(
+      OFFLINE_WASM_MAX_THREADS,
+      Math.max(1, Math.floor((navigator.hardwareConcurrency || 1) / 2)),
+    );
+  }
+  transformersEnv.localModelPath = new URL(
+    OFFLINE_MODEL_LOCAL_PATH,
+    globalThis.location.origin,
+  ).href;
+  transformersEnv.allowLocalModels = true;
+  transformersEnv.allowRemoteModels = false;
   const loadedByFile = new Map<string, number>();
   const totalByFile = new Map<string, number>();
 
@@ -166,8 +186,8 @@ async function loadModel(
         ? (knownLoaded / Math.max(knownTotal, OFFLINE_MODEL_BYTES)) * 92
         : (event.progress ?? 0) * 0.92;
     const fileLabel = event.file?.includes("onnx/")
-      ? "Downloading the neural voice model…"
-      : "Preparing the voice model…";
+      ? "Loading the included neural voice model…"
+      : "Preparing the included voice model…";
     postProgress(id, Math.min(92, modelProgress), fileLabel);
   };
 
@@ -192,26 +212,27 @@ async function loadModel(
 async function installVoices(id: number) {
   const voiceCache = await caches.open(KOKORO_VOICE_CACHE_NAME);
 
-  for (let index = 0; index < OFFLINE_VOICE_URLS.length; index += 1) {
-    const url = OFFLINE_VOICE_URLS[index];
-    const cached = await voiceCache.match(url);
+  for (let index = 0; index < OFFLINE_VOICE_SOURCE_URLS.length; index += 1) {
+    const sourceUrl = OFFLINE_VOICE_SOURCE_URLS[index];
+    const cacheUrl = OFFLINE_VOICE_CACHE_URLS[index];
+    const cached = await voiceCache.match(cacheUrl);
     if (!cached) {
-      const response = await fetch(url);
+      const response = await fetch(sourceUrl);
       if (!response.ok) {
         throw new Error(
-          `The ${OFFLINE_VOICES[index].label} voice could not be downloaded.`,
+          `The included ${OFFLINE_VOICES[index].label} voice could not be prepared.`,
         );
       }
-      await voiceCache.put(url, response);
+      await voiceCache.put(cacheUrl, response);
     }
 
     const voiceProgress =
       ((index + 1) * OFFLINE_VOICE_BYTES) /
-      (OFFLINE_VOICE_URLS.length * OFFLINE_VOICE_BYTES);
+      (OFFLINE_VOICE_SOURCE_URLS.length * OFFLINE_VOICE_BYTES);
     postProgress(
       id,
       92 + voiceProgress * 6,
-      `Adding ${OFFLINE_VOICES[index].label}…`,
+      `Adding included ${OFFLINE_VOICES[index].label}…`,
     );
   }
 }
@@ -226,44 +247,56 @@ async function phonemeCountsForText(
 ) {
   const language = voiceLanguage(voice);
   const words = extractTimedWords(text);
-  const counts: number[] = [];
+  if (!words.length) return [];
 
-  for (const word of words) {
-    const phonemes = (await phonemize(word.text, language)).join(" ");
-    counts.push(countPronouncedSymbols(phonemes));
-  }
-  return counts;
+  const phonemeEntries = await phonemize(
+    buildWordPhonemeBatch(words),
+    language,
+  );
+  return countBatchedWordPhonemes(words, phonemeEntries);
 }
 
 async function generateSpeech(
   id: number,
   text: string,
   voice: OfflineVoiceId,
+  rate: number,
   offlineOnly: boolean,
   preferredDevice?: KokoroDevice,
 ) {
-  if (offlineOnly) {
+  if (offlineOnly && !verifiedOfflineVoices.has(voice)) {
     await assertOfflineFilesAvailable(voice);
+    verifiedOfflineVoices.add(voice);
   }
   const model = await loadModel(id, {
-    offlineOnly,
     preferredDevice,
   });
 
   try {
+    const startedAt = performance.now();
     const [audio, phonemeCounts] = await Promise.all([
-      model.generate(text, { voice }),
+      model.generate(text, {
+        voice,
+        speed: Math.min(2, Math.max(0.5, rate || 1)),
+      }),
       phonemeCountsForText(text, voice),
     ]);
+    const synthesisMilliseconds = performance.now() - startedAt;
     const durationSeconds = audio.audio.length / audio.sampling_rate;
     return {
       audioData: audio.toWav(),
+      audioDurationSeconds: durationSeconds,
       boundaries: buildPhonemeWeightedBoundaries(
         text,
         durationSeconds,
         phonemeCounts,
       ),
       device: activeDevice,
+      synthesisMilliseconds,
+      wasmThreads:
+        activeDevice === "wasm"
+          ? (transformersEnv.backends.onnx.wasm?.numThreads ?? 1)
+          : null,
     };
   } catch (error) {
     if (activeDevice !== "webgpu") throw error;
@@ -279,12 +312,13 @@ async function handleRequest(message: RequestMessage) {
   }
 
   const { id } = message;
+  if (canceledRequests.delete(id)) return;
+
   try {
     let result: unknown;
     if (message.type === "install") {
-      postProgress(id, 0, "Starting the offline voice download…");
+      postProgress(id, 0, "Preparing LineLight's included offline voice…");
       await loadModel(id, {
-        offlineOnly: false,
         preferredDevice: message.device,
       });
       await installVoices(id);
@@ -293,6 +327,7 @@ async function handleRequest(message: RequestMessage) {
         id,
         "LineLight is ready.",
         OFFLINE_VOICES[0].value,
+        1,
         true,
         message.device,
       );
@@ -308,6 +343,7 @@ async function handleRequest(message: RequestMessage) {
         id,
         message.text,
         message.voice,
+        message.rate,
         true,
         message.device,
       );

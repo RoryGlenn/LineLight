@@ -1,8 +1,9 @@
 import {
   KOKORO_VOICE_CACHE_NAME,
+  LEGACY_OFFLINE_MODEL_URLS,
   OFFLINE_MODEL_ID,
   OFFLINE_MODEL_URLS,
-  OFFLINE_VOICE_URLS,
+  OFFLINE_VOICE_CACHE_URLS,
   TRANSFORMERS_CACHE_NAME,
   type OfflineVoiceId,
 } from "./offline-speech-config";
@@ -17,8 +18,11 @@ export type OfflineWordBoundary = {
 
 export type OfflineSpeechResult = {
   audioData: ArrayBuffer;
+  audioDurationSeconds: number;
   boundaries: OfflineWordBoundary[];
   device: "webgpu" | "wasm";
+  synthesisMilliseconds: number;
+  wasmThreads: number | null;
 };
 
 export type OfflineInstallProgress = {
@@ -32,6 +36,7 @@ type WorkerRequestPayload =
       type: "synthesize";
       text: string;
       voice: OfflineVoiceId;
+      rate: number;
     }
   | { type: "cancel" };
 
@@ -127,19 +132,25 @@ function getWorker() {
         message.code === "webgpu_failed" &&
         !pending.attemptedWasm
       ) {
-        pending.attemptedWasm = true;
         forceWasm = true;
-        pending.onProgress?.({
-          progress: 92,
-          label: "WebGPU was unavailable. Switching to compatibility mode…",
-        });
+        const retryRequests = Array.from(pendingRequests.entries());
+        for (const [, retryPending] of retryRequests) {
+          retryPending.attemptedWasm = true;
+          retryPending.onProgress?.({
+            progress: 92,
+            label: "WebGPU was unavailable. Switching to compatibility mode…",
+          });
+        }
         worker?.terminate();
         worker = null;
-        getWorker().postMessage({
-          ...pending.message,
-          id: message.id,
-          device: "wasm",
-        } satisfies WorkerRequest);
+        const fallbackWorker = getWorker();
+        for (const [id, retryPending] of retryRequests) {
+          fallbackWorker.postMessage({
+            ...retryPending.message,
+            id,
+            device: "wasm",
+          } satisfies WorkerRequest);
+        }
         return;
       }
 
@@ -220,13 +231,37 @@ async function cacheContainsEvery(
   return matches.every(Boolean);
 }
 
+async function cacheContainsEachAlternative(
+  cacheName: string,
+  urls: readonly string[],
+  alternatives: readonly string[],
+) {
+  const cache = await caches.open(cacheName);
+  const matches = await Promise.all(
+    urls.map(async (url, index) =>
+      Boolean(
+        (await cache.match(url)) ??
+          (await cache.match(alternatives[index])),
+      ),
+    ),
+  );
+  return matches.every(Boolean);
+}
+
 export async function isOfflineVoicePackInstalled() {
   if (typeof caches === "undefined") return false;
 
   try {
     const [hasModel, hasVoices] = await Promise.all([
-      cacheContainsEvery(TRANSFORMERS_CACHE_NAME, OFFLINE_MODEL_URLS),
-      cacheContainsEvery(KOKORO_VOICE_CACHE_NAME, OFFLINE_VOICE_URLS),
+      cacheContainsEachAlternative(
+        TRANSFORMERS_CACHE_NAME,
+        OFFLINE_MODEL_URLS,
+        LEGACY_OFFLINE_MODEL_URLS,
+      ),
+      cacheContainsEvery(
+        KOKORO_VOICE_CACHE_NAME,
+        OFFLINE_VOICE_CACHE_URLS,
+      ),
     ]);
     return hasModel && hasVoices;
   } catch {
@@ -257,14 +292,16 @@ export function installOfflineVoicePack({
 export function synthesizeOfflineSpeech({
   text,
   voice,
+  rate,
   signal,
 }: {
   text: string;
   voice: OfflineVoiceId;
+  rate: number;
   signal?: AbortSignal;
 }) {
   return requestWorker<OfflineSpeechResult>(
-    { type: "synthesize", text, voice },
+    { type: "synthesize", text, voice, rate },
     { signal },
   );
 }

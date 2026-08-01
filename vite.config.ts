@@ -47,6 +47,10 @@ export default defineConfig(async () => {
     server: {
       host: "0.0.0.0",
       allowedHosts: ["terminal.local"],
+      headers: {
+        "Cross-Origin-Embedder-Policy": "require-corp",
+        "Cross-Origin-Opener-Policy": "same-origin",
+      },
       ...(isCodexSeatbeltSandbox
         ? { watch: { useFsEvents: false, usePolling: true } }
         : {}),
