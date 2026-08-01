@@ -79,6 +79,93 @@ export function findTimedBoundaryIndex(boundaries, currentTime) {
   return best;
 }
 
+/**
+ * Build a compact, ordered list of the first token in each sentence.
+ *
+ * @param {Array<{ index: number, sentenceIndex: number }>} tokens
+ */
+export function buildSentenceStartIndices(tokens) {
+  const starts = [];
+  let previousSentence = null;
+
+  for (const token of tokens) {
+    if (token.sentenceIndex === previousSentence) continue;
+    starts.push(token.index);
+    previousSentence = token.sentenceIndex;
+  }
+
+  return starts;
+}
+
+/**
+ * Find the sentence start immediately before or after the sentence containing
+ * the active token. Previous navigation clamps at the beginning; next
+ * navigation returns null at the end.
+ *
+ * @param {number[]} sentenceStarts
+ * @param {number} activeTokenIndex
+ * @param {-1 | 1} direction
+ */
+export function findAdjacentSentenceStart(
+  sentenceStarts,
+  activeTokenIndex,
+  direction,
+) {
+  if (!sentenceStarts.length) return null;
+
+  let low = 0;
+  let high = sentenceStarts.length - 1;
+  let currentSentence = 0;
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    if (sentenceStarts[middle] <= activeTokenIndex) {
+      currentSentence = middle;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+
+  const targetSentence = currentSentence + direction;
+  if (targetSentence < 0) return sentenceStarts[0];
+  return sentenceStarts[targetSentence] ?? null;
+}
+
+/**
+ * Return the audio offset for a token when it can be reached by seeking the
+ * currently buffered chunk. Boundaries are ordered by token index.
+ *
+ * @param {{
+ *   startIndex: number,
+ *   nextIndex: number,
+ *   boundaries: Array<{ tokenIndex: number, audioOffsetSeconds: number }>,
+ * }} chunk
+ * @param {number} targetIndex
+ */
+export function findBufferedSeekOffset(chunk, targetIndex) {
+  if (
+    targetIndex < chunk.startIndex ||
+    targetIndex >= chunk.nextIndex ||
+    !chunk.boundaries.length
+  ) {
+    return null;
+  }
+
+  let low = 0;
+  let high = chunk.boundaries.length - 1;
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    const boundary = chunk.boundaries[middle];
+    if (boundary.tokenIndex === targetIndex) {
+      return boundary.audioOffsetSeconds;
+    }
+    if (boundary.tokenIndex < targetIndex) low = middle + 1;
+    else high = middle - 1;
+  }
+
+  return null;
+}
+
 const RETRYABLE_SPEECH_ERRORS = new Set([
   "interrupted",
   "audio-busy",

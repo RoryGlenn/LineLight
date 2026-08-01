@@ -17,7 +17,10 @@ import {
   type PdfPageLayout,
 } from "./pdf-page-view";
 import {
+  buildSentenceStartIndices,
   buildSpeechChunk,
+  findAdjacentSentenceStart,
+  findBufferedSeekOffset,
   findTimedBoundaryIndex,
   isRetryableSpeechError,
   speechFailureMessage,
@@ -77,6 +80,17 @@ type OfflineRuntimeInfo = {
   device: "webgpu" | "wasm";
   synthesisMilliseconds: number;
   wasmThreads: number | null;
+};
+
+type BufferedSeekState = {
+  audio: HTMLAudioElement;
+  sessionId: number;
+  startIndex: number;
+  nextIndex: number;
+  boundaries: Array<{
+    audioOffsetSeconds: number;
+    tokenIndex: number;
+  }>;
 };
 
 type ReaderDocument = {
@@ -584,6 +598,10 @@ export default function Home() {
       ) as LibraryEntry[],
     [libraryEntries, librarySearch],
   );
+  const sentenceStarts = useMemo(
+    () => buildSentenceStartIndices(model.tokens),
+    [model.tokens],
+  );
   const supportsPageView =
     readerDocument.kind === "pdf" &&
     Boolean(readerDocument.pdfData?.length && readerDocument.pdfPages?.length);
@@ -602,6 +620,7 @@ export default function Home() {
   const fallbackTimerRef = useRef<number | null>(null);
   const speechStartTimerRef = useRef<number | null>(null);
   const bufferedAudioRef = useRef<HTMLAudioElement | null>(null);
+  const bufferedSeekStateRef = useRef<BufferedSeekState | null>(null);
   const bufferedAudioUrlsRef = useRef<Map<HTMLAudioElement, string>>(new Map());
   const bufferedAnimationFrameRef = useRef<number | null>(null);
   const bufferedAbortRef = useRef<AbortController | null>(null);
@@ -763,6 +782,9 @@ export default function Home() {
     if (bufferedAudioRef.current === audio) {
       bufferedAudioRef.current = null;
     }
+    if (bufferedSeekStateRef.current?.audio === audio) {
+      bufferedSeekStateRef.current = null;
+    }
   }, []);
 
   const clearBufferedPlayback = useCallback(() => {
@@ -780,6 +802,7 @@ export default function Home() {
       releaseBufferedAudio(audio);
     }
     bufferedAudioRef.current = null;
+    bufferedSeekStateRef.current = null;
   }, [releaseBufferedAudio]);
 
   const stopSpeech = useCallback(() => {
@@ -1355,6 +1378,13 @@ export default function Home() {
             chunk.startChar + boundary.textOffset,
           ),
         }));
+        bufferedSeekStateRef.current = {
+          audio,
+          sessionId,
+          startIndex: chunk.startIndex,
+          nextIndex: chunk.nextIndex,
+          boundaries: timedWords,
+        };
 
         const updateBoundary = () => {
           if (
@@ -1558,21 +1588,42 @@ export default function Home() {
 
   const moveBySentence = useCallback(
     (direction: -1 | 1) => {
-      if (!activeToken) return;
-      const targetSentence =
-        direction === 1
-          ? activeToken.sentenceIndex + 1
-          : Math.max(0, activeToken.sentenceIndex - 1);
-      const target = model.tokens.find(
-        (token) => token.sentenceIndex === targetSentence,
+      const targetIndex = findAdjacentSentenceStart(
+        sentenceStarts,
+        activeWordRef.current,
+        direction,
       );
-      if (!target) return;
+      if (targetIndex === null) return;
+
+      const bufferedSeekState = bufferedSeekStateRef.current;
+      if (
+        bufferedSeekState &&
+        bufferedSeekState.sessionId === speechSessionRef.current &&
+        bufferedSeekState.audio === bufferedAudioRef.current
+      ) {
+        const audioOffset = findBufferedSeekOffset(
+          bufferedSeekState,
+          targetIndex,
+        );
+        if (audioOffset !== null) {
+          try {
+            bufferedSeekState.audio.currentTime = audioOffset;
+            setActiveWord(targetIndex);
+            activeWordRef.current = targetIndex;
+            window.setTimeout(() => scrollToActiveWord("smooth"), 0);
+            return;
+          } catch {
+            // Fall back to stopping and repositioning if media seeking fails.
+          }
+        }
+      }
+
       stopSpeech();
-      setActiveWord(target.index);
-      activeWordRef.current = target.index;
+      setActiveWord(targetIndex);
+      activeWordRef.current = targetIndex;
       window.setTimeout(() => scrollToActiveWord("smooth"), 0);
     },
-    [activeToken, model.tokens, scrollToActiveWord, stopSpeech],
+    [scrollToActiveWord, sentenceStarts, stopSpeech],
   );
 
   const replayUnit = useCallback(
