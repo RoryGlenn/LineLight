@@ -10,12 +10,14 @@ import {
   OFFLINE_VOICES,
   OFFLINE_VOICE_BYTES,
   OFFLINE_VOICE_URLS,
+  OFFLINE_WASM_MAX_THREADS,
   TRANSFORMERS_CACHE_NAME,
   type OfflineVoiceId,
 } from "./offline-speech-config";
 import {
+  buildWordPhonemeBatch,
   buildPhonemeWeightedBoundaries,
-  countPronouncedSymbols,
+  countBatchedWordPhonemes,
   extractTimedWords,
 } from "./offline-speech-utils.mjs";
 
@@ -25,6 +27,7 @@ type RequestMessage =
       type: "synthesize";
       text: string;
       voice: OfflineVoiceId;
+      rate: number;
       device?: KokoroDevice;
     }
   | { id: number; type: "install"; device?: KokoroDevice }
@@ -56,6 +59,7 @@ const canceledRequests = new Set<number>();
 let tts: KokoroTTS | null = null;
 let activeDevice: KokoroDevice = "wasm";
 let operationQueue = Promise.resolve();
+const verifiedOfflineVoices = new Set<OfflineVoiceId>();
 
 function postProgress(
   id: number,
@@ -134,6 +138,12 @@ async function loadModel(
 
   const selectedDevice =
     preferredDevice ?? (await preferredRuntimeDevice());
+  if (selectedDevice === "wasm" && globalThis.crossOriginIsolated) {
+    transformersEnv.backends.onnx.wasm.numThreads = Math.min(
+      OFFLINE_WASM_MAX_THREADS,
+      Math.max(1, Math.floor((navigator.hardwareConcurrency || 1) / 2)),
+    );
+  }
   transformersEnv.allowLocalModels = offlineOnly;
   transformersEnv.allowRemoteModels = !offlineOnly;
   const loadedByFile = new Map<string, number>();
@@ -226,24 +236,26 @@ async function phonemeCountsForText(
 ) {
   const language = voiceLanguage(voice);
   const words = extractTimedWords(text);
-  const counts: number[] = [];
+  if (!words.length) return [];
 
-  for (const word of words) {
-    const phonemes = (await phonemize(word.text, language)).join(" ");
-    counts.push(countPronouncedSymbols(phonemes));
-  }
-  return counts;
+  const phonemeEntries = await phonemize(
+    buildWordPhonemeBatch(words),
+    language,
+  );
+  return countBatchedWordPhonemes(words, phonemeEntries);
 }
 
 async function generateSpeech(
   id: number,
   text: string,
   voice: OfflineVoiceId,
+  rate: number,
   offlineOnly: boolean,
   preferredDevice?: KokoroDevice,
 ) {
-  if (offlineOnly) {
+  if (offlineOnly && !verifiedOfflineVoices.has(voice)) {
     await assertOfflineFilesAvailable(voice);
+    verifiedOfflineVoices.add(voice);
   }
   const model = await loadModel(id, {
     offlineOnly,
@@ -251,19 +263,30 @@ async function generateSpeech(
   });
 
   try {
+    const startedAt = performance.now();
     const [audio, phonemeCounts] = await Promise.all([
-      model.generate(text, { voice }),
+      model.generate(text, {
+        voice,
+        speed: Math.min(2, Math.max(0.5, rate || 1)),
+      }),
       phonemeCountsForText(text, voice),
     ]);
+    const synthesisMilliseconds = performance.now() - startedAt;
     const durationSeconds = audio.audio.length / audio.sampling_rate;
     return {
       audioData: audio.toWav(),
+      audioDurationSeconds: durationSeconds,
       boundaries: buildPhonemeWeightedBoundaries(
         text,
         durationSeconds,
         phonemeCounts,
       ),
       device: activeDevice,
+      synthesisMilliseconds,
+      wasmThreads:
+        activeDevice === "wasm"
+          ? (transformersEnv.backends.onnx.wasm?.numThreads ?? 1)
+          : null,
     };
   } catch (error) {
     if (activeDevice !== "webgpu") throw error;
@@ -279,6 +302,8 @@ async function handleRequest(message: RequestMessage) {
   }
 
   const { id } = message;
+  if (canceledRequests.delete(id)) return;
+
   try {
     let result: unknown;
     if (message.type === "install") {
@@ -293,6 +318,7 @@ async function handleRequest(message: RequestMessage) {
         id,
         "LineLight is ready.",
         OFFLINE_VOICES[0].value,
+        1,
         true,
         message.device,
       );
@@ -308,6 +334,7 @@ async function handleRequest(message: RequestMessage) {
         id,
         message.text,
         message.voice,
+        message.rate,
         true,
         message.device,
       );

@@ -4,7 +4,9 @@ export const OFFLINE_MODEL_REVISION = "main";
 export const OFFLINE_MODEL_DTYPE = "q8";
 export const OFFLINE_MODEL_BYTES = 92_361_116;
 export const OFFLINE_VOICE_BYTES = 522_240;
-export const OFFLINE_SPEECH_CHUNK_CHARACTERS = 180;
+export const OFFLINE_SPEECH_CHUNK_CHARACTERS = 360;
+export const OFFLINE_SPEECH_LOOKAHEAD_CHUNKS = 3;
+export const OFFLINE_WASM_MAX_THREADS = 8;
 
 export const OFFLINE_VOICES = [
   {

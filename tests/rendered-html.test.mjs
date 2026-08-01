@@ -39,6 +39,14 @@ test("renders development preview metadata", async () => {
     response.headers.get("content-type") ?? "",
     /^text\/html\b/i,
   );
+  assert.equal(
+    response.headers.get("cross-origin-embedder-policy"),
+    "require-corp",
+  );
+  assert.equal(
+    response.headers.get("cross-origin-opener-policy"),
+    "same-origin",
+  );
   assert.match(await response.text(), developmentPreviewMeta);
 });
 

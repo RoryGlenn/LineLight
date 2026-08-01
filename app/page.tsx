@@ -29,6 +29,7 @@ import {
 import {
   OFFLINE_PACK_BYTES,
   OFFLINE_SPEECH_CHUNK_CHARACTERS,
+  OFFLINE_SPEECH_LOOKAHEAD_CHUNKS,
   OFFLINE_VOICES,
   type OfflineVoiceId,
 } from "./offline-speech-config";
@@ -41,6 +42,7 @@ import {
   synthesizeOfflineSpeech,
   type OfflineSpeechResult,
 } from "./offline-speech";
+import { createSpeechPrefetchQueue } from "./speech-prefetch.mjs";
 
 type DocumentKind = "demo" | "pdf" | "epub" | "txt";
 type HighlightMode = "both" | "word" | "sentence";
@@ -55,6 +57,13 @@ type OfflinePackState =
   | "ready"
   | "removing"
   | "error";
+
+type OfflineRuntimeInfo = {
+  audioDurationSeconds: number;
+  device: "webgpu" | "wasm";
+  synthesisMilliseconds: number;
+  wasmThreads: number | null;
+};
 
 type ReaderDocument = {
   id: string;
@@ -528,6 +537,8 @@ export default function Home() {
   const [offlineInstallLabel, setOfflineInstallLabel] = useState(
     "Checking this device…",
   );
+  const [offlineRuntimeInfo, setOfflineRuntimeInfo] =
+    useState<OfflineRuntimeInfo | null>(null);
   const speechAvailable =
     typeof window === "undefined" ||
     ("speechSynthesis" in window && "SpeechSynthesisUtterance" in window);
@@ -560,9 +571,10 @@ export default function Home() {
   const fallbackTimerRef = useRef<number | null>(null);
   const speechStartTimerRef = useRef<number | null>(null);
   const bufferedAudioRef = useRef<HTMLAudioElement | null>(null);
-  const bufferedAudioUrlRef = useRef("");
+  const bufferedAudioUrlsRef = useRef<Map<HTMLAudioElement, string>>(new Map());
   const bufferedAnimationFrameRef = useRef<number | null>(null);
   const bufferedAbortRef = useRef<AbortController | null>(null);
+  const bufferedPrefetchDisposeRef = useRef<(() => void) | null>(null);
   const speechSessionRef = useRef(0);
   const programmaticScrollRef = useRef(false);
   const activeWordRef = useRef(0);
@@ -702,7 +714,26 @@ export default function Home() {
     }
   }, []);
 
+  const releaseBufferedAudio = useCallback((audio: HTMLAudioElement) => {
+    audio.onplay = null;
+    audio.onpause = null;
+    audio.onended = null;
+    audio.onerror = null;
+    audio.pause();
+    audio.removeAttribute("src");
+    audio.load();
+
+    const audioUrl = bufferedAudioUrlsRef.current.get(audio);
+    if (audioUrl) URL.revokeObjectURL(audioUrl);
+    bufferedAudioUrlsRef.current.delete(audio);
+    if (bufferedAudioRef.current === audio) {
+      bufferedAudioRef.current = null;
+    }
+  }, []);
+
   const clearBufferedPlayback = useCallback(() => {
+    bufferedPrefetchDisposeRef.current?.();
+    bufferedPrefetchDisposeRef.current = null;
     bufferedAbortRef.current?.abort();
     bufferedAbortRef.current = null;
 
@@ -711,23 +742,11 @@ export default function Home() {
       bufferedAnimationFrameRef.current = null;
     }
 
-    const audio = bufferedAudioRef.current;
-    if (audio) {
-      audio.onplay = null;
-      audio.onpause = null;
-      audio.onended = null;
-      audio.onerror = null;
-      audio.pause();
-      audio.removeAttribute("src");
-      audio.load();
+    for (const audio of Array.from(bufferedAudioUrlsRef.current.keys())) {
+      releaseBufferedAudio(audio);
     }
     bufferedAudioRef.current = null;
-
-    if (bufferedAudioUrlRef.current) {
-      URL.revokeObjectURL(bufferedAudioUrlRef.current);
-      bufferedAudioUrlRef.current = "";
-    }
-  }, []);
+  }, [releaseBufferedAudio]);
 
   const stopSpeech = useCallback(() => {
     speechSessionRef.current += 1;
@@ -793,6 +812,7 @@ export default function Home() {
     try {
       await removeOfflineVoicePack();
       setOfflinePackState("missing");
+      setOfflineRuntimeInfo(null);
       setOfflineInstallProgress(0);
       setOfflineInstallLabel("Offline voice pack removed.");
       setSettings((current) =>
@@ -1078,10 +1098,7 @@ export default function Home() {
       clearBufferedPlayback();
 
       const abortController = new AbortController();
-      const audio = new Audio();
-      audio.preload = "auto";
       bufferedAbortRef.current = abortController;
-      bufferedAudioRef.current = audio;
 
       setActiveWord(safeIndex);
       activeWordRef.current = safeIndex;
@@ -1094,8 +1111,8 @@ export default function Home() {
       );
 
       type SpeechChunk = NonNullable<ReturnType<typeof buildSpeechChunk>>;
-      type PreparedChunk = {
-        chunk: SpeechChunk;
+      type PreparedAudio = {
+        audio: HTMLAudioElement;
         synthesis: AzureSpeechResult | OfflineSpeechResult;
       };
 
@@ -1106,17 +1123,8 @@ export default function Home() {
         }
       };
 
-      const revokeCurrentAudio = () => {
-        if (bufferedAudioUrlRef.current) {
-          URL.revokeObjectURL(bufferedAudioUrlRef.current);
-          bufferedAudioUrlRef.current = "";
-        }
-      };
-
-      const prepareChunk = async (
-        chunkStartIndex: number,
-      ): Promise<PreparedChunk> => {
-        const chunk = buildSpeechChunk(
+      const buildChunk = (chunkStartIndex: number) =>
+        buildSpeechChunk(
           model.fullText,
           model.tokens,
           chunkStartIndex,
@@ -1124,10 +1132,14 @@ export default function Home() {
             ? OFFLINE_SPEECH_CHUNK_CHARACTERS
             : AZURE_SPEECH_CHUNK_CHARACTERS,
         );
-        if (!chunk) {
-          throw new AzureSpeechError(
-            "There is no text left to narrate.",
-            "empty_text",
+
+      const prepareChunkNow = async (
+        chunk: SpeechChunk,
+      ): Promise<PreparedAudio> => {
+        if (abortController.signal.aborted) {
+          throw new DOMException(
+            "Speech preparation was canceled.",
+            "AbortError",
           );
         }
 
@@ -1135,6 +1147,7 @@ export default function Home() {
           ? await synthesizeOfflineSpeech({
               text: chunk.text,
               voice: settings.offlineVoice,
+              rate: settings.rate,
               signal: abortController.signal,
             })
           : await synthesizeAzureSpeech({
@@ -1142,7 +1155,37 @@ export default function Home() {
               voice: settings.azureVoice,
               signal: abortController.signal,
             });
-        return { chunk, synthesis };
+
+        if (abortController.signal.aborted) {
+          throw new DOMException(
+            "Speech preparation was canceled.",
+            "AbortError",
+          );
+        }
+
+        const audio = new Audio();
+        const audioUrl = URL.createObjectURL(
+          new Blob([synthesis.audioData], {
+            type: isOffline ? "audio/wav" : "audio/mpeg",
+          }),
+        );
+        audio.preload = "auto";
+        audio.defaultPlaybackRate = isOffline ? 1 : settings.rate;
+        audio.playbackRate = isOffline ? 1 : settings.rate;
+        bufferedAudioUrlsRef.current.set(audio, audioUrl);
+        audio.src = audioUrl;
+        audio.load();
+
+        return { audio, synthesis };
+      };
+      let preparationTail = Promise.resolve();
+      const prepareChunk = (chunk: SpeechChunk) => {
+        const prepared = preparationTail.then(() => prepareChunkNow(chunk));
+        preparationTail = prepared.then(
+          () => undefined,
+          () => undefined,
+        );
+        return prepared;
       };
 
       const continueWithDeviceVoice = (
@@ -1179,20 +1222,54 @@ export default function Home() {
         }, 120);
       };
 
+      const prefetchQueue = createSpeechPrefetchQueue({
+        startIndex: safeIndex,
+        endIndex: model.tokens.length,
+        lookahead: isOffline ? OFFLINE_SPEECH_LOOKAHEAD_CHUNKS : 1,
+        buildChunk,
+        getNextIndex: (chunk: SpeechChunk) => chunk.nextIndex,
+        prepareChunk,
+      });
+      const disposePrefetch = () => prefetchQueue.dispose();
+      bufferedPrefetchDisposeRef.current = disposePrefetch;
+
+      const finishBufferedSpeech = () => {
+        disposePrefetch();
+        if (bufferedPrefetchDisposeRef.current === disposePrefetch) {
+          bufferedPrefetchDisposeRef.current = null;
+        }
+        bufferedAudioRef.current = null;
+        bufferedAbortRef.current = null;
+        setIsPlaying(false);
+        setIsPreparingSpeech(false);
+      };
+
       const playPreparedChunk = async (
-        prepared: PreparedChunk,
+        chunk: SpeechChunk,
+        prepared: PreparedAudio,
       ): Promise<void> => {
         if (
           speechSessionRef.current !== sessionId ||
           abortController.signal.aborted
         ) {
+          releaseBufferedAudio(prepared.audio);
           return;
         }
 
         clearBoundaryAnimation();
-        revokeCurrentAudio();
+        const { audio, synthesis } = prepared;
+        bufferedAudioRef.current = audio;
+        if (isOffline && "device" in synthesis) {
+          setOfflineRuntimeInfo({
+            audioDurationSeconds: synthesis.audioDurationSeconds,
+            device: synthesis.device,
+            synthesisMilliseconds: synthesis.synthesisMilliseconds,
+            wasmThreads: synthesis.wasmThreads,
+          });
+        }
+        setActiveWord(chunk.startIndex);
+        activeWordRef.current = chunk.startIndex;
 
-        const { chunk, synthesis } = prepared;
         const timedWords = synthesis.boundaries.map((boundary) => ({
           ...boundary,
           tokenIndex: findWordAtCharacter(
@@ -1200,25 +1277,6 @@ export default function Home() {
             chunk.startChar + boundary.textOffset,
           ),
         }));
-        const audioUrl = URL.createObjectURL(
-          new Blob([synthesis.audioData], {
-            type: isOffline ? "audio/wav" : "audio/mpeg",
-          }),
-        );
-        bufferedAudioUrlRef.current = audioUrl;
-        audio.src = audioUrl;
-        audio.defaultPlaybackRate = settings.rate;
-        audio.playbackRate = settings.rate;
-        audio.load();
-
-        let prefetchError: unknown;
-        const nextPrepared =
-          chunk.nextIndex < model.tokens.length
-            ? prepareChunk(chunk.nextIndex).catch((error: unknown) => {
-                prefetchError = error;
-                return null;
-              })
-            : null;
 
         const updateBoundary = () => {
           if (
@@ -1285,28 +1343,32 @@ export default function Home() {
             return;
           }
 
-          setIsPlaying(false);
-          revokeCurrentAudio();
-
-          if (!nextPrepared) {
-            bufferedAudioRef.current = null;
-            bufferedAbortRef.current = null;
+          releaseBufferedAudio(audio);
+          const nextStatus = prefetchQueue.peekStatus();
+          if (!nextStatus) {
+            finishBufferedSpeech();
             return;
           }
 
-          setActiveWord(chunk.nextIndex);
-          activeWordRef.current = chunk.nextIndex;
-          setIsPreparingSpeech(true);
-          setNotice("Preparing the next passage…");
-          const nextChunk = await nextPrepared;
-          if (!nextChunk) {
+          if (nextStatus === "pending") {
+            setIsPlaying(false);
+            setIsPreparingSpeech(true);
+            setNotice("Preparing the next passage…");
+          }
+
+          try {
+            const nextChunk = await prefetchQueue.take();
+            if (!nextChunk) {
+              finishBufferedSpeech();
+              return;
+            }
+            await playPreparedChunk(nextChunk.chunk, nextChunk.prepared);
+          } catch (error) {
             continueWithDeviceVoice(
-              prefetchError,
+              error,
               Math.max(chunk.nextIndex, activeWordRef.current),
             );
-            return;
           }
-          await playPreparedChunk(nextChunk);
         };
 
         try {
@@ -1330,8 +1392,14 @@ export default function Home() {
         }
       };
 
-      void prepareChunk(safeIndex)
-        .then(playPreparedChunk)
+      void prefetchQueue
+        .take()
+        .then((firstChunk) => {
+          if (!firstChunk) {
+            throw new OfflineSpeechError("There is no text left to narrate.");
+          }
+          return playPreparedChunk(firstChunk.chunk, firstChunk.prepared);
+        })
         .catch((error: unknown) => {
           continueWithDeviceVoice(error, safeIndex);
         });
@@ -1343,6 +1411,7 @@ export default function Home() {
       model.fullText,
       model.tokens,
       offlinePackState,
+      releaseBufferedAudio,
       settings.azureVoice,
       settings.offlineVoice,
       settings.rate,
@@ -2286,6 +2355,29 @@ export default function Home() {
                           <span>
                             <strong>Stored on this device</strong>
                             Five voices are available without internet.
+                            {offlineRuntimeInfo && (
+                              <small>
+                                {offlineRuntimeInfo.device === "webgpu"
+                                  ? "WebGPU accelerated"
+                                  : `WebAssembly · ${
+                                      offlineRuntimeInfo.wasmThreads ?? 1
+                                    } ${
+                                      offlineRuntimeInfo.wasmThreads === 1
+                                        ? "thread"
+                                        : "threads"
+                                    }`}
+                                {" · generated "}
+                                {offlineRuntimeInfo.audioDurationSeconds.toFixed(
+                                  1,
+                                )}
+                                {"s of audio in "}
+                                {(
+                                  offlineRuntimeInfo.synthesisMilliseconds /
+                                  1000
+                                ).toFixed(1)}
+                                s
+                              </small>
+                            )}
                           </span>
                           <button
                             type="button"

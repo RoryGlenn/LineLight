@@ -23,6 +23,17 @@ interface ExecutionContext {
   passThroughOnException(): void;
 }
 
+function withCrossOriginIsolation(response: Response) {
+  const headers = new Headers(response.headers);
+  headers.set("Cross-Origin-Embedder-Policy", "require-corp");
+  headers.set("Cross-Origin-Opener-Policy", "same-origin");
+  return new Response(response.body, {
+    headers,
+    status: response.status,
+    statusText: response.statusText,
+  });
+}
+
 // Image security config. SVG sources with .svg extension auto-skip the
 // optimization endpoint on the client side (served directly, no proxy).
 // To route SVGs through the optimizer (with security headers), set
@@ -34,21 +45,32 @@ const worker = {
     const url = new URL(request.url);
 
     if (url.pathname === "/api/speech/token") {
-      return handleSpeechTokenRequest(request, env);
+      return withCrossOriginIsolation(
+        await handleSpeechTokenRequest(request, env),
+      );
     }
 
     if (url.pathname === "/_vinext/image") {
       const allowedWidths = [...DEFAULT_DEVICE_SIZES, ...DEFAULT_IMAGE_SIZES];
-      return handleImageOptimization(request, {
-        fetchAsset: (path) => env.ASSETS.fetch(new Request(new URL(path, request.url))),
-        transformImage: async (body, { width, format, quality }) => {
-          const result = await env.IMAGES.input(body).transform(width > 0 ? { width } : {}).output({ format, quality });
-          return result.response();
-        },
-      }, allowedWidths);
+      return withCrossOriginIsolation(
+        await handleImageOptimization(
+          request,
+          {
+            fetchAsset: (path) =>
+              env.ASSETS.fetch(new Request(new URL(path, request.url))),
+            transformImage: async (body, { width, format, quality }) => {
+              const result = await env.IMAGES.input(body)
+                .transform(width > 0 ? { width } : {})
+                .output({ format, quality });
+              return result.response();
+            },
+          },
+          allowedWidths,
+        ),
+      );
     }
 
-    return handler.fetch(request, env, ctx);
+    return withCrossOriginIsolation(await handler.fetch(request, env, ctx));
   },
 };
 

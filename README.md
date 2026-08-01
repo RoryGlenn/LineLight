@@ -35,16 +35,21 @@ LineLight has three narration modes:
   reader explicitly asks for it. That includes a roughly 95 MB Kokoro model,
   five English voices, and the local inference runtime. Speech then runs in a
   dedicated browser worker using WebGPU when available and WebAssembly as a
-  compatibility fallback. The model, voice data, and generated audio stay on
-  the device. The pack can be removed from Narration settings.
+  compatibility fallback. LineLight opts into cross-origin isolation so ONNX
+  can use multiple CPU threads for WebAssembly on browsers that support them.
+  The model, voice data, and generated audio stay on the device. The pack can
+  be removed from Narration settings.
 - **Natural online** uses optional Azure AI Speech neural voices. LineLight
   exchanges the server-side subscription key for a short-lived token, requests
   audio for the current passage, and follows Azure's timed word boundaries.
   The key is never sent to the browser.
 
-Natural narration prefetches one passage ahead for smooth playback. If an
-offline or Azure voice becomes unavailable, LineLight continues with the
-device voice when one is available.
+Offline natural narration keeps three future passages in a bounded preparation
+queue and preloads each generated WAV before it reaches playback. Kokoro also
+generates at the selected reading speed instead of relying on browser audio
+time-stretching. Online natural narration keeps one passage ahead. If an
+offline or Azure voice becomes unavailable, LineLight continues with the device
+voice when one is available.
 
 The offline model is
 [Kokoro-82M v1.0 ONNX](https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX).

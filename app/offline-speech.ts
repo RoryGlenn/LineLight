@@ -17,8 +17,11 @@ export type OfflineWordBoundary = {
 
 export type OfflineSpeechResult = {
   audioData: ArrayBuffer;
+  audioDurationSeconds: number;
   boundaries: OfflineWordBoundary[];
   device: "webgpu" | "wasm";
+  synthesisMilliseconds: number;
+  wasmThreads: number | null;
 };
 
 export type OfflineInstallProgress = {
@@ -32,6 +35,7 @@ type WorkerRequestPayload =
       type: "synthesize";
       text: string;
       voice: OfflineVoiceId;
+      rate: number;
     }
   | { type: "cancel" };
 
@@ -127,19 +131,25 @@ function getWorker() {
         message.code === "webgpu_failed" &&
         !pending.attemptedWasm
       ) {
-        pending.attemptedWasm = true;
         forceWasm = true;
-        pending.onProgress?.({
-          progress: 92,
-          label: "WebGPU was unavailable. Switching to compatibility mode…",
-        });
+        const retryRequests = Array.from(pendingRequests.entries());
+        for (const [, retryPending] of retryRequests) {
+          retryPending.attemptedWasm = true;
+          retryPending.onProgress?.({
+            progress: 92,
+            label: "WebGPU was unavailable. Switching to compatibility mode…",
+          });
+        }
         worker?.terminate();
         worker = null;
-        getWorker().postMessage({
-          ...pending.message,
-          id: message.id,
-          device: "wasm",
-        } satisfies WorkerRequest);
+        const fallbackWorker = getWorker();
+        for (const [id, retryPending] of retryRequests) {
+          fallbackWorker.postMessage({
+            ...retryPending.message,
+            id,
+            device: "wasm",
+          } satisfies WorkerRequest);
+        }
         return;
       }
 
@@ -257,14 +267,16 @@ export function installOfflineVoicePack({
 export function synthesizeOfflineSpeech({
   text,
   voice,
+  rate,
   signal,
 }: {
   text: string;
   voice: OfflineVoiceId;
+  rate: number;
   signal?: AbortSignal;
 }) {
   return requestWorker<OfflineSpeechResult>(
-    { type: "synthesize", text, voice },
+    { type: "synthesize", text, voice, rate },
     { signal },
   );
 }

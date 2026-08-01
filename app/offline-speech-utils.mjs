@@ -39,6 +39,36 @@ export function countPronouncedSymbols(phonemes) {
   );
 }
 
+/**
+ * Build one eSpeak request that still returns one output entry per source word.
+ * Semicolons are sentence boundaries to eSpeak, so the phonemizer preserves the
+ * entry boundaries without paying its call overhead once per word.
+ *
+ * @param {Array<{ text: string }>} words
+ */
+export function buildWordPhonemeBatch(words) {
+  return words.map((word) => word.text).join("; ");
+}
+
+/**
+ * Convert a batched phonemizer response into one weight per source word.
+ * Fall back to source-character weights if eSpeak ever merges or omits an
+ * entry; approximate highlighting is preferable to repeating the expensive
+ * per-word phonemizer calls.
+ *
+ * @param {Array<{ text: string }>} words
+ * @param {string[]} phonemeEntries
+ */
+export function countBatchedWordPhonemes(words, phonemeEntries) {
+  if (phonemeEntries.length === words.length) {
+    return phonemeEntries.map(countPronouncedSymbols);
+  }
+
+  return words.map((word) =>
+    Math.max(1, Array.from(word.text.matchAll(/[\p{L}\p{N}]/gu)).length),
+  );
+}
+
 function punctuationPauseUnits(trailingText) {
   if (/[.!?]/u.test(trailingText)) return 4.5;
   if (/[\n\r]/u.test(trailingText)) return 3.5;

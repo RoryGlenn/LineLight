@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  buildWordPhonemeBatch,
   buildPhonemeWeightedBoundaries,
+  countBatchedWordPhonemes,
   countPronouncedSymbols,
   extractTimedWords,
 } from "../app/offline-speech-utils.mjs";
@@ -27,6 +29,22 @@ test("extracts source offsets for punctuation and contractions", () => {
 test("counts pronounced IPA symbols without stress marks", () => {
   assert.equal(countPronouncedSymbols("lˈaɪf"), 4);
   assert.equal(countPronouncedSymbols(""), 1);
+});
+
+test("batches words for one phonemizer call", () => {
+  const words = extractTimedWords("Reading stays smooth.");
+
+  assert.equal(buildWordPhonemeBatch(words), "Reading; stays; smooth");
+  assert.deepEqual(
+    countBatchedWordPhonemes(words, ["ɹˈiːdɪŋ", "stˈeɪz", "smˈuːð"]),
+    [5, 5, 4],
+  );
+});
+
+test("falls back to source weights if a phoneme batch loses boundaries", () => {
+  const words = extractTimedWords("One extraordinary word");
+
+  assert.deepEqual(countBatchedWordPhonemes(words, ["merged"]), [3, 13, 4]);
 });
 
 test("builds monotonic boundaries across the real waveform duration", () => {
@@ -72,4 +90,3 @@ test("allocates an audible pause after punctuation", () => {
       withoutComma[1].audioOffsetSeconds,
   );
 });
-

@@ -1429,6 +1429,11 @@ input:focus-visible {
   font-size: 10px;
 }
 
+.offline-pack-ready small {
+  color: var(--muted);
+  font-size: 9px;
+}
+
 .offline-pack-ready button,
 .voice-pack-button {
   min-height: 34px;
