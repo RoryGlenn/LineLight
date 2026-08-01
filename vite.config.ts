@@ -1,10 +1,14 @@
 import vinext from "vinext";
+import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
 import hostingConfig from "./.openai/hosting.json" with { type: "json" };
 import { sites } from "./build/sites-vite-plugin.ts";
 
 const SITE_CREATOR_PLACEHOLDER_DATABASE_ID =
   "00000000-0000-4000-8000-000000000000";
+const PHONEMIZER_ADAPTER_PATH = fileURLToPath(
+  new URL("./app/phonemizer-runtime.ts", import.meta.url),
+);
 
 const { d1, r2 } = hostingConfig;
 
@@ -44,6 +48,19 @@ export default defineConfig(async () => {
   const { cloudflare } = await import("@cloudflare/vite-plugin");
 
   return {
+    // Rebundling phonemizer's prebuilt Emscripten module drops its eSpeak
+    // voices. Route every consumer through an adapter that emits it unchanged.
+    resolve: {
+      alias: [
+        {
+          find: /^phonemizer$/u,
+          replacement: PHONEMIZER_ADAPTER_PATH,
+        },
+      ],
+    },
+    worker: {
+      format: "es" as const,
+    },
     server: {
       host: "0.0.0.0",
       allowedHosts: ["terminal.local"],
