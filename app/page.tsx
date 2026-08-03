@@ -54,7 +54,12 @@ import {
   type OfflineSpeechResult,
 } from "./offline-speech";
 import { createSpeechPrefetchQueue } from "./speech-prefetch.mjs";
-import { DEFAULT_NARRATION_ENGINE } from "./narration-defaults.mjs";
+import {
+  DEFAULT_NARRATION_ENGINE,
+  NARRATION_PREFERENCE_VERSION,
+  allowsDeviceFallback,
+  restoreNarrationPreference,
+} from "./narration-defaults.mjs";
 import {
   DEFAULT_READER_LAYOUT,
   createReaderLayoutStyle,
@@ -197,6 +202,7 @@ type ReaderSettings = {
   ruler: boolean;
   rate: number;
   narrationEngine: NarrationEngine;
+  narrationPreferenceVersion: number;
   voiceURI: string;
   offlineVoice: OfflineVoiceId;
   azureVoice: string;
@@ -236,6 +242,7 @@ const DEFAULT_SETTINGS: ReaderSettings = {
   ruler: false,
   rate: 1,
   narrationEngine: DEFAULT_NARRATION_ENGINE,
+  narrationPreferenceVersion: NARRATION_PREFERENCE_VERSION,
   voiceURI: "",
   offlineVoice: "af_heart",
   azureVoice: "en-US-AvaMultilingualNeural",
@@ -978,10 +985,13 @@ export default function Home() {
               savedSettings,
             ) as Partial<ReaderSettings>;
             const storedLayout = normalizeReaderLayout(storedSettings);
+            const narrationPreference =
+              restoreNarrationPreference(storedSettings);
             setSettings((current) => ({
               ...current,
               ...storedSettings,
               ...storedLayout,
+              ...narrationPreference,
               focusLines: storedLayout.focusLines as FocusLineCount,
             }));
           }
@@ -1195,22 +1205,17 @@ export default function Home() {
             ? error.message
             : "The included offline voice could not be prepared.";
         const displayMessage = automatic
-          ? "The included offline voice is not available yet. Reconnect and select Offline natural to try again."
+          ? "The included offline voice is not available yet. Reconnect and press Play to try again."
           : message;
         setOfflineInstallLabel(displayMessage);
-        if (automatic && speechAvailable) {
-          setSettings((current) =>
-            current.narrationEngine === "offline"
-              ? { ...current, narrationEngine: "device" }
-              : current,
-          );
-          setNotice(`${displayMessage} Using the device voice instead.`);
-        } else {
-          setNotice(displayMessage);
-        }
+        setNotice(
+          automatic
+            ? `${displayMessage} Offline natural remains selected.`
+            : displayMessage,
+        );
       }
     },
-    [offlinePackState, speechAvailable, stopSpeech],
+    [offlinePackState, stopSpeech],
   );
 
   useEffect(() => {
@@ -1239,6 +1244,7 @@ export default function Home() {
 
     try {
       await removeOfflineVoicePack();
+      automaticOfflineInstallAttemptedRef.current = false;
       setOfflinePackState("missing");
       setOfflineRuntimeInfo(null);
       setOfflineInstallProgress(0);
@@ -1821,7 +1827,10 @@ export default function Home() {
         return prepared;
       };
 
-      const continueWithDeviceVoice = (error: unknown, resumeIndex: number) => {
+      const handleBufferedSpeechFailure = (
+        error: unknown,
+        resumeIndex: number,
+      ) => {
         if (
           speechSessionRef.current !== sessionId ||
           abortController.signal.aborted
@@ -1839,6 +1848,13 @@ export default function Home() {
         clearBufferedPlayback();
         setIsPreparingSpeech(false);
         setIsPlaying(false);
+
+        if (!allowsDeviceFallback(engine)) {
+          setNotice(
+            `${message} Offline natural remains selected. Press Play to try again.`,
+          );
+          return;
+        }
 
         if (!speechAvailable) {
           setNotice(`${message} No device voice is available as a fallback.`);
@@ -1956,7 +1972,7 @@ export default function Home() {
           }
         };
         audio.onerror = () => {
-          continueWithDeviceVoice(
+          handleBufferedSpeechFailure(
             isOffline
               ? new OfflineSpeechError(
                   "The offline voice audio could not be played.",
@@ -1998,7 +2014,7 @@ export default function Home() {
             }
             await playPreparedChunk(nextChunk.chunk, nextChunk.prepared);
           } catch (error) {
-            continueWithDeviceVoice(
+            handleBufferedSpeechFailure(
               error,
               Math.max(chunk.nextIndex, activeWordRef.current),
             );
@@ -2019,7 +2035,7 @@ export default function Home() {
             );
             return;
           }
-          continueWithDeviceVoice(
+          handleBufferedSpeechFailure(
             error,
             Math.max(chunk.startIndex, activeWordRef.current),
           );
@@ -2035,7 +2051,7 @@ export default function Home() {
           return playPreparedChunk(firstChunk.chunk, firstChunk.prepared);
         })
         .catch((error: unknown) => {
-          continueWithDeviceVoice(error, safeIndex);
+          handleBufferedSpeechFailure(error, safeIndex);
         });
     },
     [
