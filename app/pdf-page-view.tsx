@@ -230,7 +230,11 @@ export function PdfPageView({
 
       <div className="pdf-pages">
         {pages.map((page) => (
-          <section className="pdf-page-block" key={page.pageNumber}>
+          <section
+            className="pdf-page-block"
+            id={`pdf-page-${page.pageNumber}`}
+            key={page.pageNumber}
+          >
             <div
               className="pdf-page"
               style={{ aspectRatio: `${page.width} / ${page.height}` }}

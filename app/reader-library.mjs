@@ -227,6 +227,21 @@ export function createReaderLibrary({
     }
   }
 
+  async function saveDocument(document) {
+    if (!isStoredDocument(document)) {
+      throw new Error("This document cannot be saved.");
+    }
+    const database = await openDatabase();
+    try {
+      const transaction = database.transaction(DOCUMENT_STORE, "readwrite");
+      transaction.objectStore(DOCUMENT_STORE).put(document, document.id);
+      await transactionDone(transaction);
+      return document;
+    } finally {
+      database.close();
+    }
+  }
+
   async function openDocument(documentId) {
     const database = await openDatabase();
     try {
@@ -384,6 +399,7 @@ export function createReaderLibrary({
     openDocument,
     removeDocument,
     renameDocument,
+    saveDocument,
     saveNavigation,
   };
 }
@@ -401,6 +417,8 @@ export const renameReaderDocument = (documentId, title) =>
   browserLibrary.renameDocument(documentId, title);
 export const removeReaderDocument = (documentId) =>
   browserLibrary.removeDocument(documentId);
+export const saveReaderDocument = (document) =>
+  browserLibrary.saveDocument(document);
 export const getReaderNavigation = (documentId) =>
   browserLibrary.getNavigation(documentId);
 export const saveReaderNavigation = (documentId, navigation) =>
