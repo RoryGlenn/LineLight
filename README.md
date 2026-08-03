@@ -23,6 +23,7 @@ release.
 - Switch between a reflowed focus view and the original PDF page
 - Adjust font, text size, line spacing, colors, reading ruler, and speed
 - Keep a searchable private library with per-document progress on the device
+- Save named bookmarks and return through bounded long-distance jump history
 - Install as a progressive web app
 
 ## How narration works

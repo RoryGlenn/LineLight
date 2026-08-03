@@ -12,10 +12,7 @@ import {
   useState,
 } from "react";
 import JSZip from "jszip";
-import {
-  PdfPageView,
-  type PdfPageLayout,
-} from "./pdf-page-view";
+import { PdfPageView, type PdfPageLayout } from "./pdf-page-view";
 import {
   buildSentenceStartIndices,
   buildSpeechChunk,
@@ -53,13 +50,23 @@ import {
   calculateLibraryProgress,
   countDocumentWords,
   filterLibraryEntries,
+  getReaderNavigation,
   getReaderDocument,
   loadReaderLibrary,
   openReaderDocument,
   removeReaderDocument,
   renameReaderDocument,
+  saveReaderNavigation,
   sortLibraryEntries,
 } from "./reader-library.mjs";
+import {
+  MAX_POSITION_HISTORY,
+  createPositionSnapshot,
+  findDocumentMatches,
+  isMeaningfulPositionJump,
+  pushPositionHistory,
+  resolveStoredPosition,
+} from "./reader-navigation.mjs";
 
 type DocumentKind = "demo" | "pdf" | "epub" | "txt";
 type HighlightMode = "both" | "word" | "sentence";
@@ -120,6 +127,26 @@ type WordToken = {
   end: number;
   paragraphIndex: number;
   sentenceIndex: number;
+};
+
+type StoredReaderPosition = {
+  tokenIndex: number;
+  anchorText: string;
+  contextBefore: string[];
+  contextAfter: string[];
+  snippet: string;
+  createdAt: number;
+};
+
+type ReaderBookmark = StoredReaderPosition & {
+  id: string;
+  name: string;
+};
+
+type ReaderNavigationState = {
+  version: number;
+  bookmarks: ReaderBookmark[];
+  history: StoredReaderPosition[];
 };
 
 type Segment = {
@@ -211,8 +238,7 @@ const OFFLINE_PACK_SIZE_LABEL = `${Math.round(
   OFFLINE_PACK_BYTES / 1_000_000,
 )} MB`;
 
-const WORD_PATTERN =
-  /[\p{L}\p{N}]+(?:[’'-][\p{L}\p{N}]+)*|[^\s]/gu;
+const WORD_PATTERN = /[\p{L}\p{N}]+(?:[’'-][\p{L}\p{N}]+)*|[^\s]/gu;
 const IS_WORD = /^[\p{L}\p{N}]/u;
 function buildDocumentModel(paragraphs: string[]): DocumentModel {
   const fullText = paragraphs.join("\n\n");
@@ -263,7 +289,8 @@ function buildDocumentModel(paragraphs: string[]): DocumentModel {
     }
 
     renderedParagraphs.push(segments);
-    documentOffset += paragraph.length + (paragraphIndex < paragraphs.length - 1 ? 2 : 0);
+    documentOffset +=
+      paragraph.length + (paragraphIndex < paragraphs.length - 1 ? 2 : 0);
   });
 
   return { fullText, tokens, paragraphs: renderedParagraphs };
@@ -336,10 +363,7 @@ async function parsePdf(file: File): Promise<ReaderDocument> {
         viewport.transform,
         item.transform,
       );
-      const fontSize = Math.max(
-        1,
-        Math.hypot(transformed[2], transformed[3]),
-      );
+      const fontSize = Math.max(1, Math.hypot(transformed[2], transformed[3]));
       const textStyle = content.styles[item.fontName];
       const ascent =
         textStyle?.ascent ??
@@ -416,9 +440,7 @@ function resolveZipPath(basePath: string, target: string) {
 
 async function parseEpub(file: File): Promise<ReaderDocument> {
   const zip = await JSZip.loadAsync(await file.arrayBuffer());
-  const container = await zip
-    .file("META-INF/container.xml")
-    ?.async("string");
+  const container = await zip.file("META-INF/container.xml")?.async("string");
 
   if (!container) throw new Error("This EPUB is missing its book manifest.");
 
@@ -453,7 +475,10 @@ async function parseEpub(file: File): Promise<ReaderDocument> {
     if (!path) continue;
     const chapterText = await zip.file(path)?.async("string");
     if (!chapterText) continue;
-    const chapter = parser.parseFromString(chapterText, "application/xhtml+xml");
+    const chapter = parser.parseFromString(
+      chapterText,
+      "application/xhtml+xml",
+    );
     chapter
       .querySelectorAll("script, style, nav, svg")
       .forEach((element) => element.remove());
@@ -496,7 +521,10 @@ async function parseText(file: File): Promise<ReaderDocument> {
     title: filenameWithoutExtension(file.name),
     author: "Text document",
     kind: "txt",
-    paragraphs: text.split(/\n{2,}/).map(cleanText).filter(Boolean),
+    paragraphs: text
+      .split(/\n{2,}/)
+      .map(cleanText)
+      .filter(Boolean),
   };
 }
 
@@ -544,6 +572,43 @@ function clampStoredProgress(document: ReaderDocument) {
   );
 }
 
+function isStoredReaderPosition(value: unknown): value is StoredReaderPosition {
+  if (!value || typeof value !== "object") return false;
+  const position = value as Partial<StoredReaderPosition>;
+  return (
+    Number.isFinite(position.tokenIndex) &&
+    typeof position.anchorText === "string" &&
+    Array.isArray(position.contextBefore) &&
+    Array.isArray(position.contextAfter) &&
+    typeof position.snippet === "string" &&
+    Number.isFinite(position.createdAt)
+  );
+}
+
+function cleanNavigationState(value: unknown): ReaderNavigationState {
+  if (!value || typeof value !== "object") {
+    return { version: 1, bookmarks: [], history: [] };
+  }
+  const navigation = value as Partial<ReaderNavigationState>;
+  return {
+    version: 1,
+    bookmarks: Array.isArray(navigation.bookmarks)
+      ? navigation.bookmarks.filter(
+          (bookmark): bookmark is ReaderBookmark =>
+            isStoredReaderPosition(bookmark) &&
+            typeof bookmark.id === "string" &&
+            typeof bookmark.name === "string" &&
+            Boolean(bookmark.name.trim()),
+        )
+      : [],
+    history: Array.isArray(navigation.history)
+      ? navigation.history
+          .filter(isStoredReaderPosition)
+          .slice(-MAX_POSITION_HISTORY)
+      : [],
+  };
+}
+
 export default function Home() {
   const [readerDocument, setReaderDocument] =
     useState<ReaderDocument>(DEMO_DOCUMENT);
@@ -563,6 +628,7 @@ export default function Home() {
   const [followPaused, setFollowPaused] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showBookmarks, setShowBookmarks] = useState(false);
   const [showSidebar, setShowSidebar] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
   const [notice, setNotice] = useState("");
@@ -576,6 +642,17 @@ export default function Home() {
   const [offlineRuntimeInfo, setOfflineRuntimeInfo] =
     useState<OfflineRuntimeInfo | null>(null);
   const [settingsRestored, setSettingsRestored] = useState(false);
+  const [bookmarks, setBookmarks] = useState<ReaderBookmark[]>([]);
+  const [positionHistory, setPositionHistory] = useState<
+    StoredReaderPosition[]
+  >([]);
+  const [navigationReady, setNavigationReady] = useState(false);
+  const [bookmarkName, setBookmarkName] = useState("");
+  const [editingBookmarkId, setEditingBookmarkId] = useState<string | null>(
+    null,
+  );
+  const [bookmarkRenameDraft, setBookmarkRenameDraft] = useState("");
+  const [documentSearch, setDocumentSearch] = useState("");
   const speechAvailable =
     typeof window === "undefined" ||
     ("speechSynthesis" in window && "SpeechSynthesisUtterance" in window);
@@ -591,16 +668,38 @@ export default function Home() {
     [model.tokens],
   );
   const visibleLibraryEntries = useMemo(
-    () =>
-      filterLibraryEntries(
-        libraryEntries,
-        librarySearch,
-      ) as LibraryEntry[],
+    () => filterLibraryEntries(libraryEntries, librarySearch) as LibraryEntry[],
     [libraryEntries, librarySearch],
   );
   const sentenceStarts = useMemo(
     () => buildSentenceStartIndices(model.tokens),
     [model.tokens],
+  );
+  const bookmarkRows = useMemo(
+    () =>
+      bookmarks.map((bookmark) => ({
+        bookmark,
+        resolvedIndex: resolveStoredPosition(bookmark, model.tokens),
+      })),
+    [bookmarks, model.tokens],
+  );
+  const documentSearchMatches = useMemo(
+    () =>
+      findDocumentMatches(
+        model.tokens,
+        model.fullText,
+        documentSearch,
+      ) as StoredReaderPosition[],
+    [documentSearch, model.fullText, model.tokens],
+  );
+  const currentPosition = useMemo(
+    () =>
+      createPositionSnapshot(
+        model.tokens,
+        activeWord,
+        0,
+      ) as StoredReaderPosition | null,
+    [activeWord, model.tokens],
   );
   const supportsPageView =
     readerDocument.kind === "pdf" &&
@@ -629,10 +728,54 @@ export default function Home() {
   const automaticOfflineInstallAttemptedRef = useRef(false);
   const programmaticScrollRef = useRef(false);
   const activeWordRef = useRef(0);
+  const bookmarksRef = useRef<ReaderBookmark[]>([]);
+  const positionHistoryRef = useRef<StoredReaderPosition[]>([]);
+  const navigationSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
 
   useEffect(() => {
     activeWordRef.current = activeWord;
   }, [activeWord]);
+
+  useEffect(() => {
+    let cancelled = false;
+    bookmarksRef.current = [];
+    positionHistoryRef.current = [];
+
+    const loadNavigation = async () => {
+      await Promise.resolve();
+      if (cancelled) return;
+      setNavigationReady(false);
+      setBookmarks([]);
+      setPositionHistory([]);
+      setBookmarkName("");
+      setEditingBookmarkId(null);
+      setBookmarkRenameDraft("");
+      setDocumentSearch("");
+
+      try {
+        const savedNavigation = await getReaderNavigation(readerDocument.id);
+        if (cancelled) return;
+        const navigation = cleanNavigationState(savedNavigation);
+        bookmarksRef.current = navigation.bookmarks;
+        positionHistoryRef.current = navigation.history;
+        setBookmarks(navigation.bookmarks);
+        setPositionHistory(navigation.history);
+      } catch {
+        if (!cancelled) {
+          setNotice(
+            "Saved bookmarks could not be opened. Reading can continue without them.",
+          );
+        }
+      } finally {
+        if (!cancelled) setNavigationReady(true);
+      }
+    };
+    void loadNavigation();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [readerDocument.id]);
 
   useEffect(() => {
     let restoreTimer: number | undefined;
@@ -733,10 +876,7 @@ export default function Home() {
 
   useEffect(() => {
     try {
-      localStorage.setItem(
-        `guided-reader-view-${readerDocument.id}`,
-        viewMode,
-      );
+      localStorage.setItem(`guided-reader-view-${readerDocument.id}`, viewMode);
     } catch {
       // View preference is optional.
     }
@@ -820,62 +960,65 @@ export default function Home() {
 
   useEffect(() => stopSpeech, [stopSpeech]);
 
-  const downloadOfflineVoice = useCallback(async (automatic = false) => {
-    if (offlinePackState === "installing") return;
+  const downloadOfflineVoice = useCallback(
+    async (automatic = false) => {
+      if (offlinePackState === "installing") return;
 
-    stopSpeech();
-    setOfflinePackState("installing");
-    setOfflineInstallProgress(0);
-    setOfflineInstallLabel("Preparing LineLight's included offline voice…");
-    setNotice(
-      automatic
-        ? "Preparing LineLight's included offline voice in the background…"
-        : "",
-    );
-
-    try {
-      await navigator.storage?.persist?.().catch(() => false);
-      await installOfflineVoicePack({
-        onProgress: ({ progress, label }) => {
-          setOfflineInstallProgress(progress);
-          setOfflineInstallLabel(label);
-        },
-      });
-
-      if (!(await isOfflineVoicePackInstalled())) {
-        throw new OfflineSpeechError(
-          "The included voice finished loading, but the browser did not keep every file. Check storage permissions and try again.",
-        );
-      }
-
-      setOfflinePackState("ready");
-      setOfflineInstallProgress(100);
-      setOfflineInstallLabel("The included offline voices are ready.");
+      stopSpeech();
+      setOfflinePackState("installing");
+      setOfflineInstallProgress(0);
+      setOfflineInstallLabel("Preparing LineLight's included offline voice…");
       setNotice(
-        "LineLight's included natural voice is ready. Narration text now stays on this device.",
+        automatic
+          ? "Preparing LineLight's included offline voice in the background…"
+          : "",
       );
-    } catch (error) {
-      setOfflinePackState("error");
-      const message =
-        error instanceof Error
-          ? error.message
-          : "The included offline voice could not be prepared.";
-      const displayMessage = automatic
-        ? "The included offline voice is not available yet. Reconnect and select Offline natural to try again."
-        : message;
-      setOfflineInstallLabel(displayMessage);
-      if (automatic && speechAvailable) {
-        setSettings((current) =>
-          current.narrationEngine === "offline"
-            ? { ...current, narrationEngine: "device" }
-            : current,
+
+      try {
+        await navigator.storage?.persist?.().catch(() => false);
+        await installOfflineVoicePack({
+          onProgress: ({ progress, label }) => {
+            setOfflineInstallProgress(progress);
+            setOfflineInstallLabel(label);
+          },
+        });
+
+        if (!(await isOfflineVoicePackInstalled())) {
+          throw new OfflineSpeechError(
+            "The included voice finished loading, but the browser did not keep every file. Check storage permissions and try again.",
+          );
+        }
+
+        setOfflinePackState("ready");
+        setOfflineInstallProgress(100);
+        setOfflineInstallLabel("The included offline voices are ready.");
+        setNotice(
+          "LineLight's included natural voice is ready. Narration text now stays on this device.",
         );
-        setNotice(`${displayMessage} Using the device voice instead.`);
-      } else {
-        setNotice(displayMessage);
+      } catch (error) {
+        setOfflinePackState("error");
+        const message =
+          error instanceof Error
+            ? error.message
+            : "The included offline voice could not be prepared.";
+        const displayMessage = automatic
+          ? "The included offline voice is not available yet. Reconnect and select Offline natural to try again."
+          : message;
+        setOfflineInstallLabel(displayMessage);
+        if (automatic && speechAvailable) {
+          setSettings((current) =>
+            current.narrationEngine === "offline"
+              ? { ...current, narrationEngine: "device" }
+              : current,
+          );
+          setNotice(`${displayMessage} Using the device voice instead.`);
+        } else {
+          setNotice(displayMessage);
+        }
       }
-    }
-  }, [offlinePackState, speechAvailable, stopSpeech]);
+    },
+    [offlinePackState, speechAvailable, stopSpeech],
+  );
 
   useEffect(() => {
     if (
@@ -923,15 +1066,195 @@ export default function Home() {
     }
   }, [stopSpeech]);
 
-  const scrollToActiveWord = useCallback((behavior: ScrollBehavior = "smooth") => {
-    const word = wordRefs.current.get(activeWordRef.current);
-    if (!word) return;
-    programmaticScrollRef.current = true;
-    word.scrollIntoView({ behavior, block: "center", inline: "nearest" });
-    window.setTimeout(() => {
-      programmaticScrollRef.current = false;
-    }, behavior === "smooth" ? 700 : 80);
-  }, []);
+  const scrollToActiveWord = useCallback(
+    (behavior: ScrollBehavior = "smooth") => {
+      const word = wordRefs.current.get(activeWordRef.current);
+      if (!word) return;
+      programmaticScrollRef.current = true;
+      word.scrollIntoView({ behavior, block: "center", inline: "nearest" });
+      window.setTimeout(
+        () => {
+          programmaticScrollRef.current = false;
+        },
+        behavior === "smooth" ? 700 : 80,
+      );
+    },
+    [],
+  );
+
+  const queueNavigationSave = useCallback(
+    (
+      documentId: string,
+      nextBookmarks: ReaderBookmark[],
+      nextHistory: StoredReaderPosition[],
+    ) => {
+      navigationSaveQueueRef.current = navigationSaveQueueRef.current
+        .catch(() => undefined)
+        .then(() =>
+          saveReaderNavigation(documentId, {
+            version: 1,
+            bookmarks: nextBookmarks,
+            history: nextHistory,
+          }),
+        )
+        .catch(() => {
+          setNotice(
+            "This bookmark change could not be saved. Close other LineLight tabs and try again.",
+          );
+        });
+    },
+    [],
+  );
+
+  const commitNavigation = useCallback(
+    (nextBookmarks: ReaderBookmark[], nextHistory: StoredReaderPosition[]) => {
+      bookmarksRef.current = nextBookmarks;
+      positionHistoryRef.current = nextHistory;
+      setBookmarks(nextBookmarks);
+      setPositionHistory(nextHistory);
+      queueNavigationSave(readerDocument.id, nextBookmarks, nextHistory);
+    },
+    [queueNavigationSave, readerDocument.id],
+  );
+
+  const jumpToPosition = useCallback(
+    (
+      targetIndex: number,
+      { recordHistory = true, closePanel = false } = {},
+    ) => {
+      if (!model.tokens.length) return false;
+      const safeIndex = Math.min(
+        Math.max(0, Math.trunc(targetIndex)),
+        model.tokens.length - 1,
+      );
+      const currentIndex = activeWordRef.current;
+      if (
+        recordHistory &&
+        isMeaningfulPositionJump(currentIndex, safeIndex, model.tokens.length)
+      ) {
+        const departure = createPositionSnapshot(
+          model.tokens,
+          currentIndex,
+        ) as StoredReaderPosition | null;
+        if (departure) {
+          const nextHistory = pushPositionHistory(
+            positionHistoryRef.current,
+            departure,
+          ) as StoredReaderPosition[];
+          commitNavigation(bookmarksRef.current, nextHistory);
+        }
+      }
+
+      stopSpeech();
+      setActiveWord(safeIndex);
+      activeWordRef.current = safeIndex;
+      setFollowPaused(false);
+      if (closePanel) setShowBookmarks(false);
+      window.setTimeout(() => scrollToActiveWord("smooth"), 0);
+      return true;
+    },
+    [commitNavigation, model.tokens, scrollToActiveWord, stopSpeech],
+  );
+
+  const openStoredPosition = useCallback(
+    (position: StoredReaderPosition, label: string) => {
+      const targetIndex = resolveStoredPosition(position, model.tokens);
+      if (targetIndex === null) {
+        setNotice(
+          `${label} could not be matched safely in the current document.`,
+        );
+        return;
+      }
+      jumpToPosition(targetIndex, { closePanel: true });
+      setNotice(`${label} opened. Press Play to narrate from here.`);
+    },
+    [jumpToPosition, model.tokens],
+  );
+
+  const backToPreviousPosition = useCallback(() => {
+    const nextHistory = [...positionHistoryRef.current];
+    let previousPosition: StoredReaderPosition | undefined;
+    let targetIndex: number | null = null;
+    while (nextHistory.length && targetIndex === null) {
+      previousPosition = nextHistory.pop();
+      targetIndex = previousPosition
+        ? resolveStoredPosition(previousPosition, model.tokens)
+        : null;
+    }
+    commitNavigation(bookmarksRef.current, nextHistory);
+    if (targetIndex === null) {
+      setNotice("No earlier saved position could be matched in this document.");
+      return;
+    }
+    jumpToPosition(targetIndex, { recordHistory: false, closePanel: true });
+    setNotice(
+      "Returned to the previous position. Press Play to narrate from here.",
+    );
+  }, [commitNavigation, jumpToPosition, model.tokens]);
+
+  const addBookmark = useCallback(
+    (event: FormEvent<HTMLFormElement>) => {
+      event.preventDefault();
+      const normalizedName = bookmarkName.trim();
+      if (!normalizedName) {
+        setNotice("Enter a name for this bookmark.");
+        return;
+      }
+      const position = createPositionSnapshot(
+        model.tokens,
+        activeWordRef.current,
+      ) as StoredReaderPosition | null;
+      if (!position) return;
+      const id =
+        globalThis.crypto?.randomUUID?.() ??
+        `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const nextBookmarks = [
+        ...bookmarksRef.current,
+        { ...position, id, name: normalizedName },
+      ];
+      commitNavigation(nextBookmarks, positionHistoryRef.current);
+      setBookmarkName("");
+      setNotice(`Saved bookmark “${normalizedName}” on this device.`);
+    },
+    [bookmarkName, commitNavigation, model.tokens],
+  );
+
+  const renameBookmark = useCallback(
+    (event: FormEvent<HTMLFormElement>) => {
+      event.preventDefault();
+      if (!editingBookmarkId) return;
+      const normalizedName = bookmarkRenameDraft.trim();
+      if (!normalizedName) {
+        setNotice("Enter a name for this bookmark.");
+        return;
+      }
+      const nextBookmarks = bookmarksRef.current.map((bookmark) =>
+        bookmark.id === editingBookmarkId
+          ? { ...bookmark, name: normalizedName }
+          : bookmark,
+      );
+      commitNavigation(nextBookmarks, positionHistoryRef.current);
+      setEditingBookmarkId(null);
+      setBookmarkRenameDraft("");
+      setNotice(`Renamed bookmark to “${normalizedName}”.`);
+    },
+    [bookmarkRenameDraft, commitNavigation, editingBookmarkId],
+  );
+
+  const removeBookmark = useCallback(
+    (bookmark: ReaderBookmark) => {
+      const nextBookmarks = bookmarksRef.current.filter(
+        (candidate) => candidate.id !== bookmark.id,
+      );
+      commitNavigation(nextBookmarks, positionHistoryRef.current);
+      if (editingBookmarkId === bookmark.id) {
+        setEditingBookmarkId(null);
+        setBookmarkRenameDraft("");
+      }
+      setNotice(`Removed bookmark “${bookmark.name}”.`);
+    },
+    [commitNavigation, editingBookmarkId],
+  );
 
   useEffect(() => {
     if (!settings.follow || followPaused || !isPlaying) return;
@@ -945,7 +1268,13 @@ export default function Home() {
     if (wordRect.top < safeTop || wordRect.bottom > safeBottom) {
       scrollToActiveWord("smooth");
     }
-  }, [activeWord, followPaused, isPlaying, scrollToActiveWord, settings.follow]);
+  }, [
+    activeWord,
+    followPaused,
+    isPlaying,
+    scrollToActiveWord,
+    settings.follow,
+  ]);
 
   const startDeviceSpeech = useCallback(
     (
@@ -993,12 +1322,7 @@ export default function Home() {
         clearSpeechStartTimer();
         speechStartTimerRef.current = window.setTimeout(() => {
           speechStartTimerRef.current = null;
-          speakChunk(
-            chunkStartIndex,
-            voiceURI,
-            retryCount,
-            preserveNotice,
-          );
+          speakChunk(chunkStartIndex, voiceURI, retryCount, preserveNotice);
         }, delay);
       }
 
@@ -1075,10 +1399,7 @@ export default function Home() {
             return;
           }
 
-          const resumeIndex = Math.max(
-            chunk.startIndex,
-            activeWordRef.current,
-          );
+          const resumeIndex = Math.max(chunk.startIndex, activeWordRef.current);
 
           if (voiceURI) {
             setSettings((current) =>
@@ -1136,13 +1457,7 @@ export default function Home() {
       }
 
       setIsPlaying(true);
-      scheduleChunk(
-        safeIndex,
-        initialVoiceURI,
-        0,
-        preserveInitialNotice,
-        80,
-      );
+      scheduleChunk(safeIndex, initialVoiceURI, 0, preserveInitialNotice, 80);
     },
     [
       clearBufferedPlayback,
@@ -1166,10 +1481,7 @@ export default function Home() {
       const isOffline = engine === "offline";
 
       if (isOffline && offlinePackState !== "ready") {
-        if (
-          offlinePackState === "missing" ||
-          offlinePackState === "error"
-        ) {
+        if (offlinePackState === "missing" || offlinePackState === "error") {
           automaticOfflineInstallAttemptedRef.current = true;
           void downloadOfflineVoice(true);
         }
@@ -1289,10 +1601,7 @@ export default function Home() {
         return prepared;
       };
 
-      const continueWithDeviceVoice = (
-        error: unknown,
-        resumeIndex: number,
-      ) => {
+      const continueWithDeviceVoice = (error: unknown, resumeIndex: number) => {
         if (
           speechSessionRef.current !== sessionId ||
           abortController.signal.aborted
@@ -1422,10 +1731,7 @@ export default function Home() {
         };
         audio.onpause = () => {
           clearBoundaryAnimation();
-          if (
-            speechSessionRef.current === sessionId &&
-            !audio.ended
-          ) {
+          if (speechSessionRef.current === sessionId && !audio.ended) {
             setIsPlaying(false);
           }
         };
@@ -1578,13 +1884,7 @@ export default function Home() {
       return;
     }
     startSpeech();
-  }, [
-    isPlaying,
-    isPreparingSpeech,
-    speechAvailable,
-    startSpeech,
-    stopSpeech,
-  ]);
+  }, [isPlaying, isPreparingSpeech, speechAvailable, startSpeech, stopSpeech]);
 
   const moveBySentence = useCallback(
     (direction: -1 | 1) => {
@@ -1668,6 +1968,13 @@ export default function Home() {
         setShowImport(true);
         return;
       }
+      if (event.altKey && event.key === "ArrowLeft") {
+        if (positionHistoryRef.current.length) {
+          event.preventDefault();
+          backToPreviousPosition();
+        }
+        return;
+      }
       if (event.key === " ") {
         event.preventDefault();
         togglePlayback();
@@ -1695,7 +2002,12 @@ export default function Home() {
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [moveBySentence, returnToNarration, togglePlayback]);
+  }, [
+    backToPreviousPosition,
+    moveBySentence,
+    returnToNarration,
+    togglePlayback,
+  ]);
 
   const openLibraryDocument = useCallback(
     async (documentId: string) => {
@@ -1723,11 +2035,12 @@ export default function Home() {
         activeWordRef.current = storedProgress;
         setViewMode(initialViewFor(opened.document));
         setFollowPaused(false);
-        setLibraryEntries((current) =>
-          sortLibraryEntries([
-            opened.entry!,
-            ...current.filter((entry) => entry.id !== documentId),
-          ]) as LibraryEntry[],
+        setLibraryEntries(
+          (current) =>
+            sortLibraryEntries([
+              opened.entry!,
+              ...current.filter((entry) => entry.id !== documentId),
+            ]) as LibraryEntry[],
         );
         setShowSidebar(false);
         window.setTimeout(() => {
@@ -1761,12 +2074,13 @@ export default function Home() {
           document: ReaderDocument;
           entry: LibraryEntry;
         };
-        setLibraryEntries((current) =>
-          sortLibraryEntries(
-            current.map((entry) =>
-              entry.id === documentId ? renamed.entry : entry,
-            ),
-          ) as LibraryEntry[],
+        setLibraryEntries(
+          (current) =>
+            sortLibraryEntries(
+              current.map((entry) =>
+                entry.id === documentId ? renamed.entry : entry,
+              ),
+            ) as LibraryEntry[],
         );
         if (readerDocument.id === documentId) {
           setReaderDocument(renamed.document);
@@ -1806,9 +2120,7 @@ export default function Home() {
         if (wasActive) stopSpeech();
         await removeReaderDocument(entryToDelete.id);
         try {
-          localStorage.removeItem(
-            `guided-reader-progress-${entryToDelete.id}`,
-          );
+          localStorage.removeItem(`guided-reader-progress-${entryToDelete.id}`);
           localStorage.removeItem(`guided-reader-view-${entryToDelete.id}`);
         } catch {
           // IndexedDB removal still succeeds if local storage is unavailable.
@@ -1835,14 +2147,15 @@ export default function Home() {
           setActiveWord(storedProgress);
           activeWordRef.current = storedProgress;
           setViewMode(initialViewFor(nextDocument.document));
-          setLibraryEntries((current) =>
-            sortLibraryEntries(
-              current.map((entry) =>
-                entry.id === nextDocument.entry!.id
-                  ? nextDocument.entry!
-                  : entry,
-              ),
-            ) as LibraryEntry[],
+          setLibraryEntries(
+            (current) =>
+              sortLibraryEntries(
+                current.map((entry) =>
+                  entry.id === nextDocument.entry!.id
+                    ? nextDocument.entry!
+                    : entry,
+                ),
+              ) as LibraryEntry[],
           );
           window.setTimeout(() => scrollToActiveWord("auto"), 80);
         } else if (wasActive) {
@@ -1898,11 +2211,12 @@ export default function Home() {
         stopSpeech();
         wordRefs.current.clear();
         setReaderDocument(imported);
-        setLibraryEntries((current) =>
-          sortLibraryEntries([
-            libraryEntry,
-            ...current.filter((entry) => entry.id !== imported.id),
-          ]) as LibraryEntry[],
+        setLibraryEntries(
+          (current) =>
+            sortLibraryEntries([
+              libraryEntry,
+              ...current.filter((entry) => entry.id !== imported.id),
+            ]) as LibraryEntry[],
         );
         setActiveWord(0);
         activeWordRef.current = 0;
@@ -1966,10 +2280,7 @@ export default function Home() {
   };
 
   return (
-    <main
-      className={`app-shell theme-${settings.theme}`}
-      style={readerStyle}
-    >
+    <main className={`app-shell theme-${settings.theme}`} style={readerStyle}>
       <aside className={`sidebar ${showSidebar ? "sidebar-open" : ""}`}>
         <div className="brand-row">
           <div className="brand-mark" aria-hidden="true">
@@ -2216,9 +2527,27 @@ export default function Home() {
               <span aria-hidden="true">✓</span> Saved locally
             </span>
             <button
+              className="text-button bookmark-button"
+              type="button"
+              onClick={() => {
+                setShowSettings(false);
+                setShowBookmarks(true);
+              }}
+              aria-expanded={showBookmarks}
+              aria-controls="bookmarks-panel"
+            >
+              <span aria-hidden="true">⌑</span>
+              <span className="desktop-label">
+                Bookmarks{bookmarks.length ? ` (${bookmarks.length})` : ""}
+              </span>
+            </button>
+            <button
               className="text-button"
               type="button"
-              onClick={() => setShowSettings(true)}
+              onClick={() => {
+                setShowBookmarks(false);
+                setShowSettings(true);
+              }}
             >
               <span aria-hidden="true">Aa</span>
               <span className="desktop-label">Reading settings</span>
@@ -2243,12 +2572,20 @@ export default function Home() {
           className="reader-scroll"
           ref={readerRef}
           onWheel={() => {
-            if (isPlaying && settings.follow && !programmaticScrollRef.current) {
+            if (
+              isPlaying &&
+              settings.follow &&
+              !programmaticScrollRef.current
+            ) {
               setFollowPaused(true);
             }
           }}
           onTouchMove={() => {
-            if (isPlaying && settings.follow && !programmaticScrollRef.current) {
+            if (
+              isPlaying &&
+              settings.follow &&
+              !programmaticScrollRef.current
+            ) {
               setFollowPaused(true);
             }
           }}
@@ -2269,9 +2606,7 @@ export default function Home() {
                 else wordRefs.current.delete(index);
               }}
               onSelectWord={(index) => {
-                stopSpeech();
-                setActiveWord(index);
-                activeWordRef.current = index;
+                jumpToPosition(index);
               }}
               onRenderError={setNotice}
             />
@@ -2330,9 +2665,7 @@ export default function Home() {
                             }
                           }}
                           onClick={() => {
-                            stopSpeech();
-                            setActiveWord(segment.tokenIndex!);
-                            activeWordRef.current = segment.tokenIndex!;
+                            jumpToPosition(segment.tokenIndex!);
                           }}
                         >
                           {segment.text}
@@ -2349,21 +2682,36 @@ export default function Home() {
               </footer>
             </article>
           )}
-
         </div>
 
         {settings.ruler && <div className="reading-ruler" aria-hidden="true" />}
 
-        {followPaused && (
-          <button
-            className="return-button"
-            type="button"
-            onClick={returnToNarration}
-          >
-            <span aria-hidden="true">◎</span>
-            Return to narration
-            <kbd>R</kbd>
-          </button>
+        {(followPaused || positionHistory.length > 0) && (
+          <div className="position-action-stack">
+            {followPaused && (
+              <button
+                className="return-button"
+                type="button"
+                onClick={returnToNarration}
+              >
+                <span aria-hidden="true">◎</span>
+                Return to narration
+                <kbd>R</kbd>
+              </button>
+            )}
+            {positionHistory.length > 0 && (
+              <button
+                className="history-back-button"
+                type="button"
+                onClick={backToPreviousPosition}
+                aria-keyshortcuts="Alt+ArrowLeft"
+              >
+                <span aria-hidden="true">↩</span>
+                Back to previous position
+                <kbd>Alt ←</kbd>
+              </button>
+            )}
+          </div>
         )}
 
         <section className="player" aria-label="Narration controls">
@@ -2440,13 +2788,11 @@ export default function Home() {
                     setSettings((current) => ({ ...current, rate }));
                   }}
                 >
-                  {[0.5, 0.75, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2].map(
-                    (rate) => (
-                      <option key={rate} value={rate}>
-                        {rate}×
-                      </option>
-                    ),
-                  )}
+                  {[0.5, 0.75, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2].map((rate) => (
+                    <option key={rate} value={rate}>
+                      {rate}×
+                    </option>
+                  ))}
                 </select>
               </label>
               <div className="time-remaining">
@@ -2456,6 +2802,261 @@ export default function Home() {
           </div>
         </section>
       </section>
+
+      {showBookmarks && (
+        <div
+          className="bookmarks-layer"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="bookmarks-title"
+        >
+          <button
+            className="page-scrim"
+            type="button"
+            aria-label="Close bookmarks and history"
+            onClick={() => setShowBookmarks(false)}
+          />
+          <section className="bookmarks-panel" id="bookmarks-panel">
+            <header>
+              <div>
+                <p>{readerDocument.title}</p>
+                <h2 id="bookmarks-title">Bookmarks &amp; history</h2>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowBookmarks(false)}
+                aria-label="Close bookmarks and history"
+              >
+                ×
+              </button>
+            </header>
+
+            <div className="bookmarks-scroll">
+              <p className="navigation-rule">
+                Opening a bookmark, search result, or previous position stops
+                narration. Press Play when you are ready to continue from the
+                new place.
+              </p>
+
+              <button
+                className="previous-position-button"
+                type="button"
+                onClick={backToPreviousPosition}
+                disabled={!positionHistory.length}
+              >
+                <span aria-hidden="true">↩</span>
+                <span>
+                  <strong>Back to previous position</strong>
+                  {positionHistory.length
+                    ? `${positionHistory.length} recent ${
+                        positionHistory.length === 1 ? "jump" : "jumps"
+                      } available`
+                    : "A long-distance jump will appear here"}
+                </span>
+              </button>
+
+              <section
+                className="bookmark-section"
+                aria-labelledby="save-bookmark-title"
+              >
+                <div className="bookmark-section-heading">
+                  <h3 id="save-bookmark-title">Save this position</h3>
+                  <span>{progress}%</span>
+                </div>
+                <p className="current-position-snippet">
+                  {currentPosition?.snippet ?? "No readable text here yet."}
+                </p>
+                <form className="add-bookmark-form" onSubmit={addBookmark}>
+                  <label htmlFor="bookmark-name">Bookmark name</label>
+                  <div>
+                    <input
+                      id="bookmark-name"
+                      value={bookmarkName}
+                      onChange={(event) => setBookmarkName(event.target.value)}
+                      placeholder="For example, Key idea"
+                      maxLength={80}
+                      disabled={!navigationReady || !model.tokens.length}
+                    />
+                    <button
+                      type="submit"
+                      disabled={!navigationReady || !model.tokens.length}
+                    >
+                      Add
+                    </button>
+                  </div>
+                </form>
+              </section>
+
+              <section
+                className="bookmark-section"
+                aria-labelledby="saved-bookmarks-title"
+              >
+                <div className="bookmark-section-heading">
+                  <h3 id="saved-bookmarks-title">Saved bookmarks</h3>
+                  <span>{bookmarks.length}</span>
+                </div>
+                {!navigationReady ? (
+                  <p className="bookmark-empty" role="status">
+                    Opening saved bookmarks…
+                  </p>
+                ) : bookmarkRows.length ? (
+                  <div className="bookmark-list">
+                    {bookmarkRows.map(({ bookmark, resolvedIndex }) => {
+                      const bookmarkProgress =
+                        resolvedIndex === null || !model.tokens.length
+                          ? null
+                          : Math.round(
+                              ((resolvedIndex + 1) / model.tokens.length) * 100,
+                            );
+                      const isEditing = editingBookmarkId === bookmark.id;
+                      return (
+                        <article className="bookmark-card" key={bookmark.id}>
+                          {isEditing ? (
+                            <form
+                              className="bookmark-rename-form"
+                              onSubmit={renameBookmark}
+                            >
+                              <label htmlFor={`bookmark-${bookmark.id}`}>
+                                Bookmark name
+                              </label>
+                              <input
+                                id={`bookmark-${bookmark.id}`}
+                                value={bookmarkRenameDraft}
+                                onChange={(event) =>
+                                  setBookmarkRenameDraft(event.target.value)
+                                }
+                                maxLength={80}
+                                autoFocus
+                              />
+                              <div>
+                                <button type="submit">Save</button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setEditingBookmarkId(null);
+                                    setBookmarkRenameDraft("");
+                                  }}
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            </form>
+                          ) : (
+                            <>
+                              <button
+                                className="bookmark-open"
+                                type="button"
+                                disabled={resolvedIndex === null}
+                                onClick={() =>
+                                  openStoredPosition(
+                                    bookmark,
+                                    `Bookmark “${bookmark.name}”`,
+                                  )
+                                }
+                              >
+                                <span className="bookmark-title-row">
+                                  <strong>{bookmark.name}</strong>
+                                  <small>
+                                    {bookmarkProgress === null
+                                      ? "Position unavailable"
+                                      : `${bookmarkProgress}%`}
+                                  </small>
+                                </span>
+                                <span className="bookmark-snippet">
+                                  {bookmark.snippet}
+                                </span>
+                              </button>
+                              <div className="bookmark-actions">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setEditingBookmarkId(bookmark.id);
+                                    setBookmarkRenameDraft(bookmark.name);
+                                  }}
+                                  aria-label={`Rename bookmark ${bookmark.name}`}
+                                >
+                                  Rename
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => removeBookmark(bookmark)}
+                                  aria-label={`Remove bookmark ${bookmark.name}`}
+                                >
+                                  Remove
+                                </button>
+                              </div>
+                            </>
+                          )}
+                        </article>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <p className="bookmark-empty">
+                    Name the current position to start a bookmark list for this
+                    document.
+                  </p>
+                )}
+              </section>
+
+              <section
+                className="bookmark-section document-find"
+                aria-labelledby="find-document-title"
+              >
+                <div className="bookmark-section-heading">
+                  <h3 id="find-document-title">Find in this document</h3>
+                  {documentSearch.trim().length >= 2 && (
+                    <span>{documentSearchMatches.length}</span>
+                  )}
+                </div>
+                <label htmlFor="document-search">Word or phrase</label>
+                <input
+                  id="document-search"
+                  type="search"
+                  value={documentSearch}
+                  onChange={(event) => setDocumentSearch(event.target.value)}
+                  placeholder="Search reading text"
+                />
+                {documentSearch.trim().length >= 2 &&
+                  (documentSearchMatches.length ? (
+                    <ol className="document-search-results">
+                      {documentSearchMatches.map((match) => {
+                        const matchProgress = model.tokens.length
+                          ? Math.round(
+                              ((match.tokenIndex + 1) / model.tokens.length) *
+                                100,
+                            )
+                          : 0;
+                        return (
+                          <li key={match.tokenIndex}>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                jumpToPosition(match.tokenIndex, {
+                                  closePanel: true,
+                                });
+                                setNotice(
+                                  "Search result opened. Press Play to narrate from here.",
+                                );
+                              }}
+                            >
+                              <span>{match.snippet}</span>
+                              <small>{matchProgress}%</small>
+                            </button>
+                          </li>
+                        );
+                      })}
+                    </ol>
+                  ) : (
+                    <p className="bookmark-empty" role="status">
+                      No matching text in this document.
+                    </p>
+                  ))}
+              </section>
+            </div>
+          </section>
+        </div>
+      )}
 
       {showImport && (
         <div
@@ -2496,7 +3097,9 @@ export default function Home() {
               <span className="drop-icon" aria-hidden="true">
                 {isImporting ? "…" : "↥"}
               </span>
-              <h3>{isImporting ? "Preparing your book…" : "Drop a file here"}</h3>
+              <h3>
+                {isImporting ? "Preparing your book…" : "Drop a file here"}
+              </h3>
               <p>or choose one from this device</p>
               <button
                 type="button"
@@ -2599,7 +3202,8 @@ export default function Home() {
 
                 <label className="range-setting">
                   <span>
-                    Line spacing <strong>{settings.lineHeight.toFixed(2)}</strong>
+                    Line spacing{" "}
+                    <strong>{settings.lineHeight.toFixed(2)}</strong>
                   </span>
                   <input
                     type="range"

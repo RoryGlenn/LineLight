@@ -1,8 +1,9 @@
 export const READER_DATABASE_NAME = "guided-reader-library";
-export const READER_DATABASE_VERSION = 2;
+export const READER_DATABASE_VERSION = 3;
 export const DOCUMENT_STORE = "documents";
 export const LIBRARY_STORE = "library";
 export const STATE_STORE = "state";
+export const NAVIGATION_STORE = "navigation";
 export const LEGACY_ACTIVE_DOCUMENT_KEY = "active-document";
 export const ACTIVE_DOCUMENT_ID_KEY = "active-document-id";
 
@@ -141,6 +142,9 @@ export function createReaderLibrary({
         const state = database.objectStoreNames.contains(STATE_STORE)
           ? upgradeTransaction.objectStore(STATE_STORE)
           : database.createObjectStore(STATE_STORE);
+        if (!database.objectStoreNames.contains(NAVIGATION_STORE)) {
+          database.createObjectStore(NAVIGATION_STORE);
+        }
 
         if (event.oldVersion < 2) {
           const legacyRequest = documents.get(LEGACY_ACTIVE_DOCUMENT_KEY);
@@ -310,11 +314,12 @@ export function createReaderLibrary({
     const database = await openDatabase();
     try {
       const transaction = database.transaction(
-        [DOCUMENT_STORE, LIBRARY_STORE, STATE_STORE],
+        [DOCUMENT_STORE, LIBRARY_STORE, STATE_STORE, NAVIGATION_STORE],
         "readwrite",
       );
       transaction.objectStore(DOCUMENT_STORE).delete(documentId);
       transaction.objectStore(LIBRARY_STORE).delete(documentId);
+      transaction.objectStore(NAVIGATION_STORE).delete(documentId);
       const state = transaction.objectStore(STATE_STORE);
       const activeRequest = state.get(ACTIVE_DOCUMENT_ID_KEY);
       activeRequest.onsuccess = () => {
@@ -328,13 +333,58 @@ export function createReaderLibrary({
     }
   }
 
+  async function getNavigation(documentId) {
+    const database = await openDatabase();
+    try {
+      const transaction = database.transaction(NAVIGATION_STORE, "readonly");
+      const navigation = await requestValue(
+        transaction.objectStore(NAVIGATION_STORE).get(documentId),
+      );
+      await transactionDone(transaction);
+      if (!navigation || typeof navigation !== "object") {
+        return { version: 1, bookmarks: [], history: [] };
+      }
+      return {
+        version: 1,
+        bookmarks: Array.isArray(navigation.bookmarks)
+          ? navigation.bookmarks
+          : [],
+        history: Array.isArray(navigation.history) ? navigation.history : [],
+      };
+    } finally {
+      database.close();
+    }
+  }
+
+  async function saveNavigation(documentId, navigation) {
+    const database = await openDatabase();
+    try {
+      const transaction = database.transaction(NAVIGATION_STORE, "readwrite");
+      transaction.objectStore(NAVIGATION_STORE).put(
+        {
+          version: 1,
+          bookmarks: Array.isArray(navigation?.bookmarks)
+            ? navigation.bookmarks
+            : [],
+          history: Array.isArray(navigation?.history) ? navigation.history : [],
+        },
+        documentId,
+      );
+      await transactionDone(transaction);
+    } finally {
+      database.close();
+    }
+  }
+
   return {
     addDocument,
     getDocument,
+    getNavigation,
     load,
     openDocument,
     removeDocument,
     renameDocument,
+    saveNavigation,
   };
 }
 
@@ -351,3 +401,7 @@ export const renameReaderDocument = (documentId, title) =>
   browserLibrary.renameDocument(documentId, title);
 export const removeReaderDocument = (documentId) =>
   browserLibrary.removeDocument(documentId);
+export const getReaderNavigation = (documentId) =>
+  browserLibrary.getNavigation(documentId);
+export const saveReaderNavigation = (documentId, navigation) =>
+  browserLibrary.saveNavigation(documentId, navigation);
