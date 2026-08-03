@@ -1,4 +1,4 @@
-const CACHE_NAME = "linelight-v6";
+const CACHE_NAME = "linelight-v7";
 
 self.addEventListener("install", (event) => {
   event.waitUntil(self.skipWaiting());
@@ -25,6 +25,8 @@ self.addEventListener("fetch", (event) => {
   if (event.request.method !== "GET") return;
   const requestUrl = new URL(event.request.url);
   if (
+    event.request.mode === "navigate" ||
+    event.request.destination === "document" ||
     requestUrl.origin !== self.location.origin ||
     requestUrl.pathname.startsWith("/api/") ||
     requestUrl.pathname.startsWith("/offline-model/")
