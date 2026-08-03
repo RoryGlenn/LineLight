@@ -7,6 +7,7 @@ import {
   type FormEvent,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -46,6 +47,12 @@ import {
 import { createSpeechPrefetchQueue } from "./speech-prefetch.mjs";
 import { DEFAULT_NARRATION_ENGINE } from "./narration-defaults.mjs";
 import {
+  DEFAULT_READER_LAYOUT,
+  createReaderLayoutStyle,
+  normalizeReaderLayout,
+  selectFocusWindowTokens,
+} from "./reader-layout.mjs";
+import {
   addReaderDocument,
   calculateLibraryProgress,
   countDocumentWords,
@@ -73,6 +80,7 @@ type HighlightMode = "both" | "word" | "sentence";
 type ReadingTheme = "cream" | "white" | "dark";
 type ReadingFont = "serif" | "sans" | "system";
 type ReaderViewMode = "focus" | "page";
+type FocusLineCount = 0 | 1 | 3 | 5;
 type NarrationEngine = "device" | "offline" | "azure";
 type OfflinePackState =
   | "checking"
@@ -152,6 +160,7 @@ type ReaderNavigationState = {
 type Segment = {
   text: string;
   tokenIndex?: number;
+  focusTokenIndex?: number;
   sentenceIndex: number;
 };
 
@@ -164,6 +173,11 @@ type DocumentModel = {
 type ReaderSettings = {
   fontSize: number;
   lineHeight: number;
+  letterSpacing: number;
+  wordSpacing: number;
+  paragraphSpacing: number;
+  maxLineWidth: number;
+  focusLines: FocusLineCount;
   font: ReadingFont;
   theme: ReadingTheme;
   highlightMode: HighlightMode;
@@ -198,6 +212,11 @@ const DEMO_DOCUMENT: ReaderDocument = {
 const DEFAULT_SETTINGS: ReaderSettings = {
   fontSize: 21,
   lineHeight: 1.78,
+  letterSpacing: DEFAULT_READER_LAYOUT.letterSpacing,
+  wordSpacing: DEFAULT_READER_LAYOUT.wordSpacing,
+  paragraphSpacing: DEFAULT_READER_LAYOUT.paragraphSpacing,
+  maxLineWidth: DEFAULT_READER_LAYOUT.maxLineWidth,
+  focusLines: DEFAULT_READER_LAYOUT.focusLines as FocusLineCount,
   font: "serif",
   theme: "cream",
   highlightMode: "both",
@@ -253,15 +272,20 @@ function buildDocumentModel(paragraphs: string[]): DocumentModel {
 
     for (const match of paragraph.matchAll(WORD_PATTERN)) {
       const localStart = match.index ?? 0;
+      const text = match[0];
+      const isWord = IS_WORD.test(text);
+      const nearbyTokenIndex = isWord
+        ? tokens.length
+        : Math.max(0, tokens.length - 1);
       if (localStart > previousEnd) {
         segments.push({
           text: paragraph.slice(previousEnd, localStart),
+          focusTokenIndex: nearbyTokenIndex,
           sentenceIndex,
         });
       }
 
-      const text = match[0];
-      if (IS_WORD.test(text)) {
+      if (isWord) {
         const tokenIndex = tokens.length;
         const start = documentOffset + localStart;
         tokens.push({
@@ -272,9 +296,18 @@ function buildDocumentModel(paragraphs: string[]): DocumentModel {
           paragraphIndex,
           sentenceIndex,
         });
-        segments.push({ text, tokenIndex, sentenceIndex });
+        segments.push({
+          text,
+          tokenIndex,
+          focusTokenIndex: tokenIndex,
+          sentenceIndex,
+        });
       } else {
-        segments.push({ text, sentenceIndex });
+        segments.push({
+          text,
+          focusTokenIndex: nearbyTokenIndex,
+          sentenceIndex,
+        });
       }
 
       if (/[.!?]/.test(text)) sentenceIndex += 1;
@@ -284,6 +317,7 @@ function buildDocumentModel(paragraphs: string[]): DocumentModel {
     if (previousEnd < paragraph.length) {
       segments.push({
         text: paragraph.slice(previousEnd),
+        focusTokenIndex: Math.max(0, tokens.length - 1),
         sentenceIndex,
       });
     }
@@ -621,6 +655,7 @@ export default function Home() {
   );
   const [renameDraft, setRenameDraft] = useState("");
   const [settings, setSettings] = useState<ReaderSettings>(DEFAULT_SETTINGS);
+  const [readerLayoutRevision, setReaderLayoutRevision] = useState(0);
   const [viewMode, setViewMode] = useState<ReaderViewMode>("focus");
   const [activeWord, setActiveWord] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -737,6 +772,77 @@ export default function Home() {
   }, [activeWord]);
 
   useEffect(() => {
+    const container = readerRef.current;
+    if (!container || typeof ResizeObserver === "undefined") return;
+    let cancelled = false;
+    const refreshLayout = () => {
+      if (!cancelled) setReaderLayoutRevision((current) => current + 1);
+    };
+    const observer = new ResizeObserver(refreshLayout);
+    observer.observe(container);
+    window.addEventListener("resize", refreshLayout);
+    void document.fonts?.ready.then(refreshLayout);
+
+    return () => {
+      cancelled = true;
+      observer.disconnect();
+      window.removeEventListener("resize", refreshLayout);
+    };
+  }, []);
+
+  useLayoutEffect(() => {
+    const readingPage =
+      readerRef.current?.querySelector<HTMLElement>(".reading-page");
+    if (!readingPage) return;
+    const focusSegments =
+      readingPage.querySelectorAll<HTMLElement>("[data-focus-token]");
+
+    if (viewMode !== "focus" || settings.focusLines === 0) {
+      focusSegments.forEach((element) =>
+        element.classList.remove("focus-window-visible"),
+      );
+      return;
+    }
+
+    const tokenPositions = Array.from(wordRefs.current.entries())
+      .filter(([, element]) => readingPage.contains(element))
+      .map(([tokenIndex, element]) => ({
+        tokenIndex,
+        top: element.getBoundingClientRect().top,
+      }));
+    const visibleTokens = new Set(
+      selectFocusWindowTokens(
+        tokenPositions,
+        activeWord,
+        settings.focusLines,
+      ),
+    );
+    if (!visibleTokens.size) visibleTokens.add(activeWord);
+
+    focusSegments.forEach((element) => {
+      const tokenIndex = Number(element.dataset.focusToken);
+      element.classList.toggle(
+        "focus-window-visible",
+        visibleTokens.has(tokenIndex),
+      );
+    });
+  }, [
+    activeWord,
+    model.tokens.length,
+    readerDocument.id,
+    readerLayoutRevision,
+    settings.focusLines,
+    settings.font,
+    settings.fontSize,
+    settings.letterSpacing,
+    settings.lineHeight,
+    settings.maxLineWidth,
+    settings.paragraphSpacing,
+    settings.wordSpacing,
+    viewMode,
+  ]);
+
+  useEffect(() => {
     let cancelled = false;
     bookmarksRef.current = [];
     positionHistoryRef.current = [];
@@ -789,9 +895,15 @@ export default function Home() {
         if (cancelled) return;
         try {
           if (savedSettings) {
+            const storedSettings = JSON.parse(
+              savedSettings,
+            ) as Partial<ReaderSettings>;
+            const storedLayout = normalizeReaderLayout(storedSettings);
             setSettings((current) => ({
               ...current,
-              ...(JSON.parse(savedSettings) as Partial<ReaderSettings>),
+              ...storedSettings,
+              ...storedLayout,
+              focusLines: storedLayout.focusLines as FocusLineCount,
             }));
           }
         } catch {
@@ -2269,7 +2381,21 @@ export default function Home() {
   const readerStyle = {
     "--reader-size": `${settings.fontSize}px`,
     "--reader-leading": settings.lineHeight,
+    ...createReaderLayoutStyle(settings),
   } as CSSProperties;
+
+  const resetReadingLayout = () => {
+    setSettings((current) => ({
+      ...current,
+      fontSize: DEFAULT_SETTINGS.fontSize,
+      lineHeight: DEFAULT_SETTINGS.lineHeight,
+      letterSpacing: DEFAULT_READER_LAYOUT.letterSpacing,
+      wordSpacing: DEFAULT_READER_LAYOUT.wordSpacing,
+      paragraphSpacing: DEFAULT_READER_LAYOUT.paragraphSpacing,
+      maxLineWidth: DEFAULT_READER_LAYOUT.maxLineWidth,
+      focusLines: DEFAULT_READER_LAYOUT.focusLines as FocusLineCount,
+    }));
+  };
 
   const changeViewMode = (mode: ReaderViewMode) => {
     if (mode === viewMode) return;
@@ -2612,7 +2738,14 @@ export default function Home() {
             />
           ) : (
             <article
-              className={`reading-page font-${settings.font} highlight-${settings.highlightMode}`}
+              className={[
+                "reading-page",
+                `font-${settings.font}`,
+                `highlight-${settings.highlightMode}`,
+                settings.focusLines > 0 ? "focus-window-active" : "",
+              ]
+                .filter(Boolean)
+                .join(" ")}
             >
               <div className="chapter-heading">
                 <span className="chapter-rule" aria-hidden="true" />
@@ -2636,6 +2769,7 @@ export default function Home() {
                             className={
                               isCurrentSentence ? "sentence-active" : undefined
                             }
+                            data-focus-token={segment.focusTokenIndex}
                             key={`${paragraphIndex}-${segmentIndex}`}
                           >
                             {segment.text}
@@ -2653,6 +2787,7 @@ export default function Home() {
                             .filter(Boolean)
                             .join(" ")}
                           id={isActive ? "active-spoken-word" : undefined}
+                          data-focus-token={segment.focusTokenIndex}
                           key={`${paragraphIndex}-${segmentIndex}`}
                           ref={(element) => {
                             if (element) {
@@ -3222,6 +3357,106 @@ export default function Home() {
               </fieldset>
 
               <fieldset>
+                <legend>Text layout</legend>
+                <p className="setting-note">
+                  These controls reflow Focus view. Original PDF pages keep
+                  their source layout.
+                </p>
+
+                <label className="range-setting">
+                  <span>
+                    Letter spacing
+                    <strong>{settings.letterSpacing.toFixed(2)}em</strong>
+                  </span>
+                  <input
+                    type="range"
+                    min="0"
+                    max="0.12"
+                    step="0.01"
+                    value={settings.letterSpacing}
+                    aria-valuetext={`${settings.letterSpacing.toFixed(2)} em`}
+                    onChange={(event) =>
+                      setSettings((current) => ({
+                        ...current,
+                        letterSpacing: Number(event.target.value),
+                      }))
+                    }
+                  />
+                </label>
+
+                <label className="range-setting">
+                  <span>
+                    Word spacing
+                    <strong>{settings.wordSpacing.toFixed(2)}em</strong>
+                  </span>
+                  <input
+                    type="range"
+                    min="0"
+                    max="0.3"
+                    step="0.02"
+                    value={settings.wordSpacing}
+                    aria-valuetext={`${settings.wordSpacing.toFixed(2)} em`}
+                    onChange={(event) =>
+                      setSettings((current) => ({
+                        ...current,
+                        wordSpacing: Number(event.target.value),
+                      }))
+                    }
+                  />
+                </label>
+
+                <label className="range-setting">
+                  <span>
+                    Paragraph spacing
+                    <strong>{settings.paragraphSpacing.toFixed(2)}em</strong>
+                  </span>
+                  <input
+                    type="range"
+                    min="0.8"
+                    max="2.5"
+                    step="0.05"
+                    value={settings.paragraphSpacing}
+                    aria-valuetext={`${settings.paragraphSpacing.toFixed(2)} em`}
+                    onChange={(event) =>
+                      setSettings((current) => ({
+                        ...current,
+                        paragraphSpacing: Number(event.target.value),
+                      }))
+                    }
+                  />
+                </label>
+
+                <label className="range-setting">
+                  <span>
+                    Maximum line width
+                    <strong>{settings.maxLineWidth} characters</strong>
+                  </span>
+                  <input
+                    type="range"
+                    min="42"
+                    max="90"
+                    step="2"
+                    value={settings.maxLineWidth}
+                    aria-valuetext={`${settings.maxLineWidth} characters`}
+                    onChange={(event) =>
+                      setSettings((current) => ({
+                        ...current,
+                        maxLineWidth: Number(event.target.value),
+                      }))
+                    }
+                  />
+                </label>
+
+                <button
+                  className="reset-layout-button"
+                  type="button"
+                  onClick={resetReadingLayout}
+                >
+                  Reset layout and focus
+                </button>
+              </fieldset>
+
+              <fieldset>
                 <legend>Page color</legend>
                 <div className="theme-choices">
                   {(
@@ -3264,6 +3499,55 @@ export default function Home() {
                     <option value="sentence">Current sentence only</option>
                   </select>
                 </label>
+
+                <div className="focus-line-setting">
+                  <div className="focus-line-heading">
+                    <strong>Visible focus lines</strong>
+                    <span>
+                      {settings.focusLines === 0
+                        ? "All lines"
+                        : `${settings.focusLines} ${
+                            settings.focusLines === 1 ? "line" : "lines"
+                          }`}
+                    </span>
+                  </div>
+                  <div
+                    className="segmented four"
+                    role="group"
+                    aria-label="Visible focus lines"
+                    aria-describedby="focus-lines-description"
+                  >
+                    {(
+                      [
+                        [0, "All"],
+                        [1, "1 line"],
+                        [3, "3 lines"],
+                        [5, "5 lines"],
+                      ] as [FocusLineCount, string][]
+                    ).map(([value, label]) => (
+                      <button
+                        type="button"
+                        className={
+                          settings.focusLines === value ? "selected" : ""
+                        }
+                        aria-pressed={settings.focusLines === value}
+                        onClick={() =>
+                          setSettings((current) => ({
+                            ...current,
+                            focusLines: value,
+                          }))
+                        }
+                        key={value}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="setting-note" id="focus-lines-description">
+                    Focus view softens lines outside this window while keeping
+                    the full document available to assistive technology.
+                  </p>
+                </div>
 
                 <label className="switch-row">
                   <span>
