@@ -164,8 +164,10 @@ function getWorker() {
     },
   );
 
-  worker.addEventListener("error", () => {
-    terminateWorker("The offline voice worker stopped unexpectedly.");
+  worker.addEventListener("error", (event) => {
+    terminateWorker(
+      event.message || "The offline voice worker stopped unexpectedly.",
+    );
   });
 
   return worker;

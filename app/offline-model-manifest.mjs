@@ -1,5 +1,7 @@
 export const OFFLINE_MODEL_ID =
   "onnx-community/Kokoro-82M-v1.0-ONNX";
+export const OFFLINE_MODEL_DTYPE = "q8";
+export const OFFLINE_MODEL_RUNTIME = "wasm";
 export const OFFLINE_MODEL_REVISION =
   "1939ad2a8e416c0acfeecc08a694d14ef25f2231";
 export const OFFLINE_MODEL_ROUTE_BASE = "/offline-model/";
