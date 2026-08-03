@@ -114,7 +114,19 @@ test("adds, opens, renames, and removes independent documents", async () => {
     },
   });
 
-  await library.addDocument(document("one", "First"));
+  const outlinedDocument = {
+    ...document("one", "First"),
+    outline: [
+      {
+        id: "chapter-one",
+        title: "Chapter one",
+        pageNumber: 2,
+        tokenIndex: 3,
+        items: [],
+      },
+    ],
+  };
+  await library.addDocument(outlinedDocument);
   await library.addDocument(document("two", "Second"));
   let snapshot = await library.load();
   assert.deepEqual(
@@ -131,6 +143,24 @@ test("adds, opens, renames, and removes independent documents", async () => {
     ["one", "two"],
   );
   assert.equal(snapshot.activeDocumentId, "one");
+  assert.deepEqual(
+    (await library.getDocument("one")).outline,
+    outlinedDocument.outline,
+  );
+  await library.saveDocument({
+    ...outlinedDocument,
+    outline: [
+      ...outlinedDocument.outline,
+      {
+        id: "chapter-two",
+        title: "Chapter two",
+        pageNumber: 4,
+        tokenIndex: 6,
+        items: [],
+      },
+    ],
+  });
+  assert.equal((await library.getDocument("one")).outline.length, 2);
 
   const renamed = await library.renameDocument("one", "Renamed");
   assert.equal(renamed.document.title, "Renamed");

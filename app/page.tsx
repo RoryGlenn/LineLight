@@ -13,7 +13,16 @@ import {
   useState,
 } from "react";
 import JSZip from "jszip";
+import {
+  DocumentOutline,
+  type PdfOutlineItem,
+} from "./document-outline";
 import { PdfPageView, type PdfPageLayout } from "./pdf-page-view";
+import {
+  buildPdfOutline,
+  derivePdfPageWordStarts,
+  findActivePdfOutlineItemId,
+} from "./pdf-outline.mjs";
 import {
   buildSentenceStartIndices,
   buildSpeechChunk,
@@ -63,6 +72,7 @@ import {
   openReaderDocument,
   removeReaderDocument,
   renameReaderDocument,
+  saveReaderDocument,
   saveReaderNavigation,
   sortLibraryEntries,
 } from "./reader-library.mjs";
@@ -80,6 +90,7 @@ type HighlightMode = "both" | "word" | "sentence";
 type ReadingTheme = "cream" | "white" | "dark";
 type ReadingFont = "serif" | "sans" | "system";
 type ReaderViewMode = "focus" | "page";
+type SidebarView = "library" | "contents";
 type FocusLineCount = 0 | 1 | 3 | 5;
 type NarrationEngine = "device" | "offline" | "azure";
 type OfflinePackState =
@@ -116,6 +127,7 @@ type ReaderDocument = {
   paragraphs: string[];
   pdfData?: Uint8Array;
   pdfPages?: PdfPageLayout[];
+  outline?: PdfOutlineItem[];
 };
 
 type LibraryEntry = {
@@ -381,9 +393,11 @@ async function parsePdf(file: File): Promise<ReaderDocument> {
   const pdf = await pdfjs.getDocument({ data: sourceData.slice() }).promise;
   const paragraphs: string[] = [];
   const pdfPages: PdfPageLayout[] = [];
+  const pageWordStarts: number[] = [];
   let globalWordCount = 0;
 
   for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+    pageWordStarts.push(globalWordCount);
     const page = await pdf.getPage(pageNumber);
     const viewport = page.getViewport({ scale: 1 });
     const content = await page.getTextContent();
@@ -448,6 +462,13 @@ async function parsePdf(file: File): Promise<ReaderDocument> {
     );
   }
 
+  const rawOutline = await pdf.getOutline().catch(() => []);
+  const outline = (await buildPdfOutline(
+    rawOutline,
+    pdf,
+    pageWordStarts,
+    globalWordCount,
+  )) as PdfOutlineItem[];
   const pageCount = pdf.numPages;
   await pdf.destroy();
   return {
@@ -458,7 +479,47 @@ async function parsePdf(file: File): Promise<ReaderDocument> {
     paragraphs,
     pdfData: sourceData,
     pdfPages,
+    outline,
   };
+}
+
+async function ensureStoredPdfOutline(
+  document: ReaderDocument,
+): Promise<ReaderDocument> {
+  if (
+    document.kind !== "pdf" ||
+    document.outline !== undefined ||
+    !document.pdfData?.length ||
+    !document.pdfPages?.length
+  ) {
+    return document;
+  }
+
+  try {
+    const pdfjs = await import("pdfjs-dist");
+    pdfjs.GlobalWorkerOptions.workerSrc = new URL(
+      "pdfjs-dist/build/pdf.worker.min.mjs",
+      import.meta.url,
+    ).toString();
+    const pdf = await pdfjs.getDocument({ data: document.pdfData.slice() })
+      .promise;
+    try {
+      const rawOutline = await pdf.getOutline().catch(() => []);
+      const outline = (await buildPdfOutline(
+        rawOutline,
+        pdf,
+        derivePdfPageWordStarts(document.pdfPages),
+        countDocumentWords(document),
+      )) as PdfOutlineItem[];
+      const updatedDocument = { ...document, outline };
+      await saveReaderDocument(updatedDocument).catch(() => undefined);
+      return updatedDocument;
+    } finally {
+      await pdf.destroy();
+    }
+  } catch {
+    return document;
+  }
 }
 
 function resolveZipPath(basePath: string, target: string) {
@@ -665,6 +726,16 @@ export default function Home() {
   const [showSettings, setShowSettings] = useState(false);
   const [showBookmarks, setShowBookmarks] = useState(false);
   const [showSidebar, setShowSidebar] = useState(false);
+  const [sidebarSelection, setSidebarSelection] = useState<{
+    documentId: string;
+    view: SidebarView;
+  }>({ documentId: DEMO_DOCUMENT.id, view: "library" });
+  const sidebarView =
+    sidebarSelection.documentId === readerDocument.id
+      ? sidebarSelection.view
+      : readerDocument.kind === "pdf"
+        ? "contents"
+        : "library";
   const [isImporting, setIsImporting] = useState(false);
   const [notice, setNotice] = useState("");
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
@@ -698,6 +769,14 @@ export default function Home() {
   );
   const activeToken = model.tokens[activeWord] ?? model.tokens[0];
   const activeSentence = activeToken?.sentenceIndex ?? 0;
+  const documentOutline = useMemo(
+    () => readerDocument.outline ?? [],
+    [readerDocument.outline],
+  );
+  const activeOutlineItemId = useMemo(
+    () => findActivePdfOutlineItemId(documentOutline, activeWord),
+    [activeWord, documentOutline],
+  );
   const tokenSentences = useMemo(
     () => model.tokens.map((token) => token.sentenceIndex),
     [model.tokens],
@@ -928,11 +1007,13 @@ export default function Home() {
           snapshot.activeDocumentId,
         )) as ReaderDocument | null;
         if (!storedDocument || cancelled) return;
-        const storedProgress = clampStoredProgress(storedDocument);
-        setReaderDocument(storedDocument);
+        const outlinedDocument = await ensureStoredPdfOutline(storedDocument);
+        if (cancelled) return;
+        const storedProgress = clampStoredProgress(outlinedDocument);
+        setReaderDocument(outlinedDocument);
         setActiveWord(storedProgress);
         activeWordRef.current = storedProgress;
-        setViewMode(initialViewFor(storedDocument));
+        setViewMode(initialViewFor(outlinedDocument));
       })
       .catch(() => {
         if (!cancelled) {
@@ -1232,7 +1313,7 @@ export default function Home() {
   const jumpToPosition = useCallback(
     (
       targetIndex: number,
-      { recordHistory = true, closePanel = false } = {},
+      { recordHistory = true, closePanel = false, scroll = true } = {},
     ) => {
       if (!model.tokens.length) return false;
       const safeIndex = Math.min(
@@ -1262,10 +1343,37 @@ export default function Home() {
       activeWordRef.current = safeIndex;
       setFollowPaused(false);
       if (closePanel) setShowBookmarks(false);
-      window.setTimeout(() => scrollToActiveWord("smooth"), 0);
+      if (scroll) window.setTimeout(() => scrollToActiveWord("smooth"), 0);
       return true;
     },
     [commitNavigation, model.tokens, scrollToActiveWord, stopSpeech],
+  );
+
+  const openOutlineItem = useCallback(
+    (item: PdfOutlineItem) => {
+      if (
+        item.tokenIndex === null ||
+        !jumpToPosition(item.tokenIndex, {
+          scroll: viewMode !== "page" || item.pageNumber === null,
+        })
+      ) {
+        return;
+      }
+      if (viewMode === "page" && item.pageNumber !== null) {
+        window.setTimeout(() => {
+          document
+            .getElementById(`pdf-page-${item.pageNumber}`)
+            ?.scrollIntoView({ behavior: "smooth", block: "start" });
+        }, 0);
+      }
+      setShowSidebar(false);
+      setNotice(
+        `${item.title}${
+          item.pageNumber === null ? "" : ` · page ${item.pageNumber}`
+        } opened. Press Play to narrate from here.`,
+      );
+    },
+    [jumpToPosition, viewMode],
   );
 
   const openStoredPosition = useCallback(
@@ -2138,14 +2246,15 @@ export default function Home() {
         if (!opened.document || !opened.entry) {
           throw new Error("This document is no longer in the library.");
         }
+        const outlinedDocument = await ensureStoredPdfOutline(opened.document);
 
         stopSpeech();
         wordRefs.current.clear();
-        const storedProgress = clampStoredProgress(opened.document);
-        setReaderDocument(opened.document);
+        const storedProgress = clampStoredProgress(outlinedDocument);
+        setReaderDocument(outlinedDocument);
         setActiveWord(storedProgress);
         activeWordRef.current = storedProgress;
-        setViewMode(initialViewFor(opened.document));
+        setViewMode(initialViewFor(outlinedDocument));
         setFollowPaused(false);
         setLibraryEntries(
           (current) =>
@@ -2253,12 +2362,15 @@ export default function Home() {
           if (!nextDocument.document || !nextDocument.entry) {
             throw new Error("The next document could not be opened.");
           }
+          const outlinedDocument = await ensureStoredPdfOutline(
+            nextDocument.document,
+          );
           wordRefs.current.clear();
-          const storedProgress = clampStoredProgress(nextDocument.document);
-          setReaderDocument(nextDocument.document);
+          const storedProgress = clampStoredProgress(outlinedDocument);
+          setReaderDocument(outlinedDocument);
           setActiveWord(storedProgress);
           activeWordRef.current = storedProgress;
-          setViewMode(initialViewFor(nextDocument.document));
+          setViewMode(initialViewFor(outlinedDocument));
           setLibraryEntries(
             (current) =>
               sortLibraryEntries(
@@ -2420,7 +2532,7 @@ export default function Home() {
             className="mobile-close"
             type="button"
             onClick={() => setShowSidebar(false)}
-            aria-label="Close library"
+            aria-label="Close navigation"
           >
             ×
           </button>
@@ -2435,7 +2547,43 @@ export default function Home() {
           Import a book
         </button>
 
-        <section className="library-section" aria-labelledby="library-title">
+        {readerDocument.kind === "pdf" && (
+          <div
+            className="sidebar-view-tabs"
+            role="group"
+            aria-label="Choose navigation view"
+          >
+            <button
+              type="button"
+              className={sidebarView === "library" ? "selected" : ""}
+              aria-pressed={sidebarView === "library"}
+              onClick={() =>
+                setSidebarSelection({
+                  documentId: readerDocument.id,
+                  view: "library",
+                })
+              }
+            >
+              Library
+            </button>
+            <button
+              type="button"
+              className={sidebarView === "contents" ? "selected" : ""}
+              aria-pressed={sidebarView === "contents"}
+              onClick={() =>
+                setSidebarSelection({
+                  documentId: readerDocument.id,
+                  view: "contents",
+                })
+              }
+            >
+              Contents
+            </button>
+          </div>
+        )}
+
+        {(readerDocument.kind !== "pdf" || sidebarView === "library") && (
+          <section className="library-section" aria-labelledby="library-title">
           <div className="library-heading">
             <p className="nav-label" id="library-title">
               Your library
@@ -2570,7 +2718,17 @@ export default function Home() {
             visibleLibraryEntries.length === 0 && (
               <p className="library-empty">No saved books match that search.</p>
             )}
-        </section>
+          </section>
+        )}
+
+        {readerDocument.kind === "pdf" && sidebarView === "contents" && (
+          <DocumentOutline
+            key={`${readerDocument.id}-${activeOutlineItemId ?? "none"}`}
+            items={documentOutline}
+            activeItemId={activeOutlineItemId}
+            onNavigate={openOutlineItem}
+          />
+        )}
 
         <div className="privacy-note">
           <span aria-hidden="true">⌂</span>
@@ -2596,7 +2754,7 @@ export default function Home() {
       {showSidebar && (
         <button
           className="page-scrim mobile-scrim"
-          aria-label="Close library"
+          aria-label="Close navigation"
           type="button"
           onClick={() => setShowSidebar(false)}
         />
@@ -2609,7 +2767,7 @@ export default function Home() {
               className="menu-button"
               type="button"
               onClick={() => setShowSidebar(true)}
-              aria-label="Open library"
+              aria-label="Open navigation"
             >
               ☰
             </button>
