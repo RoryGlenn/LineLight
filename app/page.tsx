@@ -1037,7 +1037,7 @@ export default function Home() {
       });
 
     if ("serviceWorker" in navigator) {
-      navigator.serviceWorker.register("/sw.js").catch(() => undefined);
+      navigator.serviceWorker.register("/sw-v7.js").catch(() => undefined);
     }
 
     isOfflineVoicePackInstalled()

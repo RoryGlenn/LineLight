@@ -3,8 +3,10 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import vm from "node:vm";
 
+const SERVICE_WORKER_PATH = "public/sw-v7.js";
+
 async function loadServiceWorker() {
-  const source = await readFile("public/sw.js", "utf8");
+  const source = await readFile(SERVICE_WORKER_PATH, "utf8");
   const listeners = new Map();
   const deletedCaches = [];
   const cachedResponses = [];
@@ -96,6 +98,12 @@ async function runFetch(listener, request) {
   });
   return responsePromise;
 }
+
+test("the app registers the versioned service worker at the root scope", async () => {
+  const pageSource = await readFile("app/page.tsx", "utf8");
+
+  assert.match(pageSource, /serviceWorker\.register\("\/sw-v7\.js"\)/);
+});
 
 test("service worker replaces stale shell caches without touching model data", async () => {
   const runtime = await loadServiceWorker();
