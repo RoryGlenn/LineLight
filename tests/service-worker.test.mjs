@@ -25,7 +25,12 @@ async function loadServiceWorker() {
       return true;
     },
     async keys() {
-      return ["linelight-v4", "linelight-v5", "transformers-cache"];
+      return [
+        "linelight-v5",
+        "linelight-v6",
+        "transformers-cache",
+        "kokoro-voices",
+      ];
     },
     async match() {
       return matchedResponse;
@@ -98,8 +103,24 @@ test("service worker replaces stale shell caches without touching model data", a
   await runWaitUntil(runtime.listeners.get("install"));
   await runWaitUntil(runtime.listeners.get("activate"));
 
-  assert.deepEqual(runtime.deletedCaches, ["linelight-v4", "linelight-v5"]);
+  assert.deepEqual(runtime.deletedCaches, ["linelight-v5", "linelight-v6"]);
   assert.equal(runtime.wasClaimed(), true);
+});
+
+test("service worker leaves page navigations to the browser", async () => {
+  const runtime = await loadServiceWorker();
+  const listener = runtime.listeners.get("fetch");
+  const request = {
+    destination: "document",
+    method: "GET",
+    mode: "navigate",
+    url: "https://linelight.example/",
+  };
+
+  const response = await runFetch(listener, request);
+
+  assert.equal(response, undefined);
+  assert.equal(runtime.cachedResponses.length, 0);
 });
 
 test("service worker always resolves intercepted requests with a Response", async () => {
