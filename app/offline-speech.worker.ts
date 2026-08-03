@@ -144,8 +144,13 @@ async function loadModel(
 
   const selectedDevice =
     preferredDevice ?? (await preferredRuntimeDevice());
-  if (selectedDevice === "wasm" && globalThis.crossOriginIsolated) {
-    transformersEnv.backends.onnx.wasm.numThreads = Math.min(
+  const wasmBackend = transformersEnv.backends.onnx.wasm;
+  if (
+    selectedDevice === "wasm" &&
+    globalThis.crossOriginIsolated &&
+    wasmBackend
+  ) {
+    wasmBackend.numThreads = Math.min(
       OFFLINE_WASM_MAX_THREADS,
       Math.max(1, Math.floor((navigator.hardwareConcurrency || 1) / 2)),
     );
