@@ -129,6 +129,67 @@ recorded in
 The production build helpers currently target Linux and use `flock`, `curl`,
 and GNU `timeout`.
 
+## Offline narration voice review
+
+Developers can screen a generated WAV or MP3 entirely on the local machine.
+The reviewer combines a predicted naturalness score from UTMOS, optional
+English transcription and word-error rate from Whisper, and deterministic
+signal measurements for duration, pace, loudness, peak level, clipping, and
+meaningful pauses. It does not upload the recording.
+
+Install [ffmpeg](https://ffmpeg.org/download.html) and
+[uv](https://docs.astral.sh/uv/getting-started/installation/), then prepare the
+pinned models and Python runtime once while online:
+
+```bash
+npm run review:voice -- --prepare
+```
+
+Preparation is resumable and stores everything outside the repository. A first
+run may take several minutes depending on the connection; allow about 1 GiB of
+free space for the models and isolated Python runtime. The command pins both
+model revisions, verifies the UTMOS checkpoint digest, proves that both models
+can reload with remote access disabled, and only then records the cache as
+ready. If the cache is missing, incomplete, or stale, a review stops with the
+preparation command instead of attempting a download.
+The [UTMOS-PyTorch](https://github.com/Blinorot/utmos-pytorch) implementation
+and [pinned converted checkpoint](https://huggingface.co/Blinorot/UTMOS-PyTorch/tree/4f2447e519df3b88567b45583d3500006729502b)
+are MIT-licensed; the pinned
+[Whisper Tiny English ONNX model](https://huggingface.co/Xenova/whisper-tiny.en/tree/79fb389fc764e7c395bd330e9531d9d32ada7049)
+is Apache-2.0 licensed.
+
+After that, reviews are always strict offline runs, even if `--offline` is not
+written explicitly:
+
+```bash
+npm run review:voice -- narration.wav \
+  --text "Reading is not a race."
+```
+
+For longer passages, keep the source text in a UTF-8 file. Add `--json` for
+machine-readable output:
+
+```bash
+npm run review:voice -- narration.mp3 \
+  --text-file passage.txt \
+  --json
+```
+
+Without expected text, the reviewer skips Whisper and reports naturalness and
+signal measurements only. Models and the Python environment are cached in
+`~/Library/Caches/LineLight/voice-review` on macOS and the XDG cache directory
+under `linelight/voice-review` on Linux. Set
+`LINELIGHT_VOICE_REVIEW_CACHE` to override that location. To reclaim the disk
+space, remove the exact cache directory printed by `--prepare`; this does not
+remove the separate voice pack stored by the browser app.
+
+UTMOS and Whisper are automated screening tools, not human listeners. Their
+scores can catch unnatural output, missing words, clipping, and timing
+problems, but they cannot establish whether a voice is expressive,
+context-appropriate, or accessible to a particular reader. Important voice
+changes still need a human listening and accessibility review. The bundled
+transcription check is English-only.
+
 ## Roadmap
 
 - OCR for scanned PDFs
