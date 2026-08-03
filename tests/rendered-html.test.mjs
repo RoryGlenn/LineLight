@@ -48,11 +48,11 @@ test("renders development preview metadata", async () => {
   );
   assert.equal(
     response.headers.get("cross-origin-embedder-policy"),
-    "require-corp",
+    null,
   );
   assert.equal(
     response.headers.get("cross-origin-opener-policy"),
-    "same-origin",
+    null,
   );
   const html = await response.text();
   const manifestLinks =
@@ -118,7 +118,7 @@ test("serves the pinned offline model through the production worker", async () =
     assert.match(upstreamUrl, new RegExp(OFFLINE_MODEL_REVISION));
     assert.equal(
       response.headers.get("cross-origin-embedder-policy"),
-      "require-corp",
+      null,
     );
     assert.equal(
       response.headers.get("cross-origin-resource-policy"),

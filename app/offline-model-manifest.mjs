@@ -2,6 +2,8 @@ export const OFFLINE_MODEL_ID =
   "onnx-community/Kokoro-82M-v1.0-ONNX";
 export const OFFLINE_MODEL_DTYPE = "q8";
 export const OFFLINE_MODEL_RUNTIME = "wasm";
+// One ONNX thread keeps the model inside LineLight's dedicated worker without
+// requiring page-wide cross-origin isolation or nested runtime workers.
 export const OFFLINE_WASM_THREADS = 1;
 export const OFFLINE_WASM_PROXY = false;
 export const OFFLINE_MODEL_REVISION =
