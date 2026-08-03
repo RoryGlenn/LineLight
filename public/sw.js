@@ -1,12 +1,7 @@
-const CACHE_NAME = "linelight-v5";
+const CACHE_NAME = "linelight-v6";
 
 self.addEventListener("install", (event) => {
-  event.waitUntil(
-    caches
-      .open(CACHE_NAME)
-      .then((cache) => cache.addAll(["/", "/manifest.webmanifest"]))
-      .then(() => self.skipWaiting()),
-  );
+  event.waitUntil(self.skipWaiting());
 });
 
 self.addEventListener("activate", (event) => {
@@ -38,12 +33,21 @@ self.addEventListener("fetch", (event) => {
   }
 
   event.respondWith(
-    fetch(event.request)
-      .then((response) => {
-        const copy = response.clone();
-        caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
+    (async () => {
+      try {
+        const response = await fetch(event.request);
+        if (response.ok) {
+          try {
+            const cache = await caches.open(CACHE_NAME);
+            await cache.put(event.request, response.clone());
+          } catch {
+            // App-shell caching is optional; the network response remains valid.
+          }
+        }
         return response;
-      })
-      .catch(() => caches.match(event.request)),
+      } catch {
+        return (await caches.match(event.request)) ?? Response.error();
+      }
+    })(),
   );
 });
