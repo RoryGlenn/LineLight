@@ -145,14 +145,17 @@ pinned models and Python runtime once while online:
 npm run review:voice -- --prepare
 ```
 
-Preparation is resumable and stores everything outside the repository. On
-Apple Silicon the current cache is about 858 MiB: approximately 394 MiB for
-UTMOS, 42 MiB for quantized Whisper, and the remainder for the isolated Python
-runtime. The command pins both model revisions, verifies the UTMOS checkpoint
-digest, and proves that both models can reload with remote access disabled.
+Preparation is resumable and stores everything outside the repository. A first
+run may take several minutes depending on the connection; allow about 1 GiB of
+free space for the models and isolated Python runtime. The command pins both
+model revisions, verifies the UTMOS checkpoint digest, proves that both models
+can reload with remote access disabled, and only then records the cache as
+ready. If the cache is missing, incomplete, or stale, a review stops with the
+preparation command instead of attempting a download.
 The [UTMOS-PyTorch](https://github.com/Blinorot/utmos-pytorch) implementation
-and converted checkpoint are MIT-licensed; the pinned
-[Whisper Tiny English ONNX model](https://huggingface.co/Xenova/whisper-tiny.en)
+and [pinned converted checkpoint](https://huggingface.co/Blinorot/UTMOS-PyTorch/tree/4f2447e519df3b88567b45583d3500006729502b)
+are MIT-licensed; the pinned
+[Whisper Tiny English ONNX model](https://huggingface.co/Xenova/whisper-tiny.en/tree/79fb389fc764e7c395bd330e9531d9d32ada7049)
 is Apache-2.0 licensed.
 
 After that, reviews are always strict offline runs, even if `--offline` is not

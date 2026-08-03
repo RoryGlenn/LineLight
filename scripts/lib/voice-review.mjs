@@ -1,4 +1,5 @@
 const WORD_PATTERN = /[\p{L}\p{N}]+/gu;
+const REVIEW_SCHEMA_VERSION = 1;
 
 /**
  * Normalize text for a case- and punctuation-insensitive WER comparison.
@@ -245,6 +246,9 @@ export function parsePcm16Wav(buffer) {
       "Normalized WAV must be mono 16 kHz, 16-bit integer PCM.",
     );
   }
+  if (data.length % 2 !== 0) {
+    throw new Error("Normalized PCM-16 WAV data must contain whole samples.");
+  }
 
   const samples = new Int16Array(data.length / 2);
   for (let index = 0; index < samples.length; index += 1) {
@@ -279,6 +283,10 @@ export function buildVoiceReview({
   transcript,
   utmosScore,
 }) {
+  if (!Number.isFinite(utmosScore)) {
+    throw new Error("UTMOS score must be a finite number.");
+  }
+
   const intelligibility =
     expectedText && transcript
       ? calculateWordErrorRate(expectedText, transcript)
@@ -334,6 +342,7 @@ export function buildVoiceReview({
       networkAccessDuringReview: false,
       uploadsAudio: false,
     },
+    schemaVersion: REVIEW_SCHEMA_VERSION,
     signal: {
       ...signal,
       wordsPerMinute,

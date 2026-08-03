@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 
@@ -13,6 +16,18 @@ import {
 } from "../scripts/lib/voice-review.mjs";
 
 const execFileAsync = promisify(execFile);
+
+async function runCli(args) {
+  return execFileAsync(process.execPath, ["scripts/review-voice.mjs", ...args]);
+}
+
+async function assertCliFailure(args, pattern) {
+  await assert.rejects(runCli(args), (error) => {
+    assert.equal(error.code, 1);
+    assert.match(error.stderr, pattern);
+    return true;
+  });
+}
 
 function pcm16Wav(samples, sampleRate = 16000) {
   const dataBytes = samples.length * 2;
@@ -69,6 +84,13 @@ test("rejects WAV data that was not normalized to 16 kHz", () => {
   );
 });
 
+test("rejects PCM-16 WAV data with a partial sample", () => {
+  const buffer = pcm16Wav(Int16Array.from([1, 2])).subarray(0, 47);
+  buffer.writeUInt32LE(3, 40);
+
+  assert.throws(() => parsePcm16Wav(buffer), /whole samples/);
+});
+
 test("measures levels, clipping, and meaningful internal pauses", () => {
   const sampleRate = 1000;
   const samples = new Int16Array(1400);
@@ -122,15 +144,69 @@ test("builds a good offline review when naturalness and WER are strong", () => {
   assert.equal(review.intelligibility.wer, 0);
   assert.equal(review.signal.wordsPerMinute, 150);
   assert.equal(review.privacy.networkAccessDuringReview, false);
+  assert.equal(review.schemaVersion, 1);
   assert.match(formatVoiceReview(review), /Naturalness: 4\.25\/5/);
 });
 
+test("rejects an invalid predicted naturalness score", () => {
+  assert.throws(
+    () =>
+      buildVoiceReview({
+        audioPath: "/tmp/voice.wav",
+        expectedText: null,
+        models: {},
+        signal: {
+          clippingPercent: 0,
+          durationSeconds: 1,
+        },
+        transcript: null,
+        utmosScore: Number.NaN,
+      }),
+    /finite number/,
+  );
+});
+
 test("CLI help does not prepare or download models", async () => {
-  const { stdout } = await execFileAsync(process.execPath, [
-    "scripts/review-voice.mjs",
-    "--help",
-  ]);
+  const { stdout } = await runCli(["--help"]);
 
   assert.match(stdout, /Prepare the pinned local models once/);
   assert.match(stdout, /reviews are always strictly offline/);
+});
+
+test("CLI validates review and preparation arguments without model access", async () => {
+  await assertCliFailure([], /Provide an audio file, or run with --prepare/);
+  await assertCliFailure(
+    ["--prepare", "--offline"],
+    /Preparation needs network access/,
+  );
+  await assertCliFailure(
+    ["--prepare", "--text", "hello"],
+    /Expected text is only used when reviewing/,
+  );
+  await assertCliFailure(
+    ["voice.wav", "--text", "hello", "--text-file", "passage.txt"],
+    /Use either --text or --text-file/,
+  );
+  await assertCliFailure(["--unknown"], /Unknown option: --unknown/);
+  await assertCliFailure(["--text"], /--text requires a value/);
+  await assertCliFailure(
+    ["missing-voice.wav"],
+    /Audio file is not readable:.*missing-voice\.wav/,
+  );
+});
+
+test("CLI gives preparation guidance for an empty cache without fetching", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "linelight-review-test-"));
+  const audioPath = join(directory, "sample.wav");
+  const cacheDir = join(directory, "empty-cache");
+  await writeFile(audioPath, Buffer.alloc(0));
+
+  try {
+    await assertCliFailure(
+      [audioPath, "--cache-dir", cacheDir],
+      /Offline models are not prepared.*npm run review:voice -- --prepare/,
+    );
+  } finally {
+    await rm(directory, { force: true, recursive: true });
+  }
 });

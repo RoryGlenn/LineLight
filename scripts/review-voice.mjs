@@ -10,6 +10,7 @@ import {
   readdir,
   rm,
   stat,
+  writeFile,
 } from "node:fs/promises";
 import { homedir, platform, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -24,6 +25,8 @@ import {
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const UTMOS_HELPER = join(SCRIPT_DIR, "utmos-score.py");
+const PREPARE_COMMAND = "npm run review:voice -- --prepare";
+const PREPARATION_SCHEMA_VERSION = 1;
 
 const PYTHON_VERSION = "3.12";
 const PYTHON_PACKAGES = [
@@ -36,6 +39,8 @@ const UTMOS_MODEL = {
   id: "Blinorot/UTMOS-PyTorch",
   revision: "4f2447e519df3b88567b45583d3500006729502b",
 };
+const UTMOS_CHECKPOINT_SHA256 =
+  "21b98001a7d5164d562a40d76aff80ae996deeabe4473c3a6786d1c591c2cc47";
 const WHISPER_MODEL = {
   dtype: "q8",
   id: "Xenova/whisper-tiny.en",
@@ -73,6 +78,7 @@ function parseArgs(argv) {
     expectedTextFile: null,
     help: false,
     json: false,
+    offline: false,
     prepare: false,
   };
 
@@ -83,7 +89,7 @@ function parseArgs(argv) {
     } else if (argument === "--json") {
       options.json = true;
     } else if (argument === "--offline") {
-      // Reviews are always offline. The flag remains useful in copied commands.
+      options.offline = true;
     } else if (argument === "--help" || argument === "-h") {
       options.help = true;
     } else if (
@@ -108,13 +114,22 @@ function parseArgs(argv) {
     }
   }
 
+  if (options.help) return options;
   if (options.expectedText && options.expectedTextFile) {
     throw new Error("Use either --text or --text-file, not both.");
   }
   if (options.prepare && options.audioPath) {
     throw new Error("Run --prepare separately from an audio review.");
   }
-  if (!options.help && !options.prepare && !options.audioPath) {
+  if (options.prepare && (options.expectedText || options.expectedTextFile)) {
+    throw new Error("Expected text is only used when reviewing an audio file.");
+  }
+  if (options.prepare && options.offline) {
+    throw new Error(
+      "Preparation needs network access. Remove --offline; completed reviews are always offline.",
+    );
+  }
+  if (!options.prepare && !options.audioPath) {
     throw new Error("Provide an audio file, or run with --prepare.");
   }
   return options;
@@ -137,10 +152,86 @@ function cachePaths(cacheDir) {
   return {
     cacheDir,
     huggingFace: join(cacheDir, "huggingface"),
+    manifest: join(cacheDir, "prepared.json"),
     python: join(cacheDir, "python", "bin", "python"),
     pythonEnvironment: join(cacheDir, "python"),
     transformers: join(cacheDir, "transformers"),
   };
+}
+
+function preparationManifest() {
+  return {
+    offlineVerified: true,
+    python: {
+      packages: PYTHON_PACKAGES,
+      version: PYTHON_VERSION,
+    },
+    schemaVersion: PREPARATION_SCHEMA_VERSION,
+    utmos: {
+      ...UTMOS_MODEL,
+      checkpointSha256: UTMOS_CHECKPOINT_SHA256,
+    },
+    whisper: WHISPER_MODEL,
+  };
+}
+
+function matchesPreparation(manifest) {
+  const expected = preparationManifest();
+  return (
+    manifest?.schemaVersion === expected.schemaVersion &&
+    manifest.offlineVerified === true &&
+    manifest.python?.version === expected.python.version &&
+    JSON.stringify(manifest.python?.packages) ===
+      JSON.stringify(expected.python.packages) &&
+    manifest.utmos?.id === expected.utmos.id &&
+    manifest.utmos?.revision === expected.utmos.revision &&
+    manifest.utmos?.checkpointSha256 === expected.utmos.checkpointSha256 &&
+    manifest.whisper?.id === expected.whisper.id &&
+    manifest.whisper?.revision === expected.whisper.revision &&
+    manifest.whisper?.dtype === expected.whisper.dtype
+  );
+}
+
+function assertUtmosPreparation(result) {
+  if (
+    result?.model !== UTMOS_MODEL.id ||
+    result.revision !== UTMOS_MODEL.revision ||
+    result.sha256 !== UTMOS_CHECKPOINT_SHA256
+  ) {
+    throw new Error("UTMOS preparation returned unexpected model metadata.");
+  }
+}
+
+async function assertPrepared(paths) {
+  let manifest;
+  try {
+    manifest = JSON.parse(await readFile(paths.manifest, "utf8"));
+  } catch {
+    throw new Error(
+      `Offline models are not prepared in ${paths.cacheDir}. Run: ${PREPARE_COMMAND}`,
+    );
+  }
+
+  if (!matchesPreparation(manifest) || !(await pathExists(paths.python))) {
+    throw new Error(
+      `The offline model cache is incomplete or out of date. Run: ${PREPARE_COMMAND}`,
+    );
+  }
+}
+
+async function runOfflineModel(label, operation) {
+  try {
+    return await operation();
+  } catch (error) {
+    const detail =
+      error instanceof Error
+        ? error.message.split(/\r?\n/u)[0]
+        : String(error);
+    throw new Error(
+      `${label} failed during the offline review. Run ${PREPARE_COMMAND} if the cache is incomplete. Details: ${detail}`,
+      { cause: error },
+    );
+  }
 }
 
 async function pathExists(path) {
@@ -185,6 +276,20 @@ async function runCommand(command, args, { env = process.env } = {}) {
   });
 }
 
+async function requireCommand(command, args, guidance) {
+  try {
+    return await runCommand(command, args);
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      error.message === `Required command not found: ${command}`
+    ) {
+      throw new Error(`${command} is required. ${guidance}`, { cause: error });
+    }
+    throw error;
+  }
+}
+
 function modelEnvironment(paths, offline) {
   return {
     ...process.env,
@@ -222,10 +327,30 @@ async function loadWhisper(paths, { offline }) {
 
 async function preparePython(paths) {
   const uv = process.env.UV_BIN || "uv";
-  await runCommand(uv, ["--version"]);
+  await requireCommand(
+    uv,
+    ["--version"],
+    "Install it from https://docs.astral.sh/uv/getting-started/installation/.",
+  );
   await mkdir(paths.cacheDir, { recursive: true });
 
-  if (!(await pathExists(paths.python))) {
+  if (await pathExists(paths.python)) {
+    let version = null;
+    try {
+      const result = await runCommand(paths.python, [
+        "-c",
+        "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')",
+      ]);
+      version = result.stdout.trim();
+    } catch {
+      // The actionable error below covers an unreadable cached runtime too.
+    }
+    if (version !== PYTHON_VERSION) {
+      throw new Error(
+        `The cached Python runtime is ${version ?? "unreadable"}, not ${PYTHON_VERSION}. Remove ${paths.pythonEnvironment}, then rerun ${PREPARE_COMMAND}.`,
+      );
+    }
+  } else {
     await runCommand(uv, [
       "venv",
       "--python",
@@ -268,20 +393,34 @@ function formatBytes(bytes) {
 
 async function prepareModels(paths, jsonOutput) {
   const progress = (message) => console.error(message);
-  await runCommand("ffmpeg", ["-version"]);
+  await requireCommand(
+    "ffmpeg",
+    ["-version"],
+    "Install it from https://ffmpeg.org/download.html.",
+  );
+  progress(
+    `First-time preparation may take several minutes and download about 1 GiB into ${paths.cacheDir}; interrupted downloads can be resumed.`,
+  );
   progress("Preparing pinned Python runtime and UTMOS dependencies...");
   await preparePython(paths);
   progress("Downloading and validating the pinned UTMOS checkpoint...");
   const utmos = await runUtmos(paths, ["--prepare"], { offline: false });
+  assertUtmosPreparation(utmos);
   progress("Downloading the pinned quantized Whisper model...");
   const transcriber = await loadWhisper(paths, { offline: false });
   await transcriber.dispose();
 
   progress("Verifying both models reload with network access disabled...");
-  await runUtmos(paths, ["--prepare"], { offline: true });
+  const offlineUtmos = await runUtmos(paths, ["--prepare"], { offline: true });
+  assertUtmosPreparation(offlineUtmos);
   const offlineTranscriber = await loadWhisper(paths, { offline: true });
   await offlineTranscriber.dispose();
 
+  await writeFile(
+    paths.manifest,
+    `${JSON.stringify(preparationManifest(), null, 2)}\n`,
+    { encoding: "utf8", mode: 0o600 },
+  );
   const bytes = await directorySize(paths.cacheDir);
   const result = {
     cacheBytes: bytes,
@@ -343,7 +482,15 @@ async function transcribe(samples, paths) {
 
 async function expectedText(options) {
   if (options.expectedTextFile) {
-    const text = await readFile(resolve(options.expectedTextFile), "utf8");
+    const textPath = resolve(options.expectedTextFile);
+    let text;
+    try {
+      text = await readFile(textPath, "utf8");
+    } catch (error) {
+      throw new Error(`Expected-text file is not readable: ${textPath}`, {
+        cause: error,
+      });
+    }
     if (!text.trim()) throw new Error("Expected-text file is empty.");
     return text.trim();
   }
@@ -354,16 +501,21 @@ async function expectedText(options) {
 }
 
 async function reviewAudio(options, paths) {
-  await access(resolve(options.audioPath), fsConstants.R_OK);
-  await runCommand("ffmpeg", ["-version"]);
-  if (!(await pathExists(paths.python))) {
-    throw new Error(
-      `Offline models are not prepared. Run: npm run review:voice -- --prepare`,
-    );
-  }
-
   const sourcePath = resolve(options.audioPath);
+  try {
+    await access(sourcePath, fsConstants.R_OK);
+  } catch (error) {
+    throw new Error(`Audio file is not readable: ${sourcePath}`, {
+      cause: error,
+    });
+  }
   const sourceText = await expectedText(options);
+  await assertPrepared(paths);
+  await requireCommand(
+    "ffmpeg",
+    ["-version"],
+    "Install it from https://ffmpeg.org/download.html.",
+  );
   const temporaryDirectory = await mkdtemp(
     join(tmpdir(), "linelight-voice-review-"),
   );
@@ -376,12 +528,12 @@ async function reviewAudio(options, paths) {
       await readFile(normalizedPath),
     );
     const signal = analyzePcm16(samples, sampleRate);
-    const utmos = await runUtmos(
-      paths,
-      ["--audio", normalizedPath],
-      { offline: true },
+    const utmos = await runOfflineModel("UTMOS", () =>
+      runUtmos(paths, ["--audio", normalizedPath], { offline: true }),
     );
-    const transcript = sourceText ? await transcribe(samples, paths) : null;
+    const transcript = sourceText
+      ? await runOfflineModel("Whisper", () => transcribe(samples, paths))
+      : null;
     const review = buildVoiceReview({
       audioPath: sourcePath,
       expectedText: sourceText,

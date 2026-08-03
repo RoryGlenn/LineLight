@@ -134,7 +134,8 @@ def main() -> None:
         return
 
     audio = read_audio(args.audio)
-    score = float(model.score(audio).item())
+    with torch.inference_mode():
+        score = float(model.score(audio).item())
     print(
         json.dumps(
             {
