@@ -126,6 +126,8 @@ npm test
 Dependency update policy, audited overrides, and production exposure notes are
 recorded in
 [`docs/dependency-security.md`](docs/dependency-security.md).
+The pull-request workflow, protected-branch policy, and emergency procedure are
+documented in [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 The production build helpers currently target Linux and use `flock`, `curl`,
 and GNU `timeout`.
