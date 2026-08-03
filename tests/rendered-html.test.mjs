@@ -8,6 +8,8 @@ import {
 
 const developmentPreviewMeta =
   /<meta(?=[^>]*\bname=["']codex-preview["'])(?=[^>]*\bcontent=["']development["'])[^>]*>/i;
+const authenticatedManifestLink =
+  /<link(?=[^>]*\brel=["']manifest["'])(?=[^>]*\bhref=["']\/manifest\.webmanifest["'])(?=[^>]*\bcrossorigin=["']use-credentials["'])[^>]*>/i;
 
 let workerPromise;
 
@@ -52,7 +54,13 @@ test("renders development preview metadata", async () => {
     response.headers.get("cross-origin-opener-policy"),
     "same-origin",
   );
-  assert.match(await response.text(), developmentPreviewMeta);
+  const html = await response.text();
+  const manifestLinks =
+    html.match(/<link(?=[^>]*\brel=["']manifest["'])[^>]*>/gi) ?? [];
+  assert.match(html, developmentPreviewMeta);
+  assert.equal(manifestLinks.length, 1);
+  assert.match(manifestLinks[0], authenticatedManifestLink);
+  assert.doesNotMatch(html, /\.vinext\/fonts|geist-[^"']+\.woff2/i);
 });
 
 test("keeps Azure Speech credentials on the server", async () => {
