@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { DEFAULT_NARRATION_ENGINE } from "../app/narration-defaults.mjs";
+import {
+  DEFAULT_NARRATION_ENGINE,
+  NARRATION_PREFERENCE_VERSION,
+  allowsDeviceFallback,
+  restoreNarrationPreference,
+} from "../app/narration-defaults.mjs";
 import {
   OFFLINE_MODEL_REVISION,
   OFFLINE_MODEL_ROUTE_PREFIX,
@@ -11,6 +16,39 @@ import { handleOfflineModelRequest } from "../worker/offline-model.mjs";
 
 test("defaults new readers to Offline natural narration", () => {
   assert.equal(DEFAULT_NARRATION_ENGINE, "offline");
+});
+
+test("migrates the legacy browser voice default to Offline natural once", () => {
+  assert.deepEqual(
+    restoreNarrationPreference({ narrationEngine: "device" }),
+    {
+      narrationEngine: "offline",
+      narrationPreferenceVersion: NARRATION_PREFERENCE_VERSION,
+    },
+  );
+});
+
+test("preserves explicit narration choices after preference migration", () => {
+  assert.deepEqual(
+    restoreNarrationPreference({
+      narrationEngine: "device",
+      narrationPreferenceVersion: NARRATION_PREFERENCE_VERSION,
+    }),
+    {
+      narrationEngine: "device",
+      narrationPreferenceVersion: NARRATION_PREFERENCE_VERSION,
+    },
+  );
+  assert.equal(
+    restoreNarrationPreference({ narrationEngine: "azure" })
+      .narrationEngine,
+    "azure",
+  );
+});
+
+test("never silently falls back from offline narration to browser speech", () => {
+  assert.equal(allowsDeviceFallback("offline"), false);
+  assert.equal(allowsDeviceFallback("azure"), true);
 });
 
 test("only resolves pinned, allowlisted offline model assets", () => {
