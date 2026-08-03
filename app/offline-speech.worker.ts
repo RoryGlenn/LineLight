@@ -15,7 +15,8 @@ import {
   OFFLINE_VOICE_BYTES,
   OFFLINE_VOICE_CACHE_URLS,
   OFFLINE_VOICE_SOURCE_URLS,
-  OFFLINE_WASM_MAX_THREADS,
+  OFFLINE_WASM_PROXY,
+  OFFLINE_WASM_THREADS,
   TRANSFORMERS_CACHE_NAME,
   type OfflineVoiceId,
 } from "./offline-speech-config";
@@ -61,6 +62,14 @@ class WebGpuUnavailableError extends Error {
 }
 
 const workerScope = globalThis as unknown as WorkerScope;
+const wasmBackend = transformersEnv.backends.onnx.wasm;
+if (wasmBackend) {
+  // LineLight already keeps inference off the UI thread. A single ONNX thread
+  // prevents the WASM runtime from spawning nested workers that hosted browser
+  // shells can terminate during startup.
+  wasmBackend.numThreads = OFFLINE_WASM_THREADS;
+  wasmBackend.proxy = OFFLINE_WASM_PROXY;
+}
 const canceledRequests = new Set<number>();
 let tts: KokoroTTS | null = null;
 let activeDevice: KokoroDevice = "wasm";
@@ -124,17 +133,6 @@ async function loadModel(
   if (tts) return tts;
 
   const selectedDevice = preferredDevice ?? OFFLINE_MODEL_RUNTIME;
-  const wasmBackend = transformersEnv.backends.onnx.wasm;
-  if (
-    selectedDevice === "wasm" &&
-    globalThis.crossOriginIsolated &&
-    wasmBackend
-  ) {
-    wasmBackend.numThreads = Math.min(
-      OFFLINE_WASM_MAX_THREADS,
-      Math.max(1, Math.floor((navigator.hardwareConcurrency || 1) / 2)),
-    );
-  }
   transformersEnv.localModelPath = new URL(
     OFFLINE_MODEL_LOCAL_PATH,
     globalThis.location.origin,
