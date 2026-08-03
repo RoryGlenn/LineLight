@@ -12,6 +12,8 @@ import {
   OFFLINE_MODEL_REVISION,
   OFFLINE_MODEL_ROUTE_PREFIX,
   OFFLINE_MODEL_RUNTIME,
+  OFFLINE_WASM_PROXY,
+  OFFLINE_WASM_THREADS,
   resolveOfflineModelRequest,
 } from "../app/offline-model-manifest.mjs";
 import { handleOfflineModelRequest } from "../worker/offline-model.mjs";
@@ -56,6 +58,8 @@ test("never silently falls back from offline narration to browser speech", () =>
 test("pairs the included q8 model with the compatible WASM runtime", () => {
   assert.equal(OFFLINE_MODEL_DTYPE, "q8");
   assert.equal(OFFLINE_MODEL_RUNTIME, "wasm");
+  assert.equal(OFFLINE_WASM_THREADS, 1);
+  assert.equal(OFFLINE_WASM_PROXY, false);
 });
 
 test("only resolves pinned, allowlisted offline model assets", () => {

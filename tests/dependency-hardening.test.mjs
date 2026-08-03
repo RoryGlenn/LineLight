@@ -153,5 +153,7 @@ test("production prepares the q8 offline pack before WASM initialization", async
   const workerSource = await readFile(clientWorker, "utf8");
   assert.match(workerSource, /Downloading the included neural voice model/u);
   assert.match(workerSource, new RegExp(basename(clientWasm)));
+  assert.match(workerSource, /\.numThreads\s*=\s*1/u);
+  assert.match(workerSource, /\.proxy\s*=\s*!1/u);
   assert.doesNotMatch(workerSource, /Testing the voice on this device/u);
 });
