@@ -7,6 +7,7 @@ import {
 } from "./speech-token";
 import { OFFLINE_MODEL_ROUTE_BASE } from "../app/offline-model-manifest.mjs";
 import { handleOfflineModelRequest } from "./offline-model.mjs";
+import { isOfflineSpeechWorkerAsset } from "./offline-speech-asset.mjs";
 
 interface Env extends SpeechEnvironment {
   ASSETS: Fetcher;
@@ -56,6 +57,10 @@ const worker = {
       return withCrossOriginIsolation(
         await handleOfflineModelRequest(request),
       );
+    }
+
+    if (isOfflineSpeechWorkerAsset(url.pathname)) {
+      return withCrossOriginIsolation(await env.ASSETS.fetch(request));
     }
 
     if (url.pathname === "/_vinext/image") {
