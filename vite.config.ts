@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
 import hostingConfig from "./.openai/hosting.json" with { type: "json" };
 import { sites } from "./build/sites-vite-plugin.ts";
+import { OFFLINE_SPEECH_WORKER_ROUTE } from "./worker/offline-speech-asset.mjs";
 
 const SITE_CREATOR_PLACEHOLDER_DATABASE_ID =
   "00000000-0000-4000-8000-000000000000";
@@ -18,6 +19,13 @@ const isCodexSeatbeltSandbox = process.env.CODEX_SANDBOX === "seatbelt";
 const localBindingConfig = {
   main: "./worker/index.ts",
   compatibility_flags: ["nodejs_compat"],
+  assets: {
+    binding: "ASSETS",
+    // A cross-origin-isolated page can only initialize a dedicated Worker
+    // whose own response opts into COEP. Keep all other static assets on the
+    // platform's direct-serving fast path.
+    run_worker_first: [OFFLINE_SPEECH_WORKER_ROUTE],
+  },
   d1_databases: d1
     ? [
         {
