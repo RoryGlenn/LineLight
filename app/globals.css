@@ -846,7 +846,7 @@ input:focus-visible {
 }
 
 .reading-page {
-  width: min(780px, calc(100% - 80px));
+  width: min(1080px, calc(100% - 80px));
   min-height: calc(100dvh - 68px);
   margin: 0 auto;
   padding: 76px 0 210px;
@@ -883,9 +883,15 @@ input:focus-visible {
 }
 
 .reading-copy {
+  width: min(100%, var(--reader-measure));
+  margin-inline: auto;
   font-size: var(--reader-size);
+  letter-spacing: calc(
+    var(--reader-letter-spacing) + var(--reader-font-letter-spacing, 0em)
+  );
   line-height: var(--reader-leading);
   text-wrap: pretty;
+  word-spacing: var(--reader-word-spacing);
 }
 
 .reading-page.font-serif .reading-copy {
@@ -895,22 +901,42 @@ input:focus-visible {
 }
 
 .reading-page.font-sans .reading-copy {
+  --reader-font-letter-spacing: 0.018em;
   font-family: "Avenir Next", Avenir, "Trebuchet MS", Arial, sans-serif;
-  letter-spacing: 0.018em;
 }
 
 .reading-page.font-system .reading-copy {
+  --reader-font-letter-spacing: 0.01em;
   font-family:
     system-ui,
     -apple-system,
     BlinkMacSystemFont,
     "Segoe UI",
     sans-serif;
-  letter-spacing: 0.01em;
 }
 
 .reading-copy p {
-  margin: 0 0 1.45em;
+  margin: 0 0 var(--reader-paragraph-spacing);
+}
+
+.reading-copy [data-focus-token] {
+  transition: opacity 120ms ease;
+}
+
+.focus-window-active .reading-copy [data-focus-token] {
+  opacity: 0.18;
+}
+
+.focus-window-active .reading-copy .focus-window-visible {
+  opacity: 1;
+}
+
+.theme-dark .focus-window-active .reading-copy [data-focus-token] {
+  opacity: 0.25;
+}
+
+.theme-dark .focus-window-active .reading-copy .focus-window-visible {
+  opacity: 1;
 }
 
 .spoken-word {
@@ -1760,6 +1786,10 @@ input:focus-visible {
   grid-template-columns: repeat(3, 1fr);
 }
 
+.segmented.four {
+  grid-template-columns: repeat(4, 1fr);
+}
+
 .segmented.two {
   grid-template-columns: repeat(2, 1fr);
 }
@@ -1787,19 +1817,61 @@ input:focus-visible {
 
 .range-setting > span {
   display: flex;
+  align-items: baseline;
   justify-content: space-between;
+  gap: 12px;
   color: var(--muted-strong);
   font-size: 11px;
 }
 
 .range-setting strong {
   color: var(--accent);
+  text-align: right;
 }
 
 .range-setting input {
   width: 100%;
   margin: 11px 0 0;
   accent-color: var(--accent);
+}
+
+.setting-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.55;
+}
+
+.reset-layout-button {
+  width: 100%;
+  min-height: 40px;
+  margin-top: 20px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--paper);
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.focus-line-setting {
+  display: grid;
+  gap: 10px;
+  margin-top: 20px;
+}
+
+.focus-line-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--muted-strong);
+  font-size: 11px;
+}
+
+.focus-line-heading span {
+  color: var(--accent);
+  font-weight: 700;
 }
 
 .theme-choices {
@@ -2310,6 +2382,10 @@ input:focus-visible {
   .settings-scroll,
   .bookmarks-scroll {
     padding: 20px;
+  }
+
+  .segmented.four {
+    grid-template-columns: repeat(2, 1fr);
   }
 
   .player-content {
