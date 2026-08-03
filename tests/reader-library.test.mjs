@@ -7,6 +7,7 @@ import {
   ACTIVE_DOCUMENT_ID_KEY,
   DOCUMENT_STORE,
   LEGACY_ACTIVE_DOCUMENT_KEY,
+  READER_DATABASE_VERSION,
   STATE_STORE,
   calculateLibraryProgress,
   createReaderLibrary,
@@ -80,7 +81,11 @@ test("migrates the legacy active document into the private library", async () =>
   ]);
   assert.deepEqual(await library.getDocument("legacy"), legacyDocument);
 
-  const migratedDatabase = await openDatabase(indexedDB, databaseName, 2);
+  const migratedDatabase = await openDatabase(
+    indexedDB,
+    databaseName,
+    READER_DATABASE_VERSION,
+  );
   const readTransaction = migratedDatabase.transaction(
     [DOCUMENT_STORE, STATE_STORE],
     "readonly",
@@ -131,11 +136,27 @@ test("adds, opens, renames, and removes independent documents", async () => {
   assert.equal(renamed.document.title, "Renamed");
   assert.equal((await library.getDocument("one")).title, "Renamed");
 
+  const navigation = {
+    version: 1,
+    bookmarks: [{ id: "bookmark-one", name: "Return here", tokenIndex: 3 }],
+    history: [{ tokenIndex: 0 }],
+  };
+  await library.saveNavigation("one", navigation);
+  assert.deepEqual(await library.getNavigation("one"), navigation);
+
   await library.removeDocument("one");
   snapshot = await library.load();
-  assert.deepEqual(snapshot.entries.map((entry) => entry.id), ["two"]);
+  assert.deepEqual(
+    snapshot.entries.map((entry) => entry.id),
+    ["two"],
+  );
   assert.equal(snapshot.activeDocumentId, null);
   assert.equal(await library.getDocument("one"), null);
+  assert.deepEqual(await library.getNavigation("one"), {
+    version: 1,
+    bookmarks: [],
+    history: [],
+  });
 });
 
 test("filters lightweight library metadata and calculates saved progress", () => {
