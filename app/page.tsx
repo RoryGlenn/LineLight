@@ -1204,9 +1204,7 @@ export default function Home() {
           error instanceof Error
             ? error.message
             : "The included offline voice could not be prepared.";
-        const displayMessage = automatic
-          ? "The included offline voice is not available yet. Reconnect and press Play to try again."
-          : message;
+        const displayMessage = message;
         setOfflineInstallLabel(displayMessage);
         setNotice(
           automatic

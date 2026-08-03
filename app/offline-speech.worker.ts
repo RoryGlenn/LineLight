@@ -6,8 +6,10 @@ import {
   LEGACY_OFFLINE_MODEL_URLS,
   OFFLINE_MODEL_BYTES,
   OFFLINE_MODEL_DTYPE,
+  OFFLINE_MODEL_FILES,
   OFFLINE_MODEL_ID,
   OFFLINE_MODEL_LOCAL_PATH,
+  OFFLINE_MODEL_RUNTIME,
   OFFLINE_MODEL_URLS,
   OFFLINE_VOICES,
   OFFLINE_VOICE_BYTES,
@@ -17,6 +19,7 @@ import {
   TRANSFORMERS_CACHE_NAME,
   type OfflineVoiceId,
 } from "./offline-speech-config";
+import { ensureCachedOfflineAsset } from "./offline-pack-installer.mjs";
 import {
   buildWordPhonemeBatch,
   buildPhonemeWeightedBoundaries,
@@ -77,28 +80,6 @@ function postProgress(
   });
 }
 
-async function preferredRuntimeDevice(): Promise<KokoroDevice> {
-  const gpu = (
-    navigator as Navigator & {
-      gpu?: {
-        requestAdapter(options?: {
-          powerPreference?: "low-power" | "high-performance";
-        }): Promise<unknown | null>;
-      };
-    }
-  ).gpu;
-  if (!gpu) return "wasm";
-
-  try {
-    const adapter = await gpu.requestAdapter({
-      powerPreference: "high-performance",
-    });
-    return adapter ? "webgpu" : "wasm";
-  } catch {
-    return "wasm";
-  }
-}
-
 async function disposeModel() {
   if (!tts) return;
   await tts.model.dispose();
@@ -142,8 +123,7 @@ async function loadModel(
 ) {
   if (tts) return tts;
 
-  const selectedDevice =
-    preferredDevice ?? (await preferredRuntimeDevice());
+  const selectedDevice = preferredDevice ?? OFFLINE_MODEL_RUNTIME;
   const wasmBackend = transformersEnv.backends.onnx.wasm;
   if (
     selectedDevice === "wasm" &&
@@ -214,6 +194,52 @@ async function loadModel(
   return tts;
 }
 
+const MODEL_DOWNLOAD_PROGRESS = [2, 5, 8, 92] as const;
+
+function modelAssetLabel(file: string) {
+  return file.endsWith(".onnx")
+    ? "The included neural voice model"
+    : "The included voice setup";
+}
+
+async function installModelFiles(id: number) {
+  const modelCache = await caches.open(TRANSFORMERS_CACHE_NAME);
+
+  for (let index = 0; index < OFFLINE_MODEL_URLS.length; index += 1) {
+    const sourceUrl = OFFLINE_MODEL_URLS[index];
+    const legacyUrl = LEGACY_OFFLINE_MODEL_URLS[index];
+    const file = OFFLINE_MODEL_FILES[index];
+    const targetProgress = MODEL_DOWNLOAD_PROGRESS[index] ?? 92;
+    const cached =
+      (await modelCache.match(sourceUrl)) ??
+      (await modelCache.match(legacyUrl));
+
+    if (!cached) {
+      postProgress(
+        id,
+        index === 0 ? 0 : (MODEL_DOWNLOAD_PROGRESS[index - 1] ?? 0),
+        file.endsWith(".onnx")
+          ? "Downloading the included neural voice model…"
+          : "Downloading the included voice setup…",
+      );
+      await ensureCachedOfflineAsset({
+        cache: modelCache,
+        cacheUrl: sourceUrl,
+        label: modelAssetLabel(file),
+        sourceUrl,
+      });
+    }
+
+    postProgress(
+      id,
+      targetProgress,
+      file.endsWith(".onnx")
+        ? "Included neural voice model downloaded."
+        : "Included voice setup downloaded.",
+    );
+  }
+}
+
 async function installVoices(id: number) {
   const voiceCache = await caches.open(KOKORO_VOICE_CACHE_NAME);
 
@@ -222,13 +248,12 @@ async function installVoices(id: number) {
     const cacheUrl = OFFLINE_VOICE_CACHE_URLS[index];
     const cached = await voiceCache.match(cacheUrl);
     if (!cached) {
-      const response = await fetch(sourceUrl);
-      if (!response.ok) {
-        throw new Error(
-          `The included ${OFFLINE_VOICES[index].label} voice could not be prepared.`,
-        );
-      }
-      await voiceCache.put(cacheUrl, response);
+      await ensureCachedOfflineAsset({
+        cache: voiceCache,
+        cacheUrl,
+        label: `The included ${OFFLINE_VOICES[index].label} voice`,
+        sourceUrl,
+      });
     }
 
     const voiceProgress =
@@ -323,23 +348,14 @@ async function handleRequest(message: RequestMessage) {
     let result: unknown;
     if (message.type === "install") {
       postProgress(id, 0, "Preparing LineLight's included offline voice…");
-      await loadModel(id, {
-        preferredDevice: message.device,
-      });
+      await installModelFiles(id);
       await installVoices(id);
-      postProgress(id, 98, "Testing the voice on this device…");
-      await generateSpeech(
-        id,
-        "LineLight is ready.",
-        OFFLINE_VOICES[0].value,
-        1,
-        true,
-        message.device,
-      );
+      postProgress(id, 99, "Verifying the included offline voices…");
+      await assertOfflineFilesAvailable(OFFLINE_VOICES[0].value);
       transformersEnv.allowLocalModels = true;
       transformersEnv.allowRemoteModels = false;
       postProgress(id, 100, "Offline voices are ready.");
-      result = { device: activeDevice };
+      result = { device: OFFLINE_MODEL_RUNTIME };
     } else {
       if (!message.text.trim()) {
         throw new Error("There is no text left to narrate.");

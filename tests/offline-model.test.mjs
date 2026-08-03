@@ -8,8 +8,10 @@ import {
   restoreNarrationPreference,
 } from "../app/narration-defaults.mjs";
 import {
+  OFFLINE_MODEL_DTYPE,
   OFFLINE_MODEL_REVISION,
   OFFLINE_MODEL_ROUTE_PREFIX,
+  OFFLINE_MODEL_RUNTIME,
   resolveOfflineModelRequest,
 } from "../app/offline-model-manifest.mjs";
 import { handleOfflineModelRequest } from "../worker/offline-model.mjs";
@@ -49,6 +51,11 @@ test("preserves explicit narration choices after preference migration", () => {
 test("never silently falls back from offline narration to browser speech", () => {
   assert.equal(allowsDeviceFallback("offline"), false);
   assert.equal(allowsDeviceFallback("azure"), true);
+});
+
+test("pairs the included q8 model with the compatible WASM runtime", () => {
+  assert.equal(OFFLINE_MODEL_DTYPE, "q8");
+  assert.equal(OFFLINE_MODEL_RUNTIME, "wasm");
 });
 
 test("only resolves pinned, allowlisted offline model assets", () => {
