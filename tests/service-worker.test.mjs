@@ -2,6 +2,10 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import vm from "node:vm";
+import {
+  SERVICE_WORKER_URL,
+  configureServiceWorker,
+} from "../app/service-worker-registration.mjs";
 
 const SERVICE_WORKER_PATH = "public/sw-v7.js";
 
@@ -99,10 +103,54 @@ async function runFetch(listener, request) {
   return responsePromise;
 }
 
-test("the app registers the versioned service worker at the root scope", async () => {
+test("the app uses the shared service worker registration policy", async () => {
   const pageSource = await readFile("app/page.tsx", "utf8");
 
-  assert.match(pageSource, /serviceWorker\.register\("\/sw-v7\.js"\)/);
+  assert.match(pageSource, /configureServiceWorker\(navigator\.serviceWorker/);
+  assert.match(pageSource, /development: import\.meta\.env\.DEV/);
+  assert.equal(SERVICE_WORKER_URL, "/sw-v7.js");
+});
+
+test("development unregisters stale workers instead of intercepting Vite", async () => {
+  const unregistered = [];
+  let registeredUrl;
+  const serviceWorker = {
+    async getRegistrations() {
+      return ["/sw.js", "/sw-v7.js"].map((url) => ({
+        async unregister() {
+          unregistered.push(url);
+          return true;
+        },
+      }));
+    },
+    async register(url) {
+      registeredUrl = url;
+    },
+  };
+
+  await configureServiceWorker(serviceWorker, { development: true });
+
+  assert.deepEqual(unregistered, ["/sw.js", "/sw-v7.js"]);
+  assert.equal(registeredUrl, undefined);
+});
+
+test("production registers the versioned worker", async () => {
+  let registrationsRead = false;
+  let registeredUrl;
+  const serviceWorker = {
+    async getRegistrations() {
+      registrationsRead = true;
+      return [];
+    },
+    async register(url) {
+      registeredUrl = url;
+    },
+  };
+
+  await configureServiceWorker(serviceWorker, { development: false });
+
+  assert.equal(registrationsRead, false);
+  assert.equal(registeredUrl, "/sw-v7.js");
 });
 
 test("service worker replaces stale shell caches without touching model data", async () => {

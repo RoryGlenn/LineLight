@@ -95,6 +95,7 @@ import {
   pushPositionHistory,
   resolveStoredPosition,
 } from "./reader-navigation.mjs";
+import { configureServiceWorker } from "./service-worker-registration.mjs";
 
 type DocumentKind = "demo" | "pdf" | "epub" | "txt";
 type HighlightMode = "both" | "word" | "sentence";
@@ -981,7 +982,9 @@ export default function Home() {
       });
 
     if ("serviceWorker" in navigator) {
-      navigator.serviceWorker.register("/sw-v7.js").catch(() => undefined);
+      configureServiceWorker(navigator.serviceWorker, {
+        development: import.meta.env.DEV,
+      }).catch(() => undefined);
     }
 
     isOfflineVoicePackInstalled()
