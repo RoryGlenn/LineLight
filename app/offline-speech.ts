@@ -72,6 +72,7 @@ type PendingRequest = {
   removeAbortListener?: () => void;
   message: WorkerRequestPayload;
   attemptedWasm: boolean;
+  lastProgress: number;
 };
 
 export class OfflineSpeechError extends Error {
@@ -85,6 +86,21 @@ let worker: Worker | null = null;
 let nextRequestId = 1;
 let forceWasm = false;
 const pendingRequests = new Map<number, PendingRequest>();
+
+function reportProgress(
+  pending: PendingRequest,
+  progress: OfflineInstallProgress,
+) {
+  const normalizedProgress = Math.min(
+    100,
+    Math.max(pending.lastProgress, Math.round(progress.progress)),
+  );
+  pending.lastProgress = normalizedProgress;
+  pending.onProgress?.({
+    progress: normalizedProgress,
+    label: progress.label,
+  });
+}
 
 function terminateWorker(reason = "Offline narration was stopped.") {
   worker?.terminate();
@@ -120,7 +136,7 @@ function getWorker() {
       if (!pending) return;
 
       if (message.type === "progress") {
-        pending.onProgress?.({
+        reportProgress(pending, {
           progress: message.progress,
           label: message.label,
         });
@@ -136,8 +152,8 @@ function getWorker() {
         const retryRequests = Array.from(pendingRequests.entries());
         for (const [, retryPending] of retryRequests) {
           retryPending.attemptedWasm = true;
-          retryPending.onProgress?.({
-            progress: 92,
+          reportProgress(retryPending, {
+            progress: 64,
             label: "WebGPU was unavailable. Switching to compatibility mode…",
           });
         }
@@ -209,6 +225,7 @@ function requestWorker<T>(
       onProgress,
       message,
       attemptedWasm: forceWasm,
+      lastProgress: 0,
       removeAbortListener: signal
         ? () => signal.removeEventListener("abort", handleAbort)
         : undefined,
@@ -296,15 +313,17 @@ export function synthesizeOfflineSpeech({
   voice,
   rate,
   signal,
+  onProgress,
 }: {
   text: string;
   voice: OfflineVoiceId;
   rate: number;
   signal?: AbortSignal;
+  onProgress?: (progress: OfflineInstallProgress) => void;
 }) {
   return requestWorker<OfflineSpeechResult>(
     { type: "synthesize", text, voice, rate },
-    { signal },
+    { signal, onProgress },
   );
 }
 

@@ -12,7 +12,9 @@ function memoryCache({ failPut = false, retainPut = true } = {}) {
     },
     async put(key, response) {
       if (failPut) throw new Error("quota exceeded");
-      if (retainPut) entries.set(key, response);
+      const retainedResponse = response.clone();
+      await response.arrayBuffer();
+      if (retainPut) entries.set(key, retainedResponse);
     },
   };
 }
@@ -49,6 +51,36 @@ test("downloads an offline asset once under its runtime cache key", async () => 
     false,
   );
   assert.equal(fetchCount, 1);
+});
+
+test("reports byte-level progress while the browser stores an asset", async () => {
+  const cache = memoryCache();
+  const snapshots = [];
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new Uint8Array([1, 2]));
+      controller.enqueue(new Uint8Array([3, 4, 5, 6]));
+      controller.close();
+    },
+  });
+
+  await ensureCachedOfflineAsset({
+    cache,
+    cacheUrl: "https://runtime.example/model.onnx",
+    fetchAsset: async () =>
+      new Response(body, {
+        headers: { "Content-Length": "6" },
+      }),
+    label: "The included neural voice model",
+    onDownloadProgress: (snapshot) => snapshots.push(snapshot),
+    sourceUrl: "/offline-model/model.onnx",
+  });
+
+  assert.deepEqual(snapshots, [
+    { done: false, loaded: 0, total: 6 },
+    { done: false, loaded: 2, total: 6 },
+    { done: true, loaded: 6, total: 6 },
+  ]);
 });
 
 test("reports download, storage, and retention failures precisely", async () => {
