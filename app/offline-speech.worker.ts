@@ -216,6 +216,7 @@ async function loadModel(
 }
 
 const MODEL_DOWNLOAD_PROGRESS = [2, 5, 8, 92] as const;
+const MODEL_DOWNLOAD_CHUNK_BYTES = 8 * 1024 * 1024;
 
 function modelAssetLabel(file: string) {
   return file.endsWith(".onnx")
@@ -249,6 +250,9 @@ async function installModelFiles(id: number) {
       await ensureCachedOfflineAsset({
         cache: modelCache,
         cacheUrl: sourceUrl,
+        expectedBytes: file.endsWith(".onnx")
+          ? OFFLINE_MODEL_BYTES
+          : undefined,
         label: modelAssetLabel(file),
         onDownloadProgress: ({
           loaded,
@@ -265,6 +269,9 @@ async function installModelFiles(id: number) {
             downloadLabel,
           );
         },
+        rangeChunkBytes: file.endsWith(".onnx")
+          ? MODEL_DOWNLOAD_CHUNK_BYTES
+          : undefined,
         sourceUrl,
       });
     }

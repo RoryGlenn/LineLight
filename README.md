@@ -62,7 +62,10 @@ the browser's Cache Storage and asks the browser to make that storage
 persistent. Browser storage can still be cleared or evicted; the settings panel
 prepares the included voice again if any required file is missing.
 The distributed license text is available at
-[`public/offline-voice-license.txt`](public/offline-voice-license.txt).
+[`public/offline-voice-license.txt`](public/offline-voice-license.txt). The
+browser keeps one durable model copy in Cache Storage; the first-party model
+route disables the browser's separate HTTP cache while retaining immutable CDN
+caching.
 
 ## Privacy
 
