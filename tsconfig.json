@@ -12,7 +12,7 @@
     "allowImportingTsExtensions": true,
     "resolveJsonModule": true,
     "isolatedModules": true,
-    "types": ["@cloudflare/workers-types"],
+    "types": ["@cloudflare/workers-types", "vite/client"],
     "jsx": "react-jsx",
     "incremental": true,
     "plugins": [
