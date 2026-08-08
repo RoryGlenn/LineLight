@@ -8,6 +8,7 @@ export async function ensureCachedOfflineAsset({
   cacheUrl,
   fetchAsset = fetch,
   label,
+  onDownloadProgress,
   sourceUrl,
 }) {
   if (await cache.match(cacheUrl)) return false;
@@ -26,6 +27,45 @@ export async function ensureCachedOfflineAsset({
     throw new Error(
       `${label} could not be downloaded (HTTP ${response?.status ?? "unknown"}).`,
     );
+  }
+
+  if (onDownloadProgress && response.body) {
+    const contentLength = Number(response.headers.get("content-length"));
+    const total =
+      Number.isFinite(contentLength) && contentLength > 0
+        ? contentLength
+        : null;
+    let loaded = 0;
+    let completed = false;
+
+    const reportProgress = (done = false) => {
+      if (completed) return;
+      if (done) completed = true;
+      onDownloadProgress({
+        done,
+        loaded,
+        total: total ?? (done ? loaded : null),
+      });
+    };
+
+    reportProgress();
+    const trackedBody = response.body.pipeThrough(
+      new TransformStream({
+        transform(chunk, controller) {
+          loaded += chunk.byteLength;
+          reportProgress(total !== null && loaded >= total);
+          controller.enqueue(chunk);
+        },
+        flush() {
+          reportProgress(true);
+        },
+      }),
+    );
+    response = new Response(trackedBody, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    });
   }
 
   try {

@@ -12,7 +12,6 @@ import {
   OFFLINE_MODEL_RUNTIME,
   OFFLINE_MODEL_URLS,
   OFFLINE_VOICES,
-  OFFLINE_VOICE_BYTES,
   OFFLINE_VOICE_CACHE_URLS,
   OFFLINE_VOICE_SOURCE_URLS,
   OFFLINE_WASM_PROXY,
@@ -71,6 +70,10 @@ if (wasmBackend) {
   wasmBackend.proxy = OFFLINE_WASM_PROXY;
 }
 const canceledRequests = new Set<number>();
+const lastProgressByRequest = new Map<
+  number,
+  { label: string; progress: number }
+>();
 let tts: KokoroTTS | null = null;
 let activeDevice: KokoroDevice = "wasm";
 let operationQueue = Promise.resolve();
@@ -81,10 +84,25 @@ function postProgress(
   progress: number,
   label: string,
 ) {
+  const normalizedProgress = Math.min(
+    100,
+    Math.max(0, Math.round(progress)),
+  );
+  const previous = lastProgressByRequest.get(id);
+  if (
+    previous?.progress === normalizedProgress &&
+    previous.label === label
+  ) {
+    return;
+  }
+  lastProgressByRequest.set(id, {
+    label,
+    progress: normalizedProgress,
+  });
   workerScope.postMessage({
     id,
     type: "progress",
-    progress: Math.min(100, Math.max(0, Math.round(progress))),
+    progress: normalizedProgress,
     label,
   });
 }
@@ -130,7 +148,10 @@ async function loadModel(
     preferredDevice?: KokoroDevice;
   },
 ) {
-  if (tts) return tts;
+  if (tts) {
+    postProgress(id, 62, "The included voice model is loaded.");
+    return tts;
+  }
 
   const selectedDevice = preferredDevice ?? OFFLINE_MODEL_RUNTIME;
   transformersEnv.localModelPath = new URL(
@@ -164,14 +185,15 @@ async function loadModel(
       (sum, value) => sum + value,
       0,
     );
-    const modelProgress =
+    const modelFraction =
       knownTotal > 0
-        ? (knownLoaded / Math.max(knownTotal, OFFLINE_MODEL_BYTES)) * 92
-        : (event.progress ?? 0) * 0.92;
+        ? knownLoaded / Math.max(knownTotal, OFFLINE_MODEL_BYTES)
+        : (event.progress ?? 0) / 100;
+    const modelProgress = 8 + Math.min(1, modelFraction) * 54;
     const fileLabel = event.file?.includes("onnx/")
       ? "Loading the included neural voice model…"
       : "Preparing the included voice model…";
-    postProgress(id, Math.min(92, modelProgress), fileLabel);
+    postProgress(id, Math.min(62, modelProgress), fileLabel);
   };
 
   const createModel = (device: KokoroDevice) =>
@@ -189,6 +211,7 @@ async function loadModel(
     await disposeModel().catch(() => undefined);
     throw new WebGpuUnavailableError(error);
   }
+  postProgress(id, 62, "The included voice model is loaded.");
   return tts;
 }
 
@@ -213,17 +236,35 @@ async function installModelFiles(id: number) {
       (await modelCache.match(legacyUrl));
 
     if (!cached) {
+      const startProgress =
+        index === 0 ? 0 : (MODEL_DOWNLOAD_PROGRESS[index - 1] ?? 0);
+      const downloadLabel = file.endsWith(".onnx")
+        ? "Downloading the included neural voice model…"
+        : "Downloading the included voice setup…";
       postProgress(
         id,
-        index === 0 ? 0 : (MODEL_DOWNLOAD_PROGRESS[index - 1] ?? 0),
-        file.endsWith(".onnx")
-          ? "Downloading the included neural voice model…"
-          : "Downloading the included voice setup…",
+        startProgress,
+        downloadLabel,
       );
       await ensureCachedOfflineAsset({
         cache: modelCache,
         cacheUrl: sourceUrl,
         label: modelAssetLabel(file),
+        onDownloadProgress: ({
+          loaded,
+          total,
+        }: {
+          loaded: number;
+          total: number | null;
+        }) => {
+          if (!total) return;
+          const fileProgress = Math.min(1, loaded / total);
+          postProgress(
+            id,
+            startProgress + fileProgress * (targetProgress - startProgress),
+            downloadLabel,
+          );
+        },
         sourceUrl,
       });
     }
@@ -244,23 +285,41 @@ async function installVoices(id: number) {
   for (let index = 0; index < OFFLINE_VOICE_SOURCE_URLS.length; index += 1) {
     const sourceUrl = OFFLINE_VOICE_SOURCE_URLS[index];
     const cacheUrl = OFFLINE_VOICE_CACHE_URLS[index];
+    const startProgress =
+      92 + (index * 6) / OFFLINE_VOICE_SOURCE_URLS.length;
+    const targetProgress =
+      92 + ((index + 1) * 6) / OFFLINE_VOICE_SOURCE_URLS.length;
+    const downloadLabel =
+      `Adding included ${OFFLINE_VOICES[index].label}…`;
     const cached = await voiceCache.match(cacheUrl);
     if (!cached) {
       await ensureCachedOfflineAsset({
         cache: voiceCache,
         cacheUrl,
         label: `The included ${OFFLINE_VOICES[index].label} voice`,
+        onDownloadProgress: ({
+          loaded,
+          total,
+        }: {
+          loaded: number;
+          total: number | null;
+        }) => {
+          if (!total) return;
+          const voiceProgress = Math.min(1, loaded / total);
+          postProgress(
+            id,
+            startProgress + voiceProgress * (targetProgress - startProgress),
+            downloadLabel,
+          );
+        },
         sourceUrl,
       });
     }
 
-    const voiceProgress =
-      ((index + 1) * OFFLINE_VOICE_BYTES) /
-      (OFFLINE_VOICE_SOURCE_URLS.length * OFFLINE_VOICE_BYTES);
     postProgress(
       id,
-      92 + voiceProgress * 6,
-      `Adding included ${OFFLINE_VOICES[index].label}…`,
+      targetProgress,
+      downloadLabel,
     );
   }
 }
@@ -292,15 +351,18 @@ async function generateSpeech(
   offlineOnly: boolean,
   preferredDevice?: KokoroDevice,
 ) {
+  postProgress(id, 2, "Checking the included offline voice…");
   if (offlineOnly && !verifiedOfflineVoices.has(voice)) {
     await assertOfflineFilesAvailable(voice);
     verifiedOfflineVoices.add(voice);
   }
+  postProgress(id, 7, "Preparing the included voice model…");
   const model = await loadModel(id, {
     preferredDevice,
   });
 
   try {
+    postProgress(id, 68, "Generating narration audio…");
     const startedAt = performance.now();
     const [audio, phonemeCounts] = await Promise.all([
       model.generate(text, {
@@ -311,14 +373,17 @@ async function generateSpeech(
     ]);
     const synthesisMilliseconds = performance.now() - startedAt;
     const durationSeconds = audio.audio.length / audio.sampling_rate;
+    const audioData = audio.toWav();
+    const boundaries = buildPhonemeWeightedBoundaries(
+      text,
+      durationSeconds,
+      phonemeCounts,
+    );
+    postProgress(id, 94, "Narration audio is generated.");
     return {
-      audioData: audio.toWav(),
+      audioData,
       audioDurationSeconds: durationSeconds,
-      boundaries: buildPhonemeWeightedBoundaries(
-        text,
-        durationSeconds,
-        phonemeCounts,
-      ),
+      boundaries,
       device: activeDevice,
       synthesisMilliseconds,
       wasmThreads:
@@ -340,7 +405,10 @@ async function handleRequest(message: RequestMessage) {
   }
 
   const { id } = message;
-  if (canceledRequests.delete(id)) return;
+  if (canceledRequests.delete(id)) {
+    lastProgressByRequest.delete(id);
+    return;
+  }
 
   try {
     let result: unknown;
@@ -396,6 +464,8 @@ async function handleRequest(message: RequestMessage) {
           ? error.message
           : "The offline voice could not continue.",
     });
+  } finally {
+    lastProgressByRequest.delete(id);
   }
 }
 

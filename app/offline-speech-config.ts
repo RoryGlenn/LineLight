@@ -40,7 +40,7 @@ export const OFFLINE_VOICES = [
   {
     value: "am_michael",
     label: "Michael",
-    description: "US English · calm",
+    description: "US English · deep and conversational",
   },
   {
     value: "bf_emma",

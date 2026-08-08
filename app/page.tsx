@@ -12,11 +12,11 @@ import {
   useRef,
   useState,
 } from "react";
-import JSZip from "jszip";
 import {
   DocumentOutline,
   type PdfOutlineItem,
 } from "./document-outline";
+import { parseEpubFile } from "./epub-parser.mjs";
 import { PdfPageView, type PdfPageLayout } from "./pdf-page-view";
 import {
   buildPdfOutline,
@@ -60,6 +60,12 @@ import {
   allowsDeviceFallback,
   restoreNarrationPreference,
 } from "./narration-defaults.mjs";
+import { normalizeNarrationReadiness } from "./narration-readiness.mjs";
+import {
+  PODCAST_HOST_PRESET,
+  applyNarratorPreset,
+  isNarratorPresetActive,
+} from "./narrator-presets.mjs";
 import {
   DEFAULT_READER_LAYOUT,
   createReaderLayoutStyle,
@@ -111,6 +117,11 @@ type OfflineRuntimeInfo = {
   device: "webgpu" | "wasm";
   synthesisMilliseconds: number;
   wasmThreads: number | null;
+};
+
+type NarrationReadiness = {
+  progress: number;
+  label: string;
 };
 
 type BufferedSeekState = {
@@ -529,90 +540,8 @@ async function ensureStoredPdfOutline(
   }
 }
 
-function resolveZipPath(basePath: string, target: string) {
-  const parts = `${basePath}/${target}`.split("/");
-  const resolved: string[] = [];
-  parts.forEach((part) => {
-    if (!part || part === ".") return;
-    if (part === "..") resolved.pop();
-    else resolved.push(part);
-  });
-  return resolved.join("/");
-}
-
 async function parseEpub(file: File): Promise<ReaderDocument> {
-  const zip = await JSZip.loadAsync(await file.arrayBuffer());
-  const container = await zip.file("META-INF/container.xml")?.async("string");
-
-  if (!container) throw new Error("This EPUB is missing its book manifest.");
-
-  const parser = new DOMParser();
-  const containerXml = parser.parseFromString(container, "application/xml");
-  const rootfile = containerXml
-    .querySelector("rootfile")
-    ?.getAttribute("full-path");
-  if (!rootfile) throw new Error("The EPUB reading order could not be found.");
-
-  const packageText = await zip.file(rootfile)?.async("string");
-  if (!packageText) throw new Error("The EPUB package could not be opened.");
-
-  const packageXml = parser.parseFromString(packageText, "application/xml");
-  const basePath = rootfile.includes("/")
-    ? rootfile.slice(0, rootfile.lastIndexOf("/"))
-    : "";
-  const manifest = new Map<string, string>();
-  packageXml.querySelectorAll("manifest item").forEach((item) => {
-    const id = item.getAttribute("id");
-    const href = item.getAttribute("href");
-    if (id && href) manifest.set(id, resolveZipPath(basePath, decodeURI(href)));
-  });
-
-  const paragraphs: string[] = [];
-  const spineIds = Array.from(packageXml.querySelectorAll("spine itemref"))
-    .map((item) => item.getAttribute("idref"))
-    .filter((value): value is string => Boolean(value));
-
-  for (const id of spineIds) {
-    const path = manifest.get(id);
-    if (!path) continue;
-    const chapterText = await zip.file(path)?.async("string");
-    if (!chapterText) continue;
-    const chapter = parser.parseFromString(
-      chapterText,
-      "application/xhtml+xml",
-    );
-    chapter
-      .querySelectorAll("script, style, nav, svg")
-      .forEach((element) => element.remove());
-    const blocks = Array.from(
-      chapter.querySelectorAll("h1, h2, h3, h4, p, blockquote, li"),
-    )
-      .map((element) => cleanText(element.textContent ?? ""))
-      .filter((text) => text.length > 0);
-    paragraphs.push(...blocks);
-  }
-
-  if (!paragraphs.length) {
-    throw new Error("No readable text was found in this EPUB.");
-  }
-
-  const title =
-    cleanText(
-      packageXml.querySelector("metadata title, dc\\:title")?.textContent ?? "",
-    ) || filenameWithoutExtension(file.name);
-  const author =
-    cleanText(
-      packageXml.querySelector("metadata creator, dc\\:creator")?.textContent ??
-        "",
-    ) || "EPUB book";
-
-  return {
-    id: `epub-${Date.now()}`,
-    title,
-    author,
-    kind: "epub",
-    paragraphs,
-  };
+  return (await parseEpubFile(file)) as ReaderDocument;
 }
 
 async function parseText(file: File): Promise<ReaderDocument> {
@@ -728,6 +657,11 @@ export default function Home() {
   const [activeWord, setActiveWord] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isPreparingSpeech, setIsPreparingSpeech] = useState(false);
+  const [narrationReadiness, setNarrationReadiness] =
+    useState<NarrationReadiness>({
+      progress: 0,
+      label: "Preparing narration…",
+    });
   const [followPaused, setFollowPaused] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -825,9 +759,19 @@ export default function Home() {
   const supportsPageView =
     readerDocument.kind === "pdf" &&
     Boolean(readerDocument.pdfData?.length && readerDocument.pdfPages?.length);
+  const podcastHostPresetActive = isNarratorPresetActive(settings);
   const progress = model.tokens.length
     ? Math.round(((activeWord + 1) / model.tokens.length) * 100)
     : 0;
+  const activeVoiceReadiness =
+    offlinePackState === "installing"
+      ? normalizeNarrationReadiness(
+          offlineInstallProgress,
+          offlineInstallLabel,
+        )
+      : isPreparingSpeech
+        ? narrationReadiness
+        : null;
   const remainingSeconds =
     ((model.tokens.length - activeWord) / (180 * settings.rate)) * 60;
 
@@ -1741,11 +1685,41 @@ export default function Home() {
       activeWordRef.current = safeIndex;
       setIsPlaying(false);
       setIsPreparingSpeech(true);
+      setNarrationReadiness(
+        normalizeNarrationReadiness(
+          1,
+          isOffline
+            ? "Checking the included offline voice…"
+            : "Connecting to the natural voice…",
+        ),
+      );
       setNotice(
         isOffline
           ? "Preparing a natural voice on this device…"
           : "Preparing a natural voice…",
       );
+
+      let waitingChunkStart: number | null = safeIndex;
+      const reportNarrationReadiness = (
+        chunkStart: number,
+        nextProgress: number,
+        label: string,
+      ) => {
+        if (
+          speechSessionRef.current !== sessionId ||
+          abortController.signal.aborted ||
+          waitingChunkStart !== chunkStart
+        ) {
+          return;
+        }
+        setNarrationReadiness((current) =>
+          normalizeNarrationReadiness(
+            nextProgress,
+            label,
+            current.progress,
+          ),
+        );
+      };
 
       type SpeechChunk = NonNullable<ReturnType<typeof buildSpeechChunk>>;
       type PreparedAudio = {
@@ -1786,12 +1760,26 @@ export default function Home() {
               voice: settings.offlineVoice,
               rate: settings.rate,
               signal: abortController.signal,
+              onProgress: ({ progress, label }) => {
+                reportNarrationReadiness(
+                  chunk.startIndex,
+                  progress,
+                  label,
+                );
+              },
             })
-          : await synthesizeAzureSpeech({
-              text: chunk.text,
-              voice: settings.azureVoice,
-              signal: abortController.signal,
-            });
+          : await (async () => {
+              reportNarrationReadiness(
+                chunk.startIndex,
+                34,
+                "Generating narration audio…",
+              );
+              return synthesizeAzureSpeech({
+                text: chunk.text,
+                voice: settings.azureVoice,
+                signal: abortController.signal,
+              });
+            })();
 
         if (abortController.signal.aborted) {
           throw new DOMException(
@@ -1799,6 +1787,12 @@ export default function Home() {
             "AbortError",
           );
         }
+
+        reportNarrationReadiness(
+          chunk.startIndex,
+          95,
+          "Loading narration audio…",
+        );
 
         const audio = new Audio();
         const audioUrl = URL.createObjectURL(
@@ -1811,7 +1805,18 @@ export default function Home() {
         audio.playbackRate = isOffline ? 1 : settings.rate;
         bufferedAudioUrlsRef.current.set(audio, audioUrl);
         audio.src = audioUrl;
+        const markAudioReady = () => {
+          reportNarrationReadiness(
+            chunk.startIndex,
+            100,
+            "Narration is fully loaded and ready.",
+          );
+        };
+        audio.addEventListener("canplay", markAudioReady, { once: true });
         audio.load();
+        if (audio.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA) {
+          markAudioReady();
+        }
 
         return { audio, synthesis };
       };
@@ -1956,6 +1961,7 @@ export default function Home() {
 
         audio.onplay = () => {
           if (speechSessionRef.current !== sessionId) return;
+          waitingChunkStart = null;
           setIsPreparingSpeech(false);
           setIsPlaying(true);
           setNotice("");
@@ -1999,8 +2005,15 @@ export default function Home() {
           }
 
           if (nextStatus === "pending") {
+            waitingChunkStart = chunk.nextIndex;
             setIsPlaying(false);
             setIsPreparingSpeech(true);
+            setNarrationReadiness(
+              normalizeNarrationReadiness(
+                3,
+                "Preparing the next passage…",
+              ),
+            );
             setNotice("Preparing the next passage…");
           }
 
@@ -2009,6 +2022,17 @@ export default function Home() {
             if (!nextChunk) {
               finishBufferedSpeech();
               return;
+            }
+            if (
+              waitingChunkStart === nextChunk.chunk.startIndex &&
+              nextChunk.prepared.audio.readyState >=
+                HTMLMediaElement.HAVE_FUTURE_DATA
+            ) {
+              reportNarrationReadiness(
+                nextChunk.chunk.startIndex,
+                100,
+                "Narration is fully loaded and ready.",
+              );
             }
             await playPreparedChunk(nextChunk.chunk, nextChunk.prepared);
           } catch (error) {
@@ -3021,7 +3045,12 @@ export default function Home() {
           </div>
         )}
 
-        <section className="player" aria-label="Narration controls">
+        <section
+          className={`player ${
+            activeVoiceReadiness ? "player-preparing-voice" : ""
+          }`}
+          aria-label="Narration controls"
+        >
           <div className="player-progress">
             <div>
               <span style={{ width: `${progress}%` }} />
@@ -3030,20 +3059,55 @@ export default function Home() {
 
           <div className="player-content">
             <div className="now-playing">
-              <div className="now-playing-mark" aria-hidden="true">
-                {isPreparingSpeech ? "…" : isPlaying ? "≋" : "¶"}
+              <div
+                className={`now-playing-mark ${
+                  activeVoiceReadiness ? "voice-readiness-mark" : ""
+                }`}
+                aria-hidden={activeVoiceReadiness ? undefined : true}
+                role={activeVoiceReadiness ? "progressbar" : undefined}
+                aria-label={
+                  activeVoiceReadiness
+                    ? "Narration voice readiness"
+                    : undefined
+                }
+                aria-valuemin={activeVoiceReadiness ? 0 : undefined}
+                aria-valuemax={activeVoiceReadiness ? 100 : undefined}
+                aria-valuenow={activeVoiceReadiness?.progress}
+                aria-valuetext={
+                  activeVoiceReadiness
+                    ? `${activeVoiceReadiness.progress}% — ${activeVoiceReadiness.label}`
+                    : undefined
+                }
+                title={activeVoiceReadiness?.label}
+              >
+                {activeVoiceReadiness
+                  ? `${activeVoiceReadiness.progress}%`
+                  : isPlaying
+                    ? "≋"
+                    : "¶"}
               </div>
-              <div>
-                <p>
-                  {isPreparingSpeech
-                    ? "Preparing natural voice"
+              <div className="now-playing-copy">
+                <p aria-live={activeVoiceReadiness ? "polite" : undefined}>
+                  {activeVoiceReadiness
+                    ? activeVoiceReadiness.label
                     : isPlaying
                       ? "Reading now"
                       : "Ready to read"}
                 </p>
                 <span>
-                  {activeToken?.text ?? "Start"} · {progress}%
+                  {activeVoiceReadiness
+                    ? `${activeVoiceReadiness.progress}% loaded`
+                    : `${activeToken?.text ?? "Start"} · ${progress}%`}
                 </span>
+                {activeVoiceReadiness && (
+                  <div className="voice-readiness-track" aria-hidden="true">
+                    <i
+                      style={{
+                        width: `${activeVoiceReadiness.progress}%`,
+                      }}
+                    />
+                  </div>
+                )}
               </div>
             </div>
 
@@ -3759,6 +3823,42 @@ export default function Home() {
 
               <fieldset>
                 <legend>Narration</legend>
+                <div className="narrator-presets" aria-label="Narrator presets">
+                  <button
+                    type="button"
+                    className={`narrator-preset ${
+                      podcastHostPresetActive
+                        ? "narrator-preset-selected"
+                        : ""
+                    }`}
+                    aria-pressed={podcastHostPresetActive}
+                    aria-describedby="podcast-host-description"
+                    onClick={() => {
+                      stopSpeech();
+                      setSettings(
+                        (current) =>
+                          applyNarratorPreset(current) as ReaderSettings,
+                      );
+                      setNotice(
+                        "Podcast host selected. It uses LineLight's included Michael voice at a relaxed pace.",
+                      );
+                    }}
+                  >
+                    <span className="narrator-preset-mark" aria-hidden="true">
+                      ≋
+                    </span>
+                    <span className="narrator-preset-copy">
+                      <strong>{PODCAST_HOST_PRESET.label}</strong>
+                      <small id="podcast-host-description">
+                        {PODCAST_HOST_PRESET.description}. An original LineLight
+                        preset, not an imitation of a real person.
+                      </small>
+                    </span>
+                    <span className="narrator-preset-action" aria-hidden="true">
+                      {podcastHostPresetActive ? "Selected" : "Use preset"}
+                    </span>
+                  </button>
+                </div>
                 <div
                   className="segmented three narration-source"
                   aria-label="Narration source"
