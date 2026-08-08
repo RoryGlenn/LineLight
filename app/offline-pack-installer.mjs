@@ -197,7 +197,7 @@ export async function ensureCachedOfflineAsset({
       cause.name === "QuotaExceededError";
     throw new Error(
       quotaExceeded
-        ? `The browser does not have enough site storage for ${label.toLowerCase()}. Free at least 100 MB and try again.`
+        ? `The browser does not have enough site storage for ${label.toLowerCase()}. Free at least 200 MB and try again.`
         : `The browser could not store ${label.toLowerCase()}. Check site storage permissions and try again.`,
       { cause },
     );

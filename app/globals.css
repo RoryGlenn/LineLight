@@ -916,6 +916,18 @@ input:focus-visible {
   height: 100%;
 }
 
+.pdf-page-placeholder {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: #fbfaf7;
+  color: #9a9288;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
 .pdf-text-layer {
   position: absolute;
   z-index: 2;
@@ -1076,6 +1088,11 @@ input:focus-visible {
 
 .reading-copy p {
   margin: 0 0 var(--reader-paragraph-spacing);
+}
+
+.focus-paragraph-shell {
+  min-width: 0;
+  contain: layout style;
 }
 
 .reading-copy [data-focus-token] {
