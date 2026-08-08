@@ -1,12 +1,26 @@
 "use client";
 
 import {
+  memo,
   type CSSProperties,
+  useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
-import type { PDFDocumentProxy } from "pdfjs-dist";
+import type {
+  PDFDocumentLoadingTask,
+  PDFDocumentProxy,
+  PDFPageProxy,
+  RenderTask,
+} from "pdfjs-dist";
+import { derivePdfPageWordStarts } from "./pdf-outline.mjs";
+import {
+  PDF_PAGE_OVERSCAN,
+  findPageIndexForWord,
+  selectVirtualizedIndices,
+} from "./reader-virtualization.mjs";
 
 export type PdfTextItemLayout = {
   text: string;
@@ -45,7 +59,7 @@ const WORD_PATTERN =
   /[\p{L}\p{N}]+(?:[’'-][\p{L}\p{N}]+)*|[^\s]/gu;
 const IS_WORD = /^[\p{L}\p{N}]/u;
 
-function PdfTextItem({
+const PdfTextItem = memo(function PdfTextItem({
   item,
   page,
   activeWord,
@@ -145,6 +159,108 @@ function PdfTextItem({
       </span>
     </span>
   );
+});
+
+function PdfRenderedPage({
+  documentProxy,
+  page,
+  activeWord,
+  activeSentence,
+  tokenSentences,
+  registerWord,
+  onSelectWord,
+  onRenderError,
+}: {
+  documentProxy: PDFDocumentProxy | null;
+  page: PdfPageLayout;
+  activeWord: number;
+  activeSentence: number;
+  tokenSentences: number[];
+  registerWord: PdfPageViewProps["registerWord"];
+  onSelectWord: PdfPageViewProps["onSelectWord"];
+  onRenderError: PdfPageViewProps["onRenderError"];
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [isRendered, setIsRendered] = useState(false);
+
+  useEffect(() => {
+    if (!documentProxy) return;
+    let cancelled = false;
+    let pageProxy: PDFPageProxy | undefined;
+    let renderTask: RenderTask | undefined;
+    const canvas = canvasRef.current;
+
+    const renderPage = async () => {
+      try {
+        pageProxy = await documentProxy.getPage(page.pageNumber);
+        if (cancelled) return;
+        const outputScale = Math.min(
+          2,
+          Math.max(1.25, window.devicePixelRatio || 1),
+        );
+        const viewport = pageProxy.getViewport({ scale: outputScale });
+        const context = canvas?.getContext("2d", { alpha: false });
+        if (!canvas || !context) return;
+
+        canvas.width = Math.ceil(viewport.width);
+        canvas.height = Math.ceil(viewport.height);
+        renderTask = pageProxy.render({
+          canvas,
+          canvasContext: context,
+          viewport,
+        });
+        await renderTask.promise;
+        if (!cancelled) setIsRendered(true);
+      } catch (error) {
+        if (
+          !cancelled &&
+          (!(error instanceof Error) ||
+            error.name !== "RenderingCancelledException")
+        ) {
+          onRenderError(
+            "The original PDF page could not be drawn. Focus view is still available.",
+          );
+        }
+      }
+    };
+
+    void renderPage();
+    return () => {
+      cancelled = true;
+      renderTask?.cancel();
+      pageProxy?.cleanup();
+      if (canvas) {
+        canvas.width = 0;
+        canvas.height = 0;
+      }
+    };
+  }, [documentProxy, onRenderError, page.pageNumber]);
+
+  return (
+    <>
+      <canvas ref={canvasRef} aria-hidden="true" />
+      <div className="pdf-text-layer">
+        {page.items.map((item, itemIndex) => (
+          <PdfTextItem
+            item={item}
+            page={page}
+            activeWord={activeWord}
+            activeSentence={activeSentence}
+            tokenSentences={tokenSentences}
+            registerWord={registerWord}
+            onSelectWord={onSelectWord}
+            key={`${page.pageNumber}-${itemIndex}`}
+          />
+        ))}
+      </div>
+      {!isRendered && (
+        <div className="pdf-page-loading" role="status">
+          <span aria-hidden="true">•••</span>
+          Drawing page {page.pageNumber}
+        </div>
+      )}
+    </>
+  );
 }
 
 export function PdfPageView({
@@ -158,62 +274,95 @@ export function PdfPageView({
   onSelectWord,
   onRenderError,
 }: PdfPageViewProps) {
-  const canvasRefs = useRef<Map<number, HTMLCanvasElement>>(new Map());
-  const [renderedPages, setRenderedPages] = useState(0);
+  const pageShellRefs = useRef<Map<number, HTMLElement>>(new Map());
+  const [documentProxy, setDocumentProxy] =
+    useState<PDFDocumentProxy | null>(null);
+  const [visiblePageIndices, setVisiblePageIndices] = useState<Set<number>>(
+    () => new Set([0]),
+  );
+  const pageWordStarts = useMemo(
+    () => derivePdfPageWordStarts(pages),
+    [pages],
+  );
+  const activePageIndex = findPageIndexForWord(pageWordStarts, activeWord);
+  const renderedPageIndices = useMemo(
+    () =>
+      new Set(
+        selectVirtualizedIndices(
+          visiblePageIndices,
+          pages.length,
+          activePageIndex,
+          PDF_PAGE_OVERSCAN,
+        ),
+      ),
+    [activePageIndex, pages.length, visiblePageIndices],
+  );
 
   useEffect(() => {
     let cancelled = false;
-    let documentProxy: PDFDocumentProxy | undefined;
+    let loadingTask: PDFDocumentLoadingTask | undefined;
 
-    const renderPages = async () => {
+    const loadDocument = async () => {
       try {
         const pdfjs = await import("pdfjs-dist");
         pdfjs.GlobalWorkerOptions.workerSrc = new URL(
           "pdfjs-dist/build/pdf.worker.min.mjs",
           import.meta.url,
         ).toString();
-        const loadingTask = pdfjs.getDocument({ data: data.slice() });
-        documentProxy = await loadingTask.promise;
-        const outputScale = Math.min(
-          2,
-          Math.max(1.35, window.devicePixelRatio || 1),
-        );
-
-        for (const pageLayout of pages) {
-          if (cancelled || !documentProxy) break;
-          const page = await documentProxy.getPage(pageLayout.pageNumber);
-          const viewport = page.getViewport({ scale: outputScale });
-          const canvas = canvasRefs.current.get(pageLayout.pageNumber);
-          const context = canvas?.getContext("2d", { alpha: false });
-          if (!canvas || !context) continue;
-
-          canvas.width = Math.ceil(viewport.width);
-          canvas.height = Math.ceil(viewport.height);
-          await page.render({
-            canvas,
-            canvasContext: context,
-            viewport,
-          }).promise;
-
-          if (!cancelled) {
-            setRenderedPages(pageLayout.pageNumber);
-          }
-        }
+        loadingTask = pdfjs.getDocument({ data: data.slice() });
+        const loadedDocument = await loadingTask.promise;
+        if (!cancelled) setDocumentProxy(loadedDocument);
       } catch {
         if (!cancelled) {
           onRenderError(
-            "The original PDF pages could not be drawn. Focus view is still available.",
+            "The original PDF pages could not be opened. Focus view is still available.",
           );
         }
       }
     };
 
-    void renderPages();
+    void loadDocument();
     return () => {
       cancelled = true;
-      void documentProxy?.destroy();
+      void loadingTask?.destroy();
     };
-  }, [data, onRenderError, pages]);
+  }, [data, onRenderError]);
+
+  useEffect(() => {
+    if (typeof IntersectionObserver === "undefined") return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        setVisiblePageIndices((current) => {
+          const next = new Set(current);
+          let changed = false;
+          for (const entry of entries) {
+            const pageIndex = Number(
+              (entry.target as HTMLElement).dataset.pdfPageIndex,
+            );
+            if (!Number.isInteger(pageIndex)) continue;
+            if (entry.isIntersecting && !next.has(pageIndex)) {
+              next.add(pageIndex);
+              changed = true;
+            } else if (!entry.isIntersecting && next.delete(pageIndex)) {
+              changed = true;
+            }
+          }
+          return changed ? next : current;
+        });
+      },
+      { rootMargin: "120% 0px" },
+    );
+    for (const shell of pageShellRefs.current.values()) observer.observe(shell);
+    return () => observer.disconnect();
+  }, [pages]);
+
+  const registerPageShell = useCallback(
+    (pageIndex: number, element: HTMLElement | null) => {
+      if (element) pageShellRefs.current.set(pageIndex, element);
+      else pageShellRefs.current.delete(pageIndex);
+    },
+    [],
+  );
 
   return (
     <article
@@ -223,56 +372,45 @@ export function PdfPageView({
       <header className="pdf-view-intro">
         <p>Original page view</p>
         <h2>Read in the document’s own layout</h2>
-        <span>
-          Narration and highlighting stay synchronized across every page.
-        </span>
+        <span>Narration and highlighting stay synchronized across every page.</span>
       </header>
 
       <div className="pdf-pages">
-        {pages.map((page) => (
-          <section
-            className="pdf-page-block"
-            id={`pdf-page-${page.pageNumber}`}
-            key={page.pageNumber}
-          >
-            <div
-              className="pdf-page"
-              style={{ aspectRatio: `${page.width} / ${page.height}` }}
+        {pages.map((page, pageIndex) => {
+          const shouldRender = renderedPageIndices.has(pageIndex);
+          return (
+            <section
+              className="pdf-page-block"
+              id={`pdf-page-${page.pageNumber}`}
+              data-pdf-page-index={pageIndex}
+              ref={(element) => registerPageShell(pageIndex, element)}
+              key={page.pageNumber}
             >
-              <canvas
-                ref={(canvas) => {
-                  if (canvas) {
-                    canvasRefs.current.set(page.pageNumber, canvas);
-                  } else {
-                    canvasRefs.current.delete(page.pageNumber);
-                  }
-                }}
-                aria-hidden="true"
-              />
-              <div className="pdf-text-layer">
-                {page.items.map((item, itemIndex) => (
-                  <PdfTextItem
-                    item={item}
+              <div
+                className="pdf-page"
+                style={{ aspectRatio: `${page.width} / ${page.height}` }}
+              >
+                {shouldRender ? (
+                  <PdfRenderedPage
+                    documentProxy={documentProxy}
                     page={page}
                     activeWord={activeWord}
                     activeSentence={activeSentence}
                     tokenSentences={tokenSentences}
                     registerWord={registerWord}
                     onSelectWord={onSelectWord}
-                    key={`${page.pageNumber}-${itemIndex}`}
+                    onRenderError={onRenderError}
                   />
-                ))}
+                ) : (
+                  <div className="pdf-page-placeholder" aria-hidden="true">
+                    <span>Page {page.pageNumber}</span>
+                  </div>
+                )}
               </div>
-              {renderedPages < page.pageNumber && (
-                <div className="pdf-page-loading" role="status">
-                  <span aria-hidden="true">•••</span>
-                  Drawing page {page.pageNumber}
-                </div>
-              )}
-            </div>
-            <p className="pdf-page-number">Page {page.pageNumber}</p>
-          </section>
-        ))}
+              <p className="pdf-page-number">Page {page.pageNumber}</p>
+            </section>
+          );
+        })}
       </div>
     </article>
   );

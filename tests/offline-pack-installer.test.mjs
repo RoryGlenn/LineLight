@@ -195,7 +195,7 @@ test("reports download, storage, and retention failures precisely", async () => 
       label: "The included neural voice model",
       sourceUrl: "model",
     }),
-    /Free at least 100 MB/u,
+    /Free at least 200 MB/u,
   );
 
   await assert.rejects(

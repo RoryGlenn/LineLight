@@ -17,6 +17,7 @@ import {
   type PdfOutlineItem,
 } from "./document-outline";
 import { parseEpubFile } from "./epub-parser.mjs";
+import { FocusDocumentView } from "./focus-document-view";
 import { PdfPageView, type PdfPageLayout } from "./pdf-page-view";
 import {
   buildPdfOutline,
@@ -44,6 +45,11 @@ import {
   OFFLINE_VOICES,
   type OfflineVoiceId,
 } from "./offline-speech-config";
+import {
+  OFFLINE_INSTALL_IDLE_DELAY_MS,
+  evaluateOfflineStorageHeadroom,
+  shouldScheduleOfflinePreparation,
+} from "./offline-preparation.mjs";
 import {
   OfflineSpeechError,
   disposeOfflineSpeechWorker,
@@ -711,6 +717,7 @@ export default function Home() {
   );
   const activeToken = model.tokens[activeWord] ?? model.tokens[0];
   const activeSentence = activeToken?.sentenceIndex ?? 0;
+  const activeParagraphIndex = activeToken?.paragraphIndex ?? 0;
   const documentOutline = useMemo(
     () => readerDocument.outline ?? [],
     [readerDocument.outline],
@@ -792,6 +799,7 @@ export default function Home() {
   const bufferedPrefetchDisposeRef = useRef<(() => void) | null>(null);
   const speechSessionRef = useRef(0);
   const automaticOfflineInstallAttemptedRef = useRef(false);
+  const offlineInstallAbortRef = useRef<AbortController | null>(null);
   const programmaticScrollRef = useRef(false);
   const activeWordRef = useRef(0);
   const bookmarksRef = useRef<ReaderBookmark[]>([]);
@@ -825,15 +833,12 @@ export default function Home() {
     const readingPage =
       readerRef.current?.querySelector<HTMLElement>(".reading-page");
     if (!readingPage) return;
-    const focusSegments =
-      readingPage.querySelectorAll<HTMLElement>("[data-focus-token]");
-
     if (viewMode !== "focus" || settings.focusLines === 0) {
-      focusSegments.forEach((element) =>
-        element.classList.remove("focus-window-visible"),
-      );
       return;
     }
+
+    const focusSegments =
+      readingPage.querySelectorAll<HTMLElement>("[data-focus-token]");
 
     const tokenPositions = Array.from(wordRefs.current.entries())
       .filter(([, element]) => readingPage.contains(element))
@@ -1114,6 +1119,8 @@ export default function Home() {
     async (automatic = false) => {
       if (offlinePackState === "installing") return;
 
+      const abortController = new AbortController();
+      offlineInstallAbortRef.current = abortController;
       stopSpeech();
       setOfflinePackState("installing");
       setOfflineInstallProgress(0);
@@ -1125,8 +1132,21 @@ export default function Home() {
       );
 
       try {
+        const storageEstimate = await navigator.storage?.estimate?.();
+        const storageHeadroom = evaluateOfflineStorageHeadroom(
+          OFFLINE_PACK_BYTES,
+          storageEstimate,
+        );
+        if (storageHeadroom.sufficient === false) {
+          throw new OfflineSpeechError(
+            `The included offline voice needs about ${Math.ceil(
+              storageHeadroom.requiredBytes / 1_000_000,
+            )} MB of free site storage while it is prepared. Free space and try again.`,
+          );
+        }
         await navigator.storage?.persist?.().catch(() => false);
         await installOfflineVoicePack({
+          signal: abortController.signal,
           onProgress: ({ progress, label }) => {
             setOfflineInstallProgress(progress);
             setOfflineInstallLabel(label);
@@ -1146,6 +1166,15 @@ export default function Home() {
           "LineLight's included natural voice is ready. Narration text now stays on this device.",
         );
       } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") {
+          automaticOfflineInstallAttemptedRef.current = false;
+          setOfflinePackState("missing");
+          setOfflineInstallProgress(0);
+          setOfflineInstallLabel(
+            "Offline voice preparation paused while the document opens.",
+          );
+          return;
+        }
         setOfflinePackState("error");
         const message =
           error instanceof Error
@@ -1158,25 +1187,48 @@ export default function Home() {
             ? `${displayMessage} Offline natural remains selected.`
             : displayMessage,
         );
+      } finally {
+        if (offlineInstallAbortRef.current === abortController) {
+          offlineInstallAbortRef.current = null;
+        }
       }
     },
     [offlinePackState, stopSpeech],
   );
 
   useEffect(() => {
-    if (
-      !settingsRestored ||
-      settings.narrationEngine !== "offline" ||
-      offlinePackState !== "missing" ||
-      automaticOfflineInstallAttemptedRef.current
-    ) {
+    if (!shouldScheduleOfflinePreparation({
+      attempted: automaticOfflineInstallAttemptedRef.current,
+      engine: settings.narrationEngine,
+      importing: isImporting,
+      packState: offlinePackState,
+      settingsRestored,
+    })) {
       return;
     }
 
-    automaticOfflineInstallAttemptedRef.current = true;
-    void downloadOfflineVoice(true);
+    let idleCallbackId: number | null = null;
+    const delayId = window.setTimeout(() => {
+      const prepare = () => {
+        automaticOfflineInstallAttemptedRef.current = true;
+        void downloadOfflineVoice(true);
+      };
+      if ("requestIdleCallback" in window) {
+        idleCallbackId = window.requestIdleCallback(prepare, { timeout: 5_000 });
+      } else {
+        prepare();
+      }
+    }, OFFLINE_INSTALL_IDLE_DELAY_MS);
+
+    return () => {
+      window.clearTimeout(delayId);
+      if (idleCallbackId !== null && "cancelIdleCallback" in window) {
+        window.cancelIdleCallback(idleCallbackId);
+      }
+    };
   }, [
     downloadOfflineVoice,
+    isImporting,
     offlinePackState,
     settings.narrationEngine,
     settingsRestored,
@@ -1222,6 +1274,14 @@ export default function Home() {
         },
         behavior === "smooth" ? 700 : 80,
       );
+    },
+    [],
+  );
+
+  const registerRenderedWord = useCallback(
+    (index: number, element: HTMLSpanElement | null) => {
+      if (element) wordRefs.current.set(index, element);
+      else wordRefs.current.delete(index);
     },
     [],
   );
@@ -1298,6 +1358,13 @@ export default function Home() {
       return true;
     },
     [commitNavigation, model.tokens, scrollToActiveWord, stopSpeech],
+  );
+
+  const selectRenderedWord = useCallback(
+    (index: number) => {
+      jumpToPosition(index);
+    },
+    [jumpToPosition],
   );
 
   const openOutlineItem = useCallback(
@@ -2462,6 +2529,22 @@ export default function Home() {
         return;
       }
 
+      stopSpeech();
+      offlineInstallAbortRef.current?.abort();
+      if (
+        offlinePackState === "installing" ||
+        settings.narrationEngine === "offline"
+      ) {
+        disposeOfflineSpeechWorker();
+      }
+      if (offlinePackState === "installing") {
+        automaticOfflineInstallAttemptedRef.current = false;
+        setOfflinePackState("missing");
+        setOfflineInstallProgress(0);
+        setOfflineInstallLabel(
+          "Offline voice preparation paused while the document opens.",
+        );
+      }
       setIsImporting(true);
       setNotice("");
       try {
@@ -2473,7 +2556,6 @@ export default function Home() {
         const libraryEntry = (await addReaderDocument(
           imported,
         )) as LibraryEntry;
-        stopSpeech();
         wordRefs.current.clear();
         setReaderDocument(imported);
         setLibraryEntries(
@@ -2509,7 +2591,7 @@ export default function Home() {
         if (fileInputRef.current) fileInputRef.current.value = "";
       }
     },
-    [stopSpeech],
+    [offlinePackState, settings.narrationEngine, stopSpeech],
   );
 
   const handleFileInput = (event: ChangeEvent<HTMLInputElement>) => {
@@ -2920,23 +3002,23 @@ export default function Home() {
           readerDocument.pdfData &&
           readerDocument.pdfPages ? (
             <PdfPageView
+              key={readerDocument.id}
               data={readerDocument.pdfData}
               pages={readerDocument.pdfPages}
               activeWord={activeWord}
               activeSentence={activeSentence}
               tokenSentences={tokenSentences}
               highlightMode={settings.highlightMode}
-              registerWord={(index, element) => {
-                if (element) wordRefs.current.set(index, element);
-                else wordRefs.current.delete(index);
-              }}
-              onSelectWord={(index) => {
-                jumpToPosition(index);
-              }}
+              registerWord={registerRenderedWord}
+              onSelectWord={selectRenderedWord}
               onRenderError={setNotice}
             />
           ) : (
-            <article
+            <FocusDocumentView
+              key={readerDocument.id}
+              activeParagraphIndex={activeParagraphIndex}
+              activeSentence={activeSentence}
+              activeWord={activeWord}
               className={[
                 "reading-page",
                 `font-${settings.font}`,
@@ -2945,76 +3027,18 @@ export default function Home() {
               ]
                 .filter(Boolean)
                 .join(" ")}
-            >
-              <div className="chapter-heading">
-                <span className="chapter-rule" aria-hidden="true" />
-                <p>
-                  {readerDocument.kind === "demo"
-                    ? "A reading sample"
-                    : "Imported document"}
-                </p>
-                <h2>{readerDocument.title}</h2>
-              </div>
-
-              <div className="reading-copy">
-                {model.paragraphs.map((paragraph, paragraphIndex) => (
-                  <p key={`${readerDocument.id}-${paragraphIndex}`}>
-                    {paragraph.map((segment, segmentIndex) => {
-                      const isCurrentSentence =
-                        segment.sentenceIndex === activeSentence;
-                      if (segment.tokenIndex === undefined) {
-                        return (
-                          <span
-                            className={
-                              isCurrentSentence ? "sentence-active" : undefined
-                            }
-                            data-focus-token={segment.focusTokenIndex}
-                            key={`${paragraphIndex}-${segmentIndex}`}
-                          >
-                            {segment.text}
-                          </span>
-                        );
-                      }
-                      const isActive = segment.tokenIndex === activeWord;
-                      return (
-                        <span
-                          className={[
-                            "spoken-word",
-                            isCurrentSentence ? "sentence-active" : "",
-                            isActive ? "word-active" : "",
-                          ]
-                            .filter(Boolean)
-                            .join(" ")}
-                          id={isActive ? "active-spoken-word" : undefined}
-                          data-focus-token={segment.focusTokenIndex}
-                          key={`${paragraphIndex}-${segmentIndex}`}
-                          ref={(element) => {
-                            if (element) {
-                              wordRefs.current.set(
-                                segment.tokenIndex!,
-                                element,
-                              );
-                            } else {
-                              wordRefs.current.delete(segment.tokenIndex!);
-                            }
-                          }}
-                          onClick={() => {
-                            jumpToPosition(segment.tokenIndex!);
-                          }}
-                        >
-                          {segment.text}
-                        </span>
-                      );
-                    })}
-                  </p>
-                ))}
-              </div>
-
-              <footer className="document-end">
-                <span aria-hidden="true">✦</span>
-                <p>End of document</p>
-              </footer>
-            </article>
+              documentId={readerDocument.id}
+              documentKind={readerDocument.kind}
+              fontSize={settings.fontSize}
+              focusLines={settings.focusLines}
+              lineHeight={settings.lineHeight}
+              maxLineWidth={settings.maxLineWidth}
+              paragraphSpacing={settings.paragraphSpacing}
+              paragraphs={model.paragraphs}
+              registerWord={registerRenderedWord}
+              onSelectWord={selectRenderedWord}
+              title={readerDocument.title}
+            />
           )}
         </div>
 
