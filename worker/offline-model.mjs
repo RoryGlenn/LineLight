@@ -84,7 +84,10 @@ export async function handleOfflineModelRequest(
     const value = upstreamResponse.headers.get(name);
     if (value) headers.set(name, value);
   }
-  headers.set("Cache-Control", IMMUTABLE_CACHE_CONTROL);
+  // The installer owns the browser's durable model copy in Cache Storage.
+  // Avoid a second large HTTP-cache entry, whose interrupted range recovery
+  // Chromium can otherwise mistake for a complete model response.
+  headers.set("Cache-Control", "no-store");
   headers.set("CDN-Cache-Control", IMMUTABLE_CACHE_CONTROL);
   headers.set("Cross-Origin-Resource-Policy", "same-origin");
   headers.set("X-Content-Type-Options", "nosniff");

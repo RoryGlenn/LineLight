@@ -83,7 +83,7 @@ test("only resolves pinned, allowlisted offline model assets", () => {
   );
 });
 
-test("streams included model files with immutable first-party headers", async () => {
+test("streams model files without duplicating the browser cache", async () => {
   let upstreamRequest;
   const response = await handleOfflineModelRequest(
     new Request(
@@ -106,6 +106,10 @@ test("streams included model files with immutable first-party headers", async ()
   assert.match(upstreamRequest.url, new RegExp(OFFLINE_MODEL_REVISION));
   assert.equal(
     response.headers.get("cache-control"),
+    "no-store",
+  );
+  assert.equal(
+    response.headers.get("cdn-cache-control"),
     "public, max-age=31536000, immutable",
   );
   assert.equal(
@@ -114,6 +118,36 @@ test("streams included model files with immutable first-party headers", async ()
   );
   assert.equal(response.headers.get("etag"), '"model-etag"');
   assert.equal(await response.text(), '{"model_type":"kokoro"}');
+});
+
+test("forwards bounded model range requests", async () => {
+  let upstreamRequest;
+  const response = await handleOfflineModelRequest(
+    new Request(
+      `https://linelight.example${OFFLINE_MODEL_ROUTE_PREFIX}onnx/model_quantized.onnx`,
+      { headers: { Range: "bytes=0-7" } },
+    ),
+    async (request) => {
+      upstreamRequest = request;
+      return new Response(new Uint8Array(8), {
+        status: 206,
+        headers: {
+          "Content-Length": "8",
+          "Content-Range": "bytes 0-7/92361116",
+          "Content-Type": "application/octet-stream",
+        },
+      });
+    },
+  );
+
+  assert.ok(upstreamRequest);
+  assert.equal(upstreamRequest.headers.get("range"), "bytes=0-7");
+  assert.equal(response.status, 206);
+  assert.equal(
+    response.headers.get("content-range"),
+    "bytes 0-7/92361116",
+  );
+  assert.equal((await response.arrayBuffer()).byteLength, 8);
 });
 
 test("does not proxy unknown model paths", async () => {
