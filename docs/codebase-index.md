@@ -148,6 +148,13 @@ drives Brave through CDP to check measured overlays across zoom/DPR, visual
 scenarios, localized shell updates, DOM mutations, and Long Tasks; its fast
 contract and opt-in real-browser gate live in
 [`tests/pdf-highlight-browser-harness.test.mjs`](../tests/pdf-highlight-browser-harness.test.mjs).
+[`scripts/run-offline-natural-timing-regression.mjs`](../scripts/run-offline-natural-timing-regression.mjs)
+attaches to a disposable headed-Brave profile with the stored local voice pack
+and verifies consecutive PDF highlight updates at 0.75x, 1x, and 1.25x against
+the real Offline-natural worker. Its thresholds and opt-in CDP gate live in
+[`tests/offline-natural-timing-harness.test.mjs`](../tests/offline-natural-timing-harness.test.mjs),
+with review records in
+[`docs/evidence/issue-60/`](evidence/issue-60/).
 The packaged page is checked by
 [`tests/rendered-html.test.mjs`](../tests/rendered-html.test.mjs). PDF geometry,
 complex reading order, and highlight alignment require representative browser

@@ -21,6 +21,7 @@ import {
   PDF_HIGHLIGHT_FIXTURE_EXPECTATIONS,
   writePdfHighlightFixture,
 } from "./generate-pdf-highlight-fixture.mjs";
+import { validateOfflineNaturalTimingEvidence } from "./run-offline-natural-timing-regression.mjs";
 
 const REPOSITORY_ROOT = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -68,6 +69,7 @@ function parseArguments(argv) {
     headed: false,
     outputDirectory: DEFAULT_OUTPUT_DIRECTORY,
     record: false,
+    offlineNaturalEvidence: null,
     offlineNaturalBlocked: null,
   };
 
@@ -79,6 +81,9 @@ function parseArguments(argv) {
     else if (argument === "--browser") options.browser = argv[++index];
     else if (argument === "--fixture") options.fixture = argv[++index];
     else if (argument === "--output") options.outputDirectory = argv[++index];
+    else if (argument === "--offline-natural-evidence") {
+      options.offlineNaturalEvidence = argv[++index];
+    }
     else if (argument === "--offline-natural-blocked") {
       options.offlineNaturalBlocked = argv[++index];
     } else if (argument === "--help" || argument === "-h") {
@@ -93,6 +98,8 @@ function parseArguments(argv) {
           "  --fixture PATH  Override the deterministic generated PDF fixture.",
           "  --output DIR    Write transient JSON and screenshots here.",
           "  --record        Write review evidence to docs/evidence/issue-60/.",
+          "  --offline-natural-evidence PATH",
+          "                  Link a passing real Offline-natural timing record.",
           "  --offline-natural-blocked MESSAGE",
           "                  Record an observed narration blocker without inventing rate data.",
           "",
@@ -105,8 +112,18 @@ function parseArguments(argv) {
   }
 
   if (options.record) options.outputDirectory = RECORDED_EVIDENCE_DIRECTORY;
+  if (options.offlineNaturalEvidence && options.offlineNaturalBlocked) {
+    throw new Error(
+      "Use either --offline-natural-evidence or --offline-natural-blocked, not both.",
+    );
+  }
   options.fixture = path.resolve(options.fixture);
   options.outputDirectory = path.resolve(options.outputDirectory);
+  if (options.offlineNaturalEvidence) {
+    options.offlineNaturalEvidence = path.resolve(
+      options.offlineNaturalEvidence,
+    );
+  }
   return options;
 }
 
@@ -987,7 +1004,9 @@ async function sourceEvidence(fixture) {
     "app/pdf-text-model.mjs",
     "app/reader-virtualization.mjs",
     "scripts/generate-pdf-highlight-fixture.mjs",
+    "scripts/run-offline-natural-timing-regression.mjs",
     "scripts/run-pdf-highlight-browser-regression.mjs",
+    "tests/offline-natural-timing-harness.test.mjs",
     "tests/pdf-highlight-browser-harness.test.mjs",
     "tests/reader-virtualization.test.mjs",
     path.relative(REPOSITORY_ROOT, fixture),
@@ -1100,6 +1119,21 @@ export function validatePdfHighlightEvidence(evidence) {
 async function run(options) {
   await writePdfHighlightFixture(options.fixture);
   await mkdir(options.outputDirectory, { recursive: true });
+
+  let offlineNaturalTiming = null;
+  if (options.offlineNaturalEvidence) {
+    offlineNaturalTiming = JSON.parse(
+      await readFile(options.offlineNaturalEvidence, "utf8"),
+    );
+    const timingFailures = validateOfflineNaturalTimingEvidence(
+      offlineNaturalTiming,
+    );
+    if (timingFailures.length) {
+      throw new Error(
+        `Offline-natural evidence failed validation:\n${timingFailures.join("\n")}`,
+      );
+    }
+  }
 
   let server;
   let browser;
@@ -1257,7 +1291,24 @@ async function run(options) {
         allLongTasks: browserState.allLongTasks,
       },
       relatedChecks: {
-        offlineNaturalTiming: options.offlineNaturalBlocked
+        offlineNaturalTiming: offlineNaturalTiming
+          ? {
+              status: "passed",
+              evidence: path.relative(
+                REPOSITORY_ROOT,
+                options.offlineNaturalEvidence,
+              ),
+              source: offlineNaturalTiming.source,
+              rates: offlineNaturalTiming.rates.map((run) => ({
+                rate: run.rate,
+                observedTransitions: run.observedTransitions,
+                maximumLogicalIndexDelta: run.maximumLogicalIndexDelta,
+                maximumActivationsPerFrame:
+                  run.maximumActivationsPerFrame,
+                maximumLongTaskMs: run.maximumLongTaskMs,
+              })),
+            }
+          : options.offlineNaturalBlocked
           ? { status: "blocked", error: options.offlineNaturalBlocked }
           : {
               status: "not-run",
