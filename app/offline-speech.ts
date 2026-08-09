@@ -35,6 +35,8 @@ import {
   assessOfflineModelAvailability,
   mapOfflineInstallProgress,
 } from "./offline-preparation.mjs";
+import { describeWorkerStartupFailure } from "./worker-startup-diagnostics.mjs";
+import offlineSpeechWorkerUrl from "./offline-speech.worker.ts?worker&url";
 
 export type OfflineSpeechDevice = "webgpu" | "wasm";
 export type OfflineSpeechModelDtype =
@@ -381,13 +383,14 @@ export async function getOfflineVoicePackRetainedBytes() {
 function getWorker() {
   if (worker) return worker;
 
-  const createdWorker = new Worker(
-    new URL("./offline-speech.worker.ts", import.meta.url),
-    {
-      type: "module",
-      name: "linelight-offline-voice",
-    },
-  );
+  const resolvedWorkerUrl = new URL(
+    offlineSpeechWorkerUrl,
+    globalThis.location.href,
+  ).href;
+  const createdWorker = new Worker(resolvedWorkerUrl, {
+    type: "module",
+    name: "linelight-offline-voice",
+  });
   worker = createdWorker;
 
   createdWorker.addEventListener(
@@ -509,7 +512,14 @@ function getWorker() {
     event.preventDefault();
     failWorker(
       createdWorker,
-      event.message || "The offline voice worker stopped unexpectedly.",
+      describeWorkerStartupFailure({
+        workerUrl: resolvedWorkerUrl,
+        message: event.message,
+        error: event.error,
+        filename: event.filename,
+        lineno: event.lineno,
+        colno: event.colno,
+      }),
     );
   });
   createdWorker.addEventListener("messageerror", () => {

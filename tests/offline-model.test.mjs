@@ -31,6 +31,7 @@ import {
   selectOfflineSpeechBackend,
 } from "../app/offline-model-manifest.mjs";
 import { handleOfflineModelRequest } from "../worker/offline-model.mjs";
+import { describeWorkerStartupFailure } from "../app/worker-startup-diagnostics.mjs";
 
 test("defaults new readers to Offline natural narration", () => {
   assert.equal(DEFAULT_NARRATION_ENGINE, "offline");
@@ -256,6 +257,35 @@ test("retries WebGPU on a later page load after a transient runtime failure", as
     source,
     /localStorage[^\n]*(?:webgpu|backend)|(?:webgpu|backend)[^\n]*localStorage/iu,
   );
+});
+
+test("reports bounded offline worker startup details without serializing private data", () => {
+  const error = new Error("Module evaluation failed");
+  error.stack = "private narration must not appear";
+  const diagnostic = describeWorkerStartupFailure({
+    workerUrl:
+      "http://reader:secret@localhost:5173/app/offline-speech.worker.ts?worker_file&type=module#private",
+    message: "Uncaught TypeError\n",
+    error,
+    filename: "http://localhost:5173/app/offline-speech.worker.ts",
+    lineno: 12,
+    colno: 7,
+    privateText: "private document text must not appear",
+  });
+
+  assert.match(
+    diagnostic,
+    /worker URL: http:\/\/localhost:5173\/app\/offline-speech\.worker\.ts\?worker_file&type=module/u,
+  );
+  assert.match(diagnostic, /message: Uncaught TypeError/u);
+  assert.match(diagnostic, /error: Error: Module evaluation failed/u);
+  assert.match(
+    diagnostic,
+    /source: http:\/\/localhost:5173\/app\/offline-speech\.worker\.ts/u,
+  );
+  assert.match(diagnostic, /line: 12/u);
+  assert.match(diagnostic, /column: 7/u);
+  assert.doesNotMatch(diagnostic, /reader|secret|private narration|private document/u);
 });
 
 test("validates waveforms before ready and preserves q8 after a model-only load", async () => {
