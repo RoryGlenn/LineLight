@@ -18,7 +18,7 @@ import { DEFAULT_PDF_HIGHLIGHT_FIXTURE } from "./generate-pdf-highlight-fixture.
 import {
   delay,
   startBrowser,
-  terminateProcessGroup,
+  stopProcessGroup,
 } from "./run-pdf-highlight-browser-regression.mjs";
 
 const REPOSITORY_ROOT = path.resolve(
@@ -35,6 +35,10 @@ const DEFAULT_OUTPUT_DIRECTORY = path.join(
 const MAX_WINDOW_TASK_MS = 50;
 const MAX_CONTROL_LATENCY_MS = 100;
 const DEFAULT_TIMEOUT_MS = 180_000;
+const BUILD_TIMEOUT_MS = 300_000;
+const CDP_COMMAND_TIMEOUT_MS = 15_000;
+const CDP_STREAM_TIMEOUT_MS = 30_000;
+const PROCESS_SHUTDOWN_TIMEOUT_MS = 3_000;
 
 function parseArguments(argv) {
   const options = {
@@ -139,13 +143,85 @@ function collectProcessOutput(child, maximumChunks = 160) {
   return () => output.join("");
 }
 
-async function waitForProcess(child, label, log) {
+function processStatus(child) {
+  return {
+    code: child?.exitCode ?? null,
+    exited: Boolean(
+      child && (child.exitCode !== null || child.signalCode !== null)
+    ),
+    signal: child?.signalCode ?? null,
+    stderrClosed: Boolean(
+      !child?.stderr || child.stderr.destroyed || child.stderr.readableEnded
+    ),
+    stdoutClosed: Boolean(
+      !child?.stdout || child.stdout.destroyed || child.stdout.readableEnded
+    ),
+  };
+}
+
+async function waitForProcessClose(child, timeoutMs) {
+  const status = processStatus(child);
+  if (!child || (status.exited && status.stderrClosed && status.stdoutClosed)) {
+    return true;
+  }
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      child.off("close", onClose);
+      resolve(false);
+    }, timeoutMs);
+    const onClose = () => {
+      clearTimeout(timeout);
+      resolve(true);
+    };
+    child.once("close", onClose);
+  });
+}
+
+async function stopOwnedProcess(child, processGroupId, label) {
+  if (!child && !processGroupId) {
+    return { closed: true, label, present: false };
+  }
+  const group = await stopProcessGroup(
+    processGroupId,
+    PROCESS_SHUTDOWN_TIMEOUT_MS,
+  );
+  const processClosed = await waitForProcessClose(
+    child,
+    PROCESS_SHUTDOWN_TIMEOUT_MS,
+  );
+  return {
+    closed: group.closed && processClosed,
+    group,
+    label,
+    present: true,
+    processClosed,
+    ...processStatus(child),
+  };
+}
+
+async function waitForProcess(child, label, log, timeoutMs) {
   const exitCode = await new Promise((resolve, reject) => {
-    child.once("error", reject);
-    child.once("exit", (code, signal) => {
+    let timeout;
+    const cleanup = () => {
+      clearTimeout(timeout);
+      child.off("error", onError);
+      child.off("exit", onExit);
+    };
+    const onError = (error) => {
+      cleanup();
+      reject(error);
+    };
+    const onExit = (code, signal) => {
+      cleanup();
       if (signal) reject(new Error(`${label} stopped with signal ${signal}.`));
       else resolve(code);
-    });
+    };
+    timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error(`${label} timed out after ${timeoutMs} ms.\n${log()}`));
+    }, timeoutMs);
+    child.once("error", onError);
+    child.once("exit", onExit);
   });
   if (exitCode !== 0) {
     throw new Error(`${label} exited with code ${exitCode}.\n${log()}`);
@@ -155,24 +231,44 @@ async function waitForProcess(child, label, log) {
 async function buildProductionApp() {
   const child = spawn("npm", ["run", "build"], {
     cwd: REPOSITORY_ROOT,
+    detached: true,
     env: { ...process.env, BROWSER: "none" },
     stdio: ["ignore", "pipe", "pipe"],
   });
+  const processGroupId = child.pid;
   const log = collectProcessOutput(child);
-  await waitForProcess(child, "The production build", log);
-  return log();
+  try {
+    await waitForProcess(child, "The production build", log, BUILD_TIMEOUT_MS);
+    return log();
+  } catch (error) {
+    const shutdown = await stopOwnedProcess(
+      child,
+      processGroupId,
+      "production-build",
+    );
+    if (shutdown.closed) throw error;
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `${message}\nProduction build process group ${processGroupId} survived cleanup.`,
+    );
+  }
 }
 
 async function waitForHttp(url, processHandle, log, timeoutMs = 60_000) {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
-    if (processHandle?.exitCode !== null) {
+    if (
+      processHandle?.exitCode !== null ||
+      processHandle?.signalCode !== null
+    ) {
       throw new Error(
         `The production server stopped before ${url} was ready.\n${log()}`,
       );
     }
     try {
-      const response = await fetch(url);
+      const response = await fetch(url, {
+        signal: AbortSignal.timeout(1_000),
+      });
       if (response.ok) return;
     } catch {
       // The local production listener is still starting.
@@ -202,10 +298,24 @@ async function startProductionServer() {
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
+  const processGroupId = child.pid;
   const log = collectProcessOutput(child);
   const appUrl = `http://127.0.0.1:${port}/`;
-  await waitForHttp(appUrl, child, log);
-  return { appUrl, child, log };
+  try {
+    await waitForHttp(appUrl, child, log);
+    return { appUrl, child, log, processGroupId };
+  } catch (error) {
+    const shutdown = await stopOwnedProcess(
+      child,
+      processGroupId,
+      "production-server",
+    );
+    if (shutdown.closed) throw error;
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `${message}\nProduction server process group ${processGroupId} survived cleanup.`,
+    );
+  }
 }
 
 class CdpSession {
@@ -214,12 +324,43 @@ class CdpSession {
     this.nextId = 1;
     this.pending = new Map();
     this.listeners = new Map();
+    this.commandLog = [];
+    this.connectionEvents = [];
+    this.usable = true;
+    const retain = (entries, entry, maximum = 240) => {
+      entries.push(entry);
+      if (entries.length > maximum) entries.shift();
+    };
+    this.retain = retain;
+    const rejectPending = (status, error) => {
+      for (const [id, pending] of this.pending) {
+        clearTimeout(pending.timeout);
+        retain(this.commandLog, {
+          elapsedMs: Date.now() - pending.startedAt,
+          id,
+          method: pending.method,
+          sessionId: pending.sessionId,
+          status,
+        });
+        pending.reject(error);
+      }
+      this.pending.clear();
+    };
     webSocket.addEventListener("message", (event) => {
       const message = JSON.parse(event.data);
       if (message.id) {
         const pending = this.pending.get(message.id);
         if (!pending) return;
         this.pending.delete(message.id);
+        clearTimeout(pending.timeout);
+        retain(this.commandLog, {
+          elapsedMs: Date.now() - pending.startedAt,
+          id: message.id,
+          method: pending.method,
+          sessionId: pending.sessionId,
+          status: message.error ? "error" : "resolved",
+          ...(message.error ? { error: message.error.message } : {}),
+        });
         if (message.error) pending.reject(new Error(message.error.message));
         else pending.resolve(message.result);
         return;
@@ -228,35 +369,110 @@ class CdpSession {
         listener(message.params ?? {}, message.sessionId ?? null);
       }
     });
-    webSocket.addEventListener("close", () => {
-      for (const pending of this.pending.values()) {
-        pending.reject(new Error("The browser debugging connection closed."));
-      }
-      this.pending.clear();
+    webSocket.addEventListener("error", (event) => {
+      this.usable = false;
+      retain(this.connectionEvents, {
+        at: new Date().toISOString(),
+        message: event.message ?? "WebSocket error",
+        type: "error",
+      });
+      rejectPending(
+        "connection-error",
+        new Error("The browser debugging connection failed."),
+      );
+    });
+    webSocket.addEventListener("close", (event) => {
+      this.usable = false;
+      retain(this.connectionEvents, {
+        at: new Date().toISOString(),
+        code: event.code,
+        reason: event.reason,
+        type: "close",
+        wasClean: event.wasClean,
+      });
+      rejectPending(
+        "connection-closed",
+        new Error("The browser debugging connection closed."),
+      );
     });
   }
 
   static async connect(url) {
     const webSocket = new WebSocket(url);
     await new Promise((resolve, reject) => {
-      webSocket.addEventListener("open", resolve, { once: true });
-      webSocket.addEventListener("error", reject, { once: true });
+      const timeout = setTimeout(() => {
+        webSocket.close();
+        reject(new Error("Timed out connecting to the browser debugging target."));
+      }, CDP_COMMAND_TIMEOUT_MS);
+      const settle = (callback) => (event) => {
+        clearTimeout(timeout);
+        callback(event);
+      };
+      webSocket.addEventListener("open", settle(resolve), { once: true });
+      webSocket.addEventListener("error", settle(reject), { once: true });
     });
     return new CdpSession(webSocket);
   }
 
   send(method, params = {}, sessionId = null) {
+    if (!this.isUsable()) {
+      return Promise.reject(
+        new Error(`Cannot send CDP ${method}; the debugging target is closed.`),
+      );
+    }
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
-      this.webSocket.send(
-        JSON.stringify({
+      const startedAt = Date.now();
+      const timeoutMs = method === "IO.read"
+        ? CDP_STREAM_TIMEOUT_MS
+        : CDP_COMMAND_TIMEOUT_MS;
+      const timeout = setTimeout(() => {
+        if (!this.pending.delete(id)) return;
+        this.usable = false;
+        this.retain(this.commandLog, {
+          elapsedMs: Date.now() - startedAt,
           id,
           method,
-          params,
-          ...(sessionId ? { sessionId } : {}),
-        }),
-      );
+          sessionId,
+          status: "timeout",
+        });
+        reject(
+          new Error(
+            `Timed out after ${timeoutMs} ms waiting for CDP ${method}.`,
+          ),
+        );
+      }, timeoutMs);
+      this.pending.set(id, {
+        method,
+        reject,
+        resolve,
+        sessionId,
+        startedAt,
+        timeout,
+      });
+      try {
+        this.webSocket.send(
+          JSON.stringify({
+            id,
+            method,
+            params,
+            ...(sessionId ? { sessionId } : {}),
+          }),
+        );
+      } catch (error) {
+        clearTimeout(timeout);
+        this.pending.delete(id);
+        this.usable = false;
+        this.retain(this.commandLog, {
+          elapsedMs: Date.now() - startedAt,
+          error: error instanceof Error ? error.message : String(error),
+          id,
+          method,
+          sessionId,
+          status: "send-error",
+        });
+        reject(error);
+      }
     });
   }
 
@@ -264,10 +480,39 @@ class CdpSession {
     const listeners = this.listeners.get(method) ?? [];
     listeners.push(listener);
     this.listeners.set(method, listeners);
+    return () => {
+      const current = this.listeners.get(method) ?? [];
+      const next = current.filter((candidate) => candidate !== listener);
+      if (next.length) this.listeners.set(method, next);
+      else this.listeners.delete(method);
+    };
   }
 
-  close() {
-    this.webSocket.close();
+  isUsable() {
+    return this.usable && this.webSocket.readyState === WebSocket.OPEN;
+  }
+
+  async close(timeoutMs = PROCESS_SHUTDOWN_TIMEOUT_MS) {
+    this.usable = false;
+    if (this.webSocket.readyState === WebSocket.CLOSED) return true;
+    return new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        this.webSocket.removeEventListener("close", onClose);
+        resolve(false);
+      }, timeoutMs);
+      const onClose = () => {
+        clearTimeout(timeout);
+        resolve(true);
+      };
+      this.webSocket.addEventListener("close", onClose, { once: true });
+      try {
+        this.webSocket.close();
+      } catch {
+        clearTimeout(timeout);
+        this.webSocket.removeEventListener("close", onClose);
+        resolve(false);
+      }
+    });
   }
 }
 
@@ -891,18 +1136,25 @@ async function startTrace(cdp) {
 }
 
 async function stopTrace(cdp) {
+  let removeListener = () => {};
+  let traceTimeout;
   const completion = new Promise((resolve, reject) => {
-    const timeout = setTimeout(
+    traceTimeout = setTimeout(
       () => reject(new Error("Timed out waiting for Brave to finish the trace.")),
       30_000,
     );
-    cdp.on("Tracing.tracingComplete", (result) => {
-      clearTimeout(timeout);
+    removeListener = cdp.on("Tracing.tracingComplete", (result) => {
       resolve(result);
     });
   });
-  await cdp.send("Tracing.end");
-  const result = await completion;
+  let result;
+  try {
+    await cdp.send("Tracing.end");
+    result = await completion;
+  } finally {
+    clearTimeout(traceTimeout);
+    removeListener();
+  }
   if (!result.stream) throw new Error("Brave did not return a trace stream.");
   const chunks = [];
   while (true) {
@@ -1144,6 +1396,14 @@ async function run(options) {
   let traceStarted = false;
   let buildLog = "";
   let consoleEntries = [];
+  const phaseLog = [];
+  const reportPhase = (phase, details = {}) => {
+    const entry = { at: new Date().toISOString(), phase, ...details };
+    phaseLog.push(entry);
+    process.stdout.write(`[issue-56] ${phase}\n`);
+    return entry;
+  };
+  let browserExit = null;
   const networkState = {
     attachErrors: [],
     failures: [],
@@ -1163,6 +1423,7 @@ async function run(options) {
   };
 
   try {
+    reportPhase("source-preflight");
     const source = sourceEvidence();
     evidence.source = source;
     if (source.dirty) {
@@ -1170,14 +1431,30 @@ async function run(options) {
         "Issue #56 browser evidence must run from a clean committed source tree.",
       );
     }
-    if (!options.appUrl && !options.skipBuild) buildLog = await buildProductionApp();
+    if (!options.appUrl && !options.skipBuild) {
+      reportPhase("production-build-start");
+      buildLog = await buildProductionApp();
+      reportPhase("production-build-complete");
+    }
     server = options.appUrl ? null : await startProductionServer();
     const appUrl = options.appUrl ?? server.appUrl;
     const productionMode = options.appUrl ? "external-production-url" : "local-production-build";
 
+    reportPhase("browser-start");
     browser = await startBrowser(options.browser, true);
+    browser.child.once("exit", (code, signal) => {
+      browserExit = {
+        at: new Date().toISOString(),
+        code,
+        signal,
+      };
+      reportPhase("browser-exit", browserExit);
+    });
+    reportPhase("browser-debug-target-ready", { pid: browser.child.pid });
     cdp = await CdpSession.connect(browser.webSocketDebuggerUrl);
+    reportPhase("browser-debug-connected");
     consoleEntries = await configurePage(cdp, appUrl, networkState);
+    reportPhase("app-shell-ready");
     const browserVersion = await cdp.send("Browser.getVersion");
     const reference = await fileEvidence(options.reference);
     const replacement = await fileEvidence(options.replacement);
@@ -1195,12 +1472,14 @@ async function run(options) {
     activeTraceName = "full-import-trace.json";
     traceStarted = true;
     await beginImport(cdp, options.reference, "full", networkState);
+    reportPhase("full-import-dispatched");
     const fullInitialControl = await measureSettingsControl(cdp);
     const fullFirstPage = await waitForFirstVisiblePage(
       cdp,
       "full",
       options.timeoutMs,
     );
+    reportPhase("full-first-page-visible");
     const fullLibraryAtFirstPaint = await inspectLibrary(cdp);
     await captureScreenshot(
       cdp,
@@ -1216,6 +1495,7 @@ async function run(options) {
       timeoutMs: options.timeoutMs,
       title: referenceTitle,
     });
+    reportPhase("full-import-complete");
     const fullFinalControl = await measureSettingsControl(cdp);
     await finishInstrumentedImport(cdp, "full", "completed");
     const fullInstrumentation = await captureInstrumentation(cdp);
@@ -1247,16 +1527,19 @@ async function run(options) {
       appUrl,
       networkState,
     );
+    reportPhase("cancellation-origin-ready");
     await startTrace(cdp);
     activeTraceName = "cancellation-trace.json";
     traceStarted = true;
     await beginImport(cdp, options.reference, "cancel-large", networkState);
+    reportPhase("cancellation-import-dispatched");
     const cancelInitialControl = await measureSettingsControl(cdp);
     const cancelFirstPage = await waitForFirstVisiblePage(
       cdp,
       "cancel-large",
       options.timeoutMs,
     );
+    reportPhase("cancellation-first-page-visible");
     const cancelLibraryAtFirstPaint = await inspectLibrary(cdp);
     await captureScreenshot(
       cdp,
@@ -1278,6 +1561,7 @@ async function run(options) {
     });
     await finishInstrumentedImport(cdp, "cancel-large", "replaced");
     await beginImport(cdp, options.replacement, "replacement", networkState);
+    reportPhase("replacement-import-dispatched");
     const canceledLibraryAfterReplacementDispatch = await inspectLibrary(cdp);
     const canceledRecordAfterReplacementDispatch =
       canceledLibraryAfterReplacementDispatch.pdfs.find(
@@ -1289,6 +1573,7 @@ async function run(options) {
       "replacement",
       options.timeoutMs,
     );
+    reportPhase("replacement-first-page-visible");
     await markHarness(cdp, "replacement-active");
     const canceledLibraryAfterReplacementStart = await inspectLibrary(cdp);
     const canceledRecordAfterReplacementStart =
@@ -1304,6 +1589,7 @@ async function run(options) {
       timeoutMs: options.timeoutMs,
       title: replacementTitle,
     });
+    reportPhase("replacement-import-complete");
     const replacementFinalControl = await measureSettingsControl(cdp);
     await finishInstrumentedImport(cdp, "replacement", "completed");
     await captureScreenshot(
@@ -1655,6 +1941,9 @@ async function run(options) {
         full: { file: "full-import-trace.json", ...fullTrace },
       },
       browserDiagnostics: {
+        browserExit,
+        cdpCommands: cdp.commandLog,
+        cdpConnectionEvents: cdp.connectionEvents,
         consoleEntries,
         consoleFailures,
         errors: runtimeErrors,
@@ -1663,6 +1952,7 @@ async function run(options) {
         browserStderr: browser.log(),
         productionBuildLog: buildLog,
         productionServerLog: server?.log() ?? null,
+        phaseLog,
       },
       artifacts: {
         cancellationFirstPageScreenshot: "cancel-large-first-page.png",
@@ -1674,11 +1964,32 @@ async function run(options) {
       },
     });
   } catch (error) {
+    reportPhase("run-failed", {
+      message: error instanceof Error ? error.message : String(error),
+    });
     evidence.failures.push(error instanceof Error ? error.stack ?? error.message : String(error));
-    if (cdp) {
-      evidence.failureState = await evaluate(
-        cdp,
-        `({
+    let diagnosticsAvailable = Boolean(
+      cdp?.isUsable() &&
+      !browserExit &&
+      browser?.child.exitCode === null &&
+      browser?.child.signalCode === null,
+    );
+    const diagnosticFailure = (label, diagnosticError) => {
+      diagnosticsAvailable = false;
+      evidence.failureDiagnostics ??= {};
+      evidence.failureDiagnostics[label] = {
+        error: diagnosticError instanceof Error
+          ? diagnosticError.stack ?? diagnosticError.message
+          : String(diagnosticError),
+      };
+      reportPhase("failure-diagnostic-failed", { label });
+    };
+    if (diagnosticsAvailable) {
+      reportPhase("failure-diagnostics-start");
+      try {
+        evidence.failureState = await evaluate(
+          cdp,
+          `({
           instrumentation: globalThis.__lineLightIssue56 ? {
             errors: globalThis.__lineLightIssue56.errors.slice(),
             imports: globalThis.__lineLightIssue56.imports.map((run) => ({ ...run })),
@@ -1706,23 +2017,49 @@ async function run(options) {
               } : null
             } : null;
           })()
-        })`,
-      ).catch((diagnosticError) => ({ error: String(diagnosticError) }));
-      evidence.failureLibrary = await inspectLibrary(cdp).catch(
-        (diagnosticError) => ({ error: String(diagnosticError) }),
-      );
-      await captureScreenshot(
-        cdp,
-        path.join(options.outputDirectory, "failure.png"),
-      ).catch(() => undefined);
-      if (traceStarted) {
-        const failedTraceName = activeTraceName ?? "failure-trace.json";
-        traceTexts[failedTraceName] = await stopTrace(cdp).catch(() => "");
-        traceStarted = false;
-        activeTraceName = null;
+          })`,
+        );
+      } catch (diagnosticError) {
+        diagnosticFailure("page-state", diagnosticError);
       }
+      if (diagnosticsAvailable) {
+        try {
+          evidence.failureLibrary = await inspectLibrary(cdp);
+        } catch (diagnosticError) {
+          diagnosticFailure("library", diagnosticError);
+        }
+      }
+      if (diagnosticsAvailable) {
+        try {
+          await captureScreenshot(
+            cdp,
+            path.join(options.outputDirectory, "failure.png"),
+          );
+        } catch (diagnosticError) {
+          diagnosticFailure("screenshot", diagnosticError);
+        }
+      }
+      if (traceStarted && diagnosticsAvailable) {
+        const failedTraceName = activeTraceName ?? "failure-trace.json";
+        try {
+          traceTexts[failedTraceName] = await stopTrace(cdp);
+        } catch (diagnosticError) {
+          diagnosticFailure("trace", diagnosticError);
+        }
+      }
+    } else {
+      evidence.failureDiagnostics = {
+        skipped: "The browser or debugging connection was already closed.",
+      };
+    }
+    if (traceStarted) {
+      traceStarted = false;
+      activeTraceName = null;
     }
     evidence.browserDiagnostics = {
+      browserExit,
+      cdpCommands: cdp?.commandLog ?? [],
+      cdpConnectionEvents: cdp?.connectionEvents ?? [],
       consoleEntries,
       networkFailures: networkState.failures,
       responseFailures: networkState.responseFailures,
@@ -1730,29 +2067,101 @@ async function run(options) {
       browserStderr: browser?.log() ?? null,
       productionBuildLog: buildLog,
       productionServerLog: server?.log() ?? null,
+      phaseLog,
     };
   } finally {
-    try {
-      for (const [fileName, traceText] of Object.entries(traceTexts)) {
-        if (!traceText) continue;
-        await writeFile(
-          path.join(options.outputDirectory, fileName),
-          traceText,
+    reportPhase("teardown-start");
+    const shutdownResults = await Promise.allSettled([
+      cdp?.close() ?? Promise.resolve(true),
+      stopOwnedProcess(
+        browser?.child,
+        browser?.processGroupId,
+        "browser",
+      ),
+      stopOwnedProcess(
+        server?.child,
+        server?.processGroupId,
+        "production-server",
+      ),
+    ]);
+    const [cdpShutdown, browserShutdown, serverShutdown] = shutdownResults;
+    const recordTeardownFailure = (message) => {
+      evidence.passed = false;
+      evidence.failures.push(`Teardown evidence failure: ${message}`);
+    };
+    if (cdpShutdown.status === "rejected") {
+      recordTeardownFailure(`CDP close failed: ${String(cdpShutdown.reason)}`);
+    } else if (!cdpShutdown.value) {
+      recordTeardownFailure("CDP close was not observed within the deadline.");
+    }
+    for (const result of [browserShutdown, serverShutdown]) {
+      if (result.status === "rejected") {
+        recordTeardownFailure(String(result.reason));
+      } else if (!result.value.closed) {
+        recordTeardownFailure(
+          `${result.value.label} did not close after bounded SIGTERM/SIGKILL.`,
         );
       }
-      await writeFile(
-        path.join(options.outputDirectory, "pdf-worker-browser.json"),
-        `${JSON.stringify(evidence, null, 2)}\n`,
-      );
-    } finally {
-      cdp?.close();
-      terminateProcessGroup(browser?.child);
-      terminateProcessGroup(server?.child);
-      if (browser?.profileDirectory) {
-        await delay(100);
-        await rm(browser.profileDirectory, { recursive: true, force: true });
+    }
+    if (!browserExit && browser?.child) {
+      const status = processStatus(browser.child);
+      if (status.exited) {
+        browserExit = {
+          at: new Date().toISOString(),
+          code: status.code,
+          observedDuringTeardown: true,
+          signal: status.signal,
+        };
+        reportPhase("browser-exit-observed", browserExit);
       }
     }
+    if (browser?.profileDirectory) {
+      try {
+        await rm(browser.profileDirectory, { recursive: true, force: true });
+      } catch (error) {
+        recordTeardownFailure(
+          `Could not remove the browser profile: ${String(error)}`,
+        );
+      }
+    }
+    reportPhase("teardown-complete", {
+      browserClosed:
+        browserShutdown.status === "fulfilled" && browserShutdown.value.closed,
+      cdpClosed: cdpShutdown.status === "fulfilled" && cdpShutdown.value,
+      serverClosed:
+        serverShutdown.status === "fulfilled" && serverShutdown.value.closed,
+    });
+    evidence.browserDiagnostics = {
+      ...(evidence.browserDiagnostics ?? {}),
+      browserExit,
+      browserStderr: browser?.log() ?? null,
+      cdpCommands: cdp?.commandLog ?? [],
+      cdpConnectionEvents: cdp?.connectionEvents ?? [],
+      phaseLog,
+      processShutdown: {
+        browser: browserShutdown.status === "fulfilled"
+          ? browserShutdown.value
+          : { error: String(browserShutdown.reason) },
+        cdp: cdpShutdown.status === "fulfilled"
+          ? { closed: cdpShutdown.value }
+          : { error: String(cdpShutdown.reason) },
+        productionServer: serverShutdown.status === "fulfilled"
+          ? serverShutdown.value
+          : { error: String(serverShutdown.reason) },
+      },
+      productionServerLog: server?.log() ?? null,
+    };
+    for (const [fileName, traceText] of Object.entries(traceTexts)) {
+      if (!traceText) continue;
+      await writeFile(
+        path.join(options.outputDirectory, fileName),
+        traceText,
+      );
+    }
+    await writeFile(
+      path.join(options.outputDirectory, "pdf-worker-browser.json"),
+      `${JSON.stringify(evidence, null, 2)}\n`,
+    );
   }
 
   if (!evidence.passed) {

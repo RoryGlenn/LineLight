@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { once } from "node:events";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -12,7 +13,10 @@ import {
   DEFAULT_PDF_HIGHLIGHT_FIXTURE,
   generatePdfHighlightFixture,
 } from "../scripts/generate-pdf-highlight-fixture.mjs";
-import { validatePdfHighlightEvidence } from "../scripts/run-pdf-highlight-browser-regression.mjs";
+import {
+  stopProcessGroup,
+  validatePdfHighlightEvidence,
+} from "../scripts/run-pdf-highlight-browser-regression.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -116,6 +120,61 @@ test("validates persisted browser evidence against the issue thresholds", () => 
     /exceeded 2px/u,
   );
 });
+
+test(
+  "stops a detached process group after its leader exits",
+  { timeout: 10_000 },
+  async () => {
+    const leaderSource = `
+      const { spawn } = require("node:child_process");
+      const descendant = spawn(
+        process.execPath,
+        ["-e", "setInterval(() => {}, 1000)"],
+        { stdio: ["ignore", 1, 2] },
+      );
+      process.stdout.write(String(descendant.pid) + "\\n", () => {
+        descendant.unref();
+      });
+    `;
+    const leader = spawn(process.execPath, ["-e", leaderSource], {
+      detached: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const processGroupId = leader.pid;
+    let descendantPid;
+    try {
+      const descendantOutput = new Promise((resolve, reject) => {
+        let output = "";
+        leader.stdout.setEncoding("utf8");
+        leader.stdout.on("data", (chunk) => {
+          output += chunk;
+          if (output.includes("\n")) resolve(output.trim());
+        });
+        leader.stdout.once("error", reject);
+      });
+      const [pidText, [exitCode, signal]] = await Promise.all([
+        descendantOutput,
+        once(leader, "exit"),
+      ]);
+      assert.equal(exitCode, 0);
+      assert.equal(signal, null);
+      descendantPid = Number(pidText);
+      assert.ok(Number.isInteger(descendantPid));
+      assert.doesNotThrow(() => process.kill(descendantPid, 0));
+
+      const shutdown = await stopProcessGroup(processGroupId, 1_000);
+      assert.equal(shutdown.termSent, true);
+      assert.equal(shutdown.closed, true);
+      assert.throws(
+        () => process.kill(descendantPid, 0),
+        (error) => error?.code === "ESRCH",
+      );
+      if (!leader.stdout.readableEnded) await once(leader, "close");
+    } finally {
+      await stopProcessGroup(processGroupId, 250);
+    }
+  },
+);
 
 test(
   "runs the PDF highlight regression in a real browser when explicitly enabled",
