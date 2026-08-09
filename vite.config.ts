@@ -19,8 +19,16 @@ const localBindingConfig = {
   main: "./worker/index.ts",
   compatibility_flags: ["nodejs_compat"],
   dev: {
+    container_engine: undefined,
+    enable_containers: true,
+    generate_types: false,
+    host: undefined,
     ip: "0.0.0.0",
+    inspector_ip: undefined,
+    inspector_port: undefined,
+    local_protocol: "http" as const,
     port: 3000,
+    upstream_protocol: "http" as const,
   },
   assets: {
     binding: "ASSETS",
