@@ -199,7 +199,7 @@ let activeBackend: OfflineBackend = {
 let modelIsWarm = false;
 const warmedOfflineVoices = new Set<OfflineVoiceId>();
 let operationQueue = Promise.resolve();
-const verifiedOfflineVoices = new Set<OfflineVoiceId>();
+const verifiedOfflineAssets = new Set<string>();
 let webGpuAdapterAvailablePromise: Promise<boolean> | null = null;
 
 function hasWebGpuAdapter() {
@@ -282,9 +282,13 @@ async function selectBackend({
   preferFp16?: boolean;
 }) {
   const preferWebGpu = preferredDevice !== "wasm";
-  const fp16Available = await hasWasmModelArtifact();
+  // The fp16 and retained-q8 inspections read independent Cache Storage keys.
+  const [fp16Available, legacyQ8Available] = await Promise.all([
+    hasWasmModelArtifact(),
+    hasLegacyQ8ModelArtifact(),
+  ]);
   const modelDtype = selectOfflineModelDtype({
-    legacyQ8Available: await hasLegacyQ8ModelArtifact(),
+    legacyQ8Available,
     preferFp16,
   });
   const useLegacyQ8 = modelDtype === "q8";
@@ -483,17 +487,21 @@ async function loadModel(
     preferredDevice,
     preferredWasmThreads,
     preferFp16 = false,
+    selectedBackend: suppliedBackend,
   }: {
     preferredDevice?: KokoroDevice;
     preferredWasmThreads?: number;
     preferFp16?: boolean;
+    selectedBackend?: OfflineBackend;
   },
 ) {
-  const selectedBackend = await selectBackend({
-    preferredDevice,
-    preferredWasmThreads,
-    preferFp16,
-  });
+  const selectedBackend =
+    suppliedBackend ??
+    (await selectBackend({
+      preferredDevice,
+      preferredWasmThreads,
+      preferFp16,
+    }));
   if (
     tts &&
     activeBackend.device === selectedBackend.device &&
@@ -508,7 +516,6 @@ async function loadModel(
   }
   if (tts) await disposeModel();
   configureBackend(selectedBackend);
-  await assertOfflineFilesAvailable(OFFLINE_VOICES[0].value, selectedBackend);
   transformersEnv.localModelPath = new URL(
     OFFLINE_MODEL_LOCAL_PATH,
     globalThis.location.origin,
@@ -870,7 +877,9 @@ async function initializeSpeech(
     preferFp16,
   });
   await assertOfflineFilesAvailable(voice, selectedBackend);
-  verifiedOfflineVoices.add(voice);
+  verifiedOfflineAssets.add(
+    `${selectedBackend.device}:${selectedBackend.modelDtype}:${selectedBackend.wasmThreads ?? "gpu"}:${voice}`,
+  );
   const cacheVerificationMilliseconds =
     performance.now() - verificationStartedAt;
 
@@ -884,6 +893,7 @@ async function initializeSpeech(
     preferredDevice: selectedBackend.device,
     preferredWasmThreads: selectedBackend.wasmThreads ?? undefined,
     preferFp16,
+    selectedBackend,
   });
   const modelInitializationMilliseconds =
     performance.now() - modelStartedAt;
@@ -961,14 +971,21 @@ async function generateSpeech(
   postProgress(id, 7, "Preparing the included voice model…", {
     stage: "initializing",
   });
-  const model = await loadModel(id, {
+  const selectedBackend = await selectBackend({
     preferredDevice,
     preferredWasmThreads,
   });
-  if (offlineOnly && !verifiedOfflineVoices.has(voice)) {
-    await assertOfflineFilesAvailable(voice, activeBackend);
-    verifiedOfflineVoices.add(voice);
+  const verificationKey =
+    `${selectedBackend.device}:${selectedBackend.modelDtype}:${selectedBackend.wasmThreads ?? "gpu"}:${voice}`;
+  if (offlineOnly && !verifiedOfflineAssets.has(verificationKey)) {
+    await assertOfflineFilesAvailable(voice, selectedBackend);
+    verifiedOfflineAssets.add(verificationKey);
   }
+  const model = await loadModel(id, {
+    preferredDevice,
+    preferredWasmThreads,
+    selectedBackend,
+  });
 
   postProgress(id, 68, "Generating narration audio…", {
     backend: activeBackend,

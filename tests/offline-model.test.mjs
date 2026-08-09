@@ -321,6 +321,49 @@ test("uses every validated fp16 cache alias for WebGPU selection", async () => {
   assert.doesNotMatch(selection, /hasWebGpuModelArtifact/u);
 });
 
+test("selects and verifies each cold backend only once before model construction", async () => {
+  const workerSource = await readFile("app/offline-speech.worker.ts", "utf8");
+  const initializeStart = workerSource.indexOf("async function initializeSpeech");
+  const generateStart = workerSource.indexOf("async function generateSpeech");
+  const initializeSource = workerSource.slice(initializeStart, generateStart);
+  const generateSource = workerSource.slice(
+    generateStart,
+    workerSource.indexOf("async function handleRequest", generateStart),
+  );
+  const loadModelStart = workerSource.indexOf("async function loadModel");
+  const loadModelSource = workerSource.slice(loadModelStart, initializeStart);
+
+  const count = (source, expression) =>
+    Array.from(source.matchAll(expression)).length;
+
+  assert.equal(count(initializeSource, /await selectBackend\(/gu), 1);
+  assert.equal(
+    count(
+      initializeSource,
+      /assertOfflineFilesAvailable\(voice, selectedBackend\)/gu,
+    ),
+    1,
+  );
+  assert.match(initializeSource, /loadModel\(id,[\s\S]*selectedBackend/u);
+
+  assert.equal(count(generateSource, /await selectBackend\(/gu), 1);
+  assert.equal(
+    count(
+      generateSource,
+      /assertOfflineFilesAvailable\(voice, selectedBackend\)/gu,
+    ),
+    1,
+  );
+  assert.match(generateSource, /loadModel\(id,[\s\S]*selectedBackend/u);
+
+  assert.match(loadModelSource, /suppliedBackend \?\?/u);
+  assert.equal(count(loadModelSource, /await selectBackend\(/gu), 1);
+  assert.doesNotMatch(
+    loadModelSource,
+    /assertOfflineFilesAvailable\(OFFLINE_VOICES\[0\]\.value/u,
+  );
+});
+
 test("keeps the validation receipt private to Cache Storage", () => {
   assert.equal(OFFLINE_FP16_READY_MARKER_VERSION, "fp16-ready-v1");
   assert.match(OFFLINE_FP16_READY_MARKER_URL, /Kokoro-82M/u);
