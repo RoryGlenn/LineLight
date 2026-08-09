@@ -4,12 +4,31 @@ import test from "node:test";
 import {
   buildSentenceStartIndices,
   buildSpeechChunk,
+  createSilentPcmWav,
   findAdjacentSentenceStart,
   findBufferedSeekOffset,
   findTimedBoundaryIndex,
   isRetryableSpeechError,
   speechFailureMessage,
 } from "../app/speech-utils.mjs";
+
+test("builds a bounded non-muted audio-prime WAV", () => {
+  const wav = createSilentPcmWav({
+    durationSeconds: 1,
+    sampleRate: 8_000,
+  });
+  const bytes = new Uint8Array(wav);
+  const view = new DataView(wav);
+
+  assert.equal(new TextDecoder().decode(bytes.subarray(0, 4)), "RIFF");
+  assert.equal(new TextDecoder().decode(bytes.subarray(8, 12)), "WAVE");
+  assert.equal(view.getUint16(20, true), 1);
+  assert.equal(view.getUint16(22, true), 1);
+  assert.equal(view.getUint32(24, true), 8_000);
+  assert.equal(view.getUint32(40, true), 16_000);
+  assert.equal(wav.byteLength, 16_044);
+  assert.equal(bytes.slice(44).some((sample) => sample !== 0), false);
+});
 
 function tokenize(text) {
   const matches = Array.from(text.matchAll(/\b[\p{L}\p{N}]+\b/gu));

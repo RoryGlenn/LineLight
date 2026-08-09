@@ -1,4 +1,4 @@
-export const SERVICE_WORKER_URL = "/sw-v7.js";
+export const SERVICE_WORKER_URL = "/sw-v9.js";
 
 /**
  * Keep production offline support without letting a previously installed

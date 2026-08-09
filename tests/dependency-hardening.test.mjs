@@ -134,7 +134,7 @@ test("production ships a working untransformed phonemizer runtime", async () => 
   }
 });
 
-test("production prepares the q8 offline pack before WASM initialization", async () => {
+test("production ships the device-specific voice ladder and local ORT runtime", async () => {
   const files = await listFiles("dist");
   const clientWasm = files.find(
     (path) =>
@@ -153,7 +153,12 @@ test("production prepares the q8 offline pack before WASM initialization", async
   const workerSource = await readFile(clientWorker, "utf8");
   assert.match(workerSource, /Downloading the included neural voice model/u);
   assert.match(workerSource, new RegExp(basename(clientWasm)));
+  assert.match(workerSource, /model_fp16/u);
+  assert.match(workerSource, /\.wasmPaths=\{wasm:/u);
+  assert.match(workerSource, /crossOriginIsolated/u);
+  assert.match(workerSource, /hardwareConcurrency/u);
+  assert.match(workerSource, /Warming the offline voice/u);
+  assert.match(workerSource, /backend_failed/u);
   assert.match(workerSource, /\.numThreads\s*=\s*1/u);
   assert.match(workerSource, /\.proxy\s*=\s*!1/u);
-  assert.doesNotMatch(workerSource, /Testing the voice on this device/u);
 });
