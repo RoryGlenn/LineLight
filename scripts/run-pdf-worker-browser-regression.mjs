@@ -280,21 +280,37 @@ async function waitForHttp(url, processHandle, log, timeoutMs = 60_000) {
 
 async function startProductionServer() {
   const port = await getFreePort();
+  const wranglerExecutable = path.join(
+    REPOSITORY_ROOT,
+    "node_modules",
+    ".bin",
+    "wrangler",
+  );
   const child = spawn(
-    "npm",
+    wranglerExecutable,
     [
-      "run",
-      "start",
-      "--",
-      "--host",
+      "dev",
+      "--config",
+      path.join(REPOSITORY_ROOT, "dist", "server", "wrangler.json"),
+      "--ip",
       "127.0.0.1",
       "--port",
       String(port),
+      "--inspector-port",
+      "0",
+      "--local",
+      "--log-level",
+      "warn",
+      "--show-interactive-dev-session=false",
     ],
     {
       cwd: REPOSITORY_ROOT,
       detached: true,
-      env: { ...process.env, BROWSER: "none" },
+      env: {
+        ...process.env,
+        BROWSER: "none",
+        WRANGLER_SEND_METRICS: "false",
+      },
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
@@ -316,6 +332,145 @@ async function startProductionServer() {
       `${message}\nProduction server process group ${processGroupId} survived cleanup.`,
     );
   }
+}
+
+async function inspectProductionHeaders(appUrl) {
+  const checks = [];
+  const failures = [];
+  const inspect = async (label, pathname, expected) => {
+    try {
+      const response = await fetch(new URL(pathname, appUrl), {
+        method: "HEAD",
+        signal: AbortSignal.timeout(5_000),
+      });
+      const actual = {
+        cacheControl: response.headers.get("cache-control"),
+        contentType: response.headers.get("content-type"),
+        crossOriginEmbedderPolicy: response.headers.get(
+          "cross-origin-embedder-policy",
+        ),
+        crossOriginOpenerPolicy: response.headers.get(
+          "cross-origin-opener-policy",
+        ),
+        crossOriginResourcePolicy: response.headers.get(
+          "cross-origin-resource-policy",
+        ),
+        label,
+        pathname,
+        status: response.status,
+      };
+      checks.push(actual);
+      if (!response.ok) {
+        failures.push(`${label} returned HTTP ${response.status}.`);
+      }
+      for (const [header, expectedValue] of Object.entries(expected.headers)) {
+        if (actual[header] !== expectedValue) {
+          failures.push(
+            `${label} ${header} was ${JSON.stringify(actual[header])}; expected ${JSON.stringify(expectedValue)}.`,
+          );
+        }
+      }
+      if (
+        expected.contentType &&
+        !expected.contentType.test(actual.contentType ?? "")
+      ) {
+        failures.push(
+          `${label} content type ${JSON.stringify(actual.contentType)} did not match ${expected.contentType}.`,
+        );
+      }
+    } catch (error) {
+      failures.push(`${label} header request failed: ${String(error)}`);
+    }
+  };
+
+  let manifest;
+  try {
+    const response = await fetch(new URL("/runtime-assets.json", appUrl), {
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!response.ok) {
+      failures.push(`runtime asset manifest returned HTTP ${response.status}.`);
+    } else {
+      manifest = await response.json();
+    }
+  } catch (error) {
+    failures.push(`runtime asset manifest request failed: ${String(error)}`);
+  }
+  const assets = Array.isArray(manifest?.assets) ? manifest.assets : [];
+  const requiredAsset = (label, pattern) => {
+    const matches = assets.filter((asset) => pattern.test(asset));
+    if (matches.length !== 1) {
+      failures.push(
+        `${label} expected one runtime asset matching ${pattern}; found ${matches.length}.`,
+      );
+      return null;
+    }
+    return matches[0];
+  };
+  const documentWorker = requiredAsset(
+    "PDF document worker",
+    /^\/assets\/pdf-document\.worker-[^/]+\.js$/u,
+  );
+  const parserWorker = requiredAsset(
+    "PDF parser bootstrap",
+    /^\/assets\/pdf-parser\.worker-[^/]+\.js$/u,
+  );
+  const pdfJsWorker = requiredAsset(
+    "nested PDF.js worker",
+    /^\/assets\/pdf\.worker\.min-[^/]+\.mjs$/u,
+  );
+  const wasm = requiredAsset(
+    "threaded WebAssembly runtime",
+    /^\/assets\/ort-wasm-simd-threaded\.jsep-[^/]+\.wasm$/u,
+  );
+  await inspect("HTML document", "/", {
+    contentType: /^text\/html\b/iu,
+    headers: {
+      crossOriginEmbedderPolicy: "require-corp",
+      crossOriginOpenerPolicy: "same-origin",
+    },
+  });
+  for (const [label, pathname] of [
+    ["PDF document worker", documentWorker],
+    ["PDF parser bootstrap", parserWorker],
+    ["nested PDF.js worker", pdfJsWorker],
+  ]) {
+    if (!pathname) continue;
+    await inspect(label, pathname, {
+      contentType: /^(?:application|text)\/javascript\b/iu,
+      headers: {
+        crossOriginEmbedderPolicy: "require-corp",
+        crossOriginResourcePolicy: "same-origin",
+      },
+    });
+  }
+  if (wasm) {
+    await inspect("threaded WebAssembly runtime", wasm, {
+      contentType: /^application\/wasm\b/iu,
+      headers: {
+        crossOriginEmbedderPolicy: "require-corp",
+        crossOriginResourcePolicy: "same-origin",
+      },
+    });
+  }
+  return {
+    assets: {
+      documentWorker,
+      parserWorker,
+      pdfJsWorker,
+      wasm,
+    },
+    checks,
+    failures,
+    manifest: manifest
+      ? {
+          assetCount: assets.length,
+          deploymentId: manifest.deploymentId,
+          version: manifest.version,
+        }
+      : null,
+    passed: failures.length === 0,
+  };
 }
 
 class CdpSession {
@@ -531,6 +686,24 @@ async function evaluate(cdp, expression) {
     throw new Error(description);
   }
   return result.result?.value;
+}
+
+async function assertRendererIsolation(cdp, label, networkState) {
+  const isolation = await evaluate(
+    cdp,
+    `({
+      crossOriginIsolated: globalThis.crossOriginIsolated,
+      origin: location.origin
+    })`,
+  );
+  const record = { label, ...isolation };
+  networkState.isolation.push(record);
+  if (!record.crossOriginIsolated) {
+    throw new Error(
+      `${label} at ${record.origin} was not cross-origin isolated.`,
+    );
+  }
+  return record;
 }
 
 async function waitForExpression(
@@ -883,6 +1056,7 @@ async function configurePage(cdp, appUrl, networkState) {
     "the LineLight reader shell",
     30_000,
   );
+  await assertRendererIsolation(cdp, "full-import origin", networkState);
   return consoleEntries;
 }
 
@@ -1053,6 +1227,11 @@ async function navigateToCleanOrigin(cdp, appUrl, networkState) {
     `Boolean(document.querySelector(".import-button"))`,
     "LineLight on the isolated cancellation origin",
     30_000,
+  );
+  await assertRendererIsolation(
+    cdp,
+    "cancellation/replacement origin",
+    networkState,
   );
   return isolatedUrl;
 }
@@ -1407,6 +1586,7 @@ async function run(options) {
   const networkState = {
     attachErrors: [],
     failures: [],
+    isolation: [],
     phase: "startup",
     requests: [],
     requestsByKey: new Map(),
@@ -1438,7 +1618,16 @@ async function run(options) {
     }
     server = options.appUrl ? null : await startProductionServer();
     const appUrl = options.appUrl ?? server.appUrl;
-    const productionMode = options.appUrl ? "external-production-url" : "local-production-build";
+    const productionMode = options.appUrl
+      ? "external-production-url"
+      : "local-cloudflare-built-artifact";
+    reportPhase("production-header-preflight-start");
+    const productionHeaders = await inspectProductionHeaders(appUrl);
+    evidence.productionHeaders = productionHeaders;
+    if (!productionHeaders.passed) {
+      throw new Error(productionHeaders.failures.join("\n"));
+    }
+    reportPhase("production-header-preflight-complete");
 
     reportPhase("browser-start");
     browser = await startBrowser(options.browser, true);
@@ -1931,6 +2120,7 @@ async function run(options) {
         externalRequests,
         importFailures: importNetworkFailures,
         importRequests,
+        isolation: networkState.isolation,
         responseFailures: importResponseFailures,
       },
       traces: {

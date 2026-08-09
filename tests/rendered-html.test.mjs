@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import net from "node:net";
+import os from "node:os";
 import { resolve } from "node:path";
+import path from "node:path";
 import test from "node:test";
 import { loadConfigFromFile } from "vite";
 
@@ -8,6 +12,7 @@ import {
   OFFLINE_MODEL_REVISION,
   OFFLINE_MODEL_ROUTE_PREFIX,
 } from "../app/offline-model-manifest.mjs";
+import { stopProcessGroup } from "../scripts/run-pdf-highlight-browser-regression.mjs";
 
 const developmentPreviewMeta =
   /<meta(?=[^>]*\bname=["']codex-preview["'])(?=[^>]*\bcontent=["']development["'])[^>]*>/i;
@@ -15,6 +20,48 @@ const authenticatedManifestLink =
   /<link(?=[^>]*\brel=["']manifest["'])(?=[^>]*\bhref=["']\/manifest\.webmanifest["'])(?=[^>]*\bcrossorigin=["']use-credentials["'])[^>]*>/i;
 
 let workerPromise;
+
+function getFreePort() {
+  return new Promise((resolvePort, reject) => {
+    const server = net.createServer();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (!address || typeof address === "string") {
+        server.close();
+        reject(new Error("Could not reserve a test port."));
+        return;
+      }
+      server.close((error) => {
+        if (error) reject(error);
+        else resolvePort(address.port);
+      });
+    });
+  });
+}
+
+const delay = (milliseconds) =>
+  new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
+
+async function waitForBuiltOrigin(url, child, log, timeoutMs = 20_000) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      throw new Error(`Built origin stopped before startup.\n${log()}`);
+    }
+    try {
+      const response = await fetch(url, {
+        cache: "no-store",
+        signal: AbortSignal.timeout(1_000),
+      });
+      if (response.ok) return;
+    } catch {
+      // Wrangler is still starting the local built artifact.
+    }
+    await delay(50);
+  }
+  throw new Error(`Timed out waiting for the built origin.\n${log()}`);
+}
 
 function loadBuiltWorker() {
   workerPromise ??= import(
@@ -47,6 +94,145 @@ test("isolates Vite-served development module workers", async () => {
     "same-origin",
   );
 });
+
+test(
+  "serves isolated workers and WebAssembly from the built production origin",
+  { timeout: 60_000 },
+  async () => {
+    const port = await getFreePort();
+    const temporaryDirectory = await mkdtemp(
+      path.join(os.tmpdir(), "linelight-built-origin-test-"),
+    );
+    const child = spawn(
+      resolve("node_modules/.bin/wrangler"),
+      [
+        "dev",
+        "--config",
+        resolve("dist/server/wrangler.json"),
+        "--ip",
+        "127.0.0.1",
+        "--port",
+        String(port),
+        "--inspector-port",
+        "0",
+        "--local",
+        "--log-level",
+        "warn",
+        "--persist-to",
+        temporaryDirectory,
+        "--show-interactive-dev-session=false",
+      ],
+      {
+        detached: true,
+        env: {
+          ...process.env,
+          MINIFLARE_REGISTRY_PATH: path.join(
+            temporaryDirectory,
+            "registry",
+          ),
+          WRANGLER_LOG_PATH: path.join(temporaryDirectory, "wrangler.log"),
+          WRANGLER_SEND_METRICS: "false",
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    const output = [];
+    const collect = (chunk) => output.push(chunk.toString());
+    child.stdout.on("data", collect);
+    child.stderr.on("data", collect);
+    const log = () => output.join("");
+    const origin = `http://127.0.0.1:${port}`;
+    try {
+      await waitForBuiltOrigin(`${origin}/`, child, log);
+      const manifestResponse = await fetch(`${origin}/runtime-assets.json`, {
+        cache: "no-store",
+        signal: AbortSignal.timeout(5_000),
+      });
+      assert.equal(manifestResponse.status, 200);
+      assert.equal(manifestResponse.headers.get("cache-control"), "no-store");
+      const manifest = await manifestResponse.json();
+      assert.ok(Array.isArray(manifest.assets));
+      const requiredAsset = (pattern) => {
+        const matches = manifest.assets.filter((asset) => pattern.test(asset));
+        assert.equal(matches.length, 1, `expected one asset matching ${pattern}`);
+        return matches[0];
+      };
+      const assets = [
+        {
+          contentType: /^(?:application|text)\/javascript\b/iu,
+          path: requiredAsset(
+            /^\/assets\/pdf-document\.worker-[^/]+\.js$/u,
+          ),
+        },
+        {
+          contentType: /^(?:application|text)\/javascript\b/iu,
+          path: requiredAsset(
+            /^\/assets\/pdf-parser\.worker-[^/]+\.js$/u,
+          ),
+        },
+        {
+          contentType: /^(?:application|text)\/javascript\b/iu,
+          path: requiredAsset(
+            /^\/assets\/pdf\.worker\.min-[^/]+\.mjs$/u,
+          ),
+        },
+        {
+          contentType: /^application\/wasm\b/iu,
+          path: requiredAsset(
+            /^\/assets\/ort-wasm-simd-threaded\.jsep-[^/]+\.wasm$/u,
+          ),
+        },
+      ];
+      const documentResponse = await fetch(`${origin}/`, {
+        cache: "no-store",
+        method: "HEAD",
+        signal: AbortSignal.timeout(5_000),
+      });
+      assert.equal(
+        documentResponse.headers.get("cross-origin-embedder-policy"),
+        "require-corp",
+      );
+      assert.equal(
+        documentResponse.headers.get("cross-origin-opener-policy"),
+        "same-origin",
+      );
+      for (const asset of assets) {
+        const response = await fetch(`${origin}${asset.path}`, {
+          cache: "no-store",
+          method: "HEAD",
+          signal: AbortSignal.timeout(5_000),
+        });
+        assert.equal(response.status, 200, asset.path);
+        assert.match(
+          response.headers.get("content-type") ?? "",
+          asset.contentType,
+        );
+        assert.equal(
+          response.headers.get("cross-origin-embedder-policy"),
+          "require-corp",
+          asset.path,
+        );
+        assert.equal(
+          response.headers.get("cross-origin-resource-policy"),
+          "same-origin",
+          asset.path,
+        );
+      }
+    } finally {
+      let shutdown;
+      try {
+        shutdown = await stopProcessGroup(child.pid, 2_000);
+      } finally {
+        await rm(temporaryDirectory, { recursive: true, force: true });
+      }
+      assert.equal(
+        shutdown?.closed,
+        true,
+        `Wrangler process group ${child.pid} survived test cleanup.`,
+      );
+    }
+  },
+);
 
 test("renders development preview metadata", async () => {
   const { default: worker } = await loadBuiltWorker();

@@ -218,10 +218,12 @@ the real Offline-natural worker. Its thresholds and opt-in CDP gate live in
 with review records in
 [`docs/evidence/issue-60/`](evidence/issue-60/).
 [`scripts/run-pdf-worker-browser-regression.mjs`](../scripts/run-pdf-worker-browser-regression.mjs)
-runs the production build in headed Brave against the supplied 359-page PDF,
-recording first-page ordering, Window Long Tasks, control latency, attached
-worker network traffic, resumable cancellation/replacement state, screenshots,
-and a DevTools trace. Review records live in
+runs the built Cloudflare Worker and ASSETS artifact locally through Wrangler,
+directly verifies origin COOP/COEP/CORP and WebAssembly MIME headers without a
+service worker, then opens headed Brave against the supplied 359-page PDF. It
+records first-page ordering, Window Long Tasks, control latency, attached worker
+network traffic, resumable cancellation/replacement state, screenshots, and a
+DevTools trace. Review records live in
 [`docs/evidence/issue-56/`](evidence/issue-56/).
 The packaged page is checked by
 [`tests/rendered-html.test.mjs`](../tests/rendered-html.test.mjs). PDF geometry,

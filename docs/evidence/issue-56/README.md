@@ -9,6 +9,10 @@ node scripts/run-pdf-worker-browser-regression.mjs \
 ```
 
 The JSON report is authoritative for thresholds and environment details. The
+runner builds LineLight, starts that exact Worker plus static-asset artifact in
+local Wrangler, and directly checks the origin document, PDF worker scripts,
+nested PDF.js worker, and threaded WebAssembly response headers before Brave or
+its service worker can participate. The
 full-import trace covers the supplied PDF through all 359 durable pages,
 outline construction, and completion. The separate cancellation trace covers
 a second large import through a durable background-page prefix and then a
