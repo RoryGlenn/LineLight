@@ -45,6 +45,7 @@ function parseArguments(argv) {
       process.env.LINELIGHT_PDF_WORKER_EVIDENCE ?? DEFAULT_OUTPUT_DIRECTORY,
     reference: DEFAULT_REFERENCE_PDF,
     replacement: DEFAULT_PDF_HIGHLIGHT_FIXTURE,
+    replacementPages: 6,
     skipBuild: false,
     timeoutMs: DEFAULT_TIMEOUT_MS,
   };
@@ -55,6 +56,9 @@ function parseArguments(argv) {
     else if (argument === "--browser") options.browser = argv[++index];
     else if (argument === "--reference") options.reference = argv[++index];
     else if (argument === "--replacement") options.replacement = argv[++index];
+    else if (argument === "--replacement-pages") {
+      options.replacementPages = Number(argv[++index]);
+    }
     else if (argument === "--output") options.outputDirectory = argv[++index];
     else if (argument === "--expected-pages") {
       options.expectedPages = Number(argv[++index]);
@@ -72,6 +76,7 @@ function parseArguments(argv) {
           "Options:",
           "  --reference PATH       Large reference PDF (defaults to the supplied 359-page book).",
           "  --replacement PATH     Small PDF used to replace/cancel the large import.",
+          "  --replacement-pages N  Expected replacement page count (default: 6).",
           "  --expected-pages N     Expected reference page count (default: 359).",
           "  --output DIR           JSON, trace, and screenshot directory.",
           "  --browser PATH         Brave/Chromium executable.",
@@ -91,6 +96,9 @@ function parseArguments(argv) {
 
   if (!Number.isInteger(options.expectedPages) || options.expectedPages < 2) {
     throw new Error("--expected-pages must be an integer greater than one.");
+  }
+  if (!Number.isInteger(options.replacementPages) || options.replacementPages < 1) {
+    throw new Error("--replacement-pages must be a positive integer.");
   }
   if (!Number.isFinite(options.timeoutMs) || options.timeoutMs < 10_000) {
     throw new Error("--timeout-ms must be at least 10000.");
@@ -312,7 +320,8 @@ const INSTRUMENTATION_SOURCE = `
   const state = globalThis.__lineLightIssue56 = {
     errors: [],
     imports: [],
-    longTasks: []
+    longTasks: [],
+    notices: []
   };
 
   const recordError = (value) => state.errors.push(String(value));
@@ -342,6 +351,17 @@ const INSTRUMENTATION_SOURCE = `
   } catch (error) {
     recordError("Long Task observer unavailable: " + error.message);
   }
+  let lastNotice = null;
+  new MutationObserver(() => {
+    const text = document.querySelector(".notice")?.textContent?.trim() ?? null;
+    if (!text || text === lastNotice) return;
+    lastNotice = text;
+    state.notices.push({
+      at: performance.now(),
+      importLabel: state.imports.at(-1)?.label ?? null,
+      text
+    });
+  }).observe(document, { childList: true, characterData: true, subtree: true });
 
   const visible = (element) => {
     if (!element) return false;
@@ -357,6 +377,8 @@ const INSTRUMENTATION_SOURCE = `
       const now = performance.now();
       const pageOne = document.querySelector("#pdf-page-1");
       const pageOneCanvas = pageOne?.querySelector("canvas");
+      const renderFallback =
+        document.querySelector(".pdf-page-view")?.dataset.pdfRenderFallback ?? null;
       const background = document.querySelector(
         '.pdf-page-block[data-pdf-page-index]:not([data-pdf-page-index="0"])'
       );
@@ -366,6 +388,7 @@ const INSTRUMENTATION_SOURCE = `
       if (pageOne?.querySelector(".pdf-word-overlay") && current.pageOneTextAt === null) {
         current.pageOneTextAt = now;
       }
+      if (renderFallback === "true") current.renderFallbackObserved = true;
       if (
         pageOneCanvas?.width > 0 &&
         pageOneCanvas?.height > 0 &&
@@ -375,8 +398,7 @@ const INSTRUMENTATION_SOURCE = `
       ) {
         current.pageOneBitmapAt = now;
         current.pageOneRenderSource = pageOneCanvas.dataset.pdfRenderSource ?? null;
-        current.renderFallback =
-          document.querySelector(".pdf-page-view")?.dataset.pdfRenderFallback ?? null;
+        current.renderFallback = renderFallback;
         current.pageOneCanvas = {
           width: pageOneCanvas.width,
           height: pageOneCanvas.height,
@@ -409,13 +431,31 @@ const INSTRUMENTATION_SOURCE = `
       pageOneCanvas: null,
       backgroundPageAt: null,
       backgroundPageNumber: null,
-      control: null
+      control: null,
+      controls: [],
+      outcome: null,
+      renderFallbackObserved: false
     };
     state.imports.push(run);
     return startedAt;
   };
 
-  state.measureSettingsControl = async () => {
+  state.finishImport = async (label, outcome) => {
+    const run = state.imports.find((candidate) => candidate.label === label);
+    if (!run) throw new Error("Unknown import run: " + label);
+    if (run.stoppedAt !== null) return structuredClone(run);
+    await new Promise((resolve) => requestAnimationFrame(() =>
+      requestAnimationFrame(resolve)
+    ));
+    run.stoppedAt = performance.now();
+    run.outcome = outcome;
+    performance.mark("linelight:harness:" + label + "-import-end");
+    return structuredClone(run);
+  };
+
+  state.mark = (label) => performance.mark("linelight:harness:" + label);
+
+  state.measureSettingsControl = async (probeId) => {
     const run = state.imports.at(-1);
     const button = Array.from(document.querySelectorAll("button"))
       .find((candidate) => candidate.textContent.includes("Reading settings"));
@@ -431,7 +471,8 @@ const INSTRUMENTATION_SOURCE = `
     await new Promise((resolve) => requestAnimationFrame(resolve));
     const latencyMs = performance.now() - startedAt;
     document.querySelector('[aria-label="Close reading settings"]')?.click();
-    run.control = { name: "Reading settings", startedAt, latencyMs };
+    run.control = { name: "Reading settings", probeId, startedAt, latencyMs };
+    run.controls.push(run.control);
     return run.control;
   };
 })();
@@ -439,60 +480,138 @@ const INSTRUMENTATION_SOURCE = `
 
 async function configurePage(cdp, appUrl, networkState) {
   const consoleEntries = [];
-  cdp.on("Runtime.consoleAPICalled", (event) => {
+  cdp.on("Runtime.consoleAPICalled", (event, sessionId) => {
     consoleEntries.push({
+      phase: networkState.phase,
+      sessionId,
       type: event.type,
       values: event.args.map((argument) => argument.value ?? argument.description),
     });
   });
   cdp.on("Log.entryAdded", ({ entry }) => {
-    consoleEntries.push({ type: entry.level, values: [entry.text] });
+    consoleEntries.push({
+      phase: networkState.phase,
+      sessionId: null,
+      type: entry.level,
+      values: [entry.text],
+    });
   });
   cdp.on("Network.requestWillBeSent", (event, sessionId) => {
-    networkState.requests.push({
+    const request = {
       documentURL: event.documentURL,
       initiatorType: event.initiator?.type ?? null,
       method: event.request.method,
       phase: networkState.phase,
+      requestId: event.requestId,
       resourceType: event.type,
       sessionId,
       timestamp: event.timestamp,
       url: event.request.url,
-    });
+    };
+    networkState.requests.push(request);
+    networkState.requestsByKey.set(`${sessionId ?? "page"}:${event.requestId}`, request);
   });
   cdp.on("Network.loadingFailed", (event, sessionId) => {
+    const request = networkState.requestsByKey.get(
+      `${sessionId ?? "page"}:${event.requestId}`,
+    );
     networkState.failures.push({
       blockedReason: event.blockedReason ?? null,
       canceled: event.canceled ?? false,
+      documentURL: request?.documentURL ?? null,
       errorText: event.errorText,
-      phase: networkState.phase,
+      phase: request?.phase ?? networkState.phase,
       requestId: event.requestId,
+      resourceType: event.type ?? request?.resourceType ?? null,
       sessionId,
       timestamp: event.timestamp,
+      url: request?.url ?? null,
+    });
+  });
+  cdp.on("Network.responseReceived", (event, sessionId) => {
+    if (event.response.status < 400) return;
+    const request = networkState.requestsByKey.get(
+      `${sessionId ?? "page"}:${event.requestId}`,
+    );
+    networkState.responseFailures.push({
+      phase: request?.phase ?? networkState.phase,
+      requestId: event.requestId,
+      resourceType: event.type ?? request?.resourceType ?? null,
+      sessionId,
+      status: event.response.status,
+      statusText: event.response.statusText,
+      timestamp: event.timestamp,
+      url: event.response.url ?? request?.url ?? null,
+    });
+  });
+  cdp.on("Runtime.exceptionThrown", ({ exceptionDetails }, sessionId) => {
+    networkState.runtimeExceptions.push({
+      columnNumber: exceptionDetails.columnNumber ?? null,
+      exception:
+        exceptionDetails.exception?.description ??
+        exceptionDetails.exception?.value ??
+        null,
+      lineNumber: exceptionDetails.lineNumber ?? null,
+      phase: networkState.phase,
+      scriptId: exceptionDetails.scriptId ?? null,
+      sessionId,
+      stack: (exceptionDetails.stackTrace?.callFrames ?? []).map((frame) => ({
+        columnNumber: frame.columnNumber,
+        functionName: frame.functionName,
+        lineNumber: frame.lineNumber,
+        scriptId: frame.scriptId,
+        url: frame.url,
+      })),
+      text: exceptionDetails.text,
+      timestamp: exceptionDetails.timestamp ?? null,
+      url: exceptionDetails.url ?? null,
     });
   });
   cdp.on("Target.attachedToTarget", (event) => {
-    const { sessionId, targetInfo } = event;
+    const { sessionId, targetInfo, waitingForDebugger } = event;
     networkState.targets.push({
       sessionId,
       targetId: targetInfo.targetId,
       type: targetInfo.type,
       url: targetInfo.url,
     });
-    void Promise.all([
-      cdp.send("Network.enable", {}, sessionId),
-      cdp.send(
-        "Target.setAutoAttach",
-        {
-          autoAttach: true,
-          flatten: true,
-          waitForDebuggerOnStart: false,
-        },
-        sessionId,
-      ),
-    ]).catch((error) => {
-      networkState.attachErrors.push(String(error));
-    });
+    void (async () => {
+      try {
+        await Promise.all([
+          cdp.send("Network.enable", {}, sessionId),
+          cdp.send("Runtime.enable", {}, sessionId),
+        ]);
+        await cdp.send(
+          "Target.setAutoAttach",
+          {
+            autoAttach: true,
+            flatten: true,
+            waitForDebuggerOnStart: true,
+          },
+          sessionId,
+        );
+      } catch (error) {
+        networkState.attachErrors.push({
+          error: String(error),
+          sessionId,
+          targetType: targetInfo.type,
+          targetUrl: targetInfo.url,
+        });
+      } finally {
+        if (waitingForDebugger) {
+          await cdp.send("Runtime.runIfWaitingForDebugger", {}, sessionId).catch(
+            (error) => {
+              networkState.attachErrors.push({
+                error: `Could not resume target: ${String(error)}`,
+                sessionId,
+                targetType: targetInfo.type,
+                targetUrl: targetInfo.url,
+              });
+            },
+          );
+        }
+      }
+    })();
   });
 
   await Promise.all([
@@ -505,7 +624,7 @@ async function configurePage(cdp, appUrl, networkState) {
     cdp.send("Target.setAutoAttach", {
       autoAttach: true,
       flatten: true,
-      waitForDebuggerOnStart: false,
+      waitForDebuggerOnStart: true,
     }),
   ]);
   await cdp.send("Network.setCacheDisabled", { cacheDisabled: true });
@@ -555,6 +674,7 @@ async function beginImport(cdp, filePath, label, networkState) {
     files: [filePath],
     nodeId,
   });
+  await markHarness(cdp, `${label}-dispatched`);
 }
 
 async function waitForFirstVisiblePage(cdp, label, timeoutMs) {
@@ -583,6 +703,115 @@ async function waitForBackgroundPage(cdp, label, timeoutMs = 30_000) {
   );
 }
 
+async function waitForPdfRecord(
+  cdp,
+  {
+    description,
+    expectedPages,
+    minimumStoredPages = 1,
+    onProbe,
+    probeEveryMs = 1_000,
+    status,
+    timeoutMs,
+    title,
+  },
+) {
+  const startedAt = Date.now();
+  let lastProbeAt = startedAt;
+  while (Date.now() - startedAt < timeoutMs) {
+    const library = await inspectLibrary(cdp);
+    const record = library.pdfs.find(
+      (candidate) =>
+        candidate.title === title &&
+        candidate.pdfPageCount === expectedPages &&
+        candidate.pdfImportStatus === status &&
+        candidate.storedPageCount >= minimumStoredPages,
+    );
+    if (record) return { library, record };
+    if (onProbe && Date.now() - lastProbeAt >= probeEveryMs) {
+      await onProbe();
+      lastProbeAt = Date.now();
+    }
+    await delay(100);
+  }
+  throw new Error(`Timed out waiting for ${description}.`);
+}
+
+async function finishInstrumentedImport(cdp, label, outcome) {
+  return evaluate(
+    cdp,
+    `globalThis.__lineLightIssue56.finishImport(${JSON.stringify(label)}, ${JSON.stringify(outcome)})`,
+  );
+}
+
+async function markHarness(cdp, label) {
+  await evaluate(
+    cdp,
+    `globalThis.__lineLightIssue56.mark(${JSON.stringify(label)})`,
+  );
+}
+
+async function measureSettingsControl(cdp) {
+  const probeId = `control-${measureSettingsControl.nextProbeId++}`;
+  const dispatchedAt = performance.now();
+  const control = await evaluate(
+    cdp,
+    `globalThis.__lineLightIssue56.measureSettingsControl(${JSON.stringify(probeId)})`,
+  );
+  const dispatchLatencyMs = performance.now() - dispatchedAt;
+  await evaluate(
+    cdp,
+    `(() => {
+      const control = globalThis.__lineLightIssue56.imports
+        .flatMap((run) => run.controls)
+        .find((candidate) => candidate.probeId === ${JSON.stringify(probeId)});
+      if (!control) throw new Error("Control probe was not retained.");
+      control.dispatchLatencyMs = ${JSON.stringify(dispatchLatencyMs)};
+      return true;
+    })()`,
+  );
+  return { ...control, dispatchLatencyMs };
+}
+measureSettingsControl.nextProbeId = 1;
+
+async function captureInstrumentation(cdp) {
+  return evaluate(
+    cdp,
+    `({
+      errors: globalThis.__lineLightIssue56.errors.slice(),
+      imports: globalThis.__lineLightIssue56.imports.map((run) => ({ ...run })),
+      longTasks: globalThis.__lineLightIssue56.longTasks.map((task) => ({ ...task })),
+      notices: globalThis.__lineLightIssue56.notices.map((notice) => ({ ...notice })),
+      capturedAt: performance.now()
+    })`,
+  );
+}
+
+function isolatedLoopbackUrl(appUrl) {
+  const url = new URL(appUrl);
+  if (url.hostname === "127.0.0.1") url.hostname = "localhost";
+  else if (url.hostname === "localhost") url.hostname = "127.0.0.1";
+  else {
+    throw new Error(
+      "The two-scenario harness needs a loopback production URL so it can use a second isolated origin.",
+    );
+  }
+  return url.href;
+}
+
+async function navigateToCleanOrigin(cdp, appUrl, networkState) {
+  const isolatedUrl = isolatedLoopbackUrl(appUrl);
+  networkState.phase = "isolation-navigation";
+  await cdp.send("Page.navigate", { url: isolatedUrl });
+  await waitForExpression(
+    cdp,
+    `Boolean(document.querySelector(".import-button"))`,
+    "LineLight on the isolated cancellation origin",
+    30_000,
+  );
+  return isolatedUrl;
+}
+
 async function inspectLibrary(cdp) {
   return evaluate(
     cdp,
@@ -605,6 +834,10 @@ async function inspectLibrary(cdp) {
       const activeDocumentId = await value(
         transaction.objectStore("state").get("active-document-id")
       );
+      const countOutlineItems = (items) => (items ?? []).reduce(
+        (total, item) => total + 1 + countOutlineItems(item.items),
+        0
+      );
       const pdfs = [];
       for (const document of documents.filter((candidate) => candidate?.kind === "pdf")) {
         const pageCount = names.includes("pdf-pages")
@@ -624,6 +857,7 @@ async function inspectLibrary(cdp) {
           pdfRevision: document.pdfRevision ?? null,
           storedPageCount: pageCount,
           hasSource,
+          outlineItemCount: countOutlineItems(document.outline),
           wordCount: document.wordCount ?? null
         });
       }
@@ -657,8 +891,15 @@ async function startTrace(cdp) {
 }
 
 async function stopTrace(cdp) {
-  const completion = new Promise((resolve) => {
-    cdp.on("Tracing.tracingComplete", resolve);
+  const completion = new Promise((resolve, reject) => {
+    const timeout = setTimeout(
+      () => reject(new Error("Timed out waiting for Brave to finish the trace.")),
+      30_000,
+    );
+    cdp.on("Tracing.tracingComplete", (result) => {
+      clearTimeout(timeout);
+      resolve(result);
+    });
   });
   await cdp.send("Tracing.end");
   const result = await completion;
@@ -675,7 +916,7 @@ async function stopTrace(cdp) {
   return chunks.join("");
 }
 
-function traceSummary(trace, documentId) {
+function traceSummary(trace, { documentId, endLabel, startLabel }) {
   const events = Array.isArray(trace?.traceEvents) ? trace.traceEvents : [];
   const pdfPrefix = `linelight:pdf:${documentId}:`;
   const pdfMarks = events
@@ -693,7 +934,12 @@ function traceSummary(trace, documentId) {
         typeof event.name === "string" &&
         event.name.startsWith("linelight:harness:"),
     )
-    .map((event) => ({ name: event.name, timestampMicroseconds: event.ts }))
+    .map((event) => ({
+      name: event.name,
+      processId: event.pid,
+      threadId: event.tid,
+      timestampMicroseconds: event.ts,
+    }))
     .sort((left, right) => left.timestampMicroseconds - right.timestampMicroseconds);
   const rendererMainThreadIds = new Set(
     events
@@ -705,21 +951,29 @@ function traceSummary(trace, documentId) {
       )
       .map((event) => event.tid),
   );
-  const importStart = harnessMarks.find(
-    (mark) => mark.name === "linelight:harness:large-import-start",
+  const windowStart = harnessMarks.find(
+    (mark) => mark.name === `linelight:harness:${startLabel}-import-start`,
   )?.timestampMicroseconds;
-  const replacementStart = harnessMarks.find(
-    (mark) => mark.name === "linelight:harness:replacement-import-start",
+  const windowEnd = harnessMarks.find(
+    (mark) => mark.name === `linelight:harness:${endLabel}-import-end`,
   )?.timestampMicroseconds;
+  const windowProcessId = harnessMarks.find(
+    (mark) => mark.name === `linelight:harness:${startLabel}-import-start`,
+  )?.processId;
+  const windowThreadId = harnessMarks.find(
+    (mark) => mark.name === `linelight:harness:${startLabel}-import-start`,
+  )?.threadId;
   const mainThreadTasks = events
     .filter(
       (event) =>
-        rendererMainThreadIds.has(event.tid) &&
-        event.name === "RunTask" &&
+        event.pid === windowProcessId &&
+        event.tid === windowThreadId &&
+        typeof event.name === "string" &&
+        (event.name === "RunTask" || event.name.endsWith("::RunTask")) &&
         event.ph === "X" &&
         Number.isFinite(event.dur) &&
-        (!importStart || event.ts + event.dur >= importStart) &&
-        (!replacementStart || event.ts <= replacementStart),
+        (!windowStart || event.ts + event.dur >= windowStart) &&
+        (!windowEnd || event.ts <= windowEnd),
     )
     .map((event) => ({
       durationMs: event.dur / 1000,
@@ -734,11 +988,16 @@ function traceSummary(trace, documentId) {
       : null,
     pdfMarks,
     rendererMainThreadIds: [...rendererMainThreadIds],
+    windowEndMicroseconds: windowEnd ?? null,
+    windowProcessId: windowProcessId ?? null,
+    windowStartMicroseconds: windowStart ?? null,
+    windowThreadId: windowThreadId ?? null,
   };
 }
 
-function workerOrdering(summary) {
+function workerOrdering(summary, { requireComplete = false } = {}) {
   const stage = (name) => summary.pdfMarks.find((mark) => mark.stage === name);
+  const pageOnePersisted = stage("page-1-persisted");
   const rasterStart = stage("page-1-raster-start");
   const rasterEnd = stage("page-1-raster-end");
   const pageOnePosted = stage("page-1-posted");
@@ -746,13 +1005,19 @@ function workerOrdering(summary) {
   const complete = stage("complete");
   const usesWorkerRaster = Boolean(rasterStart || rasterEnd);
   return {
-    completeBeforeReplacement: Boolean(complete),
+    complete,
+    completeSeen: Boolean(complete),
+    pageOnePersisted,
     pageOnePosted,
     pageTwoTextStart,
     passed:
       Boolean(pageOnePosted) &&
+      Boolean(pageOnePersisted) &&
       Boolean(pageTwoTextStart) &&
+      pageOnePersisted.timestampMicroseconds <=
+        (rasterStart?.timestampMicroseconds ?? pageOnePosted.timestampMicroseconds) &&
       pageOnePosted.timestampMicroseconds <= pageTwoTextStart.timestampMicroseconds &&
+      (!requireComplete || Boolean(complete)) &&
       (!usesWorkerRaster ||
         (Boolean(rasterStart) &&
           Boolean(rasterEnd) &&
@@ -804,10 +1069,7 @@ function importTiming(instrumentation, label) {
   const run = instrumentation.imports.find((candidate) => candidate.label === label);
   if (!run) return null;
   const firstPageEnd = run.pageOneBitmapAt;
-  const nextRun = instrumentation.imports.find(
-    (candidate) => candidate.startedAt > run.startedAt,
-  );
-  const activeEnd = nextRun?.startedAt ?? instrumentation.capturedAt;
+  const activeEnd = run.stoppedAt ?? instrumentation.capturedAt;
   return {
     ...run,
     activeWindowEnd: activeEnd,
@@ -815,6 +1077,10 @@ function importTiming(instrumentation, label) {
       firstPageEnd === null ? null : firstPageEnd - run.startedAt,
     importToFirstShellMs:
       run.pageOneShellAt === null ? null : run.pageOneShellAt - run.startedAt,
+    pageOneTextBeforeBitmap:
+      run.pageOneTextAt !== null &&
+      run.pageOneBitmapAt !== null &&
+      run.pageOneTextAt <= run.pageOneBitmapAt,
     firstBitmapBeforeBackgroundDom:
       run.pageOneBitmapAt !== null &&
       (run.backgroundPageAt === null || run.pageOneBitmapAt <= run.backgroundPageAt),
@@ -829,6 +1095,31 @@ function importTiming(instrumentation, label) {
         entry.startTime >= run.startedAt &&
         entry.startTime <= activeEnd,
     ),
+  };
+}
+
+function scenarioTiming(instrumentation, startLabel, endLabel = startLabel) {
+  const startRun = instrumentation.imports.find(
+    (candidate) => candidate.label === startLabel,
+  );
+  const endRun = instrumentation.imports.find(
+    (candidate) => candidate.label === endLabel,
+  );
+  if (!startRun || !endRun) return null;
+  const end = endRun.stoppedAt ?? instrumentation.capturedAt;
+  const windowLongTasks = instrumentation.longTasks.filter(
+    (entry) => entry.startTime >= startRun.startedAt && entry.startTime <= end,
+  );
+  return {
+    durationMs: end - startRun.startedAt,
+    end,
+    endLabel,
+    maximumWindowLongTaskMs: windowLongTasks.length
+      ? Math.max(...windowLongTasks.map((entry) => entry.duration))
+      : 0,
+    start: startRun.startedAt,
+    startLabel,
+    windowLongTasks,
   };
 }
 
@@ -848,7 +1139,8 @@ async function run(options) {
   let browser;
   let cdp;
   let server;
-  let traceText = "";
+  const traceTexts = {};
+  let activeTraceName = null;
   let traceStarted = false;
   let buildLog = "";
   let consoleEntries = [];
@@ -857,6 +1149,9 @@ async function run(options) {
     failures: [],
     phase: "startup",
     requests: [],
+    requestsByKey: new Map(),
+    responseFailures: [],
+    runtimeExceptions: [],
     targets: [],
   };
   const evidence = {
@@ -868,6 +1163,13 @@ async function run(options) {
   };
 
   try {
+    const source = sourceEvidence();
+    evidence.source = source;
+    if (source.dirty) {
+      throw new Error(
+        "Issue #56 browser evidence must run from a clean committed source tree.",
+      );
+    }
     if (!options.appUrl && !options.skipBuild) buildLog = await buildProductionApp();
     server = options.appUrl ? null : await startProductionServer();
     const appUrl = options.appUrl ?? server.appUrl;
@@ -877,166 +1179,410 @@ async function run(options) {
     cdp = await CdpSession.connect(browser.webSocketDebuggerUrl);
     consoleEntries = await configurePage(cdp, appUrl, networkState);
     const browserVersion = await cdp.send("Browser.getVersion");
-    const source = sourceEvidence();
-    if (source.dirty) {
-      throw new Error(
-        "Issue #56 browser evidence must run from a clean committed source tree.",
-      );
-    }
     const reference = await fileEvidence(options.reference);
     const replacement = await fileEvidence(options.replacement);
 
-    await startTrace(cdp);
-    traceStarted = true;
-    await beginImport(cdp, options.reference, "large", networkState);
-    const control = await evaluate(
-      cdp,
-      `globalThis.__lineLightIssue56.measureSettingsControl()`,
+    const referenceTitle = path.basename(
+      options.reference,
+      path.extname(options.reference),
     );
-    const largeFirstPage = await waitForFirstVisiblePage(
+    const replacementTitle = path.basename(
+      options.replacement,
+      path.extname(options.replacement),
+    );
+
+    await startTrace(cdp);
+    activeTraceName = "full-import-trace.json";
+    traceStarted = true;
+    await beginImport(cdp, options.reference, "full", networkState);
+    const fullInitialControl = await measureSettingsControl(cdp);
+    const fullFirstPage = await waitForFirstVisiblePage(
       cdp,
-      "large",
+      "full",
       options.timeoutMs,
     );
-    const largeLibraryAtFirstPaint = await inspectLibrary(cdp);
+    const fullLibraryAtFirstPaint = await inspectLibrary(cdp);
     await captureScreenshot(
       cdp,
-      path.join(options.outputDirectory, "large-first-page.png"),
+      path.join(options.outputDirectory, "full-first-page.png"),
     );
-    await waitForBackgroundPage(cdp, "large", Math.min(options.timeoutMs, 30_000));
+    await waitForBackgroundPage(cdp, "full", Math.min(options.timeoutMs, 30_000));
+    const fullCompletion = await waitForPdfRecord(cdp, {
+      description: `all ${options.expectedPages} reference PDF pages and completion metadata`,
+      expectedPages: options.expectedPages,
+      minimumStoredPages: options.expectedPages,
+      onProbe: () => measureSettingsControl(cdp),
+      status: "ready",
+      timeoutMs: options.timeoutMs,
+      title: referenceTitle,
+    });
+    const fullFinalControl = await measureSettingsControl(cdp);
+    await finishInstrumentedImport(cdp, "full", "completed");
+    const fullInstrumentation = await captureInstrumentation(cdp);
+    await captureScreenshot(
+      cdp,
+      path.join(options.outputDirectory, "full-complete.png"),
+    );
+    traceTexts[activeTraceName] = await stopTrace(cdp);
+    traceStarted = false;
+    activeTraceName = null;
 
+    const fullRecordAtFirstPaint = fullLibraryAtFirstPaint.pdfs.find(
+      (document) => document.id === fullCompletion.record.id,
+    );
+    const fullTrace = traceSummary(
+      JSON.parse(traceTexts["full-import-trace.json"]),
+      {
+        documentId: fullCompletion.record.id,
+        endLabel: "full",
+        startLabel: "full",
+      },
+    );
+    const fullOrdering = workerOrdering(fullTrace, { requireComplete: true });
+    const fullTiming = importTiming(fullInstrumentation, "full");
+    const fullScenarioTiming = scenarioTiming(fullInstrumentation, "full");
+
+    const cancellationAppUrl = await navigateToCleanOrigin(
+      cdp,
+      appUrl,
+      networkState,
+    );
+    await startTrace(cdp);
+    activeTraceName = "cancellation-trace.json";
+    traceStarted = true;
+    await beginImport(cdp, options.reference, "cancel-large", networkState);
+    const cancelInitialControl = await measureSettingsControl(cdp);
+    const cancelFirstPage = await waitForFirstVisiblePage(
+      cdp,
+      "cancel-large",
+      options.timeoutMs,
+    );
+    const cancelLibraryAtFirstPaint = await inspectLibrary(cdp);
+    await captureScreenshot(
+      cdp,
+      path.join(options.outputDirectory, "cancel-large-first-page.png"),
+    );
+    await waitForBackgroundPage(
+      cdp,
+      "cancel-large",
+      Math.min(options.timeoutMs, 30_000),
+    );
+    const cancelPrefix = await waitForPdfRecord(cdp, {
+      description: "a durable background-page prefix before cancellation",
+      expectedPages: options.expectedPages,
+      minimumStoredPages: 2,
+      onProbe: () => measureSettingsControl(cdp),
+      status: "importing",
+      timeoutMs: Math.min(options.timeoutMs, 30_000),
+      title: referenceTitle,
+    });
+    await finishInstrumentedImport(cdp, "cancel-large", "replaced");
     await beginImport(cdp, options.replacement, "replacement", networkState);
+    const canceledLibraryAfterReplacementDispatch = await inspectLibrary(cdp);
+    const canceledRecordAfterReplacementDispatch =
+      canceledLibraryAfterReplacementDispatch.pdfs.find(
+        (document) => document.id === cancelPrefix.record.id,
+      );
+    const replacementInitialControl = await measureSettingsControl(cdp);
     const replacementFirstPage = await waitForFirstVisiblePage(
       cdp,
       "replacement",
       options.timeoutMs,
     );
+    await markHarness(cdp, "replacement-active");
+    const canceledLibraryAfterReplacementStart = await inspectLibrary(cdp);
+    const canceledRecordAfterReplacementStart =
+      canceledLibraryAfterReplacementStart.pdfs.find(
+        (document) => document.id === cancelPrefix.record.id,
+      );
+    const replacementCompletion = await waitForPdfRecord(cdp, {
+      description: "the replacement PDF to complete",
+      expectedPages: options.replacementPages,
+      minimumStoredPages: options.replacementPages,
+      onProbe: () => measureSettingsControl(cdp),
+      status: "ready",
+      timeoutMs: options.timeoutMs,
+      title: replacementTitle,
+    });
+    const replacementFinalControl = await measureSettingsControl(cdp);
+    await finishInstrumentedImport(cdp, "replacement", "completed");
     await captureScreenshot(
       cdp,
-      path.join(options.outputDirectory, "replacement-first-page.png"),
+      path.join(options.outputDirectory, "replacement-complete.png"),
     );
     await delay(1_000);
+    const cancellationInstrumentation = await captureInstrumentation(cdp);
     const titleAfterSettling = await evaluate(
       cdp,
       `document.querySelector("h1")?.textContent ?? null`,
     );
     const libraryAfterReplacement = await inspectLibrary(cdp);
-    const instrumentation = await evaluate(
-      cdp,
-      `({
-        errors: globalThis.__lineLightIssue56.errors.slice(),
-        imports: globalThis.__lineLightIssue56.imports.map((run) => ({ ...run })),
-        longTasks: globalThis.__lineLightIssue56.longTasks.map((task) => ({ ...task })),
-        capturedAt: performance.now()
-      })`,
-    );
-    traceText = await stopTrace(cdp);
+    traceTexts[activeTraceName] = await stopTrace(cdp);
     traceStarted = false;
-    const parsedTrace = JSON.parse(traceText);
-    const largeRecordAtFirstPaint = largeLibraryAtFirstPaint.pdfs.find(
-      (document) => document.pdfPageCount === options.expectedPages,
+    activeTraceName = null;
+
+    const cancelRecordAtFirstPaint = cancelLibraryAtFirstPaint.pdfs.find(
+      (document) => document.id === cancelPrefix.record.id,
     );
     const largeRecordAfterReplacement = libraryAfterReplacement.pdfs.find(
-      (document) => document.id === largeRecordAtFirstPaint?.id,
+      (document) => document.id === cancelPrefix.record.id,
     );
     const activeRecordAfterReplacement = libraryAfterReplacement.pdfs.find(
       (document) => document.id === libraryAfterReplacement.activeDocumentId,
     );
-    const trace = traceSummary(parsedTrace, largeRecordAtFirstPaint?.id ?? "missing");
-    const ordering = workerOrdering(trace);
-    const largeTiming = importTiming(instrumentation, "large");
-    const replacementTiming = importTiming(instrumentation, "replacement");
+    const cancellationTrace = traceSummary(
+      JSON.parse(traceTexts["cancellation-trace.json"]),
+      {
+        documentId: cancelPrefix.record.id,
+        endLabel: "replacement",
+        startLabel: "cancel-large",
+      },
+    );
+    const cancellationOrdering = workerOrdering(cancellationTrace);
+    const replacementDispatchedAt = cancellationTrace.harnessMarks.find(
+      (mark) => mark.name === "linelight:harness:replacement-dispatched",
+    )?.timestampMicroseconds;
+    const staleCanceledWorkerMarks = cancellationTrace.pdfMarks.filter(
+      (mark) =>
+        replacementDispatchedAt !== undefined &&
+        mark.timestampMicroseconds > replacementDispatchedAt,
+    );
+    const cancelTiming = importTiming(cancellationInstrumentation, "cancel-large");
+    const replacementTiming = importTiming(
+      cancellationInstrumentation,
+      "replacement",
+    );
+    const cancellationScenarioTiming = scenarioTiming(
+      cancellationInstrumentation,
+      "cancel-large",
+      "replacement",
+    );
+    const importPhases = ["full", "cancel-large", "replacement"];
     const importRequests = networkState.requests.filter((request) =>
-      ["large", "replacement"].includes(request.phase),
+      importPhases.includes(request.phase),
     );
     const externalRequests = importRequests.filter((request) =>
-      requestIsExternal(request, appUrl),
+      requestIsExternal(
+        request,
+        request.phase === "full" ? appUrl : cancellationAppUrl,
+      ),
     );
-    const runtimeErrors = instrumentation.errors;
+    const importNetworkFailures = networkState.failures.filter((failure) =>
+      importPhases.includes(failure.phase),
+    );
+    const importResponseFailures = networkState.responseFailures.filter(
+      (failure) => importPhases.includes(failure.phase),
+    );
+    const importRuntimeExceptions = networkState.runtimeExceptions.filter(
+      (exception) => importPhases.includes(exception.phase),
+    );
+    const runtimeErrors = [
+      ...fullInstrumentation.errors,
+      ...cancellationInstrumentation.errors,
+    ];
+    const consoleFailures = consoleEntries.filter(
+      (entry) =>
+        importPhases.includes(entry.phase) &&
+        ["assert", "error"].includes(entry.type),
+    );
 
-    if (!largeRecordAtFirstPaint) {
-      evidence.failures.push(
-        `The first-paint library snapshot did not contain a ${options.expectedPages}-page PDF.`,
-      );
-    } else {
-      if (largeRecordAtFirstPaint.pdfImportStatus !== "importing") {
-        evidence.failures.push("The full PDF completed before the first page was displayed.");
+    const firstPaintRecords = [
+      ["full import", fullRecordAtFirstPaint],
+      ["cancellation import", cancelRecordAtFirstPaint],
+    ];
+    for (const [label, record] of firstPaintRecords) {
+      if (!record) {
+        evidence.failures.push(`The ${label} had no durable first-paint record.`);
+      } else if (
+        record.pdfImportStatus !== "importing" ||
+        record.pdfCompletedPages >= options.expectedPages ||
+        record.storedPageCount < 1 ||
+        !record.hasSource
+      ) {
+        evidence.failures.push(
+          `The ${label} did not display page one from a durable, incomplete local prefix.`,
+        );
       }
-      if (largeRecordAtFirstPaint.pdfCompletedPages >= options.expectedPages) {
-        evidence.failures.push("Background extraction completed before first-page display.");
-      }
-      if (!largeRecordAtFirstPaint.hasSource || largeRecordAtFirstPaint.storedPageCount < 1) {
-        evidence.failures.push("Page one and its private source were not durably staged.");
-      }
-    }
-    if (!largeTiming?.firstBitmapBeforeBackgroundDom) {
-      evidence.failures.push("The first visible bitmap did not precede background page DOM.");
     }
     if (
-      largeTiming?.pageOneRenderSource !== "worker-bitmap" ||
-      largeTiming?.renderFallback !== "false"
+      fullCompletion.record.pdfImportStatus !== "ready" ||
+      fullCompletion.record.pdfCompletedPages !== options.expectedPages ||
+      fullCompletion.record.pdfPageCount !== options.expectedPages ||
+      fullCompletion.record.storedPageCount !== options.expectedPages ||
+      fullCompletion.record.outlineItemCount < 1 ||
+      fullCompletion.record.wordCount < 1 ||
+      fullCompletion.library.activeDocumentId !== fullCompletion.record.id
     ) {
       evidence.failures.push(
-        "The supplied PDF did not prove a real OffscreenCanvas worker bitmap without fallback.",
+        `The full scenario did not complete all ${options.expectedPages} pages with outline and word metadata.`,
       );
     }
-    if (!ordering.passed) {
+    for (const [label, timing] of [
+      ["full import", fullTiming],
+      ["cancellation import", cancelTiming],
+      ["replacement", replacementTiming],
+    ]) {
+      if (
+        !timing?.pageOneTextBeforeBitmap ||
+        timing?.pageOneRenderSource !== "worker-bitmap" ||
+        timing?.renderFallback !== "false" ||
+        timing?.renderFallbackObserved
+      ) {
+        evidence.failures.push(
+          `The ${label} did not display readable page-one text before an actual worker bitmap with fallback disabled.`,
+        );
+      }
+    }
+    if (!fullTiming?.firstBitmapBeforeBackgroundDom) {
       evidence.failures.push(
-        "Worker trace marks did not prove page-one raster settlement before page-two extraction.",
+        "The full import's first visible bitmap did not precede background-page DOM.",
       );
     }
-    if (ordering.completeBeforeReplacement) {
-      evidence.failures.push("The large import completed before its replacement was selected.");
-    }
-    if ((largeTiming?.windowLongTasks ?? []).some((entry) => entry.duration > MAX_WINDOW_TASK_MS)) {
+    if (!cancelTiming?.firstBitmapBeforeBackgroundDom) {
       evidence.failures.push(
-        `A Window Long Task exceeded ${MAX_WINDOW_TASK_MS} ms while the large import remained active.`,
+        "The cancellation import's first visible bitmap did not precede background-page DOM.",
       );
     }
     if (
-      (replacementTiming?.windowLongTasks ?? []).some(
-        (entry) => entry.duration > MAX_WINDOW_TASK_MS,
+      !fullOrdering.passed ||
+      !fullOrdering.completeSeen ||
+      !fullOrdering.usesWorkerRaster
+    ) {
+      evidence.failures.push(
+        "The full worker trace did not prove page-one raster settlement before page two and final completion.",
+      );
+    }
+    if (
+      !cancellationOrdering.passed ||
+      cancellationOrdering.completeSeen ||
+      !cancellationOrdering.usesWorkerRaster
+    ) {
+      evidence.failures.push(
+        "The canceled worker trace did not prove page-one ordering followed by cancellation before completion.",
+      );
+    }
+    if (
+      replacementDispatchedAt === undefined ||
+      staleCanceledWorkerMarks.length > 0
+    ) {
+      evidence.failures.push(
+        "The canceled worker recorded progress after the replacement became active.",
+      );
+    }
+    for (const [label, timing, trace] of [
+      ["full import", fullScenarioTiming, fullTrace],
+      ["cancellation/replacement", cancellationScenarioTiming, cancellationTrace],
+    ]) {
+      if (
+        !timing ||
+        timing.windowLongTasks.some(
+          (entry) => entry.duration > MAX_WINDOW_TASK_MS,
+        )
+      ) {
+        evidence.failures.push(
+          `A Window Long Task exceeded ${MAX_WINDOW_TASK_MS} ms during the entire ${label} window.`,
+        );
+      }
+      if (
+        trace.windowStartMicroseconds === null ||
+        trace.windowEndMicroseconds === null ||
+        !Number.isFinite(trace.maximumMainThreadTaskMs) ||
+        trace.maximumMainThreadTaskMs > MAX_WINDOW_TASK_MS
+      ) {
+        evidence.failures.push(
+          `The raw trace did not prove every renderer-main task stayed within ${MAX_WINDOW_TASK_MS} ms for the entire ${label} window.`,
+        );
+      }
+    }
+    const controlProbes = [
+      ...(fullTiming?.controls ?? []),
+      ...(cancelTiming?.controls ?? []),
+      ...(replacementTiming?.controls ?? []),
+    ];
+    if (
+      (fullTiming?.controls.length ?? 0) < 2 ||
+      (cancelTiming?.controls.length ?? 0) < 1 ||
+      (replacementTiming?.controls.length ?? 0) < 2 ||
+      controlProbes.some(
+        (control) =>
+          control.latencyMs > MAX_CONTROL_LATENCY_MS ||
+          control.dispatchLatencyMs > MAX_CONTROL_LATENCY_MS,
       )
     ) {
       evidence.failures.push(
-        `A Window Long Task exceeded ${MAX_WINDOW_TASK_MS} ms during replacement/cancellation.`,
-      );
-    }
-    if (!control || control.latencyMs > MAX_CONTROL_LATENCY_MS) {
-      evidence.failures.push(
-        `Reading settings did not respond within ${MAX_CONTROL_LATENCY_MS} ms during import.`,
+        `Reading settings was not repeatedly responsive within ${MAX_CONTROL_LATENCY_MS} ms across both scenarios.`,
       );
     }
     if (externalRequests.length) {
-      evidence.failures.push("The page or one of its attached workers made an external import request.");
+      evidence.failures.push(
+        "The page or an attached worker made an external import request.",
+      );
+    }
+    if (importNetworkFailures.length || importResponseFailures.length) {
+      evidence.failures.push(
+        "The page or an attached worker recorded a failed import request.",
+      );
     }
     if (networkState.attachErrors.length) {
-      evidence.failures.push("One or more worker targets could not be instrumented for network traffic.");
+      evidence.failures.push(
+        "One or more worker targets could not be fully instrumented.",
+      );
+    }
+    const importNotices = [
+      ...fullInstrumentation.notices,
+      ...cancellationInstrumentation.notices,
+    ].filter((notice) => importPhases.includes(notice.importLabel));
+    if (
+      importRuntimeExceptions.length ||
+      runtimeErrors.length ||
+      consoleFailures.length ||
+      importNotices.length
+    ) {
+      evidence.failures.push(
+        "The page or an attached worker recorded a runtime exception.",
+      );
     }
     if (
       !largeRecordAfterReplacement ||
+      !canceledRecordAfterReplacementDispatch ||
+      !canceledRecordAfterReplacementStart ||
       largeRecordAfterReplacement.pdfImportStatus !== "importing" ||
       largeRecordAfterReplacement.pdfCompletedPages >= options.expectedPages ||
-      largeRecordAfterReplacement.storedPageCount < 1 ||
-      !largeRecordAfterReplacement.hasSource
+      largeRecordAfterReplacement.storedPageCount < 2 ||
+      !largeRecordAfterReplacement.hasSource ||
+      ["pdfCompletedPages", "pdfImportStatus", "pdfRevision", "storedPageCount", "wordCount"]
+        .some(
+          (field) =>
+            largeRecordAfterReplacement[field] !==
+              canceledRecordAfterReplacementDispatch[field] ||
+            canceledRecordAfterReplacementStart[field] !==
+              canceledRecordAfterReplacementDispatch[field],
+        )
     ) {
-      evidence.failures.push("The canceled large import was not left as a resumable local prefix.");
+      evidence.failures.push(
+        "The canceled large import was not left as a resumable local prefix.",
+      );
     }
     if (
       !activeRecordAfterReplacement ||
+      activeRecordAfterReplacement.id !== replacementCompletion.record.id ||
       activeRecordAfterReplacement.id === largeRecordAfterReplacement?.id ||
+      activeRecordAfterReplacement.pdfImportStatus !== "ready" ||
+      activeRecordAfterReplacement.storedPageCount !== options.replacementPages ||
       titleAfterSettling !== activeRecordAfterReplacement.title
     ) {
-      evidence.failures.push("The replacement PDF did not remain the active rendered document.");
+      evidence.failures.push(
+        "Stale large-import work displaced or corrupted the completed active replacement.",
+      );
     }
-    if (!replacementTiming?.pageOneBitmapAt) {
-      evidence.failures.push("The replacement PDF did not render its first page.");
-    }
-    if (runtimeErrors.length) evidence.failures.push("The browser recorded runtime errors.");
 
     evidence.passed = evidence.failures.length === 0;
     Object.assign(evidence, {
-      app: { mode: productionMode, url: appUrl },
+      app: {
+        cancellationUrl: cancellationAppUrl,
+        fullImportUrl: appUrl,
+        mode: productionMode,
+      },
       browser: {
         executable: options.browser,
         headed: true,
@@ -1047,49 +1593,84 @@ async function run(options) {
       source,
       fixtures: {
         reference: { ...reference, expectedPages: options.expectedPages },
-        replacement,
+        replacement: { ...replacement, expectedPages: options.replacementPages },
       },
       thresholds: {
         maximumControlLatencyMs: MAX_CONTROL_LATENCY_MS,
         maximumWindowTaskMs: MAX_WINDOW_TASK_MS,
       },
       firstPage: {
-        large: largeFirstPage,
+        cancellation: cancelFirstPage,
+        cancellationLibraryAtFirstPaint: cancelLibraryAtFirstPaint,
+        full: fullFirstPage,
+        fullLibraryAtFirstPaint,
         replacement: replacementFirstPage,
-        largeLibraryAtFirstPaint,
       },
-      timings: { control, large: largeTiming, replacement: replacementTiming },
-      ordering,
+      timings: {
+        cancellation: cancelTiming,
+        cancellationScenario: cancellationScenarioTiming,
+        full: fullTiming,
+        fullScenario: fullScenarioTiming,
+        replacement: replacementTiming,
+      },
+      controls: {
+        cancelInitial: cancelInitialControl,
+        fullFinal: fullFinalControl,
+        fullInitial: fullInitialControl,
+        probes: controlProbes,
+        replacementFinal: replacementFinalControl,
+        replacementInitial: replacementInitialControl,
+      },
+      ordering: {
+        cancellation: cancellationOrdering,
+        full: fullOrdering,
+      },
+      fullImport: {
+        completion: fullCompletion,
+      },
       cancellation: {
         activeRecordAfterReplacement,
+        canceledRecordAfterReplacementDispatch,
+        canceledRecordAfterReplacementStart,
+        durablePrefixBeforeReplacement: cancelPrefix,
         largeRecordAfterReplacement,
         libraryAfterReplacement,
+        replacementDispatchedAt,
+        staleCanceledWorkerMarks,
         titleAfterSettling,
       },
       network: {
         attachErrors: networkState.attachErrors,
         attachedTargets: networkState.targets,
         externalRequests,
-        importFailures: networkState.failures.filter((failure) =>
-          ["large", "replacement"].includes(failure.phase),
-        ),
+        importFailures: importNetworkFailures,
         importRequests,
+        responseFailures: importResponseFailures,
       },
-      trace: {
-        file: "pdf-worker-trace.json",
-        ...trace,
+      traces: {
+        cancellation: {
+          file: "cancellation-trace.json",
+          ...cancellationTrace,
+        },
+        full: { file: "full-import-trace.json", ...fullTrace },
       },
       browserDiagnostics: {
         consoleEntries,
+        consoleFailures,
         errors: runtimeErrors,
+        notices: importNotices,
+        runtimeExceptions: importRuntimeExceptions,
         browserStderr: browser.log(),
         productionBuildLog: buildLog,
         productionServerLog: server?.log() ?? null,
       },
       artifacts: {
-        largeFirstPageScreenshot: "large-first-page.png",
-        replacementFirstPageScreenshot: "replacement-first-page.png",
-        trace: "pdf-worker-trace.json",
+        cancellationFirstPageScreenshot: "cancel-large-first-page.png",
+        cancellationTrace: "cancellation-trace.json",
+        fullCompleteScreenshot: "full-complete.png",
+        fullFirstPageScreenshot: "full-first-page.png",
+        fullTrace: "full-import-trace.json",
+        replacementCompleteScreenshot: "replacement-complete.png",
       },
     });
   } catch (error) {
@@ -1102,6 +1683,7 @@ async function run(options) {
             errors: globalThis.__lineLightIssue56.errors.slice(),
             imports: globalThis.__lineLightIssue56.imports.map((run) => ({ ...run })),
             longTasks: globalThis.__lineLightIssue56.longTasks.map((task) => ({ ...task })),
+            notices: globalThis.__lineLightIssue56.notices.map((notice) => ({ ...notice })),
             capturedAt: performance.now()
           } : null,
           title: document.querySelector("h1")?.textContent ?? null,
@@ -1134,33 +1716,42 @@ async function run(options) {
         path.join(options.outputDirectory, "failure.png"),
       ).catch(() => undefined);
       if (traceStarted) {
-        traceText = await stopTrace(cdp).catch(() => "");
+        const failedTraceName = activeTraceName ?? "failure-trace.json";
+        traceTexts[failedTraceName] = await stopTrace(cdp).catch(() => "");
         traceStarted = false;
+        activeTraceName = null;
       }
     }
     evidence.browserDiagnostics = {
       consoleEntries,
+      networkFailures: networkState.failures,
+      responseFailures: networkState.responseFailures,
+      runtimeExceptions: networkState.runtimeExceptions,
       browserStderr: browser?.log() ?? null,
       productionBuildLog: buildLog,
       productionServerLog: server?.log() ?? null,
     };
   } finally {
-    if (traceText) {
+    try {
+      for (const [fileName, traceText] of Object.entries(traceTexts)) {
+        if (!traceText) continue;
+        await writeFile(
+          path.join(options.outputDirectory, fileName),
+          traceText,
+        );
+      }
       await writeFile(
-        path.join(options.outputDirectory, "pdf-worker-trace.json"),
-        traceText,
+        path.join(options.outputDirectory, "pdf-worker-browser.json"),
+        `${JSON.stringify(evidence, null, 2)}\n`,
       );
-    }
-    await writeFile(
-      path.join(options.outputDirectory, "pdf-worker-browser.json"),
-      `${JSON.stringify(evidence, null, 2)}\n`,
-    );
-    cdp?.close();
-    terminateProcessGroup(browser?.child);
-    terminateProcessGroup(server?.child);
-    if (browser?.profileDirectory) {
-      await delay(100);
-      await rm(browser.profileDirectory, { recursive: true, force: true });
+    } finally {
+      cdp?.close();
+      terminateProcessGroup(browser?.child);
+      terminateProcessGroup(server?.child);
+      if (browser?.profileDirectory) {
+        await delay(100);
+        await rm(browser.profileDirectory, { recursive: true, force: true });
+      }
     }
   }
 
@@ -1170,13 +1761,15 @@ async function run(options) {
   process.stdout.write(
     `${JSON.stringify({
       evidence: path.join(options.outputDirectory, "pdf-worker-browser.json"),
-      firstPageMs: evidence.timings.large.importToFirstBitmapMs,
+      firstPageMs: evidence.timings.full.importToFirstBitmapMs,
       maximumWindowTaskMs: Math.max(
-        0,
-        ...evidence.timings.large.windowLongTasks.map((entry) => entry.duration),
+        evidence.timings.fullScenario.maximumWindowLongTaskMs,
+        evidence.timings.cancellationScenario.maximumWindowLongTaskMs,
       ),
       passed: true,
-      trace: path.join(options.outputDirectory, "pdf-worker-trace.json"),
+      traces: ["full-import-trace.json", "cancellation-trace.json"].map(
+        (fileName) => path.join(options.outputDirectory, fileName),
+      ),
     }, null, 2)}\n`,
   );
 }

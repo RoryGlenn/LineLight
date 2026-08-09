@@ -9,5 +9,10 @@ node scripts/run-pdf-worker-browser-regression.mjs \
 ```
 
 The JSON report is authoritative for thresholds and environment details. The
-raw DevTools trace is retained for task/thread inspection, and the screenshots
-show the first visible page for the reference and replacement documents.
+full-import trace covers the supplied PDF through all 359 durable pages,
+outline construction, and completion. The separate cancellation trace covers
+a second large import through a durable background-page prefix and then a
+completed replacement on an isolated loopback origin. Both raw traces are
+retained for task/thread inspection. Screenshots capture the full import's
+first page and completion, the canceled import's first page, and the completed
+replacement.
