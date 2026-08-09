@@ -5,21 +5,44 @@ export const MAX_PDF_OUTLINE_DEPTH = 12;
  * Recover per-page word starts from persisted PDF text-layer items. Empty
  * pages inherit the next available reading position without inventing text.
  *
- * @param {Array<{ items?: Array<{ wordStart?: number, wordCount?: number }> }>} pages
+ * @param {Array<{ items?: Array<{
+ *   wordStart?: number,
+ *   wordCount?: number,
+ *   wordIndices?: number[],
+ * }> }>} pages
  */
 export function derivePdfPageWordStarts(pages) {
   let nextWordStart = 0;
   return pages.map((page) => {
     const wordItems = (page.items ?? []).filter(
       (item) =>
-        Number.isFinite(item.wordStart) && Number.isFinite(item.wordCount),
+        (Array.isArray(item.wordIndices) &&
+          item.wordIndices.some(Number.isFinite)) ||
+        (Number.isFinite(item.wordStart) && Number.isFinite(item.wordCount)),
+    );
+    const mappedIndices = wordItems.flatMap((item) =>
+      Array.isArray(item.wordIndices)
+        ? item.wordIndices.filter(Number.isFinite)
+        : [],
     );
     const pageWordStart = wordItems.length
-      ? Math.min(...wordItems.map((item) => item.wordStart))
+      ? mappedIndices.length
+        ? Math.min(...mappedIndices)
+        : Math.min(...wordItems.map((item) => item.wordStart))
       : nextWordStart;
     nextWordStart = wordItems.reduce(
-      (largestEnd, item) =>
-        Math.max(largestEnd, item.wordStart + item.wordCount),
+      (largestEnd, item) => {
+        const mappedEnd = Array.isArray(item.wordIndices)
+          ? Math.max(-1, ...item.wordIndices.filter(Number.isFinite)) + 1
+          : -1;
+        return Math.max(
+          largestEnd,
+          mappedEnd,
+          Number.isFinite(item.wordStart) && Number.isFinite(item.wordCount)
+            ? item.wordStart + item.wordCount
+            : -1,
+        );
+      },
       pageWordStart,
     );
     return pageWordStart;

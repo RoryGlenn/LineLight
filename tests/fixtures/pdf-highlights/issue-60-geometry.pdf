@@ -1,0 +1,141 @@
+%PDF-1.7
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R /PageMode /UseNone >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [9 0 R 11 0 R 13 0 R 15 0 R 17 0 R 19 0 R] /Count 6 >>
+endobj
+3 0 obj
+<< /Title (LineLight issue 60 PDF highlight geometry) /Producer (LineLight deterministic fixture generator) >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Times-Roman /Encoding /WinAnsiEncoding >>
+endobj
+6 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Courier /Encoding /WinAnsiEncoding >>
+endobj
+7 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Times-Roman /Encoding << /Type /Encoding /BaseEncoding /WinAnsiEncoding /Differences [1 /fi] >> /ToUnicode 8 0 R >>
+endobj
+8 0 obj
+<< /Length 325 >>
+stream
+/CIDInit /ProcSet findresource begin
+12 dict begin
+begincmap
+/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def
+/CMapName /LineLight-fi def
+/CMapType 2 def
+1 begincodespacerange
+<00> <FF>
+endcodespacerange
+1 beginbfchar
+<01> <FB01>
+endbfchar
+endcmap
+CMapName currentdict /CMap defineresource pop
+end
+end
+endstream
+endobj
+9 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R /F2 5 0 R /F3 6 0 R /F4 7 0 R >> >> /Contents 10 0 R >>
+endobj
+10 0 obj
+<< /Length 554 >>
+stream
+BT /F2 16 Tf 45 744 Td (Reported passage - continuous sentence bands) Tj ET
+BT /F1 11 Tf 45 704 Td (3  I like my friend Tiarn·n de Burcaís definition of senior engineer: the level at which) Tj ET
+BT /F1 11 Tf 45 686 Td (someone can stop advancing and continue their current level of productivity, capability,) Tj ET
+BT /F1 11 Tf 45 668 Td (and of output for the rest of their career and still be "regretted attrition" if they leave.) Tj ET
+BT /F1 15 Tf 45 602 Td (An extraordi-) Tj ET
+BT /F1 15 Tf 45 580 Td (nary staff path stays one spoken word.) Tj ET
+endstream
+endobj
+11 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R /F2 5 0 R /F3 6 0 R /F4 7 0 R >> >> /Contents 12 0 R >>
+endobj
+12 0 obj
+<< /Length 364 >>
+stream
+BT /F2 18 Tf 54 744 Td (Multi-font and ligature geometry) Tj ET
+BT /F2 18 Tf 54 690 Td (Serif text,) Tj /F1 18 Tf ( sans text,) Tj /F3 16 Tf ( monospace text.) Tj ET
+BT /F2 22 Tf 54 630 Td (A true PDF ) Tj /F4 22 Tf <01> Tj /F2 22 Tf ( ligature keeps measured bounds.) Tj ET
+BT /F1 13 Tf 54 580 Td (Mixed metrics remain aligned when the active word changes.) Tj ET
+endstream
+endobj
+13 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R /F2 5 0 R /F3 6 0 R /F4 7 0 R >> >> /Contents 14 0 R >>
+endobj
+14 0 obj
+<< /Length 352 >>
+stream
+BT /F2 18 Tf 54 744 Td (Rotated and multi-column geometry) Tj ET
+BT /F1 14 Tf 54 680 Td (Left column shares a visual row) Tj ET
+BT /F1 14 Tf 326 680 Td (Right column stays separate.) Tj ET
+BT /F2 13 Tf 54 640 Td (Column gaps must not become one highlight rectangle.) Tj ET
+q 0 1 -1 0 560 120 cm BT /F3 16 Tf 0 0 Td (Rotated words stay aligned.) Tj ET Q
+endstream
+endobj
+15 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R /F2 5 0 R /F3 6 0 R /F4 7 0 R >> >> /Contents 16 0 R >>
+endobj
+16 0 obj
+<< /Length 143 >>
+stream
+BT /F2 18 Tf 54 744 Td (Virtualized boundary fixture - page four) Tj ET
+BT /F1 14 Tf 54 680 Td (Boundary page four keeps a stable shell.) Tj ET
+endstream
+endobj
+17 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R /F2 5 0 R /F3 6 0 R /F4 7 0 R >> >> /Contents 18 0 R >>
+endobj
+18 0 obj
+<< /Length 143 >>
+stream
+BT /F2 18 Tf 54 744 Td (Virtualized boundary fixture - page five) Tj ET
+BT /F1 14 Tf 54 680 Td (Boundary page five keeps a stable shell.) Tj ET
+endstream
+endobj
+19 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R /F2 5 0 R /F3 6 0 R /F4 7 0 R >> >> /Contents 20 0 R >>
+endobj
+20 0 obj
+<< /Length 162 >>
+stream
+BT /F2 18 Tf 54 744 Td (Virtualized boundary fixture - page six) Tj ET
+BT /F1 14 Tf 54 680 Td (Far boundary target verifies localized shell reconciliation.) Tj ET
+endstream
+endobj
+xref
+0 21
+0000000000 65535 f
+0000000015 00000 n
+0000000083 00000 n
+0000000175 00000 n
+0000000301 00000 n
+0000000398 00000 n
+0000000497 00000 n
+0000000592 00000 n
+0000000765 00000 n
+0000001141 00000 n
+0000001298 00000 n
+0000001904 00000 n
+0000002062 00000 n
+0000002478 00000 n
+0000002636 00000 n
+0000003040 00000 n
+0000003198 00000 n
+0000003393 00000 n
+0000003551 00000 n
+0000003746 00000 n
+0000003904 00000 n
+trailer
+<< /Size 21 /Root 1 0 R /Info 3 0 R >>
+startxref
+4118
+%%EOF

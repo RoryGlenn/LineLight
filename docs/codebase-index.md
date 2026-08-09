@@ -54,9 +54,11 @@ navigation controls.
 **Runtime:** Browser main.
 
 **Owns:** [`app/page.tsx`](../app/page.tsx) is the application coordinator and
-currently owns the shared document model, settings restoration, active-word
-state, import flow, narration session lifecycle, follow behavior, and most user
-actions. [`app/layout.tsx`](../app/layout.tsx) owns root metadata and global style
+owns settings restoration, active-word state, import flow, narration session
+lifecycle, follow behavior, and most user actions.
+[`app/document-model.mjs`](../app/document-model.mjs) owns the shared Focus and
+narration token/segment model, including the explicit PDF-only structural
+paragraph boundary option. [`app/layout.tsx`](../app/layout.tsx) owns root metadata and global style
 loading. [`app/globals.css`](../app/globals.css) owns the visual system and reader
 geometry. [`app/focus-document-view.tsx`](../app/focus-document-view.tsx) renders
 reflowed text, while [`app/document-outline.tsx`](../app/document-outline.tsx)
@@ -93,15 +95,22 @@ preserving navigation and highlighting indices.
 
 **Runtime:** Browser main, plus PDF.js's own browser worker and canvas renderer.
 
-**Owns:** PDF and text parsing, text normalization, and the shared token model
-currently live in [`app/page.tsx`](../app/page.tsx).
+**Owns:** PDF and text import orchestration currently lives in
+[`app/page.tsx`](../app/page.tsx), while the shared token model lives in
+[`app/document-model.mjs`](../app/document-model.mjs).
 [`app/epub-parser.mjs`](../app/epub-parser.mjs) owns EPUB container, package,
 spine, metadata, and chapter extraction.
+[`app/pdf-text-model.mjs`](../app/pdf-text-model.mjs) owns reversible displayed
+glyph-to-narration-token mapping, line-end dehyphenation, continuous
+sentence-line geometry, and the persisted PDF text-model version/migration
+contract. Legacy PDF records are rebuilt locally from their stored bytes; no
+network source or manual re-import is used.
 [`app/pdf-page-view.tsx`](../app/pdf-page-view.tsx) owns virtualized canvas pages
-and the interactive PDF text overlay. [`app/pdf-outline.mjs`](../app/pdf-outline.mjs)
+and the measured PDF.js text/highlight layers. [`app/pdf-outline.mjs`](../app/pdf-outline.mjs)
 maps PDF destinations to document token indices.
 [`app/reader-virtualization.mjs`](../app/reader-virtualization.mjs) selects the
-bounded page and paragraph render windows.
+bounded page and paragraph render windows and notifies only page shells whose
+rendered state changes.
 
 **Entry points:** File selection enters the import functions in
 [`app/page.tsx`](../app/page.tsx); EPUB files delegate to
@@ -125,6 +134,27 @@ upload the source file.
 [`tests/pdf-outline.test.mjs`](../tests/pdf-outline.test.mjs). Render-window
 selection is covered by
 [`tests/reader-virtualization.test.mjs`](../tests/reader-virtualization.test.mjs).
+Shared sentence behavior, including unchanged TXT/EPUB paragraph navigation,
+is covered by [`tests/document-model.test.mjs`](../tests/document-model.test.mjs).
+Normalized token mapping, dehyphenation, and multi-font, ligature, rotated, and
+multi-column highlight geometry fixtures are covered by
+[`tests/pdf-text-model.test.mjs`](../tests/pdf-text-model.test.mjs).
+The deterministic real-PDF fixture at
+[`tests/fixtures/pdf-highlights/issue-60-geometry.pdf`](../tests/fixtures/pdf-highlights/issue-60-geometry.pdf)
+is owned by
+[`scripts/generate-pdf-highlight-fixture.mjs`](../scripts/generate-pdf-highlight-fixture.mjs).
+[`scripts/run-pdf-highlight-browser-regression.mjs`](../scripts/run-pdf-highlight-browser-regression.mjs)
+drives Brave through CDP to check measured overlays across zoom/DPR, visual
+scenarios, localized shell updates, DOM mutations, and Long Tasks; its fast
+contract and opt-in real-browser gate live in
+[`tests/pdf-highlight-browser-harness.test.mjs`](../tests/pdf-highlight-browser-harness.test.mjs).
+[`scripts/run-offline-natural-timing-regression.mjs`](../scripts/run-offline-natural-timing-regression.mjs)
+attaches to a disposable headed-Brave profile with the stored local voice pack
+and verifies consecutive PDF highlight updates at 0.75x, 1x, and 1.25x against
+the real Offline-natural worker. Its thresholds and opt-in CDP gate live in
+[`tests/offline-natural-timing-harness.test.mjs`](../tests/offline-natural-timing-harness.test.mjs),
+with review records in
+[`docs/evidence/issue-60/`](evidence/issue-60/).
 The packaged page is checked by
 [`tests/rendered-html.test.mjs`](../tests/rendered-html.test.mjs). PDF geometry,
 complex reading order, and highlight alignment require representative browser
@@ -254,7 +284,8 @@ operations. [`app/worker-startup-diagnostics.mjs`](../app/worker-startup-diagnos
 owns bounded, local-only worker failure details without serializing document or
 narration data. [`app/offline-speech.worker.ts`](../app/offline-speech.worker.ts) owns
 Transformers/Kokoro configuration, model installation, initialization, warm-up,
-synthesis, runtime fallback, and commit ordering.
+synthesis, pronunciation-weighted boundary generation, runtime fallback, and
+commit ordering.
 [`app/offline-speech-utils.mjs`](../app/offline-speech-utils.mjs) owns backend
 error classification, waveform validation/recovery, and approximate word timing.
 [`app/phonemizer-runtime.ts`](../app/phonemizer-runtime.ts) preserves the

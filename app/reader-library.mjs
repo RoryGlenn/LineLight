@@ -233,8 +233,22 @@ export function createReaderLibrary({
     }
     const database = await openDatabase();
     try {
-      const transaction = database.transaction(DOCUMENT_STORE, "readwrite");
+      const transaction = database.transaction(
+        [DOCUMENT_STORE, LIBRARY_STORE],
+        "readwrite",
+      );
       transaction.objectStore(DOCUMENT_STORE).put(document, document.id);
+      const library = transaction.objectStore(LIBRARY_STORE);
+      const entryRequest = library.get(document.id);
+      entryRequest.onsuccess = () => {
+        if (!entryRequest.result) return;
+        library.put({
+          ...entryRequest.result,
+          title: document.title,
+          author: document.author,
+          wordCount: countDocumentWords(document),
+        });
+      };
       await transactionDone(transaction);
       return document;
     } finally {

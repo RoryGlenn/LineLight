@@ -149,6 +149,7 @@ test("adds, opens, renames, and removes independent documents", async () => {
   );
   await library.saveDocument({
     ...outlinedDocument,
+    paragraphs: ["A shorter migrated PDF model"],
     outline: [
       ...outlinedDocument.outline,
       {
@@ -161,6 +162,11 @@ test("adds, opens, renames, and removes independent documents", async () => {
     ],
   });
   assert.equal((await library.getDocument("one")).outline.length, 2);
+  assert.equal(
+    (await library.load()).entries.find((entry) => entry.id === "one")
+      .wordCount,
+    5,
+  );
 
   const renamed = await library.renameDocument("one", "Renamed");
   assert.equal(renamed.document.title, "Renamed");
