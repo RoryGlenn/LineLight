@@ -26,6 +26,7 @@ import {
   OFFLINE_LEGACY_Q8_MODEL_URL,
   OFFLINE_FP16_READY_MARKER_URL,
   OFFLINE_FP16_READY_MARKER_VERSION,
+  OFFLINE_RUNTIME_CACHE_NAME,
   OFFLINE_WEBGPU_MODEL_BYTES,
   OFFLINE_WEBGPU_MODEL_DTYPE,
   OFFLINE_WEBGPU_MODEL_FILE,
@@ -43,6 +44,7 @@ import {
   commitOfflineModelReadyMarker,
   createOfflineModelCacheAdapter,
   deleteOfflineModelArtifactEntries,
+  retainOfflineRuntimeAssets,
 } from "./offline-model-cache.mjs";
 import {
   buildPhonemeWeightedBoundaries,
@@ -768,6 +770,24 @@ async function removeUnusedModelArtifact() {
   }
 }
 
+async function retainOfflineSpeechRuntime() {
+  await retainOfflineRuntimeAssets({
+    cache: await caches.open(OFFLINE_RUNTIME_CACHE_NAME),
+    assets: [
+      {
+        cacheUrl: globalThis.location.href,
+        expectedContentType: "javascript",
+        label: "The offline voice worker",
+      },
+      {
+        cacheUrl: new URL(ortWasmUrl, globalThis.location.origin).href,
+        expectedContentType: "application/wasm",
+        label: "The offline voice runtime",
+      },
+    ],
+  });
+}
+
 async function ensureRequestedFallbackFiles(
   id: number,
   voice: OfflineVoiceId,
@@ -1050,6 +1070,7 @@ async function handleRequest(
         true,
         true,
       );
+      await retainOfflineSpeechRuntime();
       await removeUnusedModelArtifact();
       await commitOfflineModelReadyMarker({
         cache: await getModelCache(),
@@ -1076,6 +1097,7 @@ async function handleRequest(
       // legacy q8 artifact until a warm probe or real narration succeeds so an
       // interrupted fp16 migration always retains a recoverable voice.
       if (warm) {
+        await retainOfflineSpeechRuntime().catch(() => undefined);
         await removeUnusedModelArtifact().catch(() => undefined);
       }
     } else {
@@ -1098,6 +1120,7 @@ async function handleRequest(
         message.device,
         message.wasmThreads,
       );
+      void retainOfflineSpeechRuntime().catch(() => undefined);
       await removeUnusedModelArtifact().catch(() => undefined);
     }
 

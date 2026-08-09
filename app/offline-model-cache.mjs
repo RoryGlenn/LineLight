@@ -115,6 +115,48 @@ export async function commitOfflineModelReadyMarker({
 }
 
 /**
+ * Explicitly retain the hashed worker and ONNX runtime before a pack commits.
+ * This closes the first-visit window where the service worker may not control
+ * the page yet even though model installation itself succeeds.
+ *
+ * @param {{
+ *   assets: ReadonlyArray<{
+ *     cacheUrl: string,
+ *     expectedContentType?: string,
+ *     label: string,
+ *   }>,
+ *   cache: Cache,
+ *   fetchAsset?: typeof globalThis.fetch,
+ * }} options
+ */
+export async function retainOfflineRuntimeAssets({
+  assets,
+  cache,
+  fetchAsset = globalThis.fetch.bind(globalThis),
+}) {
+  for (const asset of assets) {
+    const hasExpectedType = (response) =>
+      !asset.expectedContentType ||
+      response.headers
+        .get("content-type")
+        ?.toLowerCase()
+        .includes(asset.expectedContentType);
+    let response = await cache.match(asset.cacheUrl);
+    if (!response?.ok || !hasExpectedType(response)) {
+      response = await fetchAsset(asset.cacheUrl, { cache: "force-cache" });
+      if (!response.ok || !hasExpectedType(response)) {
+        throw new Error(`${asset.label} could not be stored for offline use.`);
+      }
+      await cache.put(asset.cacheUrl, response.clone());
+    }
+    const retained = await cache.match(asset.cacheUrl);
+    if (!retained?.ok || !hasExpectedType(retained)) {
+      throw new Error(`${asset.label} could not be verified for offline use.`);
+    }
+  }
+}
+
+/**
  * Build the small Cache API surface Transformers.js v3 needs. Large model
  * matches are reconstructed from retained ranges and model puts are ignored,
  * preventing the library from creating a duplicate full-model entry.

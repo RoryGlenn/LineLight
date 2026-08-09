@@ -13,6 +13,7 @@ import {
   deleteOfflineModelArtifactEntries,
   deleteOfflineModelEntriesByIdentifier,
   hasOfflineModelReadyMarker,
+  retainOfflineRuntimeAssets,
 } from "../app/offline-model-cache.mjs";
 
 function memoryCache({
@@ -483,6 +484,69 @@ test("rejects a readiness commit the cache did not retain", async () => {
       value: "fp16-ready-v1",
     }),
     /could not be retained/u,
+  );
+});
+
+test("retains and verifies the worker and WASM runtime before ready", async () => {
+  const cache = memoryCache();
+  const assets = [
+    {
+      cacheUrl: "https://app.example/assets/offline-worker.js",
+      expectedContentType: "javascript",
+      label: "The offline voice worker",
+    },
+    {
+      cacheUrl: "https://app.example/assets/ort.wasm",
+      expectedContentType: "application/wasm",
+      label: "The offline voice runtime",
+    },
+  ];
+  const requested = [];
+  await retainOfflineRuntimeAssets({
+    assets,
+    cache,
+    fetchAsset: async (url, init) => {
+      requested.push({ init, url });
+      return new Response("runtime", {
+        headers: {
+          "Content-Type": url.endsWith(".wasm")
+            ? "application/wasm"
+            : "application/javascript",
+        },
+      });
+    },
+  });
+  assert.deepEqual(
+    requested.map(({ init, url }) => [url, init.cache]),
+    assets.map(({ cacheUrl }) => [cacheUrl, "force-cache"]),
+  );
+
+  await retainOfflineRuntimeAssets({
+    assets,
+    cache,
+    fetchAsset: async () => {
+      throw new Error("verified runtime assets must not be fetched again");
+    },
+  });
+});
+
+test("rejects a runtime asset with the wrong content type", async () => {
+  await assert.rejects(
+    retainOfflineRuntimeAssets({
+      assets: [
+        {
+          cacheUrl: "https://app.example/assets/ort.wasm",
+          expectedContentType: "application/wasm",
+          label: "The offline voice runtime",
+        },
+      ],
+      cache: memoryCache(),
+      fetchAsset: async () =>
+        new Response("not wasm", {
+          headers: { "Content-Type": "text/html" },
+        }),
+    }),
+    /could not be stored for offline use/u,
   );
 });
 

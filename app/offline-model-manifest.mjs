@@ -20,6 +20,7 @@ export const OFFLINE_WASM_THREADS = 8;
 export const OFFLINE_WASM_FALLBACK_THREADS = 1;
 export const OFFLINE_WASM_PROXY = false;
 export const OFFLINE_WEBGPU_ADAPTER_TIMEOUT_MS = 500;
+export const OFFLINE_RUNTIME_CACHE_NAME = "linelight-assets-v1";
 export const OFFLINE_MODEL_REVISION =
   "1939ad2a8e416c0acfeecc08a694d14ef25f2231";
 export const OFFLINE_MODEL_ROUTE_BASE = "/offline-model/";

@@ -16,6 +16,7 @@ import {
   OFFLINE_MODEL_REVISION,
   OFFLINE_MODEL_ROUTE_PREFIX,
   OFFLINE_MODEL_RUNTIME,
+  OFFLINE_RUNTIME_CACHE_NAME,
   OFFLINE_WEBGPU_MODEL_BYTES,
   OFFLINE_WEBGPU_ADAPTER_TIMEOUT_MS,
   OFFLINE_WEBGPU_MODEL_DTYPE,
@@ -272,7 +273,7 @@ test("validates waveforms before ready and preserves q8 after a model-only load"
   );
   assert.match(
     workerSource,
-    /installModelFiles[\s\S]*installBackend\.wasmThreads \?\? undefined,\s*true,\s*true,[\s\S]*await removeUnusedModelArtifact\(\);[\s\S]*commitOfflineModelReadyMarker/u,
+    /installModelFiles[\s\S]*installBackend\.wasmThreads \?\? undefined,\s*true,\s*true,[\s\S]*retainOfflineSpeechRuntime\(\)[\s\S]*await removeUnusedModelArtifact\(\);[\s\S]*commitOfflineModelReadyMarker/u,
   );
   assert.doesNotMatch(workerSource, /invalidateOfflineModelReadyMarker/u);
 });
@@ -294,6 +295,16 @@ test("keeps the validation receipt private to Cache Storage", () => {
   assert.equal(OFFLINE_FP16_READY_MARKER_VERSION, "fp16-ready-v1");
   assert.match(OFFLINE_FP16_READY_MARKER_URL, /Kokoro-82M/u);
   assert.equal(resolveOfflineModelRequest(OFFLINE_FP16_READY_MARKER_URL), null);
+});
+
+test("shares one stable cache for the retained speech runtime", async () => {
+  const serviceWorkerSource = await readFile("public/sw-v9.js", "utf8");
+
+  assert.equal(OFFLINE_RUNTIME_CACHE_NAME, "linelight-assets-v1");
+  assert.match(
+    serviceWorkerSource,
+    /const CACHE_NAME = "linelight-assets-v1";/u,
+  );
 });
 
 test("only resolves pinned, allowlisted offline model assets", () => {
