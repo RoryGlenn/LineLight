@@ -322,7 +322,9 @@ async function verifyOfflinePack(cdp) {
         return "";
       }
       if (document.querySelector(".offline-pack-ready")) return "ready";
-      if (document.querySelector(".offline-pack-download")) return "missing";
+      const status = document.querySelector(".offline-pack-status")?.textContent ?? "";
+      if (/Preparing automatically while connected/iu.test(status)) return "missing";
+      if (/could not|failed|error/iu.test(status)) return "error";
       return "";
     })()`,
     "the offline voice pack state",
