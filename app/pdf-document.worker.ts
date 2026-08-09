@@ -119,16 +119,15 @@ class OffscreenCanvasFactory {
   }
 }
 
-// SVG-backed PDF.js filters require a DOM. Pages are inspected before this
-// factory is used; transfer maps and soft masks are routed to the cooperative
-// visible-page fallback instead of being rendered with missing effects.
+// PDF.js normally represents these effects with DOM-backed SVG filters. The
+// document worker registers equivalent pixel transforms so Alpha/Luminosity
+// soft masks (including their alpha transfer map) stay off the Window thread.
+// General drawing transfer functions can affect every canvas operation rather
+// than only image composition, so those pages are rejected before rasterizing
+// and use the bounded visible-page fallback instead of dropping an effect.
 type WorkerFilter =
   | { kind: "alpha"; map?: Uint8Array | Uint8ClampedArray | null }
-  | { kind: "luminosity"; map?: Uint8Array | Uint8ClampedArray | null }
-  | {
-      kind: "transfer";
-      maps: Array<Uint8Array | Uint8ClampedArray>;
-    };
+  | { kind: "luminosity"; map?: Uint8Array | Uint8ClampedArray | null };
 
 const workerFilters = new Map<string, WorkerFilter>();
 let nextWorkerFilterId = 1;
@@ -148,8 +147,8 @@ class WorkerFilterFactory {
     return token;
   }
 
-  addFilter(maps?: Array<Uint8Array | Uint8ClampedArray> | null) {
-    return maps?.length ? this.add({ kind: "transfer", maps }) : "none";
+  addFilter() {
+    return "none";
   }
   addHCMFilter() {
     return "none";
@@ -464,7 +463,7 @@ async function hasUnsupportedWorkerFilters(page: pdfjs.PDFPageProxy) {
       if (!Array.isArray(state) || state[0] !== "TR" || state[1] === null) {
         continue;
       }
-      if (!Array.isArray(state[1])) return true;
+      return true;
     }
   }
   return false;

@@ -107,13 +107,14 @@ saved book can stream page one and bounded batches instead of cloning the whole
 document onto the browser main thread.
 
 Supported browsers rasterize PDF pages with `OffscreenCanvas` and transfer
-bounded `ImageBitmap` results back for lightweight composition. Some PDF.js
-effects, including DOM-backed soft-mask or transfer-map filters, cannot be
-rendered faithfully in that worker. Those pages use a cooperative fallback
-that parses the same local source and renders only visible pages on the main
-thread. PDF.js can yield between operator-list chunks in this fallback, but an
-individual drawing operator cannot be preempted; unusually complex fallback
-pages can therefore still pause longer than worker-rendered pages.
+bounded `ImageBitmap` results back for lightweight composition. The worker
+implements PDF.js-compatible Alpha/Luminosity soft masks, including their
+alpha transfer maps. General drawing transfer functions and unknown soft-mask
+types use a cooperative fallback that parses the same local source and renders
+only visible pages on the main thread. PDF.js can yield between operator-list
+chunks in this fallback, but an individual drawing operator cannot be
+preempted; unusually complex fallback pages can therefore still pause longer
+than worker-rendered pages.
 
 Closing or replacing a PDF cancels its worker and rejects stale messages and
 bitmaps by job and revision. If page one was already committed, the private

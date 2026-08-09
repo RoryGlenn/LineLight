@@ -6,7 +6,7 @@ import {
   isPdfWorkerFilterSupported,
 } from "../app/pdf-worker-filters.mjs";
 
-test("converts luminosity masks to alpha with the PDF.js sRGB weights", () => {
+test("converts luminosity masks to alpha with the PDF.js SVG matrix", () => {
   const pixels = new Uint8ClampedArray([
     255, 0, 0, 255,
     0, 255, 0, 255,
@@ -14,21 +14,17 @@ test("converts luminosity masks to alpha with the PDF.js sRGB weights", () => {
   ]);
   applyPdfWorkerFilter(pixels, { kind: "luminosity" });
   assert.deepEqual([...pixels], [
-    255, 0, 0, 77,
+    255, 0, 0, 76,
     0, 255, 0, 150,
-    0, 0, 255, 14,
+    0, 0, 255, 28,
   ]);
 });
 
-test("applies alpha and RGB transfer tables without changing other channels", () => {
+test("applies a soft-mask alpha transfer table without changing RGB", () => {
   const invert = Uint8Array.from({ length: 256 }, (_, value) => 255 - value);
   const alphaPixels = new Uint8ClampedArray([10, 20, 30, 40]);
   applyPdfWorkerFilter(alphaPixels, { kind: "alpha", map: invert });
   assert.deepEqual([...alphaPixels], [10, 20, 30, 215]);
-
-  const colorPixels = new Uint8ClampedArray([10, 20, 30, 40]);
-  applyPdfWorkerFilter(colorPixels, { kind: "transfer", maps: [invert] });
-  assert.deepEqual([...colorPixels], [245, 235, 225, 40]);
   assert.equal(isPdfWorkerFilterSupported({ kind: "luminosity" }), true);
-  assert.equal(isPdfWorkerFilterSupported({ kind: "unsupported" }), false);
+  assert.equal(isPdfWorkerFilterSupported({ kind: "transfer" }), false);
 });

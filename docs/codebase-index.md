@@ -117,8 +117,8 @@ the progressive document pipeline.
 [`app/pdf-parser.worker.ts`](../app/pdf-parser.worker.ts) is the first-party
 nested-worker bootstrap that imports PDF.js and exposes its parser protocol.
 [`app/pdf-worker-filters.mjs`](../app/pdf-worker-filters.mjs) implements the
-worker-safe transfer and alpha/luminosity soft-mask pixel transforms used by
-supported OffscreenCanvas pages.
+worker-safe alpha/luminosity soft-mask pixel transforms (including soft-mask
+alpha transfer maps) used by supported OffscreenCanvas pages.
 [`app/pdf-document-types.ts`](../app/pdf-document-types.ts) defines the
 serializable worker/storage contract;
 [`app/pdf-document-protocol.mjs`](../app/pdf-document-protocol.mjs) owns
