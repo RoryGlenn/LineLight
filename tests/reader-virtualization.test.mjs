@@ -7,6 +7,7 @@ import {
   estimateParagraphHeight,
   findPageIndexForWord,
   selectVirtualizedIndices,
+  selectVirtualizedRanges,
 } from "../app/reader-virtualization.mjs";
 
 test("keeps rendering bounded around visible and active PDF pages", () => {
@@ -16,6 +17,16 @@ test("keeps rendering bounded around visible and active PDF pages", () => {
     selectVirtualizedIndices([100], 359, 250, 2),
     [98, 99, 100, 101, 102, 248, 249, 250, 251, 252],
   );
+});
+
+test("keeps viewport and distant active ranges mounted in document order", () => {
+  assert.deepEqual(selectVirtualizedRanges(8, 10, 359, 250, 2), [
+    { start: 6, end: 12 },
+    { start: 248, end: 252 },
+  ]);
+  assert.deepEqual(selectVirtualizedRanges(8, 10, 359, 11, 2), [
+    { start: 6, end: 13 },
+  ]);
 });
 
 test("resolves global words to their containing PDF page", () => {

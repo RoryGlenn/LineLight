@@ -22,10 +22,12 @@ update the affected entry in the same pull request.
 
 ## Runtime vocabulary
 
-- **Browser main:** React, document parsing, reader state, media playback, and
-  browser storage coordination in the page's main execution context.
-- **Dedicated worker:** CPU- or GPU-intensive offline narration isolated from
-  the browser main thread.
+- **Browser main:** React, EPUB/text parsing, reader state, media playback,
+  lightweight PDF bitmap composition and DOM text measurement, and browser
+  storage coordination in the page's main execution context.
+- **Dedicated worker:** CPU- or GPU-intensive offline narration and the
+  app-owned PDF document pipeline, isolated from the browser main thread. The
+  PDF document worker creates a nested PDF.js worker for parser internals.
 - **Service worker:** installable-app and immutable runtime-asset caching.
 - **Edge worker:** Cloudflare/vinext request routing, response headers, model
   asset delivery, and Azure token exchange.
@@ -64,8 +66,9 @@ narration token/segment model, including the explicit PDF-only structural
 paragraph boundary option. [`app/layout.tsx`](../app/layout.tsx) owns root metadata and global style
 loading. [`app/globals.css`](../app/globals.css) owns the visual system and reader
 geometry. [`app/focus-document-view.tsx`](../app/focus-document-view.tsx) renders
-reflowed continuous sentence/paragraph regions through stable virtualized shells
-and localized imperative scope updates, while
+reflowed continuous sentence/paragraph regions through bounded range
+virtualization, an incremental accessible feed, and localized imperative scope
+updates, while
 [`app/document-outline.tsx`](../app/document-outline.tsx) renders the PDF
 contents tree.
 
@@ -100,11 +103,33 @@ scope contract and migration are covered by
 model, then render either reflowed content or the original PDF page while
 preserving navigation and highlighting indices.
 
-**Runtime:** Browser main, plus PDF.js's own browser worker and canvas renderer.
+**Runtime:** Browser main for React, visible bitmap composition, PDF.js DOM
+`TextLayer`, and bounded `Range` measurement; an app-owned dedicated PDF worker
+for source conversion, extraction, semantic mapping, page persistence, outline
+construction, and supported `OffscreenCanvas` rasterization; plus the nested
+PDF.js parser worker. Pages requiring DOM-only PDF filters use a cooperative,
+visible-page-only main-thread fallback.
 
-**Owns:** PDF and text import orchestration currently lives in
-[`app/page.tsx`](../app/page.tsx), while the shared token model lives in
-[`app/document-model.mjs`](../app/document-model.mjs).
+**Owns:** PDF session orchestration lives in [`app/page.tsx`](../app/page.tsx),
+while [`app/pdf-document.ts`](../app/pdf-document.ts) owns the job/revision
+client and [`app/pdf-document.worker.ts`](../app/pdf-document.worker.ts) owns
+the progressive document pipeline.
+[`app/pdf-document-types.ts`](../app/pdf-document-types.ts) defines the
+serializable worker/storage contract;
+[`app/pdf-document-protocol.mjs`](../app/pdf-document-protocol.mjs) owns
+cancellation, stale-message disposal, first-page milestones, parser-ready
+gating, and truthful terminal outcomes; and
+[`app/pdf-raster-scheduler.mjs`](../app/pdf-raster-scheduler.mjs) owns
+single-flight raster serialization.
+[`app/pdf-document-model.mjs`](../app/pdf-document-model.mjs) builds page-local
+semantic chunks that preserve the shared global indices,
+[`app/pdf-page-store.mjs`](../app/pdf-page-store.mjs) is the paged external UI
+store and bounded bitmap cache, and
+[`app/pdf-progressive-navigation.mjs`](../app/pdf-progressive-navigation.mjs)
+keeps late progress, outline, and bookmark destinations pending until their
+chunk exists. [`app/pdf-terminal-reconciliation.mjs`](../app/pdf-terminal-reconciliation.mjs)
+prevents delayed terminal storage reads from replacing a newer document. The
+shared non-PDF token model lives in [`app/document-model.mjs`](../app/document-model.mjs).
 [`app/epub-parser.mjs`](../app/epub-parser.mjs) owns EPUB container, package,
 spine, metadata, and chapter extraction.
 [`app/pdf-text-model.mjs`](../app/pdf-text-model.mjs) owns reversible displayed
@@ -113,8 +138,9 @@ sentence/paragraph line geometry derived from one measured segment pass, and
 the persisted PDF text-model version/migration contract. Legacy PDF records are
 rebuilt locally from their stored bytes; no network source or manual re-import
 is used.
-[`app/pdf-page-view.tsx`](../app/pdf-page-view.tsx) owns virtualized canvas pages
-and the measured PDF.js text/highlight layers. [`app/pdf-outline.mjs`](../app/pdf-outline.mjs)
+[`app/pdf-page-view.tsx`](../app/pdf-page-view.tsx) owns true range-virtualized
+canvas pages, bitmap composition, the measured PDF.js text/highlight layers,
+and the visible-page fallback. [`app/pdf-outline.mjs`](../app/pdf-outline.mjs)
 maps PDF destinations to document token indices.
 [`app/reader-virtualization.mjs`](../app/reader-virtualization.mjs) selects the
 bounded page and paragraph render windows and notifies only the PDF or Focus
@@ -132,16 +158,30 @@ boundary offsets, stored progress recovery, and both reader views. Page geometry
 changes must be reviewed with [`app/globals.css`](../app/globals.css), follow
 scrolling in the coordinator, and virtualization.
 
-**State and I/O:** Parsing reads user-selected files in memory. Persisted document
-bytes, extracted paragraphs, PDF layouts, and outlines are stored locally by the
-library module. PDF rendering creates canvas and text-layer DOM but must not
-upload the source file.
+**State and I/O:** User-selected PDFs are transferred directly to the document
+worker and never uploaded. IndexedDB v4 stores one local source `Blob`, a
+lightweight manifest, and independently keyed page text/layout/model records;
+page one commits before background extraction. Ready documents stream page one
+directly and then bounded batches, and v3 documents migrate lazily while their
+recoverable record remains intact. The main thread retains the progressive
+semantic reader model, bounded page selectors, and at most eight worker
+bitmaps.
 
 **Verification:** Parser and ordering behavior is covered by
 [`tests/epub-parser.test.mjs`](../tests/epub-parser.test.mjs) and
 [`tests/pdf-outline.test.mjs`](../tests/pdf-outline.test.mjs). Render-window
 selection is covered by
 [`tests/reader-virtualization.test.mjs`](../tests/reader-virtualization.test.mjs).
+Incremental semantic equivalence, worker protocol ordering, parser readiness,
+render coalescing, cancellation, stale bitmap disposal, and confirmed terminal
+outcomes are covered by
+[`tests/pdf-document-model.test.mjs`](../tests/pdf-document-model.test.mjs).
+Bounded external-store selectors and bitmap disposal are covered by
+[`tests/pdf-page-store.test.mjs`](../tests/pdf-page-store.test.mjs); late
+progress/outline/bookmark targets and explicit playback races are covered by
+[`tests/pdf-progressive-navigation.test.mjs`](../tests/pdf-progressive-navigation.test.mjs);
+and generation-safe terminal UI reconciliation is covered by
+[`tests/pdf-terminal-reconciliation.test.mjs`](../tests/pdf-terminal-reconciliation.test.mjs).
 Shared sentence behavior, including unchanged TXT/EPUB paragraph navigation,
 is covered by [`tests/document-model.test.mjs`](../tests/document-model.test.mjs).
 Normalized token mapping, dehyphenation, and multi-font, ligature, rotated, and
@@ -170,6 +210,12 @@ the real Offline-natural worker. Its thresholds and opt-in CDP gate live in
 [`tests/offline-natural-timing-harness.test.mjs`](../tests/offline-natural-timing-harness.test.mjs),
 with review records in
 [`docs/evidence/issue-60/`](evidence/issue-60/).
+[`scripts/run-pdf-worker-browser-regression.mjs`](../scripts/run-pdf-worker-browser-regression.mjs)
+runs the production build in headed Brave against the supplied 359-page PDF,
+recording first-page ordering, Window Long Tasks, control latency, attached
+worker network traffic, resumable cancellation/replacement state, screenshots,
+and a DevTools trace. Review records live in
+[`docs/evidence/issue-56/`](evidence/issue-56/).
 The packaged page is checked by
 [`tests/rendered-html.test.mjs`](../tests/rendered-html.test.mjs). PDF geometry,
 complex reading order, and highlight alignment require representative browser
@@ -185,7 +231,8 @@ the device.
 
 **Owns:** [`app/reader-library.mjs`](../app/reader-library.mjs) owns the versioned
 IndexedDB schema, migrations, document records, library entries, active-document
-state, and per-document navigation records.
+state, per-document navigation records, and the v4 PDF source/page stores with
+revision-guarded staging, completion, recovery, and cleanup.
 [`app/reader-navigation.mjs`](../app/reader-navigation.mjs) owns contextual
 position snapshots, recovery after text changes, bounded history, and document
 word search. [`app/reader-layout.mjs`](../app/reader-layout.mjs) owns layout
@@ -204,10 +251,12 @@ the coordinator and remain recoverable against tokenized documents. Layout
 changes must be reviewed with focus rendering, virtualization estimates, and
 the CSS variables that consume them.
 
-**State and I/O:** Documents, library metadata, active-document identity, and
-navigation records live in IndexedDB. Settings, progress, and view selection
-remain in `localStorage` under the coordinator. Removing a document must clean
-both stores without affecting other local documents.
+**State and I/O:** Documents, library metadata, active-document identity,
+navigation records, PDF sources, and keyed PDF pages live in IndexedDB.
+Settings, progress, and view selection remain in `localStorage` under the
+coordinator. Removing a document must clean every owned record without
+affecting other local documents; interrupted PDFs remain explicit resumable
+revisions rather than orphaned anonymous pages.
 
 **Verification:** Use
 [`tests/reader-library.test.mjs`](../tests/reader-library.test.mjs) for schema,

@@ -11,17 +11,19 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
+import pdfJsWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import type {
   PDFDocumentLoadingTask,
   PDFDocumentProxy,
   PDFPageProxy,
   RenderTask,
 } from "pdfjs-dist";
-import { derivePdfPageWordStarts } from "./pdf-outline.mjs";
+import type { StoredPdfPage } from "./pdf-document-types";
+import { createPdfPageStore } from "./pdf-page-store.mjs";
 import { mergePdfHighlightLineRects } from "./pdf-text-model.mjs";
 import {
-  createPdfPageRenderStore,
   findPageIndexForWord,
+  selectVirtualizedRanges,
 } from "./reader-virtualization.mjs";
 
 export type PdfTextItemLayout = {
@@ -42,21 +44,41 @@ export type PdfPageLayout = {
   pageNumber: number;
   width: number;
   height: number;
+  rotation?: number;
+  rawDims?: {
+    pageHeight: number;
+    pageWidth: number;
+    pageX: number;
+    pageY: number;
+  };
   items: PdfTextItemLayout[];
+};
+
+type PdfBitmap = {
+  bitmap: ImageBitmap;
+  height: number;
+  scale: number;
+  width: number;
 };
 
 type HighlightScope = "sentence" | "paragraph";
 type HighlightKind = HighlightScope;
 
 type PdfPageViewProps = {
-  data: Uint8Array;
-  pages: PdfPageLayout[];
+  store: ReturnType<typeof createPdfPageStore>;
+  fallbackSource?: Blob;
+  renderFallback: boolean;
   activeWord: number;
   activeHighlightIndex: number;
   tokenSentences: number[];
   tokenParagraphs: number[];
   highlightScope: HighlightScope;
   registerWord: (index: number, element: HTMLSpanElement | null) => void;
+  requestRender: (
+    pageNumber: number,
+    scale: number,
+    options?: { visible?: boolean; distance?: number },
+  ) => void;
   onSelectWord: (index: number) => void;
   onRenderError: (message: string) => void;
 };
@@ -76,18 +98,9 @@ type MeasuredWordRect = {
   primary: boolean;
 };
 
-type MeasuredSentenceRect = {
+type MeasuredScopeRect = {
   key: string;
-  sentenceIndex: number;
-  left: number;
-  top: number;
-  width: number;
-  height: number;
-};
-
-type MeasuredParagraphRect = {
-  key: string;
-  paragraphIndex: number;
+  scopeIndex: number;
   left: number;
   top: number;
   width: number;
@@ -96,8 +109,8 @@ type MeasuredParagraphRect = {
 
 type PdfTextGeometry = {
   words: MeasuredWordRect[];
-  sentences: MeasuredSentenceRect[];
-  paragraphs: MeasuredParagraphRect[];
+  sentences: MeasuredScopeRect[];
+  paragraphs: MeasuredScopeRect[];
 };
 
 type HighlightRegistration = (
@@ -107,8 +120,11 @@ type HighlightRegistration = (
   element: HTMLSpanElement | null,
 ) => void;
 
-const WORD_PATTERN =
-  /[\p{L}\p{N}]+(?:[’'-][\p{L}\p{N}]+)*/gu;
+const WORD_PATTERN = /[\p{L}\p{N}]+(?:[’'-][\p{L}\p{N}]+)*/gu;
+const PDF_RANGE_OVERSCAN = 2;
+const PDF_PAGE_GAP = 38;
+const PDF_PAGE_CHROME = 22;
+const PDF_DOM_MEASURE_BUDGET_MS = 8;
 
 function relativeStyle(rectangle: {
   left: number;
@@ -124,13 +140,18 @@ function relativeStyle(rectangle: {
   } as CSSProperties;
 }
 
-function measureTextGeometry(
+function nextAnimationFrame() {
+  return new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+}
+
+async function measureTextGeometry(
   container: HTMLElement,
   textDivs: HTMLElement[],
   page: PdfPageLayout,
   tokenSentences: number[],
   tokenParagraphs: number[],
-): PdfTextGeometry {
+  cancelled: () => boolean,
+): Promise<PdfTextGeometry> {
   const containerRect = container.getBoundingClientRect();
   if (containerRect.width <= 0 || containerRect.height <= 0) {
     return { words: [], sentences: [], paragraphs: [] };
@@ -142,6 +163,12 @@ function measureTextGeometry(
       .map((item) => [item.textDivIndex!, item]),
   );
   let legacyItemIndex = 0;
+  let sliceStartedAt = performance.now();
+  const yieldIfNeeded = async () => {
+    if (performance.now() - sliceStartedAt < PDF_DOM_MEASURE_BUDGET_MS) return;
+    await nextAnimationFrame();
+    sliceStartedAt = performance.now();
+  };
   const pixelWords: Array<
     Omit<MeasuredWordRect, "left" | "top" | "width" | "height"> & {
       left: number;
@@ -152,7 +179,7 @@ function measureTextGeometry(
       paragraphIndex: number;
     }
   > = [];
-  const pixelSentenceSegments: Array<{
+  const pixelScopeSegments: Array<{
     sentenceIndex: number;
     paragraphIndex: number;
     left: number;
@@ -163,7 +190,9 @@ function measureTextGeometry(
   }> = [];
   const primaryWords = new Set<number>();
 
-  textDivs.forEach((textDiv, textDivIndex) => {
+  for (let textDivIndex = 0; textDivIndex < textDivs.length; textDivIndex += 1) {
+    if (cancelled()) return { words: [], sentences: [], paragraphs: [] };
+    const textDiv = textDivs[textDivIndex];
     const text = textDiv.textContent ?? "";
     let layout = indexedItems.get(textDivIndex);
     if (!layout && Array.from(text.matchAll(WORD_PATTERN)).length) {
@@ -175,7 +204,7 @@ function measureTextGeometry(
         }
       }
     }
-    if (!layout || !textDiv.firstChild) return;
+    if (!layout || !textDiv.firstChild) continue;
 
     const matches = Array.from(text.matchAll(WORD_PATTERN));
     const wordIndices =
@@ -183,16 +212,17 @@ function measureTextGeometry(
         ? layout.wordIndices
         : matches.map((_, index) => layout!.wordStart + index);
 
-    matches.forEach((match, matchIndex) => {
+    for (let matchIndex = 0; matchIndex < matches.length; matchIndex += 1) {
+      const match = matches[matchIndex];
       const wordIndex = wordIndices[matchIndex];
-      if (!Number.isFinite(wordIndex)) return;
+      if (!Number.isFinite(wordIndex)) continue;
       const start = match.index ?? 0;
       const end = start + match[0].length;
       const sentenceIndex = tokenSentences[wordIndex] ?? -1;
       const paragraphIndex = tokenParagraphs[wordIndex] ?? -1;
       const range = document.createRange();
-      range.setStart(textDiv.firstChild!, start);
-      range.setEnd(textDiv.firstChild!, end);
+      range.setStart(textDiv.firstChild, start);
+      range.setEnd(textDiv.firstChild, end);
       const rectangles = Array.from(range.getClientRects()).filter(
         (rectangle) => rectangle.width > 0 && rectangle.height > 0,
       );
@@ -236,26 +266,24 @@ function measureTextGeometry(
         }
       }
       const sentenceRange = document.createRange();
-      sentenceRange.setStart(
-        textDiv.firstChild!,
-        matchIndex === 0 ? 0 : start,
-      );
-      sentenceRange.setEnd(textDiv.firstChild!, sentenceSegmentEnd);
+      sentenceRange.setStart(textDiv.firstChild, matchIndex === 0 ? 0 : start);
+      sentenceRange.setEnd(textDiv.firstChild, sentenceSegmentEnd);
       for (const rectangle of sentenceRange.getClientRects()) {
         if (rectangle.width <= 0 || rectangle.height <= 0) continue;
-        pixelSentenceSegments.push({
+        pixelScopeSegments.push({
           sentenceIndex,
           paragraphIndex,
           left: rectangle.left - containerRect.left,
           top: rectangle.top - containerRect.top,
           width: rectangle.width,
           height: rectangle.height,
-          angle: layout!.angle,
+          angle: layout.angle,
         });
       }
       sentenceRange.detach();
-    });
-  });
+      await yieldIfNeeded();
+    }
+  }
 
   const words = pixelWords.map((word) => ({
     key: word.key,
@@ -271,41 +299,36 @@ function measureTextGeometry(
     sourceEnd: word.sourceEnd,
     primary: word.primary,
   }));
-  const sentenceLines = mergePdfHighlightLineRects(
-    pixelSentenceSegments.map(({ sentenceIndex, ...rectangle }) => ({
-      ...rectangle,
-      scopeIndex: sentenceIndex,
-    })),
-  );
-  const sentences = sentenceLines.map((line, index) => ({
-    key: `${line.scopeIndex}:${index}:${line.left.toFixed(2)}:${line.top.toFixed(2)}`,
-    sentenceIndex: line.scopeIndex,
-    left: (line.left / containerRect.width) * 100,
-    top: (line.top / containerRect.height) * 100,
-    width: (line.width / containerRect.width) * 100,
-    height: (line.height / containerRect.height) * 100,
-  }));
-  const paragraphLines = mergePdfHighlightLineRects(
-    pixelSentenceSegments.map(({ paragraphIndex, ...rectangle }) => ({
-      ...rectangle,
-      scopeIndex: paragraphIndex,
-    })),
-  );
-  const paragraphs = paragraphLines.map((line, index) => ({
-    key: `${line.scopeIndex}:${index}:${line.left.toFixed(2)}:${line.top.toFixed(2)}`,
-    paragraphIndex: line.scopeIndex,
-    left: (line.left / containerRect.width) * 100,
-    top: (line.top / containerRect.height) * 100,
-    width: (line.width / containerRect.width) * 100,
-    height: (line.height / containerRect.height) * 100,
-  }));
+  const buildScopeRects = (
+    key: "sentenceIndex" | "paragraphIndex",
+  ): MeasuredScopeRect[] =>
+    mergePdfHighlightLineRects(
+      pixelScopeSegments.map((rectangle) => ({
+        angle: rectangle.angle,
+        height: rectangle.height,
+        left: rectangle.left,
+        scopeIndex: rectangle[key],
+        top: rectangle.top,
+        width: rectangle.width,
+      })),
+    ).map((line, index) => ({
+      key: `${line.scopeIndex}:${index}:${line.left.toFixed(2)}:${line.top.toFixed(2)}`,
+      scopeIndex: line.scopeIndex,
+      left: (line.left / containerRect.width) * 100,
+      top: (line.top / containerRect.height) * 100,
+      width: (line.width / containerRect.width) * 100,
+      height: (line.height / containerRect.height) * 100,
+    }));
 
-  return { words, sentences, paragraphs };
+  return {
+    words,
+    sentences: buildScopeRects("sentenceIndex"),
+    paragraphs: buildScopeRects("paragraphIndex"),
+  };
 }
 
 function PdfMeasuredTextLayer({
-  documentProxy,
-  page,
+  pageRecord,
   tokenSentences,
   tokenParagraphs,
   registerHighlight,
@@ -313,8 +336,7 @@ function PdfMeasuredTextLayer({
   onSelectWord,
   onRenderError,
 }: {
-  documentProxy: PDFDocumentProxy | null;
-  page: PdfPageLayout;
+  pageRecord: StoredPdfPage;
   tokenSentences: number[];
   tokenParagraphs: number[];
   registerHighlight: HighlightRegistration;
@@ -323,6 +345,7 @@ function PdfMeasuredTextLayer({
   onRenderError: PdfPageViewProps["onRenderError"];
 }) {
   const textLayerRef = useRef<HTMLDivElement>(null);
+  const measurementGenerationRef = useRef(0);
   const [geometry, setGeometry] = useState<PdfTextGeometry>({
     words: [],
     sentences: [],
@@ -330,62 +353,73 @@ function PdfMeasuredTextLayer({
   });
 
   useEffect(() => {
-    if (!documentProxy) return;
     let cancelled = false;
-    let pageProxy: PDFPageProxy | undefined;
-    let textLayer: {
-      cancel(): void;
-      render(): Promise<unknown>;
-      textDivs: HTMLElement[];
-    } | undefined;
+    let textLayer:
+      | { cancel(): void; render(): Promise<unknown>; textDivs: HTMLElement[] }
+      | undefined;
     let resizeObserver: ResizeObserver | undefined;
     let animationFrame = 0;
     const container = textLayerRef.current;
+    const page = pageRecord.layout;
 
     const renderText = async () => {
       try {
         if (!container) return;
         const pdfjs = await import("pdfjs-dist");
-        pageProxy = await documentProxy.getPage(page.pageNumber);
-        const [textContent, fontsReady] = await Promise.all([
-          pageProxy.getTextContent(),
-          document.fonts?.ready ?? Promise.resolve(),
-        ]);
         if (cancelled) return;
-        const viewport = pageProxy.getViewport({ scale: 1 });
+        const rawDims = page.rawDims ?? {
+          pageHeight: page.height,
+          pageWidth: page.width,
+          pageX: 0,
+          pageY: 0,
+        };
+        const viewport = {
+          rawDims,
+          rotation: page.rotation ?? 0,
+          scale: 1,
+        };
         const updateScale = () => {
           const parentWidth = container.parentElement?.clientWidth ?? 0;
-          const scale = parentWidth > 0 ? parentWidth / viewport.width : 1;
+          const scale = parentWidth > 0 ? parentWidth / page.width : 1;
           container.style.setProperty("--total-scale-factor", String(scale));
         };
         updateScale();
         textLayer = new pdfjs.TextLayer({
-          textContentSource: textContent,
+          textContentSource: pageRecord.textContent as never,
           container,
-          viewport,
+          viewport: viewport as never,
         });
         await textLayer.render();
         textLayer.textDivs.forEach((textDiv, textDivIndex) => {
           textDiv.dataset.pdfTextDiv = String(textDivIndex);
         });
-        await fontsReady;
+        await (document.fonts?.ready ?? Promise.resolve());
         if (cancelled) return;
 
         const measure = () => {
+          const generation = ++measurementGenerationRef.current;
           cancelAnimationFrame(animationFrame);
           animationFrame = requestAnimationFrame(() => {
             updateScale();
             animationFrame = requestAnimationFrame(() => {
               if (!cancelled && textLayer) {
-                setGeometry(
-                  measureTextGeometry(
-                    container,
-                    textLayer.textDivs,
-                    page,
-                    tokenSentences,
-                    tokenParagraphs,
-                  ),
-                );
+                void measureTextGeometry(
+                  container,
+                  textLayer.textDivs,
+                  page,
+                  tokenSentences,
+                  tokenParagraphs,
+                  () =>
+                    cancelled ||
+                    measurementGenerationRef.current !== generation,
+                ).then((nextGeometry) => {
+                  if (
+                    !cancelled &&
+                    measurementGenerationRef.current === generation
+                  ) {
+                    setGeometry(nextGeometry);
+                  }
+                });
               }
             });
           });
@@ -393,9 +427,7 @@ function PdfMeasuredTextLayer({
         measure();
         if (typeof ResizeObserver !== "undefined") {
           resizeObserver = new ResizeObserver(measure);
-          if (container.parentElement) {
-            resizeObserver.observe(container.parentElement);
-          }
+          if (container.parentElement) resizeObserver.observe(container.parentElement);
         }
       } catch (error) {
         if (
@@ -412,12 +444,13 @@ function PdfMeasuredTextLayer({
     void renderText();
     return () => {
       cancelled = true;
+      measurementGenerationRef.current += 1;
       cancelAnimationFrame(animationFrame);
       resizeObserver?.disconnect();
       textLayer?.cancel();
-      pageProxy?.cleanup();
+      container?.replaceChildren();
     };
-  }, [documentProxy, onRenderError, page, tokenParagraphs, tokenSentences]);
+  }, [onRenderError, pageRecord, tokenParagraphs, tokenSentences]);
 
   return (
     <div className="pdf-text-layer">
@@ -426,12 +459,12 @@ function PdfMeasuredTextLayer({
         {geometry.paragraphs.map((rectangle) => (
           <span
             className="pdf-paragraph-overlay"
-            data-pdf-paragraph={rectangle.paragraphIndex}
+            data-pdf-paragraph={rectangle.scopeIndex}
             key={rectangle.key}
             ref={(element) =>
               registerHighlight(
                 "paragraph",
-                rectangle.paragraphIndex,
+                rectangle.scopeIndex,
                 rectangle.key,
                 element,
               )
@@ -443,12 +476,12 @@ function PdfMeasuredTextLayer({
         {geometry.sentences.map((rectangle) => (
           <span
             className="pdf-sentence-overlay"
-            data-pdf-sentence={rectangle.sentenceIndex}
+            data-pdf-sentence={rectangle.scopeIndex}
             key={rectangle.key}
             ref={(element) =>
               registerHighlight(
                 "sentence",
-                rectangle.sentenceIndex,
+                rectangle.scopeIndex,
                 rectangle.key,
                 element,
               )
@@ -466,9 +499,7 @@ function PdfMeasuredTextLayer({
             data-pdf-text-end={rectangle.sourceEnd}
             key={rectangle.key}
             ref={(element) => {
-              if (rectangle.primary) {
-                registerWord(rectangle.wordIndex, element);
-              }
+              if (rectangle.primary) registerWord(rectangle.wordIndex, element);
             }}
             style={relativeStyle(rectangle)}
             onClick={() => onSelectWord(rectangle.wordIndex)}
@@ -481,56 +512,129 @@ function PdfMeasuredTextLayer({
   );
 }
 
+function useFallbackDocument(
+  source: Blob | undefined,
+  enabled: boolean,
+  onRenderError: (message: string) => void,
+) {
+  const [documentProxy, setDocumentProxy] = useState<PDFDocumentProxy | null>(null);
+  useEffect(() => {
+    if (!enabled || !source) return;
+    let cancelled = false;
+    let loadingTask: PDFDocumentLoadingTask | undefined;
+    const load = async () => {
+      try {
+        const pdfjs = await import("pdfjs-dist");
+        pdfjs.GlobalWorkerOptions.workerSrc = pdfJsWorkerUrl;
+        const bytes = new Uint8Array(await source.arrayBuffer());
+        if (cancelled) return;
+        loadingTask = pdfjs.getDocument({ data: bytes });
+        const document = await loadingTask.promise;
+        if (!cancelled) setDocumentProxy(document);
+      } catch {
+        if (!cancelled) {
+          onRenderError(
+            "The original PDF pages could not be opened. Focus view is still available.",
+          );
+        }
+      }
+    };
+    void load();
+    return () => {
+      cancelled = true;
+      setDocumentProxy(null);
+      void loadingTask?.destroy();
+    };
+  }, [enabled, onRenderError, source]);
+  return documentProxy;
+}
+
 const PdfRenderedPage = memo(function PdfRenderedPage({
-  documentProxy,
-  page,
+  bitmap,
+  fallbackDocument,
+  pageRecord,
   tokenSentences,
   tokenParagraphs,
   registerHighlight,
   registerWord,
+  requestRender,
+  pinBitmap,
   onSelectWord,
   onRenderError,
 }: {
-  documentProxy: PDFDocumentProxy | null;
-  page: PdfPageLayout;
+  bitmap?: PdfBitmap;
+  fallbackDocument: PDFDocumentProxy | null;
+  pageRecord: StoredPdfPage;
   tokenSentences: number[];
   tokenParagraphs: number[];
   registerHighlight: HighlightRegistration;
   registerWord: PdfPageViewProps["registerWord"];
+  requestRender: PdfPageViewProps["requestRender"];
+  pinBitmap: (pageNumber: number) => () => void;
   onSelectWord: PdfPageViewProps["onSelectWord"];
   onRenderError: PdfPageViewProps["onRenderError"];
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const requestedRef = useRef("");
   const [isRendered, setIsRendered] = useState(false);
 
+  useEffect(
+    () => pinBitmap(pageRecord.pageNumber),
+    [pageRecord.pageNumber, pinBitmap],
+  );
+
   useEffect(() => {
-    if (!documentProxy) return;
+    const canvas = canvasRef.current;
+    if (!canvas || !bitmap) return;
+    const context = canvas.getContext("2d", { alpha: false });
+    if (!context) return;
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height;
+    context.drawImage(bitmap.bitmap, 0, 0);
+    canvas.dataset.pdfRenderSource = "worker-bitmap";
+    requestedRef.current = "";
+    setIsRendered(true);
+    return () => {
+      delete canvas.dataset.pdfRenderSource;
+      canvas.width = 0;
+      canvas.height = 0;
+    };
+  }, [bitmap]);
+
+  useEffect(() => {
+    if (bitmap || fallbackDocument) return;
+    const scale = Math.min(2, Math.max(1.25, window.devicePixelRatio || 1));
+    const key = `${pageRecord.pageNumber}:${scale}`;
+    if (requestedRef.current === key) return;
+    requestedRef.current = key;
+    requestRender(pageRecord.pageNumber, scale, { visible: true, distance: 0 });
+  }, [bitmap, fallbackDocument, pageRecord.pageNumber, requestRender]);
+
+  useEffect(() => {
+    if (bitmap || !fallbackDocument) return;
     let cancelled = false;
     let pageProxy: PDFPageProxy | undefined;
     let renderTask: RenderTask | undefined;
     const canvas = canvasRef.current;
-
-    const renderPage = async () => {
+    const render = async () => {
       try {
-        pageProxy = await documentProxy.getPage(page.pageNumber);
-        if (cancelled) return;
-        const outputScale = Math.min(
-          2,
-          Math.max(1.25, window.devicePixelRatio || 1),
-        );
-        const viewport = pageProxy.getViewport({ scale: outputScale });
-        const context = canvas?.getContext("2d", { alpha: false });
-        if (!canvas || !context) return;
-
+        pageProxy = await fallbackDocument.getPage(pageRecord.pageNumber);
+        if (cancelled || !canvas) return;
+        const scale = Math.min(2, Math.max(1.25, window.devicePixelRatio || 1));
+        const viewport = pageProxy.getViewport({ scale });
+        const context = canvas.getContext("2d", { alpha: false });
+        if (!context) return;
         canvas.width = Math.ceil(viewport.width);
         canvas.height = Math.ceil(viewport.height);
-        renderTask = pageProxy.render({
-          canvas,
-          canvasContext: context,
-          viewport,
-        });
+        renderTask = pageProxy.render({ canvas, canvasContext: context, viewport });
+        renderTask.onContinue = (continueRendering: () => void) => {
+          requestAnimationFrame(continueRendering);
+        };
         await renderTask.promise;
-        if (!cancelled) setIsRendered(true);
+        if (!cancelled) {
+          canvas.dataset.pdfRenderSource = "main-fallback";
+          setIsRendered(true);
+        }
       } catch (error) {
         if (
           !cancelled &&
@@ -543,25 +647,24 @@ const PdfRenderedPage = memo(function PdfRenderedPage({
         }
       }
     };
-
-    void renderPage();
+    void render();
     return () => {
       cancelled = true;
       renderTask?.cancel();
       pageProxy?.cleanup();
       if (canvas) {
+        delete canvas.dataset.pdfRenderSource;
         canvas.width = 0;
         canvas.height = 0;
       }
     };
-  }, [documentProxy, onRenderError, page.pageNumber]);
+  }, [bitmap, fallbackDocument, onRenderError, pageRecord.pageNumber]);
 
   return (
     <>
       <canvas ref={canvasRef} aria-hidden="true" />
       <PdfMeasuredTextLayer
-        documentProxy={documentProxy}
-        page={page}
+        pageRecord={pageRecord}
         tokenSentences={tokenSentences}
         tokenParagraphs={tokenParagraphs}
         registerHighlight={registerHighlight}
@@ -572,212 +675,110 @@ const PdfRenderedPage = memo(function PdfRenderedPage({
       {!isRendered && (
         <div className="pdf-page-loading" role="status">
           <span aria-hidden="true">•••</span>
-          Drawing page {page.pageNumber}
+          Drawing page {pageRecord.pageNumber}
         </div>
       )}
     </>
   );
 });
 
-type PdfPageRenderStore = ReturnType<typeof createPdfPageRenderStore>;
+type PdfPageSummary = {
+  pageNumber: number;
+  width: number;
+  height: number;
+  wordStart: number;
+};
 
-const PdfPageShell = memo(function PdfPageShell({
-  documentProxy,
-  page,
-  pageIndex,
-  renderStore,
-  tokenSentences,
-  tokenParagraphs,
-  registerHighlight,
-  registerPageShell,
-  registerWord,
-  onSelectWord,
-  onRenderError,
-}: {
-  documentProxy: PDFDocumentProxy | null;
-  page: PdfPageLayout;
-  pageIndex: number;
-  renderStore: PdfPageRenderStore;
-  tokenSentences: number[];
-  tokenParagraphs: number[];
-  registerHighlight: HighlightRegistration;
-  registerPageShell: (pageIndex: number, element: HTMLElement | null) => void;
-  registerWord: PdfPageViewProps["registerWord"];
-  onSelectWord: PdfPageViewProps["onSelectWord"];
-  onRenderError: PdfPageViewProps["onRenderError"];
-}) {
-  const subscribe = useCallback(
-    (listener: () => void) => renderStore.subscribe(pageIndex, listener),
-    [pageIndex, renderStore],
-  );
-  const getSnapshot = useCallback(
-    () => renderStore.isPageRendered(pageIndex),
-    [pageIndex, renderStore],
-  );
-  const shouldRender = useSyncExternalStore(
-    subscribe,
-    getSnapshot,
-    getSnapshot,
-  );
-  const shellRef = useRef<HTMLElement>(null);
-  const setShellRef = useCallback(
-    (element: HTMLElement | null) => {
-      shellRef.current = element;
-      registerPageShell(pageIndex, element);
+function calculateOffsets(pages: PdfPageSummary[], width: number) {
+  const offsets = [0];
+  for (const page of pages) {
+    const height = width > 0
+      ? (width * page.height) / page.width
+      : page.height;
+    offsets.push(offsets.at(-1)! + height + PDF_PAGE_CHROME + PDF_PAGE_GAP);
+  }
+  return offsets;
+}
+
+function findOffsetIndex(offsets: number[], target: number) {
+  let low = 0;
+  let high = Math.max(0, offsets.length - 2);
+  let best = 0;
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    if (offsets[middle] <= target) {
+      best = middle;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+  return best;
+}
+
+function usePdfRange(
+  pages: PdfPageSummary[],
+  activePageIndex: number,
+  listRef: React.RefObject<HTMLDivElement | null>,
+  storeVersion: number,
+) {
+  const [width, setWidth] = useState(0);
+  const [range, setRange] = useState({ start: 0, end: 0 });
+  const offsets = useMemo(
+    () => {
+      void storeVersion;
+      return calculateOffsets(pages, width);
     },
-    [pageIndex, registerPageShell],
+    [pages, storeVersion, width],
   );
-  useLayoutEffect(() => {
-    if (!import.meta.env.DEV) return;
-    const shell = shellRef.current;
-    if (!shell) return;
-    const previous = Number(shell.dataset.pdfShellRenderCount) || 0;
-    shell.dataset.pdfShellRenderCount = String(previous + 1);
-  });
-
-  return (
-    <section
-      className="pdf-page-block"
-      id={`pdf-page-${page.pageNumber}`}
-      data-pdf-page-index={pageIndex}
-      data-pdf-page-rendered={shouldRender ? "true" : "false"}
-      ref={setShellRef}
-    >
-      <div
-        className="pdf-page"
-        style={{ aspectRatio: `${page.width} / ${page.height}` }}
-      >
-        {shouldRender ? (
-          <PdfRenderedPage
-            documentProxy={documentProxy}
-            page={page}
-            tokenSentences={tokenSentences}
-            tokenParagraphs={tokenParagraphs}
-            registerHighlight={registerHighlight}
-            registerWord={registerWord}
-            onSelectWord={onSelectWord}
-            onRenderError={onRenderError}
-          />
-        ) : (
-          <div className="pdf-page-placeholder" aria-hidden="true">
-            <span>Page {page.pageNumber}</span>
-          </div>
-        )}
-      </div>
-      <p className="pdf-page-number">Page {page.pageNumber}</p>
-    </section>
-  );
-});
-
-const PdfPageShells = memo(function PdfPageShells({
-  data,
-  pages,
-  renderStore,
-  tokenSentences,
-  tokenParagraphs,
-  registerHighlight,
-  registerWord,
-  onSelectWord,
-  onRenderError,
-}: {
-  data: Uint8Array;
-  pages: PdfPageLayout[];
-  renderStore: PdfPageRenderStore;
-  tokenSentences: number[];
-  tokenParagraphs: number[];
-  registerHighlight: HighlightRegistration;
-  registerWord: PdfPageViewProps["registerWord"];
-  onSelectWord: PdfPageViewProps["onSelectWord"];
-  onRenderError: PdfPageViewProps["onRenderError"];
-}) {
-  const pageShellRefs = useRef<Map<number, HTMLElement>>(new Map());
-  const [documentProxy, setDocumentProxy] =
-    useState<PDFDocumentProxy | null>(null);
-  const shellListRef = useRef<HTMLDivElement>(null);
-  useLayoutEffect(() => {
-    if (!import.meta.env.DEV) return;
-    const shellList = shellListRef.current;
-    if (!shellList) return;
-    const previous = Number(shellList.dataset.pdfShellMapRenderCount) || 0;
-    shellList.dataset.pdfShellMapRenderCount = String(previous + 1);
-  });
 
   useEffect(() => {
-    let cancelled = false;
-    let loadingTask: PDFDocumentLoadingTask | undefined;
-
-    const loadDocument = async () => {
-      try {
-        const pdfjs = await import("pdfjs-dist");
-        pdfjs.GlobalWorkerOptions.workerSrc = new URL(
-          "pdfjs-dist/build/pdf.worker.min.mjs",
-          import.meta.url,
-        ).toString();
-        loadingTask = pdfjs.getDocument({ data: data.slice() });
-        const loadedDocument = await loadingTask.promise;
-        if (!cancelled) setDocumentProxy(loadedDocument);
-      } catch {
-        if (!cancelled) {
-          onRenderError(
-            "The original PDF pages could not be opened. Focus view is still available.",
-          );
-        }
-      }
+    const list = listRef.current;
+    const root = list?.closest<HTMLElement>(".reader-scroll");
+    if (!list || !root) return;
+    let frame = 0;
+    const update = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        const listTop =
+          list.getBoundingClientRect().top - root.getBoundingClientRect().top +
+          root.scrollTop;
+        const startOffset = Math.max(0, root.scrollTop - listTop);
+        const endOffset = startOffset + root.clientHeight;
+        const visibleStart = findOffsetIndex(offsets, startOffset);
+        const visibleEnd = findOffsetIndex(offsets, endOffset);
+        setRange({
+          start: visibleStart,
+          end: Math.min(pages.length - 1, visibleEnd),
+        });
+      });
     };
-
-    void loadDocument();
+    const observer = new ResizeObserver(() => {
+      setWidth(list.clientWidth);
+      update();
+    });
+    observer.observe(list);
+    setWidth(list.clientWidth);
+    root.addEventListener("scroll", update, { passive: true });
+    update();
     return () => {
-      cancelled = true;
-      void loadingTask?.destroy();
+      cancelAnimationFrame(frame);
+      observer.disconnect();
+      root.removeEventListener("scroll", update);
     };
-  }, [data, onRenderError]);
+  }, [listRef, offsets, pages.length, storeVersion]);
 
-  useEffect(() => {
-    if (typeof IntersectionObserver === "undefined") return;
-    const observer = new IntersectionObserver(
-      (entries) => {
-        for (const entry of entries) {
-          const pageIndex = Number(
-            (entry.target as HTMLElement).dataset.pdfPageIndex,
-          );
-          renderStore.setPageVisible(pageIndex, entry.isIntersecting);
-        }
-      },
-      { rootMargin: "120% 0px" },
-    );
-    for (const shell of pageShellRefs.current.values()) observer.observe(shell);
-    return () => observer.disconnect();
-  }, [pages, renderStore]);
-
-  const registerPageShell = useCallback(
-    (pageIndex: number, element: HTMLElement | null) => {
-      if (element) pageShellRefs.current.set(pageIndex, element);
-      else pageShellRefs.current.delete(pageIndex);
-    },
-    [],
-  );
-
-  return (
-    <div className="pdf-pages" ref={shellListRef}>
-      {pages.map((page, pageIndex) => (
-        <PdfPageShell
-          documentProxy={documentProxy}
-          page={page}
-          pageIndex={pageIndex}
-          renderStore={renderStore}
-          tokenSentences={tokenSentences}
-          tokenParagraphs={tokenParagraphs}
-          registerHighlight={registerHighlight}
-          registerPageShell={registerPageShell}
-          registerWord={registerWord}
-          onSelectWord={onSelectWord}
-          onRenderError={onRenderError}
-          key={page.pageNumber}
-        />
-      ))}
-    </div>
-  );
-});
+  return {
+    offsets,
+    ranges: selectVirtualizedRanges(
+      range.start,
+      range.end,
+      pages.length,
+      activePageIndex,
+      PDF_RANGE_OVERSCAN,
+    ) as Array<{ start: number; end: number }>,
+  };
+}
 
 function toggleRegisteredElements(
   elements: Map<number, Map<string, HTMLSpanElement>>,
@@ -790,14 +791,16 @@ function toggleRegisteredElements(
 }
 
 export function PdfPageView({
-  data,
-  pages,
+  store,
+  fallbackSource,
+  renderFallback,
   activeWord,
   activeHighlightIndex,
   tokenSentences,
   tokenParagraphs,
   highlightScope,
   registerWord,
+  requestRender,
   onSelectWord,
   onRenderError,
 }: PdfPageViewProps) {
@@ -810,20 +813,59 @@ export function PdfPageView({
     index: activeHighlightIndex,
     scope: highlightScope,
   });
-
-  const pageWordStarts = useMemo(
-    () => derivePdfPageWordStarts(pages),
-    [pages],
+  const listRef = useRef<HTMLDivElement>(null);
+  const storeVersion = useSyncExternalStore(
+    store.subscribe,
+    store.getSnapshot,
+    store.getSnapshot,
   );
+  const summaries = store.getSummaries() as PdfPageSummary[];
+  const pageWordStarts = summaries.map((page) => page.wordStart);
   const activePageIndex = findPageIndexForWord(pageWordStarts, activeWord);
-  const pageRenderStore = useMemo(
-    () => createPdfPageRenderStore(pages.length, 0),
-    [pages],
+  const range = usePdfRange(
+    summaries,
+    activePageIndex,
+    listRef,
+    storeVersion,
   );
-
-  useLayoutEffect(() => {
-    pageRenderStore.setActivePageIndex(activePageIndex);
-  }, [activePageIndex, pageRenderStore]);
+  const rangeRows: Array<
+    | { kind: "spacer"; height: number; key: string }
+    | { kind: "page"; page: StoredPdfPage; key: string }
+  > = [];
+  let rangeCursor = 0;
+  for (const mountedRange of range.ranges) {
+    const spacerHeight =
+      (range.offsets[mountedRange.start] ?? 0) -
+      (range.offsets[rangeCursor] ?? 0);
+    if (spacerHeight > 0) {
+      rangeRows.push({
+        kind: "spacer",
+        height: spacerHeight,
+        key: `spacer-${rangeCursor}-${mountedRange.start}`,
+      });
+    }
+    for (const page of store.getPageRange(
+      mountedRange.start,
+      mountedRange.end,
+    ) as StoredPdfPage[]) {
+      rangeRows.push({ kind: "page", page, key: `page-${page.pageNumber}` });
+    }
+    rangeCursor = mountedRange.end + 1;
+  }
+  const trailingHeight =
+    (range.offsets.at(-1) ?? 0) - (range.offsets[rangeCursor] ?? 0);
+  if (trailingHeight > 0) {
+    rangeRows.push({
+      kind: "spacer",
+      height: trailingHeight,
+      key: `spacer-${rangeCursor}-end`,
+    });
+  }
+  const fallbackDocument = useFallbackDocument(
+    fallbackSource,
+    renderFallback,
+    onRenderError,
+  );
 
   const registerHighlight = useCallback<HighlightRegistration>(
     (kind, index, key, element) => {
@@ -877,6 +919,7 @@ export function PdfPageView({
     <article
       className={`pdf-page-view highlight-${highlightScope}`}
       aria-label="Original PDF pages"
+      data-pdf-render-fallback={renderFallback ? "true" : "false"}
     >
       <header className="pdf-view-intro">
         <p>Original page view</p>
@@ -884,17 +927,56 @@ export function PdfPageView({
         <span>Narration and highlighting stay synchronized across every page.</span>
       </header>
 
-      <PdfPageShells
-        data={data}
-        pages={pages}
-        renderStore={pageRenderStore}
-        tokenSentences={tokenSentences}
-        tokenParagraphs={tokenParagraphs}
-        registerHighlight={registerHighlight}
-        registerWord={registerWord}
-        onSelectWord={onSelectWord}
-        onRenderError={onRenderError}
-      />
+      <div
+        className="pdf-pages"
+        data-pdf-range={range.ranges
+          .map((mountedRange) => `${mountedRange.start}:${mountedRange.end}`)
+          .join(",")}
+        ref={listRef}
+      >
+        {rangeRows.map((row) =>
+          row.kind === "spacer" ? (
+            <div
+              aria-hidden="true"
+              className="pdf-range-spacer"
+              key={row.key}
+              style={{ height: row.height }}
+            />
+          ) : (
+          <section
+            className="pdf-page-block"
+            id={`pdf-page-${row.page.pageNumber}`}
+            data-pdf-page-index={row.page.pageNumber - 1}
+            data-pdf-page-rendered="true"
+            key={row.key}
+          >
+            <div
+              className="pdf-page"
+              style={{
+                aspectRatio: `${row.page.layout.width} / ${row.page.layout.height}`,
+              }}
+            >
+              <PdfRenderedPage
+                bitmap={store.getBitmap(row.page.pageNumber) as
+                  | PdfBitmap
+                  | undefined}
+                fallbackDocument={fallbackDocument}
+                pageRecord={row.page}
+                tokenSentences={tokenSentences}
+                tokenParagraphs={tokenParagraphs}
+                registerHighlight={registerHighlight}
+                registerWord={registerWord}
+                requestRender={requestRender}
+                pinBitmap={store.pinBitmap}
+                onSelectWord={onSelectWord}
+                onRenderError={onRenderError}
+              />
+            </div>
+            <p className="pdf-page-number">Page {row.page.pageNumber}</p>
+          </section>
+          ),
+        )}
+      </div>
     </article>
   );
 }
