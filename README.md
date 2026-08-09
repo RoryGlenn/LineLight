@@ -140,10 +140,14 @@ key through a `NEXT_PUBLIC_` or `VITE_` variable.
 Useful checks:
 
 ```bash
+npm run index:check
 npm run lint
 npm test
 ```
 
+The developer-facing module map, runtime boundaries, state ownership, and
+verification links are maintained in
+[`docs/codebase-index.md`](docs/codebase-index.md).
 Dependency update policy, audited overrides, and production exposure notes are
 recorded in
 [`docs/dependency-security.md`](docs/dependency-security.md).

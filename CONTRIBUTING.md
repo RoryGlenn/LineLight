@@ -11,6 +11,12 @@ reviewable path as a larger project.
 4. Wait for the required CI `test` job to pass on the current head commit.
 5. Resolve any review threads, then merge through GitHub.
 
+Use [`docs/codebase-index.md`](docs/codebase-index.md) to find the owning runtime,
+state boundary, coupled modules, and verification for a change. Update the
+affected index entry in the same pull request when responsibility moves, a new
+first-party module is added, or a runtime, storage, network, or test boundary
+changes.
+
 The `main` branch protection rule requires pull requests and the CI `test` job.
 The branch must be up to date before merge. Force pushes and branch deletion are
 disabled, and the rule applies to repository administrators.
