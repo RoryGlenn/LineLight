@@ -43,10 +43,96 @@ export function selectVirtualizedIndices(
   return Array.from(selected).sort((left, right) => left - right);
 }
 
+/** Create the keyed subscription core shared by PDF and Focus shell stores. */
+function createRenderWindowStore(itemCount, initialActiveIndex, overscan) {
+  const count = Math.max(0, Math.trunc(itemCount));
+  let activeIndex = Math.min(
+    Math.max(0, Math.trunc(initialActiveIndex) || 0),
+    Math.max(0, count - 1),
+  );
+  const visibleIndices = new Set();
+  let renderedIndices = new Set(
+    selectVirtualizedIndices(
+      visibleIndices,
+      count,
+      activeIndex,
+      overscan,
+    ),
+  );
+  /** @type {Map<number, Set<() => void>>} */
+  const listeners = new Map();
+
+  const recompute = () => {
+    const next = new Set(
+      selectVirtualizedIndices(
+        visibleIndices,
+        count,
+        activeIndex,
+        overscan,
+      ),
+    );
+    const changed = new Set();
+    for (const index of renderedIndices) {
+      if (!next.has(index)) changed.add(index);
+    }
+    for (const index of next) {
+      if (!renderedIndices.has(index)) changed.add(index);
+    }
+    renderedIndices = next;
+    for (const index of changed) {
+      for (const listener of listeners.get(index) ?? []) listener();
+    }
+    return Array.from(changed).sort((left, right) => left - right);
+  };
+
+  return {
+    getActiveIndex() {
+      return activeIndex;
+    },
+    getRenderedIndices() {
+      return Array.from(renderedIndices).sort(
+        (left, right) => left - right,
+      );
+    },
+    isRendered(index) {
+      return renderedIndices.has(index);
+    },
+    setActiveIndex(index) {
+      const next = Math.min(
+        Math.max(0, Math.trunc(index) || 0),
+        Math.max(0, count - 1),
+      );
+      if (next === activeIndex) return [];
+      activeIndex = next;
+      return recompute();
+    },
+    setVisible(index, visible) {
+      if (!Number.isInteger(index) || index < 0 || index >= count) {
+        return [];
+      }
+      const changed = visible
+        ? !visibleIndices.has(index)
+        : visibleIndices.has(index);
+      if (!changed) return [];
+      if (visible) visibleIndices.add(index);
+      else visibleIndices.delete(index);
+      return recompute();
+    },
+    subscribe(index, listener) {
+      const itemListeners = listeners.get(index) ?? new Set();
+      itemListeners.add(listener);
+      listeners.set(index, itemListeners);
+      return () => {
+        itemListeners.delete(listener);
+        if (!itemListeners.size) listeners.delete(index);
+      };
+    },
+  };
+}
+
 /**
- * Keep the 359 lightweight PDF page shells structurally stable while allowing
- * only pages entering or leaving the render window to update. Subscribers are
- * keyed by page, so an active-page boundary does not notify every shell.
+ * Keep the lightweight PDF page shells structurally stable while allowing
+ * only pages entering or leaving the render window to update.
  *
  * @param {number} pageCount
  * @param {number} initialActivePageIndex
@@ -57,88 +143,46 @@ export function createPdfPageRenderStore(
   initialActivePageIndex,
   overscan = PDF_PAGE_OVERSCAN,
 ) {
-  const count = Math.max(0, Math.trunc(pageCount));
-  let activePageIndex = Math.min(
-    Math.max(0, Math.trunc(initialActivePageIndex) || 0),
-    Math.max(0, count - 1),
+  const store = createRenderWindowStore(
+    pageCount,
+    initialActivePageIndex,
+    overscan,
   );
-  const visiblePageIndices = new Set();
-  let renderedPageIndices = new Set(
-    selectVirtualizedIndices(
-      visiblePageIndices,
-      count,
-      activePageIndex,
-      overscan,
-    ),
-  );
-  /** @type {Map<number, Set<() => void>>} */
-  const listeners = new Map();
-
-  const recompute = () => {
-    const next = new Set(
-      selectVirtualizedIndices(
-        visiblePageIndices,
-        count,
-        activePageIndex,
-        overscan,
-      ),
-    );
-    const changed = new Set();
-    for (const index of renderedPageIndices) {
-      if (!next.has(index)) changed.add(index);
-    }
-    for (const index of next) {
-      if (!renderedPageIndices.has(index)) changed.add(index);
-    }
-    renderedPageIndices = next;
-    for (const index of changed) {
-      for (const listener of listeners.get(index) ?? []) listener();
-    }
-    return Array.from(changed).sort((left, right) => left - right);
-  };
-
   return {
-    getActivePageIndex() {
-      return activePageIndex;
-    },
-    getRenderedPageIndices() {
-      return Array.from(renderedPageIndices).sort(
-        (left, right) => left - right,
-      );
-    },
-    isPageRendered(pageIndex) {
-      return renderedPageIndices.has(pageIndex);
-    },
-    setActivePageIndex(pageIndex) {
-      const next = Math.min(
-        Math.max(0, Math.trunc(pageIndex) || 0),
-        Math.max(0, count - 1),
-      );
-      if (next === activePageIndex) return [];
-      activePageIndex = next;
-      return recompute();
-    },
-    setPageVisible(pageIndex, visible) {
-      if (!Number.isInteger(pageIndex) || pageIndex < 0 || pageIndex >= count) {
-        return [];
-      }
-      const changed = visible
-        ? !visiblePageIndices.has(pageIndex)
-        : visiblePageIndices.has(pageIndex);
-      if (!changed) return [];
-      if (visible) visiblePageIndices.add(pageIndex);
-      else visiblePageIndices.delete(pageIndex);
-      return recompute();
-    },
-    subscribe(pageIndex, listener) {
-      const pageListeners = listeners.get(pageIndex) ?? new Set();
-      pageListeners.add(listener);
-      listeners.set(pageIndex, pageListeners);
-      return () => {
-        pageListeners.delete(listener);
-        if (!pageListeners.size) listeners.delete(pageIndex);
-      };
-    },
+    getActivePageIndex: store.getActiveIndex,
+    getRenderedPageIndices: store.getRenderedIndices,
+    isPageRendered: store.isRendered,
+    setActivePageIndex: store.setActiveIndex,
+    setPageVisible: store.setVisible,
+    subscribe: store.subscribe,
+  };
+}
+
+/**
+ * Keep Focus paragraph shells stable while notifying only paragraphs entering
+ * or leaving the bounded render window.
+ *
+ * @param {number} paragraphCount
+ * @param {number} initialActiveParagraphIndex
+ * @param {number} [overscan]
+ */
+export function createFocusParagraphRenderStore(
+  paragraphCount,
+  initialActiveParagraphIndex,
+  overscan = FOCUS_PARAGRAPH_OVERSCAN,
+) {
+  const store = createRenderWindowStore(
+    paragraphCount,
+    initialActiveParagraphIndex,
+    overscan,
+  );
+  return {
+    getActiveParagraphIndex: store.getActiveIndex,
+    getRenderedParagraphIndices: store.getRenderedIndices,
+    isParagraphRendered: store.isRendered,
+    setActiveParagraphIndex: store.setActiveIndex,
+    setParagraphVisible: store.setVisible,
+    subscribe: store.subscribe,
   };
 }
 

@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   PDF_TEXT_MODEL_VERSION,
   buildPdfTextModel,
+  mergePdfHighlightLineRects,
   mergePdfSentenceLineRects,
   migrateStoredPdfTextModel,
   pdfDocumentNeedsTextModelMigration,
@@ -180,6 +181,33 @@ test("visual fixture: sentence overlays are continuous per printed line", () => 
       left: 10,
       top: 23,
       width: 34,
+      height: 9,
+      vertical: false,
+    },
+  ]);
+});
+
+test("sentence and paragraph bands share the same measured line merger", () => {
+  const measuredSegments = [
+    { scopeIndex: 8, left: 10, top: 10, width: 20, height: 9, angle: 0 },
+    { scopeIndex: 8, left: 34, top: 10, width: 15, height: 9, angle: 0 },
+    { scopeIndex: 8, left: 10, top: 23, width: 18, height: 9, angle: 0 },
+  ];
+
+  assert.deepEqual(mergePdfHighlightLineRects(measuredSegments), [
+    {
+      scopeIndex: 8,
+      left: 10,
+      top: 10,
+      width: 39,
+      height: 9,
+      vertical: false,
+    },
+    {
+      scopeIndex: 8,
+      left: 10,
+      top: 23,
+      width: 18,
       height: 9,
       vertical: false,
     },

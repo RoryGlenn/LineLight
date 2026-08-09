@@ -17,6 +17,7 @@ export const DEFAULT_PDF_HIGHLIGHT_FIXTURE = path.join(
 export const PDF_HIGHLIGHT_FIXTURE_EXPECTATIONS = Object.freeze({
   pageCount: 6,
   reportedPassageWords: ["Tiarnán", "definition", "engineer", "attrition"],
+  paragraphContinuationWord: "another",
   dehyphenatedWordFragments: ["extraordi", "nary"],
   multiFontWords: ["Serif", "sans", "monospace"],
   // PDF.js normalizes the single /fi glyph to the searchable text "fi".
@@ -141,6 +142,7 @@ export function generatePdfHighlightFixture() {
           "BT /F1 11 Tf 45 704 Td (3  I like my friend Tiarn\xe1n de Burca\x92s definition of senior engineer: the level at which) Tj ET",
           "BT /F1 11 Tf 45 686 Td (someone can stop advancing and continue their current level of productivity, capability,) Tj ET",
           "BT /F1 11 Tf 45 668 Td (and of output for the rest of their career and still be \"regretted attrition\" if they leave.) Tj ET",
+          "BT /F1 11 Tf 45 650 Td (another thought stays in the same paragraph so paragraph scope keeps wider context stable.) Tj ET",
           "BT /F1 15 Tf 45 602 Td (An extraordi-) Tj ET",
           "BT /F1 15 Tf 45 580 Td (nary staff path stays one spoken word.) Tj ET",
         ].join("\n"),

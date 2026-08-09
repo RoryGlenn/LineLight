@@ -189,13 +189,13 @@ export function pdfTextParagraphs(value) {
 }
 
 /**
- * Group measured word rectangles into continuous visual sentence lines. Large
- * gaps split otherwise aligned rectangles so two columns never become one
- * highlight bar. Rotation is handled on the visual axis rather than assuming
- * all PDF text is horizontal.
+ * Group measured text segments into continuous visual scope lines. Large gaps
+ * split otherwise aligned rectangles so two columns never become one highlight
+ * bar. Rotation is handled on the visual axis rather than assuming all PDF text
+ * is horizontal.
  *
  * @param {Array<{
- *   sentenceIndex: number,
+ *   scopeIndex: number,
  *   left: number,
  *   top: number,
  *   width: number,
@@ -203,13 +203,13 @@ export function pdfTextParagraphs(value) {
  *   angle?: number,
  * }>} rectangles
  */
-export function mergePdfSentenceLineRects(rectangles) {
+export function mergePdfHighlightLineRects(rectangles) {
   const groups = new Map();
   for (const rectangle of rectangles) {
-    if (!Number.isFinite(rectangle.sentenceIndex)) continue;
+    if (!Number.isFinite(rectangle.scopeIndex)) continue;
     const angle = ((Number(rectangle.angle) || 0) % 180 + 180) % 180;
     const vertical = angle > 45 && angle < 135;
-    const key = `${rectangle.sentenceIndex}:${vertical ? "v" : "h"}`;
+    const key = `${rectangle.scopeIndex}:${vertical ? "v" : "h"}`;
     const group = groups.get(key) ?? [];
     group.push({ ...rectangle, vertical });
     groups.set(key, group);
@@ -268,7 +268,7 @@ export function mergePdfSentenceLineRects(rectangles) {
           ...run.map((rectangle) => rectangle.top + rectangle.height),
         );
         merged.push({
-          sentenceIndex: run[0].sentenceIndex,
+          scopeIndex: run[0].scopeIndex,
           left,
           top,
           width: right - left,
@@ -303,10 +303,35 @@ export function mergePdfSentenceLineRects(rectangles) {
 
   return merged.toSorted(
     (left, right) =>
-      left.sentenceIndex - right.sentenceIndex ||
+      left.scopeIndex - right.scopeIndex ||
       left.top - right.top ||
       left.left - right.left,
   );
+}
+
+/**
+ * Backward-compatible sentence-shaped adapter for geometry tests and callers.
+ * Sentence and paragraph overlays both use the generic measured-line merger.
+ *
+ * @param {Array<{
+ *   sentenceIndex: number,
+ *   left: number,
+ *   top: number,
+ *   width: number,
+ *   height: number,
+ *   angle?: number,
+ * }>} rectangles
+ */
+export function mergePdfSentenceLineRects(rectangles) {
+  return mergePdfHighlightLineRects(
+    rectangles.map(({ sentenceIndex, ...rectangle }) => ({
+      ...rectangle,
+      scopeIndex: sentenceIndex,
+    })),
+  ).map(({ scopeIndex, ...rectangle }) => ({
+    sentenceIndex: scopeIndex,
+    ...rectangle,
+  }));
 }
 
 export function isPdfWord(value) {

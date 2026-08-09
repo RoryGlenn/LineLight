@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  createFocusParagraphRenderStore,
   createPdfPageRenderStore,
   estimateParagraphHeight,
   findPageIndexForWord,
@@ -54,6 +55,24 @@ test("adds visible PDF pages without invalidating unrelated shells", () => {
   assert.deepEqual(notifications, [0, 1]);
   assert.deepEqual(store.getRenderedPageIndices(), [0, 1, 9, 10, 11]);
   remove.forEach((unsubscribe) => unsubscribe());
+});
+
+test("notifies only Focus shells whose render state changes at a paragraph boundary", () => {
+  const store = createFocusParagraphRenderStore(240, 100, 1);
+  const notifications = [];
+  const unsubscribe = Array.from({ length: 240 }, (_, paragraphIndex) =>
+    store.subscribe(paragraphIndex, () => notifications.push(paragraphIndex)),
+  );
+
+  assert.deepEqual(store.getRenderedParagraphIndices(), [99, 100, 101]);
+  assert.deepEqual(store.setActiveParagraphIndex(101), [99, 102]);
+  assert.deepEqual(store.getRenderedParagraphIndices(), [100, 101, 102]);
+  assert.deepEqual(notifications, [99, 102]);
+
+  notifications.length = 0;
+  assert.deepEqual(store.setActiveParagraphIndex(101), []);
+  assert.deepEqual(notifications, []);
+  unsubscribe.forEach((removeListener) => removeListener());
 });
 
 test("estimates stable space for virtualized Focus paragraphs", () => {

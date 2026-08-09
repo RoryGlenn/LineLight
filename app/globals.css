@@ -970,6 +970,7 @@ input:focus-visible {
   pointer-events: none;
 }
 
+.pdf-paragraph-overlay,
 .pdf-sentence-overlay,
 .pdf-word-overlay {
   position: absolute;
@@ -984,14 +985,9 @@ input:focus-visible {
   pointer-events: auto;
 }
 
-.pdf-page-view.highlight-both .pdf-sentence-overlay.sentence-active,
-.pdf-page-view.highlight-sentence .pdf-sentence-overlay.sentence-active {
+.pdf-page-view.highlight-sentence .pdf-sentence-overlay.scope-active,
+.pdf-page-view.highlight-paragraph .pdf-paragraph-overlay.scope-active {
   background: rgba(246, 223, 133, 0.34);
-}
-
-.pdf-page-view.highlight-both .pdf-word-overlay.word-active,
-.pdf-page-view.highlight-word .pdf-word-overlay.word-active {
-  background: rgba(242, 201, 76, 0.72);
 }
 
 .pdf-page-loading {
@@ -1125,41 +1121,25 @@ input:focus-visible {
 
 .spoken-word {
   position: relative;
-  border-radius: 3px;
   cursor: pointer;
+}
+
+.focus-paragraph-region,
+.focus-sentence-region {
+  border-radius: 2px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+
+.highlight-sentence .focus-sentence-region.scope-active,
+.highlight-paragraph .focus-paragraph-region.scope-active {
+  background: var(--sentence);
+  box-shadow:
+    0.14em 0 0 var(--sentence),
+    -0.14em 0 0 var(--sentence);
   transition:
     background-color 100ms linear,
     box-shadow 100ms linear;
-}
-
-.highlight-both .sentence-active,
-.highlight-sentence .sentence-active {
-  background: var(--sentence);
-  box-shadow:
-    0.14em 0 0 var(--sentence),
-    -0.14em 0 0 var(--sentence);
-}
-
-.highlight-both .word-active,
-.highlight-word .word-active {
-  z-index: 1;
-  background: var(--word);
-  box-shadow:
-    0.16em 0 0 var(--word),
-    -0.16em 0 0 var(--word);
-  color: #211f1b;
-}
-
-.highlight-word .sentence-active {
-  background: transparent;
-  box-shadow: none;
-}
-
-.highlight-sentence .word-active {
-  background: var(--sentence);
-  box-shadow:
-    0.14em 0 0 var(--sentence),
-    -0.14em 0 0 var(--sentence);
 }
 
 .document-end {
@@ -2147,6 +2127,13 @@ input:focus-visible {
 
 .select-setting.stacked select {
   width: 100%;
+}
+
+.setting-description {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.5;
 }
 
 .narration-source {

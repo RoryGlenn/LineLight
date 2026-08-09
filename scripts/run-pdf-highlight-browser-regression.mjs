@@ -127,7 +127,7 @@ function parseArguments(argv) {
   return options;
 }
 
-function delay(milliseconds) {
+export function delay(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
@@ -150,7 +150,7 @@ async function getFreePort() {
   });
 }
 
-function terminateProcessGroup(child) {
+export function terminateProcessGroup(child) {
   if (!child?.pid || child.exitCode !== null) return;
   try {
     process.kill(-child.pid, "SIGTERM");
@@ -178,7 +178,7 @@ async function waitForHttp(url, processHandle, log, timeoutMs = 60_000) {
   throw new Error(`Timed out waiting for ${url}.\n${log()}`);
 }
 
-async function startDevelopmentServer() {
+export async function startDevelopmentServer() {
   const port = await getFreePort();
   const output = [];
   const child = spawn(
@@ -219,7 +219,7 @@ async function pollJson(url, processHandle, timeoutMs = 30_000) {
   throw new Error(`Timed out waiting for ${url}.`);
 }
 
-async function startBrowser(executable, headed) {
+export async function startBrowser(executable, headed) {
   await access(executable);
   const debuggingPort = await getFreePort();
   const profileDirectory = await mkdtemp(
@@ -269,7 +269,7 @@ async function startBrowser(executable, headed) {
   };
 }
 
-class CdpSession {
+export class CdpSession {
   constructor(webSocket) {
     this.webSocket = webSocket;
     this.nextId = 1;
@@ -325,7 +325,7 @@ class CdpSession {
   }
 }
 
-async function evaluate(cdp, expression) {
+export async function evaluate(cdp, expression) {
   const result = await cdp.send("Runtime.evaluate", {
     expression,
     awaitPromise: true,
@@ -342,7 +342,7 @@ async function evaluate(cdp, expression) {
   return result.result?.value;
 }
 
-async function waitForExpression(
+export async function waitForExpression(
   cdp,
   expression,
   description,
@@ -361,7 +361,7 @@ async function waitForExpression(
   throw new Error(`Timed out waiting for ${description}.`);
 }
 
-async function waitForRenderedWindowStable(cdp, timeoutMs = 10_000) {
+export async function waitForRenderedWindowStable(cdp, timeoutMs = 10_000) {
   const startedAt = Date.now();
   let previous = null;
   let stableSamples = 0;
@@ -386,7 +386,7 @@ async function waitForRenderedWindowStable(cdp, timeoutMs = 10_000) {
   throw new Error("The virtualized PDF render window did not settle.");
 }
 
-async function configurePage(cdp, appUrl) {
+export async function configurePage(cdp, appUrl) {
   const consoleEntries = [];
   cdp.on("Runtime.consoleAPICalled", (event) => {
     consoleEntries.push({
@@ -412,7 +412,7 @@ async function configurePage(cdp, appUrl) {
       localStorage.setItem("guided-reader-settings", JSON.stringify({
         narrationEngine: "device",
         narrationPreferenceVersion: 1,
-        highlightMode: "both",
+        highlightScope: "sentence",
         follow: false
       }));
       globalThis.__lineLightPdfRegression = {
@@ -455,7 +455,7 @@ async function configurePage(cdp, appUrl) {
   return consoleEntries;
 }
 
-async function importFixture(cdp, fixture) {
+export async function importFixture(cdp, fixture) {
   await waitForExpression(
     cdp,
     `(() => {
@@ -500,7 +500,7 @@ function pageReadyExpression(pageNumber, word) {
   })()`;
 }
 
-async function showPage(cdp, pageNumber, word) {
+export async function showPage(cdp, pageNumber, word) {
   await evaluate(
     cdp,
     `document.querySelector('#pdf-page-${pageNumber}')?.scrollIntoView({ block: 'center', behavior: 'auto' }); true`,
@@ -582,7 +582,7 @@ async function collectScenarioEvidence(cdp) {
         .find((element) => element.getAttribute('aria-label') === 'like');
       word.click();
       await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-      const lines = Array.from(page.querySelectorAll('.pdf-sentence-overlay.sentence-active'))
+      const lines = Array.from(page.querySelectorAll('.pdf-sentence-overlay.scope-active'))
         .map((element) => {
           const rect = element.getBoundingClientRect();
           return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, width: rect.width };
@@ -632,7 +632,10 @@ async function collectScenarioEvidence(cdp) {
       return {
         fragmentIndices: indices,
         sameLogicalWord: Boolean(indices[0] && indices[0] === indices[1]),
-        bothFragmentsActive: fragments.every((element) => element?.classList.contains('word-active'))
+        bothFragmentsActive:
+          document.querySelectorAll('[data-active-token="true"]').length === 1 &&
+          fragments.some((element) => element?.dataset.activeToken === 'true') &&
+          page.querySelectorAll('.pdf-sentence-overlay.scope-active').length > 0
       };
     })()`,
   );
@@ -685,7 +688,7 @@ async function collectScenarioEvidence(cdp) {
       await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
       const leftRect = left?.getBoundingClientRect();
       const rightRect = right?.getBoundingClientRect();
-      const rowLines = Array.from(page.querySelectorAll('.pdf-sentence-overlay.sentence-active'))
+      const rowLines = Array.from(page.querySelectorAll('.pdf-sentence-overlay.scope-active'))
         .map((element) => element.getBoundingClientRect())
         .filter((rect) => leftRect && rect.top < leftRect.bottom && rect.bottom > leftRect.top)
         .sort((a, b) => a.left - b.left);
