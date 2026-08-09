@@ -1,10 +1,10 @@
 {
   "schemaVersion": 1,
   "issue": 60,
-  "generatedAt": "2026-08-09T14:32:38.033Z",
+  "generatedAt": "2026-08-09T14:34:30.131Z",
   "source": {
-    "commit": "8418dac7329f49ecc1e0c72c6d53ebdd239e4ff0",
-    "dirty": true,
+    "commit": "4a2d1c9eb8c3a1924a34fbdea692ddf82ffa0362",
+    "dirty": false,
     "files": {
       "app/globals.css": "718cf46ed606c666b4e2da774c58a2d6dfc5146a44a5e6369a522a4a11089c69",
       "app/page.tsx": "f26b0f7b287f694b881f4df79af175de1d6db456e7b9734369ea143f4bef680d",
@@ -14,7 +14,7 @@
       "app/reader-virtualization.mjs": "c6aa6967babe64ba3d980f97088d70de11da825b0d4f47f9a888215768217ae7",
       "scripts/generate-pdf-highlight-fixture.mjs": "f3865bbdfa8d8b0207f7a53ac9393eef0f7397f07a605b0b9574ac9ad052e1ec",
       "scripts/run-offline-natural-timing-regression.mjs": "60243da6e806cae4848749bbf7cf56f3e1ed934356e8a58fbe314c4d1b86bca4",
-      "scripts/run-pdf-highlight-browser-regression.mjs": "8d6817ae49f8fab14d71397778c0547cee7c17a934d948a2e5f60d9826c0a632",
+      "scripts/run-pdf-highlight-browser-regression.mjs": "2e6deabdd16299f6a3b7ee155a19764fe4bf0b219c8538289b9ce22da16f7412",
       "tests/offline-natural-timing-harness.test.mjs": "d0684f7e5dbf74475f4be06eafc50cac3eb320d4f2c6612218939a3182334570",
       "tests/pdf-highlight-browser-harness.test.mjs": "6f9405a28bdc45c3cd42d7a21ceb62aeb04ef921c0c7d83367887dc6c16ce04e",
       "tests/reader-virtualization.test.mjs": "33db35a7f3f0d97aeb170bacefb34954721f46710d41fa3bbc029428442f1ab0",
@@ -71,7 +71,7 @@
     }
   },
   "environment": {
-    "appUrl": "http://127.0.0.1:41125/",
+    "appUrl": "http://127.0.0.1:45055/",
     "headed": true,
     "node": "v25.7.0",
     "browserProduct": "Chrome/151.0.7922.108",
@@ -231,23 +231,23 @@
       "sentenceLines": [
         {
           "left": 391.390625,
-          "top": -60.46875,
+          "top": -81.46875,
           "right": 864.84375,
-          "bottom": -45.453125,
+          "bottom": -66.453125,
           "width": 473.453125
         },
         {
           "left": 391.390625,
-          "top": -39.421875,
+          "top": -60.421875,
           "right": 882.890625,
-          "bottom": -24.40625,
+          "bottom": -45.40625,
           "width": 491.5
         },
         {
           "left": 391.390625,
-          "top": -18.46875,
+          "top": -39.46875,
           "right": 862.828125,
-          "bottom": -3.453125,
+          "bottom": -24.453125,
           "width": 471.4375
         }
       ],
@@ -309,7 +309,7 @@
     },
     "legacyMigration": {
       "downgraded": {
-        "documentId": "pdf-1786285948664",
+        "documentId": "pdf-1786286060726",
         "removedVersion": 1,
         "removedWordIndexArrays": 29
       },
@@ -330,16 +330,16 @@
     "samePage": {
       "transitions": 7,
       "frameLatenciesMs": [
-        21.25,
-        18.310000002384186,
-        19.900000005960464,
-        19.990000009536743,
-        20.615000009536743,
-        19.915000021457672,
-        19.270000010728836
+        21.03499999642372,
+        16.895000010728836,
+        19.5799999833107,
+        19.705000013113022,
+        20,
+        20.405000001192093,
+        21.219999998807907
       ],
-      "maximumTwoFrameLatencyMs": 21.25,
-      "meanTwoFrameLatencyMs": 19.89285715137209,
+      "maximumTwoFrameLatencyMs": 21.219999998807907,
+      "meanTwoFrameLatencyMs": 19.83428571479661,
       "mutations": {
         "classAttributes": 14,
         "childList": 0,
@@ -356,7 +356,7 @@
         2,
         6,
         10,
-        2
+        4
       ],
       "shellRenderCountsAfter": [
         2,
@@ -364,7 +364,7 @@
         2,
         6,
         10,
-        2
+        4
       ],
       "changedShellRenderCounts": [],
       "renderedWindowBefore": [
@@ -398,7 +398,7 @@
             2,
             6,
             10,
-            2
+            4
           ]
         },
         {
@@ -418,7 +418,7 @@
             2,
             7,
             10,
-            2
+            4
           ]
         },
         {
@@ -440,7 +440,7 @@
             2,
             7,
             11,
-            3
+            5
           ]
         },
         {
@@ -462,7 +462,7 @@
             2,
             7,
             11,
-            3
+            5
           ]
         }
       ],
@@ -476,7 +476,7 @@
         2,
         6,
         10,
-        2
+        4
       ],
       "shellRenderCountsAfter": [
         2,
@@ -484,7 +484,7 @@
         2,
         7,
         11,
-        3
+        5
       ],
       "changedShellRenderCounts": [
         {
@@ -501,8 +501,8 @@
         },
         {
           "pageIndex": 5,
-          "before": 2,
-          "after": 3,
+          "before": 4,
+          "after": 5,
           "delta": 1
         }
       ],
