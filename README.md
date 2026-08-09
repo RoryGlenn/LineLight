@@ -78,7 +78,11 @@ The distributed license text is available at
 [`public/offline-voice-license.txt`](public/offline-voice-license.txt). The
 browser keeps one durable model copy in Cache Storage; the first-party model
 route disables the browser's separate HTTP cache while retaining immutable CDN
-caching.
+caching. A separate, much smaller runtime cache retains the exact app, speech
+worker, and WebAssembly hashes required by the current deployment and any open
+older tab. Retired hashes and finite pre-v9 caches are reclaimed during an idle
+client lifecycle event after their last reader closes; Narration settings report
+the runtime bytes still retained.
 
 ## Privacy
 

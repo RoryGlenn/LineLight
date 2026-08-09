@@ -115,7 +115,10 @@ import {
   pushPositionHistory,
   resolveStoredPosition,
 } from "./reader-navigation.mjs";
-import { configureServiceWorker } from "./service-worker-registration.mjs";
+import {
+  configureServiceWorker,
+  getRuntimeAssetStorageDiagnostics,
+} from "./service-worker-registration.mjs";
 
 type DocumentKind = "demo" | "pdf" | "epub" | "txt";
 type HighlightMode = "both" | "word" | "sentence";
@@ -733,6 +736,9 @@ export default function Home() {
   const [offlineUpgradeRequired, setOfflineUpgradeRequired] = useState(false);
   const [offlineRuntimeInfo, setOfflineRuntimeInfo] =
     useState<OfflineRuntimeInfo | null>(null);
+  const [runtimeAssetStorageBytes, setRuntimeAssetStorageBytes] = useState<
+    number | null
+  >(null);
   const [settingsRestored, setSettingsRestored] = useState(false);
   const [bookmarks, setBookmarks] = useState<ReaderBookmark[]>([]);
   const [positionHistory, setPositionHistory] = useState<
@@ -974,6 +980,7 @@ export default function Home() {
   useEffect(() => {
     let restoreTimer: number | undefined;
     let cancelled = false;
+    let disposeServiceWorker = () => {};
     try {
       const savedSettings = localStorage.getItem("guided-reader-settings");
       const savedProgress = localStorage.getItem(
@@ -1041,7 +1048,12 @@ export default function Home() {
     if ("serviceWorker" in navigator) {
       configureServiceWorker(navigator.serviceWorker, {
         development: import.meta.env.DEV,
-      }).catch(() => undefined);
+      })
+        .then((dispose) => {
+          if (cancelled) dispose();
+          else disposeServiceWorker = dispose;
+        })
+        .catch(() => undefined);
     }
 
     getOfflineVoicePackStatus()
@@ -1061,9 +1073,35 @@ export default function Home() {
     return () => {
       cancelled = true;
       if (restoreTimer) window.clearTimeout(restoreTimer);
+      disposeServiceWorker();
       disposeOfflineSpeechWorker();
     };
   }, []);
+
+  useEffect(() => {
+    if (
+      !showSettings ||
+      settings.narrationEngine !== "offline" ||
+      !("serviceWorker" in navigator)
+    ) {
+      return;
+    }
+    let cancelled = false;
+    getRuntimeAssetStorageDiagnostics(navigator.serviceWorker)
+      .then((diagnostics) => {
+        if (!cancelled) {
+          setRuntimeAssetStorageBytes(
+            diagnostics.available ? diagnostics.retainedBytes : null,
+          );
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setRuntimeAssetStorageBytes(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [offlinePackState, settings.narrationEngine, showSettings]);
 
   useEffect(() => {
     if (
@@ -4528,6 +4566,13 @@ export default function Home() {
                                 : "Prepare offline voices now"}
                         </button>
                       </div>
+                    )}
+                    {runtimeAssetStorageBytes !== null && (
+                      <small className="offline-pack-status">
+                        Retained runtime files use{" "}
+                        {(runtimeAssetStorageBytes / 1_000_000).toFixed(1)} MB
+                        of site storage.
+                      </small>
                     )}
                     <p className="online-voice-note offline-voice-note">
                       LineLight includes this voice and stores it locally on

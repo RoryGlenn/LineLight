@@ -8,3 +8,8 @@
 
 /assets/*.wasm
   Content-Type: application/wasm
+
+# The deployment manifest is intentionally unversioned so old pages can detect
+# a page/manifest mismatch and conservatively retain their hashes.
+/runtime-assets.json
+  Cache-Control: no-store

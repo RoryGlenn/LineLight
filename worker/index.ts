@@ -25,6 +25,8 @@ interface ExecutionContext {
   passThroughOnException(): void;
 }
 
+const RUNTIME_ASSET_MANIFEST_PATH = "/runtime-assets.json";
+
 function withRuntimeHeaders(request: Request, response: Response) {
   const url = new URL(request.url);
   const contentType = response.headers.get("content-type") ?? "";
@@ -75,6 +77,32 @@ const worker = {
 
     if (url.pathname.startsWith(OFFLINE_MODEL_ROUTE_BASE)) {
       return handleOfflineModelRequest(request);
+    }
+
+    if (url.pathname === RUNTIME_ASSET_MANIFEST_PATH) {
+      if (!env?.ASSETS) {
+        // Vinext's local production server resolves this signal against the
+        // built client directory. Deployed Workers use the ASSETS binding
+        // below instead.
+        return new Response(null, {
+          headers: {
+            "Cache-Control": "no-store",
+            "x-vinext-static-file": encodeURIComponent(
+              RUNTIME_ASSET_MANIFEST_PATH,
+            ),
+          },
+        });
+      }
+      const response = await env.ASSETS.fetch(request);
+      if (!response.ok) return response;
+      const headers = new Headers(response.headers);
+      headers.set("Cache-Control", "no-store");
+      headers.set("Content-Type", "application/json; charset=utf-8");
+      return new Response(response.body, {
+        headers,
+        status: response.status,
+        statusText: response.statusText,
+      });
     }
 
     if (url.pathname === "/_vinext/image") {
