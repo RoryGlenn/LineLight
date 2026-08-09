@@ -8,6 +8,7 @@
   "scripts": {
     "audit:dependencies": "node scripts/audit-dependencies.mjs",
     "install:ci": "bash scripts/install-ci.sh",
+    "index:check": "node --test tests/codebase-index.test.mjs",
     "dev": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vite",
     "build": "bash scripts/build-verified.sh",
     "start": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext start",
