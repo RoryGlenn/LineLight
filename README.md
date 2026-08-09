@@ -3,9 +3,9 @@
 LineLight is a private-first read-along app for people who find conventional
 reading difficult, including readers with dyslexia.
 
-It reads a document aloud, highlights the current word, and keeps the spoken
-position visible. The current version runs as a progressive web app on iPhone,
-macOS, and Ubuntu.
+It reads a document aloud, keeps the current sentence or paragraph highlighted,
+and keeps the exact spoken position available for navigation and seeking. The
+current version runs as a progressive web app on iPhone, macOS, and Ubuntu.
 
 ## Current status
 
@@ -16,7 +16,8 @@ release.
 ## Features
 
 - Import PDF, EPUB, and plain-text files
-- Highlight the current word and sentence during narration
+- Choose a continuous sentence or paragraph highlight while exact word clicks
+  still seek narration
 - Choose a private device voice, downloaded offline neural voices, or optional
   Azure neural narration
 - Automatically follow the narration or return to the spoken position

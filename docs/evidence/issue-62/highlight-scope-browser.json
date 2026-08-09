@@ -1,0 +1,548 @@
+{
+  "schemaVersion": 1,
+  "issue": 62,
+  "recordedAt": "2026-08-09T15:19:37.434Z",
+  "source": {
+    "branch": "agent/issue-62-highlight-scope",
+    "files": {
+      "app/focus-document-view.tsx": "08f4ace72e51a3412b76eb5a83dbb2e358cba92243124b97a3c88c278ae2760c",
+      "app/globals.css": "1eee42fc05186679b4d825a74889872be0124772cc1e3ba08a7fa74b00173d88",
+      "app/highlight-scope.mjs": "84474122fafee6410a162bc789d94907b095e9efc5d3411011e55f0be55cc73b",
+      "app/page.tsx": "ba0b07755492bbbe5ef71f10e29f47060881b01c92482c537d2b4d5dd05dac14",
+      "app/pdf-page-view.tsx": "b9c5079b632458ed3b1c2a52eef541229c946bb84f768bab364a7720241252dc",
+      "app/pdf-text-model.mjs": "61eb74e26f6d7165002ac1b239d800335f00bdd1107a0059c2447d2ced260f00",
+      "app/reader-virtualization.mjs": "9ba558626c0e0761a6ae9f13831f2bcb862709a17edf4be9729c985efd2c80a5",
+      "scripts/run-highlight-scope-browser-regression.mjs": "53b2f9255b728bf00cb6d4238aa7ef71b922d8731907ca55d7e54cb2fce40cdb",
+      "tests/highlight-scope.test.mjs": "96d4a76c7ec4bd21ffe9cca5994d1afa8fb2e7af484c825782c29656c953a778",
+      "tests/pdf-text-model.test.mjs": "8c8129a8c3210c01f5a5be0e46330015ae2ab1e8cf76077ffed638f992e6b8aa",
+      "tests/reader-virtualization.test.mjs": "6d6ebc0cd7ef365fb2eab55e7a289a321094c302279db8e66c79097d76bd4be5"
+    }
+  },
+  "browser": {
+    "executable": "/usr/bin/brave-browser",
+    "headed": true,
+    "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+    "viewport": {
+      "width": 1440,
+      "height": 1000,
+      "dpr": 1
+    }
+  },
+  "fixtures": {
+    "pdf": {
+      "path": "tests/fixtures/pdf-highlights/issue-60-geometry.pdf",
+      "sha256": "1addfceae4b869eec37dae4755d576ccd0fd7e1ce505dc856da3b96acbf3f06c"
+    },
+    "focus": {
+      "path": "tests/fixtures/highlight-scope/issue-62-focus.txt",
+      "sha256": "266f9ed917395dea6bc6bb5478b048e4167864939e8096dd8f77e3ae4fed2d82"
+    }
+  },
+  "thresholds": {
+    "maximumLongTaskMs": 50
+  },
+  "legacyMigration": {
+    "stored": {
+      "fontSize": 22,
+      "lineHeight": 1.78,
+      "letterSpacing": 0,
+      "wordSpacing": 0,
+      "paragraphSpacing": 1.45,
+      "maxLineWidth": 48,
+      "focusLines": 0,
+      "font": "serif",
+      "theme": "cream",
+      "highlightScope": "sentence",
+      "follow": false,
+      "ruler": false,
+      "rate": 1,
+      "narrationEngine": "device",
+      "narrationPreferenceVersion": 1,
+      "voiceURI": "",
+      "offlineVoice": "af_heart",
+      "azureVoice": "en-US-AvaMultilingualNeural"
+    },
+    "passed": true
+  },
+  "settings": {
+    "label": "Highlight scope",
+    "options": [
+      {
+        "value": "sentence",
+        "label": "Sentence"
+      },
+      {
+        "value": "paragraph",
+        "label": "Paragraph"
+      }
+    ],
+    "description": "Keep one thought visually steady while narration moves through it.",
+    "value": "sentence"
+  },
+  "visuals": {
+    "focus": {
+      "sentence": {
+        "regionCount": 1,
+        "fragmentCount": 5,
+        "fragments": [
+          {
+            "left": 601.5,
+            "top": 364.546875,
+            "right": 1101.34375,
+            "bottom": 389.546875,
+            "width": 499.84375,
+            "height": 25
+          },
+          {
+            "left": 601.5,
+            "top": 403.703125,
+            "right": 1102.5,
+            "bottom": 428.703125,
+            "width": 501,
+            "height": 25
+          },
+          {
+            "left": 601.5,
+            "top": 442.859375,
+            "right": 1113.703125,
+            "bottom": 467.859375,
+            "width": 512.203125,
+            "height": 25
+          },
+          {
+            "left": 601.5,
+            "top": 482.015625,
+            "right": 1050.5625,
+            "bottom": 507.015625,
+            "width": 449.0625,
+            "height": 25
+          },
+          {
+            "left": 601.5,
+            "top": 521.171875,
+            "right": 892.546875,
+            "bottom": 546.171875,
+            "width": 291.046875,
+            "height": 25
+          }
+        ],
+        "activeRegionIndices": [
+          "1"
+        ],
+        "exactToken": "like",
+        "exactTokenCount": 1,
+        "exactTokenVisual": {
+          "backgroundColor": "rgba(0, 0, 0, 0)",
+          "boxShadow": "none",
+          "transparent": true
+        },
+        "overlayAriaHidden": null,
+        "screenshot": "focus-sentence.png",
+        "screenshotSha256": "e6004271a2bc58d62bf74b8a84ba3497bc16b49c0637f8f8c4f49af1de199f83"
+      },
+      "paragraph": {
+        "regionCount": 1,
+        "fragmentCount": 7,
+        "fragments": [
+          {
+            "left": 601.5,
+            "top": 364.546875,
+            "right": 1101.34375,
+            "bottom": 389.546875,
+            "width": 499.84375,
+            "height": 25
+          },
+          {
+            "left": 601.5,
+            "top": 403.703125,
+            "right": 1102.5,
+            "bottom": 428.703125,
+            "width": 501,
+            "height": 25
+          },
+          {
+            "left": 601.5,
+            "top": 442.859375,
+            "right": 1113.703125,
+            "bottom": 467.859375,
+            "width": 512.203125,
+            "height": 25
+          },
+          {
+            "left": 601.5,
+            "top": 482.015625,
+            "right": 1050.5625,
+            "bottom": 507.015625,
+            "width": 449.0625,
+            "height": 25
+          },
+          {
+            "left": 601.5,
+            "top": 521.171875,
+            "right": 1108.875,
+            "bottom": 546.171875,
+            "width": 507.375,
+            "height": 25
+          },
+          {
+            "left": 601.5,
+            "top": 560.328125,
+            "right": 1128.109375,
+            "bottom": 585.328125,
+            "width": 526.609375,
+            "height": 25
+          },
+          {
+            "left": 601.5,
+            "top": 599.484375,
+            "right": 658.328125,
+            "bottom": 624.484375,
+            "width": 56.828125,
+            "height": 25
+          }
+        ],
+        "activeRegionIndices": [
+          "1"
+        ],
+        "exactToken": "like",
+        "exactTokenCount": 1,
+        "exactTokenVisual": {
+          "backgroundColor": "rgba(0, 0, 0, 0)",
+          "boxShadow": "none",
+          "transparent": true
+        },
+        "overlayAriaHidden": null,
+        "screenshot": "focus-paragraph.png",
+        "screenshotSha256": "632b5ebe716e03b8522330e8ca8e4e858ed11b9c331d12c69a29a5de17cabe9a"
+      }
+    },
+    "page": {
+      "sentence": {
+        "regionCount": 3,
+        "fragmentCount": 3,
+        "fragments": [
+          {
+            "left": 482.484375,
+            "top": 368.40625,
+            "right": 1079.734375,
+            "bottom": 386.40625,
+            "width": 597.25,
+            "height": 18
+          },
+          {
+            "left": 482.484375,
+            "top": 394.921875,
+            "right": 1102.484375,
+            "bottom": 412.921875,
+            "width": 620,
+            "height": 18
+          },
+          {
+            "left": 482.484375,
+            "top": 421.3125,
+            "right": 1077.203125,
+            "bottom": 439.3125,
+            "width": 594.71875,
+            "height": 18
+          }
+        ],
+        "activeRegionIndices": [
+          "1",
+          "1",
+          "1"
+        ],
+        "exactToken": "like",
+        "exactTokenCount": 1,
+        "exactTokenVisual": {
+          "backgroundColor": "rgba(0, 0, 0, 0)",
+          "boxShadow": "none",
+          "transparent": true
+        },
+        "overlayAriaHidden": true,
+        "screenshot": "page-sentence.png",
+        "screenshotSha256": "0bda6c8b15ab5a0b4132d264177b1021232e6cb3eefa22d9503fb50751558fc0"
+      },
+      "paragraph": {
+        "regionCount": 4,
+        "fragmentCount": 4,
+        "fragments": [
+          {
+            "left": 482.484375,
+            "top": 368.40625,
+            "right": 1079.734375,
+            "bottom": 386.40625,
+            "width": 597.25,
+            "height": 18
+          },
+          {
+            "left": 482.484375,
+            "top": 394.921875,
+            "right": 1102.484375,
+            "bottom": 412.921875,
+            "width": 620,
+            "height": 18
+          },
+          {
+            "left": 482.484375,
+            "top": 421.3125,
+            "right": 1077.203125,
+            "bottom": 439.3125,
+            "width": 594.71875,
+            "height": 18
+          },
+          {
+            "left": 482.484375,
+            "top": 447.703125,
+            "right": 1150.078125,
+            "bottom": 465.703125,
+            "width": 667.59375,
+            "height": 18
+          }
+        ],
+        "activeRegionIndices": [
+          "1",
+          "1",
+          "1",
+          "1"
+        ],
+        "exactToken": "like",
+        "exactTokenCount": 1,
+        "exactTokenVisual": {
+          "backgroundColor": "rgba(0, 0, 0, 0)",
+          "boxShadow": "none",
+          "transparent": true
+        },
+        "overlayAriaHidden": true,
+        "screenshot": "page-paragraph.png",
+        "screenshotSha256": "45b04c3fa44c03afdee7cc9ae7c25833b0f6387f39fe1ac0e9bd7aa1ef184f6d"
+      }
+    }
+  },
+  "exactTargets": {
+    "focus": {
+      "view": "focus",
+      "count": 1,
+      "label": "definition",
+      "focusTokenIndex": "13",
+      "pdfWordIndex": null,
+      "id": "active-spoken-word",
+      "transparent": true,
+      "clickable": true
+    },
+    "page": {
+      "view": "page",
+      "count": 1,
+      "label": "definition",
+      "focusTokenIndex": null,
+      "pdfWordIndex": "13",
+      "id": "active-spoken-word",
+      "transparent": true,
+      "clickable": true
+    }
+  },
+  "interactions": {
+    "focus": {
+      "rootIdentityPreserved": true,
+      "shellIdentityPreserved": true,
+      "shellCount": 17,
+      "mapRenderCountBefore": 1,
+      "mapRenderCountAfter": 1,
+      "changedShellRenderCounts": [],
+      "mutations": {
+        "childList": 0,
+        "attributes": 8,
+        "attributeNames": [
+          "class",
+          "data-active-token",
+          "id"
+        ]
+      },
+      "longTasks": [],
+      "maximumLongTaskMs": 0
+    },
+    "page": {
+      "rootIdentityPreserved": true,
+      "shellIdentityPreserved": true,
+      "shellCount": 6,
+      "mapRenderCountBefore": 2,
+      "mapRenderCountAfter": 2,
+      "changedShellRenderCounts": [],
+      "mutations": {
+        "childList": 0,
+        "attributes": 18,
+        "attributeNames": [
+          "class",
+          "data-active-token",
+          "id"
+        ]
+      },
+      "longTasks": [],
+      "maximumLongTaskMs": 0
+    }
+  },
+  "navigation": {
+    "before": {
+      "view": "focus",
+      "count": 1,
+      "label": "definition",
+      "focusTokenIndex": "13",
+      "pdfWordIndex": null,
+      "id": "active-spoken-word",
+      "transparent": true,
+      "clickable": true
+    },
+    "playing": {
+      "view": "focus",
+      "count": 1,
+      "label": "of",
+      "focusTokenIndex": "14",
+      "pdfWordIndex": null,
+      "id": "active-spoken-word",
+      "transparent": true,
+      "clickable": true
+    },
+    "pauseStable": true,
+    "pausedBefore": {
+      "view": "focus",
+      "count": 1,
+      "label": "of",
+      "focusTokenIndex": "14",
+      "pdfWordIndex": null,
+      "id": "active-spoken-word",
+      "transparent": true,
+      "clickable": true
+    },
+    "pausedAfter": {
+      "view": "focus",
+      "count": 1,
+      "label": "of",
+      "focusTokenIndex": "14",
+      "pdfWordIndex": null,
+      "id": "active-spoken-word",
+      "transparent": true,
+      "clickable": true
+    },
+    "nextSentence": {
+      "view": "focus",
+      "count": 1,
+      "label": "another",
+      "focusTokenIndex": "50",
+      "pdfWordIndex": null,
+      "id": "active-spoken-word",
+      "transparent": true,
+      "clickable": true
+    },
+    "replayStarted": true,
+    "sought": {
+      "view": "focus",
+      "count": 1,
+      "label": "definition",
+      "focusTokenIndex": "13",
+      "pdfWordIndex": null,
+      "id": "active-spoken-word",
+      "transparent": true,
+      "clickable": true
+    },
+    "passed": true
+  },
+  "persistence": {
+    "appUrl": "http://127.0.0.1:37031/",
+    "beforeReload": {
+      "fontSize": 22,
+      "lineHeight": 1.78,
+      "letterSpacing": 0,
+      "wordSpacing": 0,
+      "paragraphSpacing": 1.45,
+      "maxLineWidth": 48,
+      "focusLines": 0,
+      "font": "serif",
+      "theme": "cream",
+      "highlightScope": "paragraph",
+      "follow": false,
+      "ruler": false,
+      "rate": 1,
+      "narrationEngine": "device",
+      "narrationPreferenceVersion": 1,
+      "voiceURI": "",
+      "offlineVoice": "af_heart",
+      "azureVoice": "en-US-AvaMultilingualNeural"
+    },
+    "afterReload": {
+      "settings": {
+        "fontSize": 22,
+        "lineHeight": 1.78,
+        "letterSpacing": 0,
+        "wordSpacing": 0,
+        "paragraphSpacing": 1.45,
+        "maxLineWidth": 48,
+        "focusLines": 0,
+        "font": "serif",
+        "theme": "cream",
+        "highlightScope": "paragraph",
+        "follow": false,
+        "ruler": false,
+        "rate": 1,
+        "narrationEngine": "device",
+        "narrationPreferenceVersion": 1,
+        "voiceURI": "",
+        "offlineVoice": "af_heart",
+        "azureVoice": "en-US-AvaMultilingualNeural"
+      },
+      "exact": {
+        "view": "page",
+        "count": 1,
+        "label": "definition",
+        "focusTokenIndex": null,
+        "pdfWordIndex": "13",
+        "id": "active-spoken-word",
+        "transparent": true,
+        "clickable": true
+      },
+      "activeParagraphRegions": 4
+    },
+    "textDocument": {
+      "title": "issue-62-focus",
+      "scope": "paragraph",
+      "exact": {
+        "view": "focus",
+        "count": 1,
+        "label": "Sentence",
+        "focusTokenIndex": "0",
+        "pdfWordIndex": null,
+        "id": "active-spoken-word",
+        "transparent": true,
+        "clickable": true
+      }
+    },
+    "switchedBack": {
+      "title": "issue-60-geometry",
+      "scope": "paragraph",
+      "exact": {
+        "view": "page",
+        "count": 1,
+        "label": "definition",
+        "focusTokenIndex": null,
+        "pdfWordIndex": "13",
+        "id": "active-spoken-word",
+        "transparent": true,
+        "clickable": true
+      }
+    },
+    "passed": true
+  },
+  "performance": {
+    "maximumLongTaskMs": 0,
+    "interactionLongTasks": {
+      "focus": [],
+      "page": []
+    }
+  },
+  "browserDiagnostics": {
+    "errors": [],
+    "console": [],
+    "browserStderr": "\nDevTools listening on ws://127.0.0.1:41059/devtools/browser/33f0c168-37fc-42da-bca6-3f4db9f58a2d\nMESA-LOADER: failed to open dri: /usr/lib/x86_64-linux-gnu/gbm/dri_gbm.so: cannot open shared object file: Permission denied (search paths /usr/lib/x86_64-linux-gnu/gbm, suffix _gbm)\n",
+    "serverLogTail": "\n> linelight@0.1.0 dev\n> WRANGLER_LOG_PATH=.wrangler/wrangler.log vite --host 127.0.0.1 --port 37031 --strictPort\n\n\n  VITE v8.2.0  ready in 2742 ms\n\n  ➜  Local:   http://127.0.0.1:37031/\n\nThe Cloudflare Vite plugin detected this dev session is running in an AI agent.\nThe Local Explorer API is available at http://127.0.0.1:37031/cdn-cgi/local/explorer/api\nUseful routes:\n  GET http://127.0.0.1:37031/cdn-cgi/local/explorer/api/local/workers - local Workers and bindings\n  GET http://127.0.0.1:37031/cdn-cgi/local/explorer/api/storage/kv/namespaces - KV namespaces\n  GET http://127.0.0.1:37031/cdn-cgi/local/explorer/api/d1/database - D1 databases\n  GET http://127.0.0.1:37031/cdn-cgi/local/explorer/api/r2/buckets - R2 buckets\n  GET http://127.0.0.1:37031/cdn-cgi/local/explorer/api/workers/durable_objects/namespaces - Durable Object namespaces\n  GET http://127.0.0.1:37031/cdn-cgi/local/explorer/api/workflows - Workflows\n  POST http://127.0.0.1:37031/cdn-cgi/local/explorer/api/local/observability/query - run a read-only SQL query (SELECT/WITH only) over captured request traces and console logs. Tables: spans, logs (read attributes via json(attributes)). Example:\n    curl -X POST http://127.0.0.1:37031/cdn-cgi/local/explorer/api/local/observability/query -H 'Content-Type: application/json' -d '{\"sql\":\"SELECT service, name, outcome, duration_ms FROM spans WHERE parent_id IS NULL LIMIT 20\"}'\nIf the routes above don't cover what you need, fetch the full OpenAPI schema (large - use only as a last resort):\n  GET http://127.0.0.1:37031/cdn-cgi/local/explorer/api - OpenAPI schema\n\n GET / 200 in 1.1s (compile: 1786288767.1s, render: 1.1s)\n GET / 200 in 260ms (compile: 1786288767.1s, render: 223ms)\n GET / 200 in 294ms (compile: 1786288767.1s, render: 260ms)\n"
+  },
+  "failures": [],
+  "passed": true
+}

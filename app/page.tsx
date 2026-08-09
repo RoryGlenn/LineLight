@@ -19,6 +19,12 @@ import {
 import { buildDocumentModel } from "./document-model.mjs";
 import { parseEpubFile } from "./epub-parser.mjs";
 import { FocusDocumentView } from "./focus-document-view";
+import {
+  DEFAULT_HIGHLIGHT_SCOPE,
+  HIGHLIGHT_SCOPE_OPTIONS,
+  deriveActiveHighlightIndex,
+  migrateReaderHighlightSettings,
+} from "./highlight-scope.mjs";
 import { PdfPageView, type PdfPageLayout } from "./pdf-page-view";
 import {
   buildPdfOutline,
@@ -129,7 +135,7 @@ import {
 } from "./service-worker-registration.mjs";
 
 type DocumentKind = "demo" | "pdf" | "epub" | "txt";
-type HighlightMode = "both" | "word" | "sentence";
+type HighlightScope = "sentence" | "paragraph";
 type ReadingTheme = "cream" | "white" | "dark";
 type ReadingFont = "serif" | "sans" | "system";
 type ReaderViewMode = "focus" | "page";
@@ -263,7 +269,7 @@ type ReaderSettings = {
   focusLines: FocusLineCount;
   font: ReadingFont;
   theme: ReadingTheme;
-  highlightMode: HighlightMode;
+  highlightScope: HighlightScope;
   follow: boolean;
   ruler: boolean;
   rate: number;
@@ -303,7 +309,7 @@ const DEFAULT_SETTINGS: ReaderSettings = {
   focusLines: DEFAULT_READER_LAYOUT.focusLines as FocusLineCount,
   font: "serif",
   theme: "cream",
-  highlightMode: "both",
+  highlightScope: DEFAULT_HIGHLIGHT_SCOPE,
   follow: true,
   ruler: false,
   rate: 1,
@@ -765,8 +771,12 @@ export default function Home() {
     [readerDocument.kind, readerDocument.paragraphs],
   );
   const activeToken = model.tokens[activeWord] ?? model.tokens[0];
-  const activeSentence = activeToken?.sentenceIndex ?? 0;
   const activeParagraphIndex = activeToken?.paragraphIndex ?? 0;
+  const activeHighlightIndex = deriveActiveHighlightIndex(
+    model.tokens,
+    activeWord,
+    settings.highlightScope,
+  );
   const documentOutline = useMemo(
     () => readerDocument.outline ?? [],
     [readerDocument.outline],
@@ -777,6 +787,10 @@ export default function Home() {
   );
   const tokenSentences = useMemo(
     () => model.tokens.map((token) => token.sentenceIndex),
+    [model.tokens],
+  );
+  const tokenParagraphs = useMemo(
+    () => model.tokens.map((token) => token.paragraphIndex),
     [model.tokens],
   );
   const visibleLibraryEntries = useMemo(
@@ -865,13 +879,25 @@ export default function Home() {
   }
   const programmaticScrollRef = useRef(false);
   const activeWordRef = useRef(0);
+  const renderedActiveWordRef = useRef(0);
   const bookmarksRef = useRef<ReaderBookmark[]>([]);
   const positionHistoryRef = useRef<StoredReaderPosition[]>([]);
   const navigationSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     activeWordRef.current = activeWord;
-  }, [activeWord]);
+    const previous = wordRefs.current.get(renderedActiveWordRef.current);
+    if (previous) {
+      delete previous.dataset.activeToken;
+      if (previous.id === "active-spoken-word") previous.removeAttribute("id");
+    }
+    const current = wordRefs.current.get(activeWord);
+    if (current) {
+      current.dataset.activeToken = "true";
+      current.id = "active-spoken-word";
+    }
+    renderedActiveWordRef.current = activeWord;
+  }, [activeWord, readerDocument.id, viewMode]);
 
   useEffect(() => {
     const container = readerRef.current;
@@ -995,12 +1021,16 @@ export default function Home() {
         if (cancelled) return;
         try {
           if (savedSettings) {
-            const storedSettings = JSON.parse(
-              savedSettings,
+            const parsedSettings = JSON.parse(savedSettings) as Record<
+              string,
+              unknown
+            >;
+            const storedSettings = migrateReaderHighlightSettings(
+              parsedSettings,
             ) as Partial<ReaderSettings>;
-            const storedLayout = normalizeReaderLayout(storedSettings);
+            const storedLayout = normalizeReaderLayout(parsedSettings);
             const narrationPreference =
-              restoreNarrationPreference(storedSettings);
+              restoreNarrationPreference(parsedSettings);
             setSettings((current) => ({
               ...current,
               ...storedSettings,
@@ -1614,8 +1644,15 @@ export default function Home() {
 
   const registerRenderedWord = useCallback(
     (index: number, element: HTMLSpanElement | null) => {
-      if (element) wordRefs.current.set(index, element);
-      else wordRefs.current.delete(index);
+      if (element) {
+        wordRefs.current.set(index, element);
+        if (index === activeWordRef.current) {
+          element.dataset.activeToken = "true";
+          element.id = "active-spoken-word";
+        }
+      } else {
+        wordRefs.current.delete(index);
+      }
     },
     [],
   );
@@ -3512,9 +3549,10 @@ export default function Home() {
               data={readerDocument.pdfData}
               pages={readerDocument.pdfPages}
               activeWord={activeWord}
-              activeSentence={activeSentence}
+              activeHighlightIndex={activeHighlightIndex}
               tokenSentences={tokenSentences}
-              highlightMode={settings.highlightMode}
+              tokenParagraphs={tokenParagraphs}
+              highlightScope={settings.highlightScope}
               registerWord={registerRenderedWord}
               onSelectWord={selectRenderedWord}
               onRenderError={setNotice}
@@ -3523,12 +3561,11 @@ export default function Home() {
             <FocusDocumentView
               key={readerDocument.id}
               activeParagraphIndex={activeParagraphIndex}
-              activeSentence={activeSentence}
-              activeWord={activeWord}
+              activeHighlightIndex={activeHighlightIndex}
               className={[
                 "reading-page",
                 `font-${settings.font}`,
-                `highlight-${settings.highlightMode}`,
+                `highlight-${settings.highlightScope}`,
                 settings.focusLines > 0 ? "focus-window-active" : "",
               ]
                 .filter(Boolean)
@@ -3537,6 +3574,7 @@ export default function Home() {
               documentKind={readerDocument.kind}
               fontSize={settings.fontSize}
               focusLines={settings.focusLines}
+              highlightScope={settings.highlightScope}
               lineHeight={settings.lineHeight}
               maxLineWidth={settings.maxLineWidth}
               paragraphSpacing={settings.paragraphSpacing}
@@ -4253,21 +4291,34 @@ export default function Home() {
               <fieldset>
                 <legend>Reading focus</legend>
                 <label className="select-setting">
-                  <span>Highlight</span>
+                  <span>Highlight scope</span>
                   <select
-                    value={settings.highlightMode}
+                    value={settings.highlightScope}
+                    aria-describedby="highlight-scope-description"
                     onChange={(event) =>
                       setSettings((current) => ({
                         ...current,
-                        highlightMode: event.target.value as HighlightMode,
+                        highlightScope: event.target.value as HighlightScope,
                       }))
                     }
                   >
-                    <option value="both">Word and sentence</option>
-                    <option value="word">Spoken word only</option>
-                    <option value="sentence">Current sentence only</option>
+                    {HIGHLIGHT_SCOPE_OPTIONS.map((option) => (
+                      <option value={option.value} key={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
                   </select>
                 </label>
+                <p
+                  className="setting-description"
+                  id="highlight-scope-description"
+                >
+                  {
+                    HIGHLIGHT_SCOPE_OPTIONS.find(
+                      (option) => option.value === settings.highlightScope,
+                    )?.description
+                  }
+                </p>
 
                 <div className="focus-line-setting">
                   <div className="focus-line-heading">

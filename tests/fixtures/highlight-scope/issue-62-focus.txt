@@ -1,0 +1,3 @@
+Sentence scope keeps one complete thought steady across a narrow reading column while narration moves through every exact token without drawing a second word box. Another sentence stays in this same paragraph so paragraph scope can preserve the wider context across several wrapped lines.
+
+This second paragraph makes document switching and paragraph-boundary navigation deterministic without changing the sentence behavior of imported text.

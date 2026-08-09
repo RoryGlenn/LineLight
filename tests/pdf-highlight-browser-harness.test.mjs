@@ -35,6 +35,7 @@ test("generates reported, multi-font, ligature, column, and rotated PDF content"
     .map((item) => item.str)
     .join(" ");
   assert.match(page1Text, /Tiarnán de Burca’s definition of senior engineer/u);
+  assert.match(page1Text, /another thought stays in the same paragraph/u);
   assert.match(page1Text, /extraordi-\s+nary/u);
 
   const page2 = await (await pdf.getPage(2)).getTextContent();

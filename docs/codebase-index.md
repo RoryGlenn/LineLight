@@ -56,13 +56,18 @@ navigation controls.
 **Owns:** [`app/page.tsx`](../app/page.tsx) is the application coordinator and
 owns settings restoration, active-word state, import flow, narration session
 lifecycle, follow behavior, and most user actions.
+[`app/highlight-scope.mjs`](../app/highlight-scope.mjs) owns the canonical
+sentence/paragraph setting, deterministic legacy migration, and visual-region
+derivation while exact-token state remains internal for seeking and navigation.
 [`app/document-model.mjs`](../app/document-model.mjs) owns the shared Focus and
 narration token/segment model, including the explicit PDF-only structural
 paragraph boundary option. [`app/layout.tsx`](../app/layout.tsx) owns root metadata and global style
 loading. [`app/globals.css`](../app/globals.css) owns the visual system and reader
 geometry. [`app/focus-document-view.tsx`](../app/focus-document-view.tsx) renders
-reflowed text, while [`app/document-outline.tsx`](../app/document-outline.tsx)
-renders the PDF contents tree.
+reflowed continuous sentence/paragraph regions through stable virtualized shells
+and localized imperative scope updates, while
+[`app/document-outline.tsx`](../app/document-outline.tsx) renders the PDF
+contents tree.
 
 **Entry points:** The default application route is
 [`app/page.tsx`](../app/page.tsx), mounted by
@@ -85,7 +90,9 @@ short passage.
 [`tests/rendered-html.test.mjs`](../tests/rendered-html.test.mjs) for packaged
 markup and artifact-level assertions. Domain-specific behavior is covered by
 the reader, parser, narration, and service-worker tests linked below. Visual,
-focus, keyboard, and browser media changes still need a real-browser check.
+focus, keyboard, and browser media changes still need a real-browser check. The
+scope contract and migration are covered by
+[`tests/highlight-scope.test.mjs`](../tests/highlight-scope.test.mjs).
 
 ## Document ingestion and page rendering
 
@@ -102,15 +109,16 @@ preserving navigation and highlighting indices.
 spine, metadata, and chapter extraction.
 [`app/pdf-text-model.mjs`](../app/pdf-text-model.mjs) owns reversible displayed
 glyph-to-narration-token mapping, line-end dehyphenation, continuous
-sentence-line geometry, and the persisted PDF text-model version/migration
-contract. Legacy PDF records are rebuilt locally from their stored bytes; no
-network source or manual re-import is used.
+sentence/paragraph line geometry derived from one measured segment pass, and
+the persisted PDF text-model version/migration contract. Legacy PDF records are
+rebuilt locally from their stored bytes; no network source or manual re-import
+is used.
 [`app/pdf-page-view.tsx`](../app/pdf-page-view.tsx) owns virtualized canvas pages
 and the measured PDF.js text/highlight layers. [`app/pdf-outline.mjs`](../app/pdf-outline.mjs)
 maps PDF destinations to document token indices.
 [`app/reader-virtualization.mjs`](../app/reader-virtualization.mjs) selects the
-bounded page and paragraph render windows and notifies only page shells whose
-rendered state changes.
+bounded page and paragraph render windows and notifies only the PDF or Focus
+shells whose rendered state changes.
 
 **Entry points:** File selection enters the import functions in
 [`app/page.tsx`](../app/page.tsx); EPUB files delegate to
@@ -148,6 +156,13 @@ drives Brave through CDP to check measured overlays across zoom/DPR, visual
 scenarios, localized shell updates, DOM mutations, and Long Tasks; its fast
 contract and opt-in real-browser gate live in
 [`tests/pdf-highlight-browser-harness.test.mjs`](../tests/pdf-highlight-browser-harness.test.mjs).
+[`scripts/run-highlight-scope-browser-regression.mjs`](../scripts/run-highlight-scope-browser-regression.mjs)
+records headed-Brave Sentence and Paragraph visuals in Focus and Page views,
+exact-token click behavior, settings migration/persistence, document switching,
+narration navigation, stable shell identity, DOM mutations, and Long Tasks. Its
+fast contract and opt-in real-browser gate live in
+[`tests/highlight-scope-browser-harness.test.mjs`](../tests/highlight-scope-browser-harness.test.mjs),
+with review records in [`docs/evidence/issue-62/`](evidence/issue-62/).
 [`scripts/run-offline-natural-timing-regression.mjs`](../scripts/run-offline-natural-timing-regression.mjs)
 attaches to a disposable headed-Brave profile with the stored local voice pack
 and verifies consecutive PDF highlight updates at 0.75x, 1x, and 1.25x against

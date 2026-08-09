@@ -210,7 +210,7 @@ const INSTRUMENTATION_SOURCE = `
     localStorage.setItem("guided-reader-settings", JSON.stringify({
       narrationEngine: "offline",
       narrationPreferenceVersion: 1,
-      highlightMode: "both",
+      highlightScope: "sentence",
       follow: false,
       rate: 1,
       offlineVoice: "af_heart"
@@ -572,8 +572,8 @@ async function runRate(cdp, rate, timeoutMs) {
       const observer = new MutationObserver((records) => {
         for (const record of records) {
           const element = record.target;
-          const wasActive = (record.oldValue || "").split(/\\s+/).includes("word-active");
-          if (!wasActive && element.classList.contains("word-active")) {
+          const wasActive = record.oldValue === "true";
+          if (!wasActive && element.dataset.activeToken === "true") {
             round.transitions.push({
               at: performance.now(),
               frame: state.frame,
@@ -586,7 +586,7 @@ async function runRate(cdp, rate, timeoutMs) {
       observer.observe(document.querySelector(".pdf-pages"), {
         subtree: true,
         attributes: true,
-        attributeFilter: ["class"],
+        attributeFilter: ["data-active-token"],
         attributeOldValue: true
       });
       round.observer = observer;

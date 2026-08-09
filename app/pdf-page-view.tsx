@@ -18,7 +18,7 @@ import type {
   RenderTask,
 } from "pdfjs-dist";
 import { derivePdfPageWordStarts } from "./pdf-outline.mjs";
-import { mergePdfSentenceLineRects } from "./pdf-text-model.mjs";
+import { mergePdfHighlightLineRects } from "./pdf-text-model.mjs";
 import {
   createPdfPageRenderStore,
   findPageIndexForWord,
@@ -45,16 +45,17 @@ export type PdfPageLayout = {
   items: PdfTextItemLayout[];
 };
 
-type HighlightMode = "both" | "word" | "sentence";
-type HighlightKind = "sentence" | "word";
+type HighlightScope = "sentence" | "paragraph";
+type HighlightKind = HighlightScope;
 
 type PdfPageViewProps = {
   data: Uint8Array;
   pages: PdfPageLayout[];
   activeWord: number;
-  activeSentence: number;
+  activeHighlightIndex: number;
   tokenSentences: number[];
-  highlightMode: HighlightMode;
+  tokenParagraphs: number[];
+  highlightScope: HighlightScope;
   registerWord: (index: number, element: HTMLSpanElement | null) => void;
   onSelectWord: (index: number) => void;
   onRenderError: (message: string) => void;
@@ -84,9 +85,19 @@ type MeasuredSentenceRect = {
   height: number;
 };
 
+type MeasuredParagraphRect = {
+  key: string;
+  paragraphIndex: number;
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+};
+
 type PdfTextGeometry = {
   words: MeasuredWordRect[];
   sentences: MeasuredSentenceRect[];
+  paragraphs: MeasuredParagraphRect[];
 };
 
 type HighlightRegistration = (
@@ -118,10 +129,11 @@ function measureTextGeometry(
   textDivs: HTMLElement[],
   page: PdfPageLayout,
   tokenSentences: number[],
+  tokenParagraphs: number[],
 ): PdfTextGeometry {
   const containerRect = container.getBoundingClientRect();
   if (containerRect.width <= 0 || containerRect.height <= 0) {
-    return { words: [], sentences: [] };
+    return { words: [], sentences: [], paragraphs: [] };
   }
 
   const indexedItems = new Map(
@@ -137,10 +149,12 @@ function measureTextGeometry(
       width: number;
       height: number;
       sentenceIndex: number;
+      paragraphIndex: number;
     }
   > = [];
   const pixelSentenceSegments: Array<{
     sentenceIndex: number;
+    paragraphIndex: number;
     left: number;
     top: number;
     width: number;
@@ -175,6 +189,7 @@ function measureTextGeometry(
       const start = match.index ?? 0;
       const end = start + match[0].length;
       const sentenceIndex = tokenSentences[wordIndex] ?? -1;
+      const paragraphIndex = tokenParagraphs[wordIndex] ?? -1;
       const range = document.createRange();
       range.setStart(textDiv.firstChild!, start);
       range.setEnd(textDiv.firstChild!, end);
@@ -200,6 +215,7 @@ function measureTextGeometry(
           sourceEnd: end,
           primary,
           sentenceIndex,
+          paragraphIndex,
         });
       });
 
@@ -229,6 +245,7 @@ function measureTextGeometry(
         if (rectangle.width <= 0 || rectangle.height <= 0) continue;
         pixelSentenceSegments.push({
           sentenceIndex,
+          paragraphIndex,
           left: rectangle.left - containerRect.left,
           top: rectangle.top - containerRect.top,
           width: rectangle.width,
@@ -254,23 +271,43 @@ function measureTextGeometry(
     sourceEnd: word.sourceEnd,
     primary: word.primary,
   }));
-  const sentenceLines = mergePdfSentenceLineRects(pixelSentenceSegments);
+  const sentenceLines = mergePdfHighlightLineRects(
+    pixelSentenceSegments.map(({ sentenceIndex, ...rectangle }) => ({
+      ...rectangle,
+      scopeIndex: sentenceIndex,
+    })),
+  );
   const sentences = sentenceLines.map((line, index) => ({
-    key: `${line.sentenceIndex}:${index}:${line.left.toFixed(2)}:${line.top.toFixed(2)}`,
-    sentenceIndex: line.sentenceIndex,
+    key: `${line.scopeIndex}:${index}:${line.left.toFixed(2)}:${line.top.toFixed(2)}`,
+    sentenceIndex: line.scopeIndex,
+    left: (line.left / containerRect.width) * 100,
+    top: (line.top / containerRect.height) * 100,
+    width: (line.width / containerRect.width) * 100,
+    height: (line.height / containerRect.height) * 100,
+  }));
+  const paragraphLines = mergePdfHighlightLineRects(
+    pixelSentenceSegments.map(({ paragraphIndex, ...rectangle }) => ({
+      ...rectangle,
+      scopeIndex: paragraphIndex,
+    })),
+  );
+  const paragraphs = paragraphLines.map((line, index) => ({
+    key: `${line.scopeIndex}:${index}:${line.left.toFixed(2)}:${line.top.toFixed(2)}`,
+    paragraphIndex: line.scopeIndex,
     left: (line.left / containerRect.width) * 100,
     top: (line.top / containerRect.height) * 100,
     width: (line.width / containerRect.width) * 100,
     height: (line.height / containerRect.height) * 100,
   }));
 
-  return { words, sentences };
+  return { words, sentences, paragraphs };
 }
 
 function PdfMeasuredTextLayer({
   documentProxy,
   page,
   tokenSentences,
+  tokenParagraphs,
   registerHighlight,
   registerWord,
   onSelectWord,
@@ -279,6 +316,7 @@ function PdfMeasuredTextLayer({
   documentProxy: PDFDocumentProxy | null;
   page: PdfPageLayout;
   tokenSentences: number[];
+  tokenParagraphs: number[];
   registerHighlight: HighlightRegistration;
   registerWord: PdfPageViewProps["registerWord"];
   onSelectWord: PdfPageViewProps["onSelectWord"];
@@ -288,6 +326,7 @@ function PdfMeasuredTextLayer({
   const [geometry, setGeometry] = useState<PdfTextGeometry>({
     words: [],
     sentences: [],
+    paragraphs: [],
   });
 
   useEffect(() => {
@@ -344,6 +383,7 @@ function PdfMeasuredTextLayer({
                     textLayer.textDivs,
                     page,
                     tokenSentences,
+                    tokenParagraphs,
                   ),
                 );
               }
@@ -377,12 +417,29 @@ function PdfMeasuredTextLayer({
       textLayer?.cancel();
       pageProxy?.cleanup();
     };
-  }, [documentProxy, onRenderError, page, tokenSentences]);
+  }, [documentProxy, onRenderError, page, tokenParagraphs, tokenSentences]);
 
   return (
     <div className="pdf-text-layer">
       <div className="pdf-text-content" ref={textLayerRef} aria-hidden="true" />
       <div className="pdf-highlight-layer">
+        {geometry.paragraphs.map((rectangle) => (
+          <span
+            className="pdf-paragraph-overlay"
+            data-pdf-paragraph={rectangle.paragraphIndex}
+            key={rectangle.key}
+            ref={(element) =>
+              registerHighlight(
+                "paragraph",
+                rectangle.paragraphIndex,
+                rectangle.key,
+                element,
+              )
+            }
+            style={relativeStyle(rectangle)}
+            aria-hidden="true"
+          />
+        ))}
         {geometry.sentences.map((rectangle) => (
           <span
             className="pdf-sentence-overlay"
@@ -409,12 +466,6 @@ function PdfMeasuredTextLayer({
             data-pdf-text-end={rectangle.sourceEnd}
             key={rectangle.key}
             ref={(element) => {
-              registerHighlight(
-                "word",
-                rectangle.wordIndex,
-                rectangle.key,
-                element,
-              );
               if (rectangle.primary) {
                 registerWord(rectangle.wordIndex, element);
               }
@@ -422,6 +473,7 @@ function PdfMeasuredTextLayer({
             style={relativeStyle(rectangle)}
             onClick={() => onSelectWord(rectangle.wordIndex)}
             aria-label={rectangle.text}
+            aria-hidden="true"
           />
         ))}
       </div>
@@ -433,6 +485,7 @@ const PdfRenderedPage = memo(function PdfRenderedPage({
   documentProxy,
   page,
   tokenSentences,
+  tokenParagraphs,
   registerHighlight,
   registerWord,
   onSelectWord,
@@ -441,6 +494,7 @@ const PdfRenderedPage = memo(function PdfRenderedPage({
   documentProxy: PDFDocumentProxy | null;
   page: PdfPageLayout;
   tokenSentences: number[];
+  tokenParagraphs: number[];
   registerHighlight: HighlightRegistration;
   registerWord: PdfPageViewProps["registerWord"];
   onSelectWord: PdfPageViewProps["onSelectWord"];
@@ -509,6 +563,7 @@ const PdfRenderedPage = memo(function PdfRenderedPage({
         documentProxy={documentProxy}
         page={page}
         tokenSentences={tokenSentences}
+        tokenParagraphs={tokenParagraphs}
         registerHighlight={registerHighlight}
         registerWord={registerWord}
         onSelectWord={onSelectWord}
@@ -532,6 +587,7 @@ const PdfPageShell = memo(function PdfPageShell({
   pageIndex,
   renderStore,
   tokenSentences,
+  tokenParagraphs,
   registerHighlight,
   registerPageShell,
   registerWord,
@@ -543,6 +599,7 @@ const PdfPageShell = memo(function PdfPageShell({
   pageIndex: number;
   renderStore: PdfPageRenderStore;
   tokenSentences: number[];
+  tokenParagraphs: number[];
   registerHighlight: HighlightRegistration;
   registerPageShell: (pageIndex: number, element: HTMLElement | null) => void;
   registerWord: PdfPageViewProps["registerWord"];
@@ -595,6 +652,7 @@ const PdfPageShell = memo(function PdfPageShell({
             documentProxy={documentProxy}
             page={page}
             tokenSentences={tokenSentences}
+            tokenParagraphs={tokenParagraphs}
             registerHighlight={registerHighlight}
             registerWord={registerWord}
             onSelectWord={onSelectWord}
@@ -616,6 +674,7 @@ const PdfPageShells = memo(function PdfPageShells({
   pages,
   renderStore,
   tokenSentences,
+  tokenParagraphs,
   registerHighlight,
   registerWord,
   onSelectWord,
@@ -625,6 +684,7 @@ const PdfPageShells = memo(function PdfPageShells({
   pages: PdfPageLayout[];
   renderStore: PdfPageRenderStore;
   tokenSentences: number[];
+  tokenParagraphs: number[];
   registerHighlight: HighlightRegistration;
   registerWord: PdfPageViewProps["registerWord"];
   onSelectWord: PdfPageViewProps["onSelectWord"];
@@ -706,6 +766,7 @@ const PdfPageShells = memo(function PdfPageShells({
           pageIndex={pageIndex}
           renderStore={renderStore}
           tokenSentences={tokenSentences}
+          tokenParagraphs={tokenParagraphs}
           registerHighlight={registerHighlight}
           registerPageShell={registerPageShell}
           registerWord={registerWord}
@@ -721,11 +782,10 @@ const PdfPageShells = memo(function PdfPageShells({
 function toggleRegisteredElements(
   elements: Map<number, Map<string, HTMLSpanElement>>,
   index: number,
-  className: string,
   active: boolean,
 ) {
   for (const element of elements.get(index)?.values() ?? []) {
-    element.classList.toggle(className, active);
+    element.classList.toggle("scope-active", active);
   }
 }
 
@@ -733,23 +793,23 @@ export function PdfPageView({
   data,
   pages,
   activeWord,
-  activeSentence,
+  activeHighlightIndex,
   tokenSentences,
-  highlightMode,
+  tokenParagraphs,
+  highlightScope,
   registerWord,
   onSelectWord,
   onRenderError,
 }: PdfPageViewProps) {
-  const wordElements = useRef<Map<number, Map<string, HTMLSpanElement>>>(
-    new Map(),
-  );
-  const sentenceElements = useRef<
-    Map<number, Map<string, HTMLSpanElement>>
-  >(new Map());
-  const activeWordRef = useRef(activeWord);
-  const activeSentenceRef = useRef(activeSentence);
-  const previousWordRef = useRef(activeWord);
-  const previousSentenceRef = useRef(activeSentence);
+  const highlightElements = useRef<
+    Record<HighlightKind, Map<number, Map<string, HTMLSpanElement>>>
+  >({ sentence: new Map(), paragraph: new Map() });
+  const activeHighlightIndexRef = useRef(activeHighlightIndex);
+  const highlightScopeRef = useRef(highlightScope);
+  const previousHighlightRef = useRef({
+    index: activeHighlightIndex,
+    scope: highlightScope,
+  });
 
   const pageWordStarts = useMemo(
     () => derivePdfPageWordStarts(pages),
@@ -767,7 +827,7 @@ export function PdfPageView({
 
   const registerHighlight = useCallback<HighlightRegistration>(
     (kind, index, key, element) => {
-      const registry = kind === "word" ? wordElements.current : sentenceElements.current;
+      const registry = highlightElements.current[kind];
       let entries = registry.get(index);
       if (element) {
         if (!entries) {
@@ -775,11 +835,11 @@ export function PdfPageView({
           registry.set(index, entries);
         }
         entries.set(key, element);
-        const isActive =
-          kind === "word"
-            ? index === activeWordRef.current
-            : index === activeSentenceRef.current;
-        element.classList.toggle(`${kind}-active`, isActive);
+        element.classList.toggle(
+          "scope-active",
+          kind === highlightScopeRef.current &&
+            index === activeHighlightIndexRef.current,
+        );
       } else if (entries) {
         entries.delete(key);
         if (!entries.size) registry.delete(index);
@@ -789,44 +849,33 @@ export function PdfPageView({
   );
 
   useLayoutEffect(() => {
-    activeWordRef.current = activeWord;
-    activeSentenceRef.current = activeSentence;
-    if (previousWordRef.current !== activeWord) {
+    activeHighlightIndexRef.current = activeHighlightIndex;
+    highlightScopeRef.current = highlightScope;
+    const previous = previousHighlightRef.current;
+    if (
+      previous.scope !== highlightScope ||
+      previous.index !== activeHighlightIndex
+    ) {
       toggleRegisteredElements(
-        wordElements.current,
-        previousWordRef.current,
-        "word-active",
+        highlightElements.current[previous.scope],
+        previous.index,
         false,
       );
     }
     toggleRegisteredElements(
-      wordElements.current,
-      activeWord,
-      "word-active",
+      highlightElements.current[highlightScope],
+      activeHighlightIndex,
       true,
     );
-    previousWordRef.current = activeWord;
-
-    if (previousSentenceRef.current !== activeSentence) {
-      toggleRegisteredElements(
-        sentenceElements.current,
-        previousSentenceRef.current,
-        "sentence-active",
-        false,
-      );
-    }
-    toggleRegisteredElements(
-      sentenceElements.current,
-      activeSentence,
-      "sentence-active",
-      true,
-    );
-    previousSentenceRef.current = activeSentence;
-  }, [activeSentence, activeWord]);
+    previousHighlightRef.current = {
+      index: activeHighlightIndex,
+      scope: highlightScope,
+    };
+  }, [activeHighlightIndex, highlightScope]);
 
   return (
     <article
-      className={`pdf-page-view highlight-${highlightMode}`}
+      className={`pdf-page-view highlight-${highlightScope}`}
       aria-label="Original PDF pages"
     >
       <header className="pdf-view-intro">
@@ -840,6 +889,7 @@ export function PdfPageView({
         pages={pages}
         renderStore={pageRenderStore}
         tokenSentences={tokenSentences}
+        tokenParagraphs={tokenParagraphs}
         registerHighlight={registerHighlight}
         registerWord={registerWord}
         onSelectWord={onSelectWord}
