@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  createPdfPageRenderStore,
   estimateParagraphHeight,
   findPageIndexForWord,
   selectVirtualizedIndices,
@@ -22,6 +23,37 @@ test("resolves global words to their containing PDF page", () => {
   assert.equal(findPageIndexForWord(starts, 509), 1);
   assert.equal(findPageIndexForWord(starts, 510), 3);
   assert.equal(findPageIndexForWord(starts, 9_000), 4);
+});
+
+test("notifies only PDF shells whose render state changes at a page boundary", () => {
+  const store = createPdfPageRenderStore(359, 10, 2);
+  const notifications = [];
+  const unsubscribe = Array.from({ length: 359 }, (_, pageIndex) =>
+    store.subscribe(pageIndex, () => notifications.push(pageIndex)),
+  );
+
+  assert.deepEqual(store.getRenderedPageIndices(), [8, 9, 10, 11, 12]);
+  assert.deepEqual(store.setActivePageIndex(11), [8, 13]);
+  assert.deepEqual(store.getRenderedPageIndices(), [9, 10, 11, 12, 13]);
+  assert.deepEqual(notifications, [8, 13]);
+
+  notifications.length = 0;
+  assert.deepEqual(store.setActivePageIndex(11), []);
+  assert.deepEqual(notifications, []);
+  unsubscribe.forEach((removeListener) => removeListener());
+});
+
+test("adds visible PDF pages without invalidating unrelated shells", () => {
+  const store = createPdfPageRenderStore(20, 10, 1);
+  const notifications = [];
+  const remove = [0, 1].map((pageIndex) =>
+    store.subscribe(pageIndex, () => notifications.push(pageIndex)),
+  );
+
+  assert.deepEqual(store.setPageVisible(0, true), [0, 1]);
+  assert.deepEqual(notifications, [0, 1]);
+  assert.deepEqual(store.getRenderedPageIndices(), [0, 1, 9, 10, 11]);
+  remove.forEach((unsubscribe) => unsubscribe());
 });
 
 test("estimates stable space for virtualized Focus paragraphs", () => {

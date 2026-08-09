@@ -44,6 +44,105 @@ export function selectVirtualizedIndices(
 }
 
 /**
+ * Keep the 359 lightweight PDF page shells structurally stable while allowing
+ * only pages entering or leaving the render window to update. Subscribers are
+ * keyed by page, so an active-page boundary does not notify every shell.
+ *
+ * @param {number} pageCount
+ * @param {number} initialActivePageIndex
+ * @param {number} [overscan]
+ */
+export function createPdfPageRenderStore(
+  pageCount,
+  initialActivePageIndex,
+  overscan = PDF_PAGE_OVERSCAN,
+) {
+  const count = Math.max(0, Math.trunc(pageCount));
+  let activePageIndex = Math.min(
+    Math.max(0, Math.trunc(initialActivePageIndex) || 0),
+    Math.max(0, count - 1),
+  );
+  const visiblePageIndices = new Set();
+  let renderedPageIndices = new Set(
+    selectVirtualizedIndices(
+      visiblePageIndices,
+      count,
+      activePageIndex,
+      overscan,
+    ),
+  );
+  /** @type {Map<number, Set<() => void>>} */
+  const listeners = new Map();
+
+  const recompute = () => {
+    const next = new Set(
+      selectVirtualizedIndices(
+        visiblePageIndices,
+        count,
+        activePageIndex,
+        overscan,
+      ),
+    );
+    const changed = new Set();
+    for (const index of renderedPageIndices) {
+      if (!next.has(index)) changed.add(index);
+    }
+    for (const index of next) {
+      if (!renderedPageIndices.has(index)) changed.add(index);
+    }
+    renderedPageIndices = next;
+    for (const index of changed) {
+      for (const listener of listeners.get(index) ?? []) listener();
+    }
+    return Array.from(changed).sort((left, right) => left - right);
+  };
+
+  return {
+    getActivePageIndex() {
+      return activePageIndex;
+    },
+    getRenderedPageIndices() {
+      return Array.from(renderedPageIndices).sort(
+        (left, right) => left - right,
+      );
+    },
+    isPageRendered(pageIndex) {
+      return renderedPageIndices.has(pageIndex);
+    },
+    setActivePageIndex(pageIndex) {
+      const next = Math.min(
+        Math.max(0, Math.trunc(pageIndex) || 0),
+        Math.max(0, count - 1),
+      );
+      if (next === activePageIndex) return [];
+      activePageIndex = next;
+      return recompute();
+    },
+    setPageVisible(pageIndex, visible) {
+      if (!Number.isInteger(pageIndex) || pageIndex < 0 || pageIndex >= count) {
+        return [];
+      }
+      const changed = visible
+        ? !visiblePageIndices.has(pageIndex)
+        : visiblePageIndices.has(pageIndex);
+      if (!changed) return [];
+      if (visible) visiblePageIndices.add(pageIndex);
+      else visiblePageIndices.delete(pageIndex);
+      return recompute();
+    },
+    subscribe(pageIndex, listener) {
+      const pageListeners = listeners.get(pageIndex) ?? new Set();
+      pageListeners.add(listener);
+      listeners.set(pageIndex, pageListeners);
+      return () => {
+        pageListeners.delete(listener);
+        if (!pageListeners.size) listeners.delete(pageIndex);
+      };
+    },
+  };
+}
+
+/**
  * Resolve a global word index to the page whose start is the last one not
  * greater than that word. Empty PDF pages inherit the previous word start.
  *

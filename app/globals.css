@@ -936,54 +936,62 @@ input:focus-visible {
   line-height: 1;
 }
 
-.pdf-text-item {
+.pdf-text-content {
+  --total-scale-factor: 1;
+  --scale-round-x: 1px;
+  --scale-round-y: 1px;
+  position: absolute;
+  inset: 0;
+  overflow: clip;
+  text-align: initial;
+  line-height: 1;
+  text-size-adjust: none;
+  transform-origin: 0 0;
+  pointer-events: none;
+}
+
+.pdf-text-content :is(span, br) {
+  position: absolute;
+  color: transparent;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0 0;
+}
+
+.pdf-text-content span.markedContent {
+  top: 0;
+  height: 0;
+}
+
+.pdf-highlight-layer {
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  pointer-events: none;
+}
+
+.pdf-sentence-overlay,
+.pdf-word-overlay {
   position: absolute;
   display: block;
-  color: transparent;
-  font-family: Arial, Helvetica, sans-serif;
-  font-size: calc(var(--pdf-font-size) * 1cqw);
-  line-height: 1;
-  pointer-events: none;
-  transform: rotate(var(--pdf-text-angle));
-  transform-origin: 0 0;
-  white-space: pre;
-}
-
-.pdf-item-text {
-  display: inline-block;
-  pointer-events: auto;
-  transform: scaleX(var(--pdf-text-scale));
-  transform-origin: 0 0;
-}
-
-.pdf-spoken-word {
-  position: relative;
-  border-radius: 0.08em;
-  color: transparent;
-  cursor: pointer;
-  transition: background-color 90ms linear;
-}
-
-.pdf-page-view.highlight-both .pdf-spoken-word.sentence-active,
-.pdf-page-view.highlight-sentence .pdf-spoken-word.sentence-active {
-  background: rgba(246, 223, 133, 0.34);
-  box-shadow:
-    0.06em 0 0 rgba(246, 223, 133, 0.34),
-    -0.06em 0 0 rgba(246, 223, 133, 0.34);
-}
-
-.pdf-page-view.highlight-both .pdf-spoken-word.word-active,
-.pdf-page-view.highlight-word .pdf-spoken-word.word-active {
-  z-index: 2;
-  background: rgba(242, 201, 76, 0.72);
-  box-shadow:
-    0.1em 0 0 rgba(242, 201, 76, 0.72),
-    -0.1em 0 0 rgba(242, 201, 76, 0.72);
-}
-
-.pdf-page-view.highlight-word .pdf-spoken-word.sentence-active {
+  border-radius: 1px;
   background: transparent;
-  box-shadow: none;
+}
+
+.pdf-word-overlay {
+  z-index: 2;
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.pdf-page-view.highlight-both .pdf-sentence-overlay.sentence-active,
+.pdf-page-view.highlight-sentence .pdf-sentence-overlay.sentence-active {
+  background: rgba(246, 223, 133, 0.34);
+}
+
+.pdf-page-view.highlight-both .pdf-word-overlay.word-active,
+.pdf-page-view.highlight-word .pdf-word-overlay.word-active {
+  background: rgba(242, 201, 76, 0.72);
 }
 
 .pdf-page-loading {

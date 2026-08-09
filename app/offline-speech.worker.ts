@@ -47,11 +47,15 @@ import {
   retainOfflineRuntimeAssets,
 } from "./offline-model-cache.mjs";
 import {
+  buildWordPhonemeBatch,
   buildPhonemeWeightedBoundaries,
+  countBatchedWordPhonemes,
+  extractTimedWords,
   generateUsableOfflineAudio,
   isOfflineBackendRuntimeFailure,
   measureOfflineAudioLeadIn,
 } from "./offline-speech-utils.mjs";
+import { phonemize } from "./phonemizer-runtime";
 
 type RequestMessage =
   | {
@@ -1015,10 +1019,27 @@ async function generateSpeech(
   warmedOfflineVoices.add(voice);
   const durationSeconds = audio.audio.length / audio.sampling_rate;
   const audioData = audio.toWav();
+  const timedWords = extractTimedWords(text);
+  let phonemeCounts: number[] = [];
+  if (timedWords.length) {
+    try {
+      const phonemeEntries = await phonemize(
+        buildWordPhonemeBatch(timedWords),
+        voice.startsWith("b") ? "en-gb" : "en-us",
+      );
+      phonemeCounts = countBatchedWordPhonemes(
+        timedWords,
+        phonemeEntries,
+      );
+    } catch {
+      // Boundary construction retains its source-length fallback if the
+      // auxiliary pronunciation pass is unavailable. Audio remains usable.
+    }
+  }
   const boundaries = buildPhonemeWeightedBoundaries(
     text,
     durationSeconds,
-    [],
+    phonemeCounts,
     {
       leadingSilenceSeconds: measureOfflineAudioLeadIn(
         audio.audio,

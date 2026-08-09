@@ -16,6 +16,7 @@ import {
   DocumentOutline,
   type PdfOutlineItem,
 } from "./document-outline";
+import { buildDocumentModel } from "./document-model.mjs";
 import { parseEpubFile } from "./epub-parser.mjs";
 import { FocusDocumentView } from "./focus-document-view";
 import { PdfPageView, type PdfPageLayout } from "./pdf-page-view";
@@ -24,6 +25,13 @@ import {
   derivePdfPageWordStarts,
   findActivePdfOutlineItemId,
 } from "./pdf-outline.mjs";
+import {
+  PDF_TEXT_MODEL_VERSION,
+  buildPdfTextModel,
+  migrateStoredPdfTextModel,
+  pdfDocumentNeedsTextModelMigration,
+  pdfTextParagraphs,
+} from "./pdf-text-model.mjs";
 import {
   buildSentenceStartIndices,
   buildSpeechChunk,
@@ -189,6 +197,7 @@ type ReaderDocument = {
   paragraphs: string[];
   pdfData?: Uint8Array;
   pdfPages?: PdfPageLayout[];
+  pdfTextModelVersion?: number;
   outline?: PdfOutlineItem[];
 };
 
@@ -336,76 +345,6 @@ const OFFLINE_PACK_SIZE_LABEL =
 
 const WORD_PATTERN = /[\p{L}\p{N}]+(?:[’'-][\p{L}\p{N}]+)*|[^\s]/gu;
 const IS_WORD = /^[\p{L}\p{N}]/u;
-function buildDocumentModel(paragraphs: string[]): DocumentModel {
-  const fullText = paragraphs.join("\n\n");
-  const tokens: WordToken[] = [];
-  const renderedParagraphs: Segment[][] = [];
-  let documentOffset = 0;
-  let sentenceIndex = 0;
-
-  paragraphs.forEach((paragraph, paragraphIndex) => {
-    const segments: Segment[] = [];
-    let previousEnd = 0;
-
-    for (const match of paragraph.matchAll(WORD_PATTERN)) {
-      const localStart = match.index ?? 0;
-      const text = match[0];
-      const isWord = IS_WORD.test(text);
-      const nearbyTokenIndex = isWord
-        ? tokens.length
-        : Math.max(0, tokens.length - 1);
-      if (localStart > previousEnd) {
-        segments.push({
-          text: paragraph.slice(previousEnd, localStart),
-          focusTokenIndex: nearbyTokenIndex,
-          sentenceIndex,
-        });
-      }
-
-      if (isWord) {
-        const tokenIndex = tokens.length;
-        const start = documentOffset + localStart;
-        tokens.push({
-          index: tokenIndex,
-          text,
-          start,
-          end: start + text.length,
-          paragraphIndex,
-          sentenceIndex,
-        });
-        segments.push({
-          text,
-          tokenIndex,
-          focusTokenIndex: tokenIndex,
-          sentenceIndex,
-        });
-      } else {
-        segments.push({
-          text,
-          focusTokenIndex: nearbyTokenIndex,
-          sentenceIndex,
-        });
-      }
-
-      if (/[.!?]/.test(text)) sentenceIndex += 1;
-      previousEnd = localStart + text.length;
-    }
-
-    if (previousEnd < paragraph.length) {
-      segments.push({
-        text: paragraph.slice(previousEnd),
-        focusTokenIndex: Math.max(0, tokens.length - 1),
-        sentenceIndex,
-      });
-    }
-
-    renderedParagraphs.push(segments);
-    documentOffset +=
-      paragraph.length + (paragraphIndex < paragraphs.length - 1 ? 2 : 0);
-  });
-
-  return { fullText, tokens, paragraphs: renderedParagraphs };
-}
 
 function findWordAtCharacter(tokens: WordToken[], character: number) {
   let low = 0;
@@ -447,14 +386,16 @@ function countWords(value: string) {
   return count;
 }
 
-async function parsePdf(file: File): Promise<ReaderDocument> {
+async function parsePdfSource(
+  sourceData: Uint8Array,
+  identity: { id: string; title: string; author?: string },
+): Promise<ReaderDocument> {
   const pdfjs = await import("pdfjs-dist");
   pdfjs.GlobalWorkerOptions.workerSrc = new URL(
     "pdfjs-dist/build/pdf.worker.min.mjs",
     import.meta.url,
   ).toString();
 
-  const sourceData = new Uint8Array(await file.arrayBuffer());
   const pdf = await pdfjs.getDocument({ data: sourceData.slice() }).promise;
   const paragraphs: string[] = [];
   const pdfPages: PdfPageLayout[] = [];
@@ -466,12 +407,20 @@ async function parsePdf(file: File): Promise<ReaderDocument> {
     const page = await pdf.getPage(pageNumber);
     const viewport = page.getViewport({ scale: 1 });
     const content = await page.getTextContent();
-    let pageText = "";
     const items: PdfPageLayout["items"] = [];
+    const textEntries = content.items
+      .filter((item) => "str" in item)
+      .map((item, textDivIndex) => ({ item, textDivIndex }));
+    const textModel = buildPdfTextModel(
+      textEntries.map(({ item }) => ({
+        text: item.str,
+        hasEOL: item.hasEOL,
+      })),
+      globalWordCount,
+    );
 
-    content.items.forEach((item) => {
-      if (!("str" in item)) return;
-      const itemWordCount = countWords(item.str);
+    textEntries.forEach(({ item, textDivIndex }, itemIndex) => {
+      const wordIndices = textModel.items[itemIndex]?.wordIndices ?? [];
       const transformed = pdfjs.Util.transform(
         viewport.transform,
         item.transform,
@@ -484,7 +433,7 @@ async function parsePdf(file: File): Promise<ReaderDocument> {
       const angle =
         (Math.atan2(transformed[1], transformed[0]) * 180) / Math.PI;
 
-      if (item.str && itemWordCount) {
+      if (item.str && wordIndices.length) {
         items.push({
           text: item.str,
           left: transformed[4],
@@ -493,14 +442,14 @@ async function parsePdf(file: File): Promise<ReaderDocument> {
           height: fontSize,
           fontSize,
           angle,
-          wordStart: globalWordCount,
-          wordCount: itemWordCount,
+          wordStart: Math.min(...wordIndices),
+          wordCount: new Set(wordIndices).size,
+          wordIndices,
+          textDivIndex,
         });
       }
-      globalWordCount += itemWordCount;
-      pageText += item.str;
-      pageText += "hasEOL" in item && item.hasEOL ? "\n" : " ";
     });
+    globalWordCount += textModel.wordCount;
 
     pdfPages.push({
       pageNumber,
@@ -509,14 +458,7 @@ async function parsePdf(file: File): Promise<ReaderDocument> {
       items,
     });
 
-    const cleaned = cleanText(pageText);
-    if (cleaned) {
-      const pageParagraphs = cleaned
-        .split(/\n{2,}|\n(?=[A-Z0-9“"'])/)
-        .map(cleanText)
-        .filter(Boolean);
-      paragraphs.push(...(pageParagraphs.length ? pageParagraphs : [cleaned]));
-    }
+    paragraphs.push(...pdfTextParagraphs(textModel.text));
   }
 
   const wordCount = countWords(paragraphs.join(" "));
@@ -537,27 +479,87 @@ async function parsePdf(file: File): Promise<ReaderDocument> {
   const pageCount = pdf.numPages;
   await pdf.destroy();
   return {
-    id: `pdf-${Date.now()}`,
-    title: filenameWithoutExtension(file.name),
-    author: `${pageCount} page PDF`,
+    id: identity.id,
+    title: identity.title,
+    author: identity.author ?? `${pageCount} page PDF`,
     kind: "pdf",
     paragraphs,
     pdfData: sourceData,
     pdfPages,
+    pdfTextModelVersion: PDF_TEXT_MODEL_VERSION,
     outline,
   };
 }
 
-async function ensureStoredPdfOutline(
+async function parsePdf(file: File): Promise<ReaderDocument> {
+  return parsePdfSource(new Uint8Array(await file.arrayBuffer()), {
+    id: `pdf-${Date.now()}`,
+    title: filenameWithoutExtension(file.name),
+  });
+}
+
+async function ensureStoredPdfReady(
   document: ReaderDocument,
 ): Promise<ReaderDocument> {
+  let readyDocument = document;
+  if (document.kind === "pdf") {
+    const needsTextModelMigration =
+      pdfDocumentNeedsTextModelMigration(document);
+    const storedProgress = needsTextModelMigration
+      ? storedProgressFor(document.id)
+      : null;
+    const legacyPosition =
+      storedProgress === null
+        ? null
+        : createPositionSnapshot(
+            buildDocumentModel(document.paragraphs).tokens,
+            storedProgress,
+            0,
+          );
+    try {
+      const migration = await migrateStoredPdfTextModel(document, {
+        reparse: (source) =>
+          parsePdfSource(source, {
+            id: document.id,
+            title: document.title,
+            author: document.author,
+          }),
+        save: saveReaderDocument,
+      });
+      readyDocument = migration.document as ReaderDocument;
+      if (migration.migrated && legacyPosition) {
+        const migratedModel = buildDocumentModel(readyDocument.paragraphs, {
+          paragraphsStartSentences: true,
+        });
+        const recoveredProgress = resolveStoredPosition(
+          legacyPosition,
+          migratedModel.tokens,
+        );
+        if (recoveredProgress !== null) {
+          try {
+            localStorage.setItem(
+              `guided-reader-progress-${document.id}`,
+              String(recoveredProgress),
+            );
+          } catch {
+            // Private library migration remains valid without localStorage.
+          }
+        }
+      }
+    } catch {
+      // A damaged stored source must not make a previously readable record
+      // disappear. Legacy Focus view remains available for this session.
+      readyDocument = document;
+    }
+  }
+
   if (
-    document.kind !== "pdf" ||
-    document.outline !== undefined ||
-    !document.pdfData?.length ||
-    !document.pdfPages?.length
+    readyDocument.kind !== "pdf" ||
+    readyDocument.outline !== undefined ||
+    !readyDocument.pdfData?.length ||
+    !readyDocument.pdfPages?.length
   ) {
-    return document;
+    return readyDocument;
   }
 
   try {
@@ -566,24 +568,24 @@ async function ensureStoredPdfOutline(
       "pdfjs-dist/build/pdf.worker.min.mjs",
       import.meta.url,
     ).toString();
-    const pdf = await pdfjs.getDocument({ data: document.pdfData.slice() })
+    const pdf = await pdfjs.getDocument({ data: readyDocument.pdfData.slice() })
       .promise;
     try {
       const rawOutline = await pdf.getOutline().catch(() => []);
       const outline = (await buildPdfOutline(
         rawOutline,
         pdf,
-        derivePdfPageWordStarts(document.pdfPages),
-        countDocumentWords(document),
+        derivePdfPageWordStarts(readyDocument.pdfPages),
+        countDocumentWords(readyDocument),
       )) as PdfOutlineItem[];
-      const updatedDocument = { ...document, outline };
+      const updatedDocument = { ...readyDocument, outline };
       await saveReaderDocument(updatedDocument).catch(() => undefined);
       return updatedDocument;
     } finally {
       await pdf.destroy();
     }
   } catch {
-    return document;
+    return readyDocument;
   }
 }
 
@@ -755,9 +757,12 @@ export default function Home() {
     typeof window === "undefined" ||
     ("speechSynthesis" in window && "SpeechSynthesisUtterance" in window);
 
-  const model = useMemo(
-    () => buildDocumentModel(readerDocument.paragraphs),
-    [readerDocument],
+  const model: DocumentModel = useMemo(
+    () =>
+      buildDocumentModel(readerDocument.paragraphs, {
+        paragraphsStartSentences: readerDocument.kind === "pdf",
+      }) as DocumentModel,
+    [readerDocument.kind, readerDocument.paragraphs],
   );
   const activeToken = model.tokens[activeWord] ?? model.tokens[0];
   const activeSentence = activeToken?.sentenceIndex ?? 0;
@@ -1026,8 +1031,18 @@ export default function Home() {
           snapshot.activeDocumentId,
         )) as ReaderDocument | null;
         if (!storedDocument || cancelled) return;
-        const outlinedDocument = await ensureStoredPdfOutline(storedDocument);
+        const outlinedDocument = await ensureStoredPdfReady(storedDocument);
         if (cancelled) return;
+        setLibraryEntries((current) =>
+          current.map((entry) =>
+            entry.id === outlinedDocument.id
+              ? {
+                  ...entry,
+                  wordCount: countDocumentWords(outlinedDocument),
+                }
+              : entry,
+          ),
+        );
         const storedProgress = clampStoredProgress(outlinedDocument);
         setReaderDocument(outlinedDocument);
         setActiveWord(storedProgress);
@@ -2823,7 +2838,11 @@ export default function Home() {
         if (!opened.document || !opened.entry) {
           throw new Error("This document is no longer in the library.");
         }
-        const outlinedDocument = await ensureStoredPdfOutline(opened.document);
+        const outlinedDocument = await ensureStoredPdfReady(opened.document);
+        const readyEntry = {
+          ...opened.entry,
+          wordCount: countDocumentWords(outlinedDocument),
+        };
 
         stopSpeech();
         wordRefs.current.clear();
@@ -2836,7 +2855,7 @@ export default function Home() {
         setLibraryEntries(
           (current) =>
             sortLibraryEntries([
-              opened.entry!,
+              readyEntry,
               ...current.filter((entry) => entry.id !== documentId),
             ]) as LibraryEntry[],
         );
@@ -2939,9 +2958,13 @@ export default function Home() {
           if (!nextDocument.document || !nextDocument.entry) {
             throw new Error("The next document could not be opened.");
           }
-          const outlinedDocument = await ensureStoredPdfOutline(
+          const outlinedDocument = await ensureStoredPdfReady(
             nextDocument.document,
           );
+          const readyEntry = {
+            ...nextDocument.entry,
+            wordCount: countDocumentWords(outlinedDocument),
+          };
           wordRefs.current.clear();
           const storedProgress = clampStoredProgress(outlinedDocument);
           setReaderDocument(outlinedDocument);
@@ -2953,7 +2976,7 @@ export default function Home() {
               sortLibraryEntries(
                 current.map((entry) =>
                   entry.id === nextDocument.entry!.id
-                    ? nextDocument.entry!
+                    ? readyEntry
                     : entry,
                 ),
               ) as LibraryEntry[],

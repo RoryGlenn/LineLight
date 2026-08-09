@@ -59,6 +59,26 @@ test("recovers word starts for previously stored PDFs with empty pages", () => {
   );
 });
 
+test("derives logical page starts from reversible display-word mappings", () => {
+  assert.deepEqual(
+    derivePdfPageWordStarts([
+      {
+        items: [
+          { wordStart: 0, wordCount: 2, wordIndices: [0, 1] },
+          { wordStart: 1, wordCount: 1, wordIndices: [1] },
+        ],
+      },
+      {
+        items: [
+          { wordStart: 2, wordCount: 2, wordIndices: [2, 2, 3] },
+        ],
+      },
+      { items: [] },
+    ]),
+    [0, 2, 4],
+  );
+});
+
 test("builds a serializable nested outline and ignores unsafe leaf links", async () => {
   const pdf = pdfDocument({ chapterOne: [{ num: 11, gen: 0 }, "Fit"] });
   const outline = await buildPdfOutline(
