@@ -41,8 +41,10 @@ LineLight has three narration modes:
   third-party model host. Speech then runs in a dedicated browser worker using
   WebGPU when a compatible adapter is available and WebAssembly as a fallback.
   LineLight opts into cross-origin isolation so ONNX can use multiple CPU
-  threads for WebAssembly on browsers that support them. The pack can be
-  removed or restored from Narration settings.
+  threads for WebAssembly on browsers that support them. A bundled, modified
+  ONNX Runtime Web build lets that threaded fallback cooperatively cancel an
+  obsolete inference without discarding its warm model session. The pack can
+  be removed or restored from Narration settings.
 - **Private device** uses the browser's Web Speech API. The operating system or
   browser supplies the voice, so no LineLight voice service is required.
 - **Natural online** uses optional Azure AI Speech neural voices. LineLight
@@ -52,11 +54,16 @@ LineLight has three narration modes:
 
 Offline natural narration prepares a short first passage, adapts later passage
 sizes to measured generation speed, and keeps at most one passage ahead. Pause
-suspends new lookahead; seek and document changes ignore obsolete queued
-results, while a small bounded audio cache avoids regenerating recently heard
-passages. During an interrupted update, an older stored q8 pack remains usable
-offline until fp16 passes runtime validation; the Narration panel offers that
-faster fp16 update when the device reconnects.
+suspends new lookahead; seek and document changes cancel obsolete requests. On
+threaded WebAssembly, the page and speech worker coordinate through a
+generation-scoped shared cancellation mailbox so active graph execution can
+end cooperatively while the initialized worker and model session remain warm.
+A bounded watchdog replaces the worker only if a canceled run never reaches a
+terminal acknowledgment; the replacement may load prepared assets only from
+the local browser cache. A small bounded audio cache avoids regenerating
+recently heard passages. During an interrupted update, an older stored q8 pack
+remains usable offline until fp16 passes runtime validation; the Narration
+panel offers that faster fp16 update when the device reconnects.
 Kokoro also generates at the selected reading speed instead of relying on
 browser audio time-stretching.
 Online natural narration keeps one passage ahead. If Azure becomes unavailable,
@@ -67,17 +74,25 @@ The offline model is
 [Kokoro-82M v1.0 ONNX](https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX).
 The model and
 [kokoro-js](https://github.com/hexgrad/kokoro) are
-available under the Apache 2.0 license. LineLight stores the fp16 model in
-the browser's Cache Storage and asks the browser to make that storage
+available under the Apache 2.0 license. LineLight's hash-guarded Transformers.js
+queue-tail modification remains under Apache 2.0. The bundled modified ONNX
+Runtime Web is provided under the MIT License. LineLight stores the fp16 model
+in the browser's Cache Storage and asks the browser to make that storage
 persistent. Browser storage can still be cleared or evicted; the settings panel
 prepares the included voice again if any required file is missing. A fresh
 preparation checks for up to roughly 216 MB of free site storage so the model,
 five voices, bundled ONNX runtime, and cache metadata all fit without a
 duplicate model copy. A resumed preparation needs less because verified ranges
 and voices are counted before the storage check.
-The distributed license text is available at
-[`public/offline-voice-license.txt`](public/offline-voice-license.txt). The
-browser keeps one durable model copy in Cache Storage; the first-party model
+The distributed license and modification text is available at
+[`public/offline-voice-license.txt`](public/offline-voice-license.txt); the
+modified runtime's complete upstream component notices are distributed
+unchanged at
+[`public/offline-voice-third-party-notices.txt`](public/offline-voice-third-party-notices.txt).
+The bundled package also self-identifies its exact upstream commit and
+LineLight patch in
+[`vendor/onnxruntime-web/LINELIGHT-NOTICE.txt`](vendor/onnxruntime-web/LINELIGHT-NOTICE.txt).
+The browser keeps one durable model copy in Cache Storage; the first-party model
 route disables the browser's separate HTTP cache while retaining immutable CDN
 caching. A separate, much smaller runtime cache retains the exact app, speech
 worker, and WebAssembly hashes required by the current deployment and any open
@@ -133,11 +148,11 @@ confirms the cleanup transaction.
 - Browser support and available voices differ across iPhone, macOS, and Ubuntu.
 - Offline model loading and synthesis speed depend on device memory and WebGPU
   support. The WebAssembly fallback works on more browsers but is slower.
-- On tested Chromium desktop builds, Pause stops audio and suspends future
-  passages immediately, but WebAssembly inference already in progress may use
-  CPU for about two seconds before the browser releases it. A seek can wait for
-  that already-running inference rather than reload the model. Browser and
-  device behavior can vary.
+- Cooperative interruption inside already-running inference is limited to the
+  threaded WebAssembly fallback. WebGPU and single-thread WebAssembly discard
+  obsolete output at the request boundary instead, so release of inference
+  resources can wait for the current runtime call to return. Browser and device
+  behavior can vary.
 - The app has not yet completed a formal accessibility audit.
 
 ## Local development

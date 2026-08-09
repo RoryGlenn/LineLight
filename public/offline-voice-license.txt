@@ -2,6 +2,12 @@ LineLight offline narration uses Kokoro-82M v1.0 ONNX, kokoro-js,
 Transformers.js, and phonemizer. These components are provided under the
 Apache License, Version 2.0, reproduced below.
 
+LineLight modifies @huggingface/transformers 3.8.1 so a rejected browser
+inference is returned to its caller while a fulfilled private queue tail lets
+later inference continue. LineLight changed the installed source module and
+distributed browser bundle for this purpose on August 9, 2026. Those
+modifications remain licensed under Apache License, Version 2.0.
+
                                  Apache License
                            Version 2.0, January 2004
                         http://www.apache.org/licenses/
@@ -203,3 +209,40 @@ Apache License, Version 2.0, reproduced below.
    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
    See the License for the specific language governing permissions and
    limitations under the License.
+
+
+ONNX Runtime Web modification notice
+------------------------------------
+
+LineLight includes ONNX Runtime Web
+1.22.0-dev.20250409-89f8206ba4, built from Microsoft ONNX Runtime commit
+89f8206ba4f1c22c39e0297fb55272e8ce8cd7d0. LineLight modified the runtime in
+August 2026 to add a generation-scoped cooperative cancellation mailbox and
+WebAssembly bindings used by multi-threaded offline narration inference. The
+modified ONNX Runtime Web package is provided under the MIT License reproduced
+below.
+
+The complete upstream ONNX Runtime component notices are distributed unchanged
+at /offline-voice-third-party-notices.txt alongside this file.
+
+MIT License
+
+Copyright (c) Microsoft Corporation
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

@@ -354,13 +354,25 @@ verified range downloads, resumption, assembly, and cache writes.
 [`app/offline-preparation.mjs`](../app/offline-preparation.mjs) owns preparation
 policy, storage headroom, adaptive passage sizing, and progress mapping.
 [`app/offline-speech.ts`](../app/offline-speech.ts) owns the page-side worker RPC,
-readiness state, backend retry ladder, Web Lock serialization, and public pack
-operations. [`app/worker-startup-diagnostics.mjs`](../app/worker-startup-diagnostics.mjs)
+readiness state, backend retry ladder, cooperative-cancellation integration,
+bounded unacknowledged-run recovery, Web Lock serialization, and public pack
+operations. [`app/offline-run-cancellation.mjs`](../app/offline-run-cancellation.mjs)
+owns the small page-side shared-memory mailbox contract, validates worker epoch
+and run generations, retains cancellation intent through terminal
+acknowledgment, and deliberately has no ONNX Runtime import.
+[`app/onnxruntime-web-types.d.ts`](../app/onnxruntime-web-types.d.ts) points
+TypeScript at the pinned package's own reviewed declarations because its
+runtime export map omits a `types` condition; it must stay aligned with the
+bundled package and cancellation bridge.
+[`app/worker-startup-diagnostics.mjs`](../app/worker-startup-diagnostics.mjs)
 owns bounded, local-only worker failure details without serializing document or
 narration data. [`app/offline-speech.worker.ts`](../app/offline-speech.worker.ts) owns
 Transformers/Kokoro configuration, model installation, initialization, warm-up,
 synthesis, pronunciation-weighted boundary generation, runtime fallback, and
-commit ordering.
+commit ordering. It publishes ONNX run start/end generations only for
+multi-threaded WebAssembly, bridges cancellation to the modified runtime, and
+returns a terminal cancellation acknowledgment without disposing a healthy
+warm session.
 [`app/offline-speech-utils.mjs`](../app/offline-speech-utils.mjs) owns backend
 error classification, strict waveform validation, bounded punctuation-only
 token-shape recovery, and approximate word timing. Exhausting those local
@@ -387,15 +399,25 @@ intentionally unready; the next preparation revalidates it without downloading
 the model again. Installation and removal must remain serialized. A WebGPU
 failure advances through the applicable fresh WASM tiers: isolated, capable
 contexts try threaded WASM before single-thread, while other contexts go
-directly to single-thread WASM.
+directly to single-thread WASM. Changes to active-run cancellation must keep the
+page mailbox, worker protocol, bundled ONNX Runtime patch, and Transformers
+browser inference queue compatible. Cancellation applies only when the selected
+backend is multi-threaded WebAssembly; WebGPU and single-thread WebAssembly keep
+their request-boundary behavior even if shared memory happens to be available.
 
 **State and I/O:** Model and setup assets use browser Cache Storage through the
 Transformers cache adapter; voices use their dedicated cache; resumable ranges
 remain verified cache entries until assembly. Runtime worker and WASM assets are
 retained in the stable asset cache. Installation may access only LineLight's
 pinned model route and bundled assets. Once installed, synthesis consumes local
-text and local cached assets. The distributed model license is
-[`public/offline-voice-license.txt`](../public/offline-voice-license.txt).
+text and local cached assets. The worker forwards the same-origin shared Wasm
+memory reference and two reviewed mailbox indices; the page helper reads or
+writes only the two atomic run-generation cells and does not copy narration
+text or document content into the protocol. The distributed model and runtime
+license text is
+[`public/offline-voice-license.txt`](../public/offline-voice-license.txt), and
+the exact upstream runtime component notices are
+[`public/offline-voice-third-party-notices.txt`](../public/offline-voice-third-party-notices.txt).
 
 **Verification:** Use
 [`tests/offline-model.test.mjs`](../tests/offline-model.test.mjs) for manifest,
@@ -405,10 +427,24 @@ for resumable storage behavior;
 [`tests/offline-preparation.test.mjs`](../tests/offline-preparation.test.mjs) for
 policy and progress; and
 [`tests/offline-speech-utils.test.mjs`](../tests/offline-speech-utils.test.mjs)
-for audio and timing helpers. The worker-compatible phonemizer import is probed
+for audio and timing helpers.
+[`tests/offline-run-cancellation.test.mjs`](../tests/offline-run-cancellation.test.mjs)
+covers mailbox validation, epochs, generations, terminal acknowledgment,
+watchdog state, and the threaded-WASM-only page/worker boundary.
+[`tests/offline-cancellation-harness.test.mjs`](../tests/offline-cancellation-harness.test.mjs)
+keeps the headed evidence validator fail-closed across active-run identity,
+Pause and CPU timing, far seek, timeout replay, fallback, network, artifact,
+cleanup, and private-text gates. The matching production runner is
+[`scripts/run-offline-cancellation-regression.mjs`](../scripts/run-offline-cancellation-regression.mjs);
+it rebuilds a clean source commit, clones a prepared local profile, owns its
+headed browser and server process groups, auto-attaches network inspection to
+speech and pthread workers, and retains no narration text or profile path. The
+worker-compatible phonemizer import is probed
 by [`tests/helpers/phonemizer-worker-probe.mjs`](../tests/helpers/phonemizer-worker-probe.mjs).
-Backend fallback, migration, offline restart, performance, and voice quality
-still need the corresponding real-browser gates. The headed production-browser
+Backend fallback, migration, offline restart, active-cancellation latency,
+warm-session reuse, no-fetch recovery, and voice quality require the
+corresponding real-browser records; a passing Issue #55 run writes its exact
+source-bound JSON under `docs/evidence/issue-55/`. The headed production-browser
 waveform, recovery-shape, onset-boundary, cache, and privacy gate for invalid
 fp16 samples is recorded in
 [`docs/evidence/issue-70/offline-audio-recovery.json`](evidence/issue-70/offline-audio-recovery.json).
@@ -588,6 +624,13 @@ manifest; and
 [`scripts/validate-artifact.sh`](../scripts/validate-artifact.sh) owns packaged
 worker/artifact assertions. [`scripts/audit-dependencies.mjs`](../scripts/audit-dependencies.mjs)
 owns the narrow advisory allowlist enforced by CI.
+[`scripts/apply-dependency-patches.mjs`](../scripts/apply-dependency-patches.mjs)
+owns fail-closed, version-, integrity-, and digest-guarded patching of the
+installed Transformers source and browser distribution. The modified ONNX
+Runtime Web package, source patch, pinned reproduction procedure, checksums,
+deterministic SBOM generator and evidence plan, and upstream and modification
+notices live under
+[`vendor/onnxruntime-web/`](../vendor/onnxruntime-web/README.md).
 [`docs/dependency-security.md`](dependency-security.md) explains the reviewed
 dependency posture. [`.github/workflows/ci.yml`](../.github/workflows/ci.yml)
 owns required hosted checks. [`.gitignore`](../.gitignore) owns repository-local
@@ -600,6 +643,9 @@ audits, lints, type-checks, builds, tests, and validates the current change.
 
 **Change together:** Dependency updates require lockfile,
 override, audit-policy, compatibility, production-exposure, and artifact review.
+Updates to Transformers or ONNX Runtime Web must also revalidate the guarded
+patch inputs, regenerate the bundled runtime from its pinned source, refresh
+its checksums and SBOM, and review the distributed license notices.
 Build-output changes require synchronized Sites staging and artifact validation.
 Repository workflow belongs in [`CONTRIBUTING.md`](../CONTRIBUTING.md); developer
 orientation belongs in [`README.md`](../README.md), this index, and
@@ -614,6 +660,12 @@ small explicit development-only allowance rather than accepted wholesale.
 [`tests/dependency-audit-policy.test.mjs`](../tests/dependency-audit-policy.test.mjs)
 and real-adapter compatibility by
 [`tests/dependency-hardening.test.mjs`](../tests/dependency-hardening.test.mjs).
+[`tests/dependency-patches.test.mjs`](../tests/dependency-patches.test.mjs)
+covers the exact Transformers transformation, queue rejection isolation,
+idempotence, and fail-closed tamper behavior. Bundled-runtime review must
+additionally check its recorded checksums, package dependency shape, generated
+WebAssembly wrappers, and the runtime behavior described by the offline
+narration gate.
 The semantic-index contract itself is covered by
 [`tests/codebase-index.test.mjs`](../tests/codebase-index.test.mjs), which checks
 the domain schema, relative links, and tracked first-party path coverage.
@@ -677,6 +729,9 @@ or presentation-only artifacts rather than behavior-bearing modules:
   than a behavior-bearing module.
 - [`public/offline-voice-license.txt`](../public/offline-voice-license.txt) is the
   distributed third-party license text, not an implementation entry point.
+- [`public/offline-voice-third-party-notices.txt`](../public/offline-voice-third-party-notices.txt) documents
+  the byte-identical deployed ONNX Runtime component notice, not an
+  implementation entry point.
 
 ### Coverage and maintenance rules
 

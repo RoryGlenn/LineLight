@@ -1,0 +1,64 @@
++zsh:4> baseline=/tmp/issue55-build/artifacts-P-prime-notice 
++zsh:5> source=/tmp/issue55-build/onnxruntime-final-ack/js/web/dist 
++zsh:6> final=/tmp/issue55-build/artifacts-P-prime-final 
++zsh:7> name=onnxruntime-web-1.22.0-dev.20250409-89f8206ba4.tgz 
++zsh:8> cmp -- /tmp/issue55-build/artifacts-P-prime-notice/onnxruntime-web-1.22.0-dev.20250409-89f8206ba4.tgz /tmp/issue55-build/artifacts-P-prime-final/onnxruntime-web-1.22.0-dev.20250409-89f8206ba4.tgz
++zsh:9> sha256sum /tmp/issue55-build/artifacts-P-prime-final/onnxruntime-web-1.22.0-dev.20250409-89f8206ba4.tgz
+8ded0bd491693184e4ee9b47356264986409d2f1ccd205b6d24d3d4ce6f43542  /tmp/issue55-build/artifacts-P-prime-final/onnxruntime-web-1.22.0-dev.20250409-89f8206ba4.tgz
++zsh:10> file=ort-wasm-simd-threaded.wasm
++zsh:11> cmp -- /tmp/issue55-build/artifacts-P-prime-notice/ort-wasm-simd-threaded.wasm /tmp/issue55-build/onnxruntime-final-ack/js/web/dist/ort-wasm-simd-threaded.wasm
++zsh:12> sha256sum /tmp/issue55-build/onnxruntime-final-ack/js/web/dist/ort-wasm-simd-threaded.wasm
++zsh:12> cut '-d ' -f1
++zsh:12> tar -xOf /tmp/issue55-build/artifacts-P-prime-final/onnxruntime-web-1.22.0-dev.20250409-89f8206ba4.tgz package/dist/ort-wasm-simd-threaded.wasm
++zsh:12> sha256sum
++zsh:12> cut '-d ' -f1
++zsh:12> test db1fa2012c98f8806f5641558635261a9b09aaff8827e01a38ffdcb4d73f7a22 '=' db1fa2012c98f8806f5641558635261a9b09aaff8827e01a38ffdcb4d73f7a22
++zsh:13> sha256sum /tmp/issue55-build/onnxruntime-final-ack/js/web/dist/ort-wasm-simd-threaded.wasm
+db1fa2012c98f8806f5641558635261a9b09aaff8827e01a38ffdcb4d73f7a22  /tmp/issue55-build/onnxruntime-final-ack/js/web/dist/ort-wasm-simd-threaded.wasm
++zsh:10> file=ort-wasm-simd-threaded.mjs
++zsh:11> cmp -- /tmp/issue55-build/artifacts-P-prime-notice/ort-wasm-simd-threaded.mjs /tmp/issue55-build/onnxruntime-final-ack/js/web/dist/ort-wasm-simd-threaded.mjs
++zsh:12> sha256sum /tmp/issue55-build/onnxruntime-final-ack/js/web/dist/ort-wasm-simd-threaded.mjs
++zsh:12> cut '-d ' -f1
++zsh:12> tar -xOf /tmp/issue55-build/artifacts-P-prime-final/onnxruntime-web-1.22.0-dev.20250409-89f8206ba4.tgz package/dist/ort-wasm-simd-threaded.mjs
++zsh:12> sha256sum
++zsh:12> cut '-d ' -f1
++zsh:12> test 87a120859ceba8870536ab6684a47b5cdb2515a33a0ab80c4520ec84fbe3df85 '=' 87a120859ceba8870536ab6684a47b5cdb2515a33a0ab80c4520ec84fbe3df85
++zsh:13> sha256sum /tmp/issue55-build/onnxruntime-final-ack/js/web/dist/ort-wasm-simd-threaded.mjs
+87a120859ceba8870536ab6684a47b5cdb2515a33a0ab80c4520ec84fbe3df85  /tmp/issue55-build/onnxruntime-final-ack/js/web/dist/ort-wasm-simd-threaded.mjs
++zsh:10> file=ort-wasm-simd-threaded.jsep.wasm
++zsh:11> cmp -- /tmp/issue55-build/artifacts-P-prime-notice/ort-wasm-simd-threaded.jsep.wasm /tmp/issue55-build/onnxruntime-final-ack/js/web/dist/ort-wasm-simd-threaded.jsep.wasm
++zsh:12> sha256sum /tmp/issue55-build/onnxruntime-final-ack/js/web/dist/ort-wasm-simd-threaded.jsep.wasm
++zsh:12> cut '-d ' -f1
++zsh:12> tar -xOf /tmp/issue55-build/artifacts-P-prime-final/onnxruntime-web-1.22.0-dev.20250409-89f8206ba4.tgz package/dist/ort-wasm-simd-threaded.jsep.wasm
++zsh:12> sha256sum
++zsh:12> cut '-d ' -f1
++zsh:12> test 1e5a323ca41d859f324694c7b5ba2052bf8c1a96ff9721bc62e94f874d379fe1 '=' 1e5a323ca41d859f324694c7b5ba2052bf8c1a96ff9721bc62e94f874d379fe1
++zsh:13> sha256sum /tmp/issue55-build/onnxruntime-final-ack/js/web/dist/ort-wasm-simd-threaded.jsep.wasm
+1e5a323ca41d859f324694c7b5ba2052bf8c1a96ff9721bc62e94f874d379fe1  /tmp/issue55-build/onnxruntime-final-ack/js/web/dist/ort-wasm-simd-threaded.jsep.wasm
++zsh:10> file=ort-wasm-simd-threaded.jsep.mjs
++zsh:11> cmp -- /tmp/issue55-build/artifacts-P-prime-notice/ort-wasm-simd-threaded.jsep.mjs /tmp/issue55-build/onnxruntime-final-ack/js/web/dist/ort-wasm-simd-threaded.jsep.mjs
++zsh:12> sha256sum /tmp/issue55-build/onnxruntime-final-ack/js/web/dist/ort-wasm-simd-threaded.jsep.mjs
++zsh:12> cut '-d ' -f1
++zsh:12> tar -xOf /tmp/issue55-build/artifacts-P-prime-final/onnxruntime-web-1.22.0-dev.20250409-89f8206ba4.tgz package/dist/ort-wasm-simd-threaded.jsep.mjs
++zsh:12> sha256sum
++zsh:12> cut '-d ' -f1
++zsh:12> test c1458b19e63c7b104a38fc4dd44a0993b58c961a2c7884b347d2abce74556a22 '=' c1458b19e63c7b104a38fc4dd44a0993b58c961a2c7884b347d2abce74556a22
++zsh:13> sha256sum /tmp/issue55-build/onnxruntime-final-ack/js/web/dist/ort-wasm-simd-threaded.jsep.mjs
+c1458b19e63c7b104a38fc4dd44a0993b58c961a2c7884b347d2abce74556a22  /tmp/issue55-build/onnxruntime-final-ack/js/web/dist/ort-wasm-simd-threaded.jsep.mjs
++zsh:15> tar -tzf /tmp/issue55-build/artifacts-P-prime-final/onnxruntime-web-1.22.0-dev.20250409-89f8206ba4.tgz
++zsh:15> wc -l
++zsh:15> test 499 '=' 499
++zsh:16> member=package/LICENSE
++zsh:17> tar -xOf /tmp/issue55-build/artifacts-P-prime-final/onnxruntime-web-1.22.0-dev.20250409-89f8206ba4.tgz package/LICENSE
++zsh:17> sha256sum
+2f07c72751aed99790b8a4869cf2311df85a860b22ded05fa22803587a48922c  -
++zsh:16> member=package/LINELIGHT-NOTICE.txt
++zsh:17> tar -xOf /tmp/issue55-build/artifacts-P-prime-final/onnxruntime-web-1.22.0-dev.20250409-89f8206ba4.tgz package/LINELIGHT-NOTICE.txt
++zsh:17> sha256sum
+9c451ee63c6c8a7c95c6def90acb21f866a582a3c31814e244b036d2eeac9d85  -
++zsh:16> member=package/ThirdPartyNotices.txt
++zsh:17> tar -xOf /tmp/issue55-build/artifacts-P-prime-final/onnxruntime-web-1.22.0-dev.20250409-89f8206ba4.tgz package/ThirdPartyNotices.txt
++zsh:17> sha256sum
+e9e90971a8e75a9a8ac0c6412e29c1202d079998389915aa485f46c816c3b4cc  -
++zsh:19> date -u -r /tmp/issue55-build/artifacts-P-prime-final/onnxruntime-web-1.22.0-dev.20250409-89f8206ba4.tgz +%Y-%m-%dT%H:%M:%SZ
+2026-08-09T20:19:01Z

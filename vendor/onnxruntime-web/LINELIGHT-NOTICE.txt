@@ -1,0 +1,18 @@
+ONNX Runtime Web modified by LineLight
+======================================
+
+Package version: 1.22.0-dev.20250409-89f8206ba4
+Upstream commit: 89f8206ba4f1c22c39e0297fb55272e8ce8cd7d0
+LineLight patch SHA-256: 4b368d00b9c4fc11cf5183caeed13d858e93b842cba26df27bde1b653d9372f2
+Modification date: 2026-08-09
+
+LineLight changed ONNX Runtime Web for Issue #55 to add a generation-scoped,
+cooperative cancellation mailbox and WebAssembly bridge for serialized
+multi-threaded offline narration inference. The bridge preserves the warm
+model session after an acknowledged canceled run.
+
+ONNX Runtime and LineLight's modifications are provided under the MIT License
+in LICENSE. Licenses and notices for incorporated third-party components are
+provided in ThirdPartyNotices.txt. The exact source patch, build procedure,
+artifact checksums, and SPDX SBOM are distributed in LineLight under
+vendor/onnxruntime-web/.

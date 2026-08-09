@@ -1,0 +1,12 @@
+{
+  "created": "2026-08-09T20:19:01Z",
+  "generatorRunsMatched": true,
+  "focusedSpdxSha256": "68c6da0903ccefd39bc06d4a10714acc09011b634eb0a334907573bce1a5f604",
+  "officialSchema": "https://raw.githubusercontent.com/spdx/spdx-spec/v2.3/schemas/spdx-schema.json",
+  "officialSchemaSha256": "239208b7ac287b3cf5d9a9af23f9d69863971102a5e1587a27a398b43490b89b",
+  "validator": "python-jsonschema 4.10.3 Draft4Validator",
+  "validationErrors": 0,
+  "packages": 18,
+  "files": 3,
+  "relationships": 21
+}

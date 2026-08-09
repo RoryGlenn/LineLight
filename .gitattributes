@@ -1,1 +1,3 @@
 *.pdf binary
+vendor/onnxruntime-web/*.patch -whitespace
+vendor/onnxruntime-web/evidence/*.log -whitespace

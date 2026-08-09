@@ -1,0 +1,1534 @@
+diff --git a/cmake/onnxruntime_webassembly.cmake b/cmake/onnxruntime_webassembly.cmake
+index bfb73e14ce..2fa1933d39 100644
+--- a/cmake/onnxruntime_webassembly.cmake
++++ b/cmake/onnxruntime_webassembly.cmake
+@@ -359,6 +359,9 @@ OrtGetInputName:ppp,\
+ OrtGetOutputName:ppp,\
+ OrtCreateRunOptions:ppp_p,\
+ OrtReleaseRunOptions:_p,\
++OrtGetRunCancellationMailbox:p,\
++OrtBeginRunCancellation:_p,\
++OrtEndRunCancellation:_p_,\
+ OrtReleaseTensor:_p,\
+ OrtFree:_p,\
+ OrtCreateBinding:_p,\
+diff --git a/include/onnxruntime/core/framework/run_options.h b/include/onnxruntime/core/framework/run_options.h
+index fab65e8fee..b1ef94ce38 100644
+--- a/include/onnxruntime/core/framework/run_options.h
++++ b/include/onnxruntime/core/framework/run_options.h
+@@ -3,8 +3,9 @@
+ 
+ #pragma once
+ 
+-#include <string>
+ #include <atomic>
++#include <cstdint>
++#include <string>
+ 
+ #include "core/common/inlined_containers_fwd.h"
+ #include "core/session/onnxruntime_c_api.h"
+@@ -14,6 +15,105 @@ namespace onnxruntime {
+ namespace lora {
+ class LoraAdapter;
+ }
++
++/**
++ * A live, copyable cancellation flag for an inference run.
++ *
++ * The public RunOptionsSetTerminate API permits another thread to request
++ * termination while a run is active. A plain bool cannot satisfy that contract
++ * without a data race. The optional generation source is used by the WebAssembly
++ * bridge: JavaScript writes a run generation into a process-lifetime atomic in
++ * shared Wasm memory, and executor workers observe it at their existing
++ * cancellation checkpoints.
++ */
++class RunTerminationFlag final {
++ public:
++  RunTerminationFlag() noexcept = default;
++
++  RunTerminationFlag(const RunTerminationFlag& other) noexcept
++      : locally_requested_{other.locally_requested_.load(std::memory_order_acquire)} {
++  }
++
++  RunTerminationFlag& operator=(const RunTerminationFlag& other) noexcept {
++    if (this != &other) {
++      locally_requested_.store(other.locally_requested_.load(std::memory_order_acquire),
++                               std::memory_order_release);
++      UnbindCancellationGeneration();
++    }
++    return *this;
++  }
++
++  RunTerminationFlag(RunTerminationFlag&& other) noexcept
++      : RunTerminationFlag{other} {
++  }
++
++  RunTerminationFlag& operator=(RunTerminationFlag&& other) noexcept {
++    return operator=(other);
++  }
++
++  RunTerminationFlag& operator=(bool requested) noexcept {
++    if (requested) {
++      Request();
++    } else {
++      Reset();
++    }
++    return *this;
++  }
++
++  operator bool() const noexcept {
++    if (locally_requested_.load(std::memory_order_acquire)) {
++      return true;
++    }
++
++    const auto* cancellation_generation = cancellation_generation_;
++    if (cancellation_generation == nullptr || observed_generation_ == nullptr || run_generation_ == 0 ||
++        cancellation_generation->load(std::memory_order_acquire) != run_generation_) {
++      return false;
++    }
++    return true;
++  }
++
++  void AcknowledgeExternalCancellation() const noexcept {
++    const auto* cancellation_generation = cancellation_generation_;
++    if (cancellation_generation != nullptr && observed_generation_ != nullptr && run_generation_ != 0 &&
++        cancellation_generation->load(std::memory_order_acquire) == run_generation_) {
++      // The executor calls this only after its cancellation Status wins the
++      // run's first-failure race. A late request or an independent winning
++      // failure therefore retains the original OrtRun error.
++      observed_generation_->store(run_generation_, std::memory_order_release);
++    }
++  }
++
++  void Request() noexcept {
++    locally_requested_.store(true, std::memory_order_release);
++  }
++
++  void Reset() noexcept {
++    locally_requested_.store(false, std::memory_order_release);
++  }
++
++  void BindCancellationGeneration(const std::atomic<uint32_t>* cancellation_generation,
++                                  std::atomic<uint32_t>* observed_generation,
++                                  uint32_t run_generation) noexcept {
++    cancellation_generation_ = cancellation_generation;
++    observed_generation_ = observed_generation;
++    run_generation_ = run_generation;
++  }
++
++  void UnbindCancellationGeneration() noexcept {
++    cancellation_generation_ = nullptr;
++    observed_generation_ = nullptr;
++    run_generation_ = 0;
++  }
++
++ private:
++  std::atomic<bool> locally_requested_{false};
++  // The Wasm owner binds these immediately before Run() and unbinds only after
++  // Run() returns. They are immutable while executor threads can observe them.
++  const std::atomic<uint32_t>* cancellation_generation_{nullptr};
++  std::atomic<uint32_t>* observed_generation_{nullptr};
++  uint32_t run_generation_{0};
++};
+ }  // namespace onnxruntime
+ 
+ /**
+@@ -29,7 +129,7 @@ struct OrtRunOptions {
+   // Set to 'true' to ensure the termination of all the outstanding Run() calls
+   // that use this OrtRunOptions instance. Some of the outstanding Run() calls may
+   // be forced to terminate with an error status.
+-  bool terminate = false;
++  onnxruntime::RunTerminationFlag terminate;
+ 
+   // Set to 'true' to run only the nodes from feeds to required fetches.
+   // So it is possible that only some of the nodes are executed.
+diff --git a/js/.eslintrc.js b/js/.eslintrc.js
+index f20adcb0ea..5940d6b356 100644
+--- a/js/.eslintrc.js
++++ b/js/.eslintrc.js
+@@ -175,6 +175,7 @@ module.exports = {
+               '_OrtAddRunConfigEntry',
+               '_OrtAddSessionConfigEntry',
+               '_OrtAppendExecutionProvider',
++              '_OrtBeginRunCancellation',
+               '_OrtBindInput',
+               '_OrtBindOutput',
+               '_OrtClearBoundOutputs',
+@@ -184,12 +185,15 @@ module.exports = {
+               '_OrtCreateSessionOptions',
+               '_OrtCreateTensor',
+               '_OrtEndProfiling',
++              '_OrtEndRunCancellation',
+               '_OrtFree',
+               '_OrtGetInputOutputCount',
+               '_OrtGetInputOutputMetadata',
+               '_OrtGetLastError',
++              '_OrtGetRunCancellationMailbox',
+               '_OrtGetTensorData',
+               '_OrtInit',
++              '_OrtIsRunCancellationRequested',
+               '_OrtReleaseBinding',
+               '_OrtReleaseRunOptions',
+               '_OrtReleaseSession',
+diff --git a/js/web/lib/index.ts b/js/web/lib/index.ts
+index 776c0d026b..e2c229e3ca 100644
+--- a/js/web/lib/index.ts
++++ b/js/web/lib/index.ts
+@@ -11,6 +11,13 @@ export * from 'onnxruntime-common';
+ import * as ort from 'onnxruntime-common';
+ export default ort;
+ 
++export {
++  requestWasmRunCancellation,
++  setWasmRunCancellationObserver,
++  WasmRunCancellationError,
++} from './wasm/run-cancellation';
++export type { WasmRunCancellationEvent, WasmRunCancellationObserver } from './wasm/run-cancellation';
++
+ import { registerBackend, env } from 'onnxruntime-common';
+ import { version } from './version';
+ 
+diff --git a/js/web/lib/wasm/run-cancellation.ts b/js/web/lib/wasm/run-cancellation.ts
+new file mode 100644
+index 0000000000..be14194ca0
+--- /dev/null
++++ b/js/web/lib/wasm/run-cancellation.ts
+@@ -0,0 +1,150 @@
++// Copyright (c) Microsoft Corporation. All rights reserved.
++// Licensed under the MIT License.
++
++import type { OrtWasmModule } from './wasm-types';
++
++export interface WasmRunCancellationEvent {
++  readonly type: 'start' | 'end';
++  readonly generation: number;
++  readonly sharedBuffer?: SharedArrayBuffer;
++  readonly activeGenerationIndex?: number;
++  readonly cancellationGenerationIndex?: number;
++}
++
++export type WasmRunCancellationObserver = (event: WasmRunCancellationEvent) => void;
++
++type ActiveWasmRunCancellation = {
++  readonly generation: number;
++  readonly runOptionsHandle: number;
++  readonly wasm: OrtWasmModule;
++};
++
++let observer: WasmRunCancellationObserver | undefined;
++
++/**
++ * Installs an observer for the opt-in threaded-Wasm cancellation bridge.
++ *
++ * The start event deliberately exposes the Wasm SharedArrayBuffer. Consumers
++ * should forward only the two documented mailbox indices to a trusted agent and
++ * must write only the cancellation generation cell with Atomics.store(). The
++ * observer is not invoked for non-threaded Wasm memory or the proxy-worker path.
++ */
++export const setWasmRunCancellationObserver = (value?: WasmRunCancellationObserver): void => {
++  observer = value;
++};
++
++/**
++ * Requests cancellation through a start event received by another JavaScript
++ * agent. The active-generation check makes delayed or duplicated messages a
++ * no-op for later runs.
++ */
++export const requestWasmRunCancellation = (event: WasmRunCancellationEvent): boolean => {
++  if (
++    event.type !== 'start' ||
++    typeof SharedArrayBuffer === 'undefined' ||
++    !(event.sharedBuffer instanceof SharedArrayBuffer) ||
++    event.activeGenerationIndex === undefined ||
++    event.cancellationGenerationIndex === undefined
++  ) {
++    return false;
++  }
++
++  try {
++    const mailbox = new Uint32Array(event.sharedBuffer);
++    if (
++      !Number.isInteger(event.generation) ||
++      event.generation <= 0 ||
++      event.generation > 0xffffffff ||
++      !Number.isInteger(event.activeGenerationIndex) ||
++      !Number.isInteger(event.cancellationGenerationIndex) ||
++      event.activeGenerationIndex < 0 ||
++      event.cancellationGenerationIndex < 0 ||
++      event.cancellationGenerationIndex !== event.activeGenerationIndex + 1 ||
++      event.activeGenerationIndex >= mailbox.length ||
++      event.cancellationGenerationIndex >= mailbox.length ||
++      Atomics.load(mailbox, event.activeGenerationIndex) !== event.generation
++    ) {
++      return false;
++    }
++
++    Atomics.store(mailbox, event.cancellationGenerationIndex, event.generation);
++    return true;
++  } catch {
++    // Forged, detached, or otherwise non-atomic buffers are never a valid
++    // cancellation channel.
++    return false;
++  }
++};
++
++const notifyObserver = (event: WasmRunCancellationEvent): void => {
++  try {
++    observer?.(event);
++  } catch {
++    // Cancellation instrumentation must never turn an otherwise valid run into
++    // an inference failure.
++  }
++};
++
++export const beginWasmRunCancellation = (
++  wasm: OrtWasmModule,
++  runOptionsHandle: number,
++): ActiveWasmRunCancellation | undefined => {
++  // wasm-core-impl creates a distinct run-options handle for each call, and
++  // its serialized wrapper keeps that handle exclusive until this run ends.
++  if (!observer || typeof SharedArrayBuffer === 'undefined') {
++    return undefined;
++  }
++
++  const buffer = wasm.HEAPU32.buffer;
++  if (!(buffer instanceof SharedArrayBuffer)) {
++    return undefined;
++  }
++
++  const mailboxByteOffset = wasm._OrtGetRunCancellationMailbox();
++  if (
++    mailboxByteOffset <= 0 ||
++    mailboxByteOffset % Uint32Array.BYTES_PER_ELEMENT !== 0 ||
++    mailboxByteOffset / Uint32Array.BYTES_PER_ELEMENT + 1 >= wasm.HEAPU32.length
++  ) {
++    return undefined;
++  }
++
++  // WebAssembly i32 results are signed JavaScript numbers. Normalize the C
++  // uint32_t generation before comparing it with Uint32Array/Atomics values.
++  const rawGeneration = wasm._OrtBeginRunCancellation(runOptionsHandle);
++  const generation = rawGeneration < 0 ? rawGeneration + 0x100000000 : rawGeneration;
++  if (generation === 0) {
++    return undefined;
++  }
++
++  const activeGenerationIndex = mailboxByteOffset / Uint32Array.BYTES_PER_ELEMENT;
++  notifyObserver({
++    type: 'start',
++    generation,
++    sharedBuffer: buffer,
++    activeGenerationIndex,
++    cancellationGenerationIndex: activeGenerationIndex + 1,
++  });
++
++  return { generation, runOptionsHandle, wasm };
++};
++
++export const endWasmRunCancellation = (active?: ActiveWasmRunCancellation): boolean => {
++  if (!active) {
++    return false;
++  }
++
++  const { generation, runOptionsHandle, wasm } = active;
++  const cancellationObserved = wasm._OrtEndRunCancellation(runOptionsHandle, generation) !== 0;
++  notifyObserver({ type: 'end', generation });
++  return cancellationObserved;
++};
++
++export class WasmRunCancellationError extends Error {
++  readonly code = 'ERR_ORT_WASM_RUN_CANCELED' as const;
++
++  constructor() {
++    super('The active WebAssembly inference run was canceled.');
++    this.name = 'AbortError';
++  }
++}
+diff --git a/js/web/lib/wasm/wasm-core-impl.ts b/js/web/lib/wasm/wasm-core-impl.ts
+index 8dd6432939..d9383c6689 100644
+--- a/js/web/lib/wasm/wasm-core-impl.ts
++++ b/js/web/lib/wasm/wasm-core-impl.ts
+@@ -26,6 +26,7 @@ import {
+   tensorDataTypeStringToEnum,
+   tensorTypeToTypedArrayConstructor,
+ } from './wasm-common';
++import { beginWasmRunCancellation, endWasmRunCancellation, WasmRunCancellationError } from './run-cancellation';
+ import { getInstance } from './wasm-factory';
+ import { allocWasmString, checkLastError } from './wasm-utils';
+ import { loadFile } from './wasm-utils-load-file';
+@@ -780,32 +781,41 @@ export const run = async (
+       ]);
+     }
+ 
+-    wasm.jsepOnRunStart?.(sessionHandle);
+-    wasm.webnnOnRunStart?.(sessionHandle);
+-
++    const activeCancellation = beginWasmRunCancellation(wasm, runOptionsHandle);
+     let errorCode: number;
+-    if (!BUILD_DEFS.DISABLE_JSEP && ioBindingState) {
+-      errorCode = await wasm._OrtRunWithBinding(
+-        sessionHandle,
+-        ioBindingState.handle,
+-        outputCount,
+-        outputValuesOffset,
+-        runOptionsHandle,
+-      );
+-    } else {
+-      errorCode = await wasm._OrtRun(
+-        sessionHandle,
+-        inputNamesOffset,
+-        inputValuesOffset,
+-        inputCount,
+-        outputNamesOffset,
+-        outputCount,
+-        outputValuesOffset,
+-        runOptionsHandle,
+-      );
++    let cancellationObserved = false;
++    try {
++      wasm.jsepOnRunStart?.(sessionHandle);
++      wasm.webnnOnRunStart?.(sessionHandle);
++
++      if (!BUILD_DEFS.DISABLE_JSEP && ioBindingState) {
++        errorCode = await wasm._OrtRunWithBinding(
++          sessionHandle,
++          ioBindingState.handle,
++          outputCount,
++          outputValuesOffset,
++          runOptionsHandle,
++        );
++      } else {
++        errorCode = await wasm._OrtRun(
++          sessionHandle,
++          inputNamesOffset,
++          inputValuesOffset,
++          inputCount,
++          outputNamesOffset,
++          outputCount,
++          outputValuesOffset,
++          runOptionsHandle,
++        );
++      }
++    } finally {
++      cancellationObserved = endWasmRunCancellation(activeCancellation);
+     }
+ 
+     if (errorCode !== 0) {
++      if (cancellationObserved) {
++        throw new WasmRunCancellationError();
++      }
+       checkLastError('failed to call OrtRun().');
+     }
+ 
+diff --git a/js/web/lib/wasm/wasm-types.ts b/js/web/lib/wasm/wasm-types.ts
+index b2ca8480f1..370be4b59c 100644
+--- a/js/web/lib/wasm/wasm-types.ts
++++ b/js/web/lib/wasm/wasm-types.ts
+@@ -401,6 +401,10 @@ export interface OrtInferenceAPIs {
+   _OrtCreateRunOptions(logSeverityLevel: number, logVerbosityLevel: number, terminate: boolean, tag: number): number;
+   _OrtAddRunConfigEntry(runOptionsHandle: number, configKey: number, configValue: number): number;
+   _OrtReleaseRunOptions(runOptionsHandle: number): number;
++  _OrtGetRunCancellationMailbox(): number;
++  _OrtBeginRunCancellation(runOptionsHandle: number): number;
++  _OrtIsRunCancellationRequested(generation: number): number;
++  _OrtEndRunCancellation(runOptionsHandle: number, generation: number): number;
+ 
+   _OrtEndProfiling(sessionHandle: number): number;
+ }
+diff --git a/js/web/test/unittests/backends/wasm/test-run-cancellation.ts b/js/web/test/unittests/backends/wasm/test-run-cancellation.ts
+new file mode 100644
+index 0000000000..93e292d327
+--- /dev/null
++++ b/js/web/test/unittests/backends/wasm/test-run-cancellation.ts
+@@ -0,0 +1,204 @@
++// Copyright (c) Microsoft Corporation. All rights reserved.
++// Licensed under the MIT License.
++
++import { expect } from 'chai';
++
++import {
++  beginWasmRunCancellation,
++  endWasmRunCancellation,
++  requestWasmRunCancellation,
++  setWasmRunCancellationObserver,
++  type WasmRunCancellationEvent,
++  WasmRunCancellationError,
++} from '../../../../lib/wasm/run-cancellation';
++import type { OrtWasmModule } from '../../../../lib/wasm/wasm-types';
++
++const createFakeWasm = (buffer: ArrayBufferLike, generation = 41, mailboxAvailable = true) => {
++  const events: Array<{ method: string; runOptionsHandle: number; generation: number }> = [];
++  const mailboxByteOffset = 8;
++  const mailbox = new Uint32Array(buffer, mailboxByteOffset, 3);
++  const wasm = {
++    HEAPU32: new Uint32Array(buffer),
++    _OrtGetRunCancellationMailbox: () => mailboxByteOffset,
++    _OrtBeginRunCancellation: (runOptionsHandle: number) => {
++      if (!mailboxAvailable) {
++        return 0;
++      }
++      Atomics.store(mailbox, 0, generation);
++      Atomics.store(mailbox, 1, 0);
++      Atomics.store(mailbox, 2, 0);
++      events.push({ method: 'begin', runOptionsHandle, generation });
++      return generation;
++    },
++    _OrtIsRunCancellationRequested: (generation: number) => (Atomics.load(mailbox, 1) === generation ? 1 : 0),
++    _OrtEndRunCancellation: (runOptionsHandle: number, generation: number) => {
++      const observed = Atomics.load(mailbox, 2) === generation ? 1 : 0;
++      Atomics.store(mailbox, 0, 0);
++      events.push({ method: 'end', runOptionsHandle, generation });
++      return observed;
++    },
++  } as unknown as OrtWasmModule;
++  const observeCancellation = () => {
++    const activeGeneration = Atomics.load(mailbox, 0);
++    if (activeGeneration !== 0 && Atomics.load(mailbox, 1) === activeGeneration) {
++      Atomics.store(mailbox, 2, activeGeneration);
++      return true;
++    }
++    return false;
++  };
++  return { events, mailbox, observeCancellation, wasm };
++};
++
++describe('#UnitTest# - wasm - live run cancellation', () => {
++  afterEach(() => setWasmRunCancellationObserver());
++
++  it('publishes a shared generation and observes cancellation before ending the run', () => {
++    const { events, mailbox, observeCancellation, wasm } = createFakeWasm(new SharedArrayBuffer(32));
++    const observerEvents: WasmRunCancellationEvent[] = [];
++    setWasmRunCancellationObserver((event) => observerEvents.push(event));
++
++    const active = beginWasmRunCancellation(wasm, 17);
++    expect(active?.generation).to.equal(41);
++    expect(observerEvents[0]).to.include({
++      type: 'start',
++      generation: 41,
++      activeGenerationIndex: 2,
++      cancellationGenerationIndex: 3,
++    });
++    expect(observerEvents[0].sharedBuffer).to.equal(mailbox.buffer);
++
++    expect(requestWasmRunCancellation(observerEvents[0])).to.equal(true);
++    expect(Atomics.load(mailbox, 1)).to.equal(41);
++    expect(observeCancellation()).to.equal(true);
++    expect(endWasmRunCancellation(active)).to.equal(true);
++    expect(events).to.deep.equal([
++      { method: 'begin', runOptionsHandle: 17, generation: 41 },
++      { method: 'end', runOptionsHandle: 17, generation: 41 },
++    ]);
++    expect(observerEvents[1]).to.deep.equal({ type: 'end', generation: 41 });
++  });
++
++  it('rejects a stale generation without touching the current run', () => {
++    const { mailbox, wasm } = createFakeWasm(new SharedArrayBuffer(32));
++    const observerEvents: WasmRunCancellationEvent[] = [];
++    setWasmRunCancellationObserver((event) => observerEvents.push(event));
++
++    const active = beginWasmRunCancellation(wasm, 17);
++    expect(endWasmRunCancellation(active)).to.equal(false);
++    Atomics.store(mailbox, 0, 42);
++
++    expect(requestWasmRunCancellation(observerEvents[0])).to.equal(false);
++    expect(Atomics.load(mailbox, 1)).to.equal(0);
++  });
++
++  it('keeps a late request from masking an unrelated failure or poisoning the next run', () => {
++    const { mailbox, observeCancellation, wasm } = createFakeWasm(new SharedArrayBuffer(32));
++    const observerEvents: WasmRunCancellationEvent[] = [];
++    setWasmRunCancellationObserver((event) => observerEvents.push(event));
++
++    const failedRun = beginWasmRunCancellation(wasm, 17);
++    expect(requestWasmRunCancellation(observerEvents[0])).to.equal(true);
++    // Execution has already failed for another reason, so no checkpoint reads
++    // the request and the original failure must remain visible to its caller.
++    expect(endWasmRunCancellation(failedRun)).to.equal(false);
++    expect(Atomics.load(mailbox, 2)).to.equal(0);
++
++    const nextRun = beginWasmRunCancellation(wasm, 18);
++    expect(nextRun).not.to.equal(undefined);
++    expect(observeCancellation()).to.equal(false);
++    expect(endWasmRunCancellation(nextRun)).to.equal(false);
++  });
++
++  it('normalizes an unsigned generation returned through WebAssembly i32', () => {
++    const { mailbox, observeCancellation, wasm } = createFakeWasm(new SharedArrayBuffer(32), -1);
++    const observerEvents: WasmRunCancellationEvent[] = [];
++    setWasmRunCancellationObserver((event) => observerEvents.push(event));
++
++    const active = beginWasmRunCancellation(wasm, 17);
++    expect(active?.generation).to.equal(0xffffffff);
++    expect(requestWasmRunCancellation(observerEvents[0])).to.equal(true);
++    expect(Atomics.load(mailbox, 1)).to.equal(0xffffffff);
++    expect(observeCancellation()).to.equal(true);
++    expect(endWasmRunCancellation(active)).to.equal(true);
++  });
++
++  it('keeps generation zero reserved as the unavailable sentinel', () => {
++    const { events, wasm } = createFakeWasm(new SharedArrayBuffer(32), 0);
++    const observerEvents: WasmRunCancellationEvent[] = [];
++    setWasmRunCancellationObserver((event) => observerEvents.push(event));
++
++    expect(beginWasmRunCancellation(wasm, 17)).to.equal(undefined);
++    expect(observerEvents).to.deep.equal([]);
++    expect(events).to.deep.equal([{ method: 'begin', runOptionsHandle: 17, generation: 0 }]);
++  });
++
++  it('rejects a forged non-adjacent cancellation cell', () => {
++    const buffer = new SharedArrayBuffer(32);
++    const mailbox = new Uint32Array(buffer);
++    Atomics.store(mailbox, 2, 41);
++
++    expect(
++      requestWasmRunCancellation({
++        type: 'start',
++        generation: 41,
++        sharedBuffer: buffer,
++        activeGenerationIndex: 2,
++        cancellationGenerationIndex: 5,
++      }),
++    ).to.equal(false);
++    expect(Atomics.load(mailbox, 5)).to.equal(0);
++  });
++
++  it('rejects an ArrayBuffer forged into the public event shape', () => {
++    expect(
++      requestWasmRunCancellation({
++        type: 'start',
++        generation: 41,
++        sharedBuffer: new ArrayBuffer(32) as unknown as SharedArrayBuffer,
++        activeGenerationIndex: 2,
++        cancellationGenerationIndex: 3,
++      }),
++    ).to.equal(false);
++  });
++
++  it('does not expose a non-shared Wasm heap', () => {
++    const { events, wasm } = createFakeWasm(new ArrayBuffer(32));
++    setWasmRunCancellationObserver(() => {
++      throw new Error('observer should not run');
++    });
++
++    expect(beginWasmRunCancellation(wasm, 17)).to.equal(undefined);
++    expect(events).to.deep.equal([]);
++  });
++
++  it('does not reserve a mailbox when no observer is installed', () => {
++    const { events, wasm } = createFakeWasm(new SharedArrayBuffer(32));
++
++    expect(beginWasmRunCancellation(wasm, 17)).to.equal(undefined);
++    expect(events).to.deep.equal([]);
++  });
++
++  it('leaves a concurrent run unchanged when the single mailbox is reserved', () => {
++    const { events, wasm } = createFakeWasm(new SharedArrayBuffer(32), 41, false);
++    const observerEvents: WasmRunCancellationEvent[] = [];
++    setWasmRunCancellationObserver((event) => observerEvents.push(event));
++
++    expect(beginWasmRunCancellation(wasm, 17)).to.equal(undefined);
++    expect(events).to.deep.equal([]);
++    expect(observerEvents).to.deep.equal([]);
++  });
++
++  it('contains observer failures and exposes a stable abort identity', () => {
++    const { wasm } = createFakeWasm(new SharedArrayBuffer(32));
++    setWasmRunCancellationObserver(() => {
++      throw new Error('application observer failed');
++    });
++
++    const active = beginWasmRunCancellation(wasm, 17);
++    expect(() => endWasmRunCancellation(active)).not.to.throw();
++
++    const error = new WasmRunCancellationError();
++    expect(error.name).to.equal('AbortError');
++    expect(error.code).to.equal('ERR_ORT_WASM_RUN_CANCELED');
++  });
++});
+diff --git a/js/web/test/unittests/index.ts b/js/web/test/unittests/index.ts
+index b68681f497..bd57c8b633 100644
+--- a/js/web/test/unittests/index.ts
++++ b/js/web/test/unittests/index.ts
+@@ -12,5 +12,6 @@ if (typeof window !== 'undefined') {
+ }
+ 
+ require('./backends/wasm/test-model-metadata');
++require('./backends/wasm/test-run-cancellation');
+ 
+ require('./opset');
+diff --git a/js/web/types.d.ts b/js/web/types.d.ts
+index b82248c0c8..0ace6d6ec7 100644
+--- a/js/web/types.d.ts
++++ b/js/web/types.d.ts
+@@ -3,6 +3,23 @@
+ 
+ declare module 'onnxruntime-web' {
+   export * from 'onnxruntime-common';
++
++  export interface WasmRunCancellationEvent {
++    readonly type: 'start' | 'end';
++    readonly generation: number;
++    readonly sharedBuffer?: SharedArrayBuffer;
++    readonly activeGenerationIndex?: number;
++    readonly cancellationGenerationIndex?: number;
++  }
++
++  export type WasmRunCancellationObserver = (event: WasmRunCancellationEvent) => void;
++
++  export function requestWasmRunCancellation(event: WasmRunCancellationEvent): boolean;
++  export function setWasmRunCancellationObserver(observer?: WasmRunCancellationObserver): void;
++
++  export class WasmRunCancellationError extends Error {
++    readonly code: 'ERR_ORT_WASM_RUN_CANCELED';
++  }
+ }
+ 
+ declare module 'onnxruntime-web/all' {
+diff --git a/onnxruntime/core/framework/execution_steps.cc b/onnxruntime/core/framework/execution_steps.cc
+index b647833cfd..11d298d2a3 100644
+--- a/onnxruntime/core/framework/execution_steps.cc
++++ b/onnxruntime/core/framework/execution_steps.cc
+@@ -12,7 +12,7 @@ BarrierStep::BarrierStep(size_t id, NodeIndex node_index) : SequentialExecutionP
+ Status BarrierStep::Execute(StreamExecutionContext& ctx,
+                             size_t /*stream_idx*/,
+                             SessionScope& /*session_scope*/,
+-                            const bool& /*terminate_flag*/,
++                            const RunTerminationFlag& /*terminate_flag*/,
+                             bool& continue_flag) {
+   continue_flag = ctx.DecCountDownBarrier(barrier_id_);
+   return Status::OK();
+@@ -31,7 +31,7 @@ WaitOnEPStep::WaitOnEPStep(WaitNotificationFn handle,
+ Status WaitOnEPStep::Execute(StreamExecutionContext& ctx,
+                              size_t stream_idx,
+                              SessionScope& /*session_scope*/,
+-                             const bool& /*terminate_flag*/,
++                             const RunTerminationFlag& /*terminate_flag*/,
+                              bool& continue_flag) {
+   ORT_ENFORCE(wait_handle_, "WaitOnEPStep.wait_handle is null");
+   wait_handle_(*ctx.GetDeviceStream(stream_idx), *ctx.GetNotification(notification_idx_));
+@@ -60,7 +60,7 @@ LaunchKernelStep::LaunchKernelStep(NodeIndex index, std::string_view node_name)
+ Status LaunchKernelStep::Execute(StreamExecutionContext& ctx,
+                                  size_t stream_idx,
+                                  SessionScope& session_scope,
+-                                 const bool& terminate_flag,
++                                 const RunTerminationFlag& terminate_flag,
+                                  bool& continue_flag) {
+ #ifdef ENABLE_TRAINING
+   // legacy code required by ORTTrainer. Should be removed when ORTTrainer is removed
+@@ -90,7 +90,7 @@ ActivateNotificationStep::ActivateNotificationStep(
+ Status ActivateNotificationStep::Execute(StreamExecutionContext& ctx,
+                                          size_t stream_idx,
+                                          SessionScope& /*session_scope*/,
+-                                         const bool& /*terminate_flag*/,
++                                         const RunTerminationFlag& /*terminate_flag*/,
+                                          bool& continue_flag) {
+   if (ctx.GetNotification(notification_idx_)) {
+     ctx.GetNotification(notification_idx_)->ActivateAndUpdate();
+@@ -112,7 +112,7 @@ TriggerDownstreamStep::TriggerDownstreamStep(size_t trigger_point_index, NodeInd
+ Status TriggerDownstreamStep::Execute(StreamExecutionContext& ctx,
+                                       size_t /*stream_idx*/,
+                                       SessionScope& session_scope,
+-                                      const bool& terminate_flag,
++                                      const RunTerminationFlag& terminate_flag,
+                                       bool& continue_flag) {
+   ScheduleDownstream(ctx, trigger_point_index_, ctx.SingleThreadMode(), terminate_flag, session_scope);
+   continue_flag = true;
+diff --git a/onnxruntime/core/framework/execution_steps.h b/onnxruntime/core/framework/execution_steps.h
+index 545dabc56b..aa83093ec0 100644
+--- a/onnxruntime/core/framework/execution_steps.h
++++ b/onnxruntime/core/framework/execution_steps.h
+@@ -16,7 +16,7 @@ class BarrierStep : public SequentialExecutionPlan::ExecutionStep {
+   Status Execute(StreamExecutionContext& ctx,
+                  size_t /*stream_idx*/,
+                  SessionScope& /*session_scope*/,
+-                 const bool& /*terminate_flag*/,
++                 const RunTerminationFlag& /*terminate_flag*/,
+                  bool& continue_flag) override;
+ 
+   std::string ToString() const override;
+@@ -32,7 +32,7 @@ class WaitOnEPStep : public SequentialExecutionPlan::ExecutionStep {
+   Status Execute(StreamExecutionContext& ctx,
+                  size_t stream_idx,
+                  SessionScope& /*session_scope*/,
+-                 const bool& /*terminate_flag*/,
++                 const RunTerminationFlag& /*terminate_flag*/,
+                  bool& continue_flag) override;
+ 
+   std::string ToString() const override;
+@@ -53,7 +53,7 @@ class LaunchKernelStep : public SequentialExecutionPlan::ExecutionStep {
+   Status Execute(StreamExecutionContext& ctx,
+                  size_t stream_idx,
+                  SessionScope& session_scope,
+-                 const bool& terminate_flag,
++                 const RunTerminationFlag& terminate_flag,
+                  bool& continue_flag) override;
+ 
+   std::string ToString() const override;
+@@ -71,7 +71,7 @@ class ActivateNotificationStep : public SequentialExecutionPlan::ExecutionStep {
+   Status Execute(StreamExecutionContext& ctx,
+                  size_t stream_idx,
+                  SessionScope& /*session_scope*/,
+-                 const bool& /*terminate_flag*/,
++                 const RunTerminationFlag& /*terminate_flag*/,
+                  bool& continue_flag) override;
+ 
+   virtual std::string ToString() const override;
+@@ -86,7 +86,7 @@ class TriggerDownstreamStep : public SequentialExecutionPlan::ExecutionStep {
+   Status Execute(StreamExecutionContext& ctx,
+                  size_t /*stream_idx*/,
+                  SessionScope& session_scope,
+-                 const bool& terminate_flag,
++                 const RunTerminationFlag& terminate_flag,
+                  bool& continue_flag) override;
+ 
+   virtual std::string ToString() const override;
+diff --git a/onnxruntime/core/framework/op_kernel_context_internal.h b/onnxruntime/core/framework/op_kernel_context_internal.h
+index 4c7ee10a07..04fe66c7d9 100644
+--- a/onnxruntime/core/framework/op_kernel_context_internal.h
++++ b/onnxruntime/core/framework/op_kernel_context_internal.h
+@@ -14,6 +14,7 @@
+ namespace onnxruntime {
+ class SessionState;
+ class ExecutionFrame;
++class RunTerminationFlag;
+ 
+ class OpKernelContextInternal : public OpKernelContext {
+  public:
+@@ -21,7 +22,7 @@ class OpKernelContextInternal : public OpKernelContext {
+                                    IExecutionFrame& frame,
+                                    const OpKernel& kernel,
+                                    const logging::Logger& logger,
+-                                   const bool& terminate_flag,
++                                   const RunTerminationFlag& terminate_flag,
+                                    Stream* stream)
+       : OpKernelContext(&frame, &kernel, stream, session_state.GetThreadPool(), logger),
+         session_state_(session_state),
+@@ -102,7 +103,7 @@ class OpKernelContextInternal : public OpKernelContext {
+   }
+ #endif
+ 
+-  const bool& GetTerminateFlag() const noexcept { return terminate_flag_; }
++  const RunTerminationFlag& GetTerminateFlag() const noexcept { return terminate_flag_; }
+ 
+  private:
+ #if !defined(ORT_MINIMAL_BUILD)
+@@ -136,7 +137,7 @@ class OpKernelContextInternal : public OpKernelContext {
+ #endif
+ 
+   const SessionState& session_state_;
+-  const bool& terminate_flag_;
++  const RunTerminationFlag& terminate_flag_;
+   std::vector<const OrtValue*> implicit_input_values_;
+ };
+ 
+diff --git a/onnxruntime/core/framework/run_options.cc b/onnxruntime/core/framework/run_options.cc
+index cb07cc22b1..94351d09e0 100644
+--- a/onnxruntime/core/framework/run_options.cc
++++ b/onnxruntime/core/framework/run_options.cc
+@@ -6,6 +6,9 @@
+ #include "core/session/ort_apis.h"
+ #include "core/framework/error_code_helper.h"
+ 
++#include <atomic>
++#include <cstdint>
++
+ #if defined(_MSC_VER) && !defined(__clang__)
+ #pragma warning(disable : 26409)
+ #endif
+@@ -49,15 +52,30 @@ ORT_API_STATUS_IMPL(OrtApis::RunOptionsGetRunTag, _In_ const OrtRunOptions* opti
+ }
+ 
+ ORT_API_STATUS_IMPL(OrtApis::RunOptionsSetTerminate, _Inout_ OrtRunOptions* options) {
+-  options->terminate = true;
++  options->terminate.Request();
+   return nullptr;
+ }
+ 
+ ORT_API_STATUS_IMPL(OrtApis::RunOptionsUnsetTerminate, _Inout_ OrtRunOptions* options) {
+-  options->terminate = false;
++  options->terminate.Reset();
+   return nullptr;
+ }
+ 
++namespace onnxruntime {
++
++void BindRunCancellationGeneration(OrtRunOptions* options,
++                                   const std::atomic<uint32_t>* cancellation_generation,
++                                   std::atomic<uint32_t>* observed_generation,
++                                   uint32_t generation) noexcept {
++  options->terminate.BindCancellationGeneration(cancellation_generation, observed_generation, generation);
++}
++
++void UnbindRunCancellationGeneration(OrtRunOptions* options) noexcept {
++  options->terminate.UnbindCancellationGeneration();
++}
++
++}  // namespace onnxruntime
++
+ ORT_API_STATUS_IMPL(OrtApis::AddRunConfigEntry, _Inout_ OrtRunOptions* options,
+                     _In_z_ const char* config_key, _In_z_ const char* config_value) {
+   return onnxruntime::ToOrtStatus(options->config_options.AddConfigEntry(config_key, config_value));
+diff --git a/onnxruntime/core/framework/sequential_execution_plan.h b/onnxruntime/core/framework/sequential_execution_plan.h
+index d9472e404c..82ef94cee6 100644
+--- a/onnxruntime/core/framework/sequential_execution_plan.h
++++ b/onnxruntime/core/framework/sequential_execution_plan.h
+@@ -26,6 +26,7 @@ using IntervalT = std::pair<size_t, size_t>;
+ class SessionState;
+ class StreamExecutionContext;
+ class SessionScope;
++class RunTerminationFlag;
+ 
+ // Captures information required to allocate/reuse buffer for a ml-value
+ struct AllocPlanPerValue {
+@@ -114,7 +115,7 @@ struct SequentialExecutionPlan : public ExecutionPlanBase {
+     virtual Status Execute(StreamExecutionContext& ctx,
+                            size_t stream_idx,
+                            SessionScope& session_scope,
+-                           const bool& terminate_flag,
++                           const RunTerminationFlag& terminate_flag,
+                            bool& continue_flag) = 0;
+     virtual std::string ToString() const = 0;
+     inline NodeIndex GetNodeIndex() { return node_index_; }
+diff --git a/onnxruntime/core/framework/sequential_executor.cc b/onnxruntime/core/framework/sequential_executor.cc
+index 26a57ec3ea..a6ecce35d6 100644
+--- a/onnxruntime/core/framework/sequential_executor.cc
++++ b/onnxruntime/core/framework/sequential_executor.cc
+@@ -433,7 +433,7 @@ class KernelScope {
+ onnxruntime::Status ExecuteKernel(StreamExecutionContext& ctx,
+                                   NodeIndex idx,
+                                   size_t stream_idx,
+-                                  const bool& terminate_flag,
++                                  const RunTerminationFlag& terminate_flag,
+                                   SessionScope& session_scope) {
+   auto* p_kernel = ctx.GetSessionState().GetKernel(idx);
+   if (p_kernel->KernelDef().OpName() == "YieldOp") {
+@@ -586,7 +586,7 @@ onnxruntime::Status ExecuteThePlan(const SessionState& session_state, gsl::span<
+ #ifdef ORT_ENABLE_STREAM
+                                    const DeviceStreamCollection* device_streams,
+ #endif
+-                                   const bool& terminate_flag,
++                                   const RunTerminationFlag& terminate_flag,
+                                    const bool only_execute_path_to_fetches,
+                                    bool single_thread_mode) {
+   auto* execution_plan = session_state.GetExecutionPlan();
+@@ -679,7 +679,7 @@ onnxruntime::Status PartialExecuteThePlan(const SessionState& session_state, gsl
+                                               fetch_allocators,
+                                           const logging::Logger& logger,
+                                           const DeviceStreamCollection* device_streams,
+-                                          const bool& terminate_flag,
++                                          const RunTerminationFlag& terminate_flag,
+                                           bool single_thread_mode,
+                                           PartialGraphExecutionState& state,
+                                           const OrtValueCachePtr& cache,
+diff --git a/onnxruntime/core/framework/sequential_executor.h b/onnxruntime/core/framework/sequential_executor.h
+index c22ccb041a..386c7f5089 100644
+--- a/onnxruntime/core/framework/sequential_executor.h
++++ b/onnxruntime/core/framework/sequential_executor.h
+@@ -33,7 +33,7 @@ using OrtValueCachePtr = std::shared_ptr<OrtValueCache>;
+ onnxruntime::Status ExecuteKernel(StreamExecutionContext& ctx,
+                                   NodeIndex idx,
+                                   size_t stream_idx,
+-                                  const bool& terminate_flag,
++                                  const RunTerminationFlag& terminate_flag,
+                                   SessionScope& session_scope);
+ 
+ onnxruntime::Status ExecuteThePlan(const SessionState& session_state, gsl::span<const int> feed_mlvalue_idxs,
+@@ -44,7 +44,7 @@ onnxruntime::Status ExecuteThePlan(const SessionState& session_state, gsl::span<
+ #ifdef ORT_ENABLE_STREAM
+                                    const DeviceStreamCollection* device_streams,
+ #endif
+-                                   const bool& terminate_flag,
++                                   const RunTerminationFlag& terminate_flag,
+                                    const bool only_execute_path_to_fetches,
+                                    bool single_thread_mode);
+ 
+@@ -55,7 +55,7 @@ onnxruntime::Status PartialExecuteThePlan(const SessionState& session_state, gsl
+                                           const std::unordered_map<size_t, IExecutor::CustomAllocator>& fetch_allocators,
+                                           const logging::Logger& logger,
+                                           const DeviceStreamCollection* device_streams,
+-                                          const bool& terminate_flag,
++                                          const RunTerminationFlag& terminate_flag,
+                                           bool single_thread_mode,
+                                           PartialGraphExecutionState& state,
+                                           const OrtValueCachePtr& cache,
+diff --git a/onnxruntime/core/framework/stream_execution_context.cc b/onnxruntime/core/framework/stream_execution_context.cc
+index e8beb98749..b42d9ca4e7 100644
+--- a/onnxruntime/core/framework/stream_execution_context.cc
++++ b/onnxruntime/core/framework/stream_execution_context.cc
+@@ -1,6 +1,7 @@
+ // Copyright (c) Microsoft Corporation. All rights reserved.
+ // Licensed under the MIT License.
+ #include "core/framework/stream_execution_context.h"
++#include "core/framework/run_options.h"
+ #include "core/framework/execution_provider.h"
+ #include "core/framework/execution_frame.h"
+ #include "core/framework/bfc_arena.h"
+@@ -152,13 +153,19 @@ void StreamExecutionContext ::WaitAll() {
+     onnxruntime::concurrency::SpinPause();
+ }
+ 
+-void StreamExecutionContext ::SetStatus(Status& status) {
+-  // TODO: if multiple worker report non-ok status,
+-  // what is our strategy? currently we just keep
+-  // a random one. as long as it is not OK, the
+-  // execution will fail.
+-  if (task_status_.IsOK() && !status.IsOK())
++bool StreamExecutionContext ::SetStatus(Status& status) {
++  if (status.IsOK()) {
++    return false;
++  }
++
++  bool expected = false;
++  if (task_failed_.compare_exchange_strong(expected, true, std::memory_order_acq_rel,
++                                           std::memory_order_acquire)) {
+     task_status_ = status;
++    return true;
++  }
++
++  return false;
+ }
+ 
+ StreamExecutionContext::~StreamExecutionContext() {}
+@@ -173,8 +180,12 @@ void StreamExecutionContext::RecycleNodeInputs(onnxruntime::NodeIndex node_index
+   }
+ }
+ 
+-void RunSince(size_t stream_idx, StreamExecutionContext& ctx, SessionScope& session_scope, const bool& terminate_flag, size_t since) {
+-  if (!ctx.TaskStatus().IsOK()) {
++void RunSince(size_t stream_idx,
++              StreamExecutionContext& ctx,
++              SessionScope& session_scope,
++              const RunTerminationFlag& terminate_flag,
++              size_t since) {
++  if (!ctx.IsTaskStatusOK()) {
+     // already in bad status, terminate it
+     ctx.CompleteTask();
+     return;
+@@ -221,13 +232,15 @@ void RunSince(size_t stream_idx, StreamExecutionContext& ctx, SessionScope& sess
+ #endif
+ 
+   while (since < end) {
+-    if (!ctx.TaskStatus().IsOK()) {
++    if (!ctx.IsTaskStatusOK()) {
+       ctx.CompleteTask();
+       return;
+     }
+     if (terminate_flag) {
+       Status status_made = ORT_MAKE_STATUS(ONNXRUNTIME, FAIL, "Exiting due to terminate flag being set to true.");
+-      ctx.SetStatus(status_made);
++      if (ctx.SetStatus(status_made)) {
++        terminate_flag.AcknowledgeExternalCancellation();
++      }
+       ctx.CompleteTask();
+       return;
+     }
+@@ -260,7 +273,7 @@ void RunSince(size_t stream_idx, StreamExecutionContext& ctx, SessionScope& sess
+ }
+ 
+ void ScheduleDownstream(StreamExecutionContext& ctx, size_t trigger, bool single_thread_mode,
+-                        const bool& terminate_flag, SessionScope& session_scope) {
++                        const RunTerminationFlag& terminate_flag, SessionScope& session_scope) {
+   auto* plan = ctx.GetSessionState().GetExecutionPlan();
+   auto& downstream_map = plan->downstream_map;
+   auto* tp = single_thread_mode ? nullptr : ctx.GetSessionState().GetInterOpThreadPool();
+diff --git a/onnxruntime/core/framework/stream_execution_context.h b/onnxruntime/core/framework/stream_execution_context.h
+index 92a7b4fa5b..e8d88ed97d 100644
+--- a/onnxruntime/core/framework/stream_execution_context.h
++++ b/onnxruntime/core/framework/stream_execution_context.h
+@@ -16,6 +16,7 @@
+ 
+ namespace onnxruntime {
+ class SessionState;
++class RunTerminationFlag;
+ 
+ class SessionScope;
+ typedef InlinedHashMap<std::string, OrtValue> OrtValueCache;
+@@ -39,19 +40,19 @@ class StreamExecutionContext {
+ 
+     void Set(int32_t v) {
+       ORT_ENFORCE(v >= 0);
+-      v_.store(v, std::memory_order_relaxed);
++      v_.store(v, std::memory_order_release);
+     }
+ 
+     bool Dec() {
+-      return v_.fetch_sub(1, std::memory_order_relaxed) == 1;
++      return v_.fetch_sub(1, std::memory_order_acq_rel) == 1;
+     }
+ 
+     int32_t Get() {
+-      return gsl::narrow_cast<int32_t>(v_.load(std::memory_order_relaxed));
++      return gsl::narrow_cast<int32_t>(v_.load(std::memory_order_acquire));
+     }
+ 
+     void Inc() {
+-      ++v_;
++      v_.fetch_add(1, std::memory_order_acq_rel);
+     }
+ 
+    private:
+@@ -88,6 +89,10 @@ class StreamExecutionContext {
+   // if one of the stream got non-OK status, the whole task status will be set as that non-OK status.
+   const Status& TaskStatus() const;
+ 
++  bool IsTaskStatusOK() const noexcept {
++    return !task_failed_.load(std::memory_order_acquire);
++  }
++
+   // Decrease the count of a given barrier.
+   bool DecCountDownBarrier(size_t barrier_id);
+ 
+@@ -110,8 +115,9 @@ class StreamExecutionContext {
+   // blocked until all the jobs scheduled into inter-op thread pool complete.
+   void WaitAll();
+ 
+-  // If one of the stream got non-OK status, update the status in the context.
+-  void SetStatus(Status& status);
++  // If a stream got non-OK status, publish the first failure. Returns true only
++  // to the worker whose status won that publication race.
++  bool SetStatus(Status& status);
+ 
+   // Release the OrtValues after a step, based on the execution plan.
+   void RecycleNodeInputs(onnxruntime::NodeIndex node_index);
+@@ -159,6 +165,10 @@ class StreamExecutionContext {
+   CountDownBarrier remain_tasks_;
+ 
+   Status task_status_{Status::OK()};
++  // The first failing worker owns task_status_. Completion-count release/acquire
++  // publication makes that write visible before TaskStatus() is read by the
++  // caller after WaitAll().
++  std::atomic<bool> task_failed_{false};
+ 
+ #ifdef ENABLE_TRAINING
+   const ProgramRegion* program_range_{nullptr};
+@@ -186,13 +196,13 @@ using NotificationIndex = size_t;
+ void RunSince(size_t stream_idx,
+               StreamExecutionContext& ctx,
+               SessionScope& session_scope,
+-              const bool& terminate_flag,
++              const RunTerminationFlag& terminate_flag,
+               size_t since);
+ 
+ // Schedule the downstream jobs from other streams at 'trigger' step, based on the execution plan.
+ void ScheduleDownstream(StreamExecutionContext& ctx,
+                         size_t trigger,
+                         bool single_thread_mode,
+-                        const bool& terminate_flag,
++                        const RunTerminationFlag& terminate_flag,
+                         SessionScope& session_scope);
+ }  // namespace onnxruntime
+diff --git a/onnxruntime/core/framework/utils.cc b/onnxruntime/core/framework/utils.cc
+index ff664c2c76..43cda58b01 100644
+--- a/onnxruntime/core/framework/utils.cc
++++ b/onnxruntime/core/framework/utils.cc
+@@ -617,7 +617,7 @@ ExecuteGraphImpl(const SessionState& session_state,
+                  const FeedsFetchesManager& feeds_fetches_manager,
+                  gsl::span<const OrtValue> feeds, std::vector<OrtValue>& fetches,
+                  const std::unordered_map<size_t, IExecutor::CustomAllocator>& fetch_allocators,
+-                 ExecutionMode execution_mode, const bool& terminate_flag,
++                 ExecutionMode execution_mode, const RunTerminationFlag& terminate_flag,
+                  const logging::Logger& logger,
+ #ifdef ORT_ENABLE_STREAM
+                  DeviceStreamCollection* device_stream_collection,
+@@ -735,7 +735,7 @@ ExecuteGraphImpl(const SessionState& session_state,
+ common::Status ExecuteGraph(const SessionState& session_state,
+                             FeedsFetchesManager& feeds_fetches_manager,
+                             gsl::span<const OrtValue> feeds, std::vector<OrtValue>& fetches,
+-                            ExecutionMode execution_mode, const bool& terminate_flag,
++                            ExecutionMode execution_mode, const RunTerminationFlag& terminate_flag,
+                             const logging::Logger& logger,
+ #ifdef ORT_ENABLE_STREAM
+                             DeviceStreamCollectionHolder& device_stream_collection_holder,
+@@ -786,7 +786,7 @@ common::Status ExecuteGraph(const SessionState& session_state,
+ common::Status ExecutePartialGraphImpl(const SessionState& session_state, FeedsFetchesManager& feeds_fetches_manager,
+                                        std::vector<OrtValue>& feeds, std::vector<OrtValue>& fetches,
+                                        const logging::Logger& logger, PartialGraphExecutionState& state,
+-                                       const OrtValueCachePtr& cache, const bool& terminate_flag,
++                                       const OrtValueCachePtr& cache, const RunTerminationFlag& terminate_flag,
+                                        DeviceStreamCollection* device_stream_collection,
+                                        int32_t partial_graph_index,
+                                        Stream* parent_stream) {
+@@ -884,7 +884,7 @@ common::Status ExecutePartialGraphImpl(const SessionState& session_state, FeedsF
+ common::Status ExecutePartialGraph(const SessionState& session_state, FeedsFetchesManager& feeds_fetches_manager,
+                                    std::vector<OrtValue>& feeds, std::vector<OrtValue>& fetches,
+                                    const logging::Logger& logger, PartialGraphExecutionState& state,
+-                                   const OrtValueCachePtr& cache, const bool& terminate_flag,
++                                   const OrtValueCachePtr& cache, const RunTerminationFlag& terminate_flag,
+                                    int32_t partial_graph_index,
+                                    Stream* parent_stream) {
+   DeviceStreamCollection* device_stream_collection = state.GetDeviceStreamCollection(session_state);
+@@ -900,7 +900,8 @@ common::Status ExecutePartialGraph(const SessionState& session_state, FeedsFetch
+ common::Status ExecuteSubgraph(const SessionState& session_state, const FeedsFetchesManager& feeds_fetches_manager,
+                                gsl::span<const OrtValue> feeds, std::vector<OrtValue>& fetches,
+                                const std::unordered_map<size_t, IExecutor::CustomAllocator>& fetch_allocators,
+-                               ExecutionMode execution_mode, const bool& terminate_flag, const logging::Logger& logger,
++                               ExecutionMode execution_mode, const RunTerminationFlag& terminate_flag,
++                               const logging::Logger& logger,
+                                Stream* parent_stream,
+                                bool sync_subgraph_fetches) {
+ #ifdef ORT_ENABLE_STREAM
+diff --git a/onnxruntime/core/framework/utils.h b/onnxruntime/core/framework/utils.h
+index afdb5a2cb2..98b6ff5cad 100644
+--- a/onnxruntime/core/framework/utils.h
++++ b/onnxruntime/core/framework/utils.h
+@@ -22,6 +22,7 @@ class KernelRegistryManager;
+ class IExecutionProvider;
+ class Node;
+ class Tensor;
++class RunTerminationFlag;
+ struct KernelCreateInfo;
+ #ifdef ENABLE_TRAINING
+ struct PartialGraphExecutionState;
+@@ -83,7 +84,8 @@ void FinalizeFeedFetchCopyInfo(FeedsFetchesManager& feeds_fetches_manager,
+ // Execute the main graph. The feed_fetches_manager will be finalized based on the provided feeds and fetches.
+ common::Status ExecuteGraph(const SessionState& session_state, FeedsFetchesManager& feeds_fetches_manager,
+                             gsl::span<const OrtValue> feeds, std::vector<OrtValue>& fetches,
+-                            ExecutionMode execution_mode, const bool& terminate_flag, const logging::Logger& logger,
++                            ExecutionMode execution_mode, const RunTerminationFlag& terminate_flag,
++                            const logging::Logger& logger,
+ #ifdef ORT_ENABLE_STREAM
+                             DeviceStreamCollectionHolder& device_stream_collection_holder,
+ #endif
+@@ -103,7 +105,7 @@ common::Status ExecutePartialGraph(const SessionState& session_state, FeedsFetch
+                                    std::vector<OrtValue>& feeds, std::vector<OrtValue>& fetches,
+                                    const logging::Logger& logger, PartialGraphExecutionState& state,
+                                    const OrtValueCachePtr& cache,
+-                                   const bool& terminate_flag,
++                                   const RunTerminationFlag& terminate_flag,
+                                    int32_t partial_graph_index,
+                                    Stream* parent_stream);
+ #endif
+@@ -113,7 +115,8 @@ common::Status ExecutePartialGraph(const SessionState& session_state, FeedsFetch
+ common::Status ExecuteSubgraph(const SessionState& session_state, const FeedsFetchesManager& feeds_fetches_manager,
+                                gsl::span<const OrtValue> feeds, std::vector<OrtValue>& fetches,
+                                const std::unordered_map<size_t, IExecutor::CustomAllocator>& fetch_allocators,
+-                               ExecutionMode execution_mode, const bool& terminate_flag, const logging::Logger& logger,
++                               ExecutionMode execution_mode, const RunTerminationFlag& terminate_flag,
++                               const logging::Logger& logger,
+                                Stream* parent_stream,
+                                /*when this is enabled, we will sync the parent stream to make sure the subgraph fetches
+                                is complete. this is mainly used when the parent kernel depends on the CPU value of the
+diff --git a/onnxruntime/test/framework/run_options_test.cc b/onnxruntime/test/framework/run_options_test.cc
+new file mode 100644
+index 0000000000..c32d76ca5a
+--- /dev/null
++++ b/onnxruntime/test/framework/run_options_test.cc
+@@ -0,0 +1,149 @@
++// Copyright (c) Microsoft Corporation. All rights reserved.
++// Licensed under the MIT License.
++
++#include <atomic>
++#include <chrono>
++#include <thread>
++#include <type_traits>
++#include <utility>
++
++#include "core/framework/run_options.h"
++#include "core/session/ort_apis.h"
++#include "gtest/gtest.h"
++
++namespace onnxruntime {
++namespace test {
++
++static_assert(std::is_copy_constructible<OrtRunOptions>::value,
++              "OrtRunOptions must remain copy constructible.");
++static_assert(std::is_copy_assignable<OrtRunOptions>::value,
++              "OrtRunOptions must remain copy assignable.");
++static_assert(std::is_move_constructible<OrtRunOptions>::value,
++              "OrtRunOptions must remain move constructible.");
++static_assert(std::is_move_assignable<OrtRunOptions>::value,
++              "OrtRunOptions must remain move assignable.");
++
++TEST(RunTerminationFlagTest, ObservesConcurrentLocalRequestAndReset) {
++  OrtRunOptions options;
++  std::atomic<bool> requester_started{false};
++  OrtStatus* request_status = nullptr;
++
++  std::thread requester([&]() {
++    requester_started.store(true, std::memory_order_release);
++    request_status = OrtApis::RunOptionsSetTerminate(&options);
++  });
++
++  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
++  bool observed_request = false;
++  while (std::chrono::steady_clock::now() < deadline) {
++    if (requester_started.load(std::memory_order_acquire) && options.terminate) {
++      observed_request = true;
++      break;
++    }
++    std::this_thread::yield();
++  }
++  requester.join();
++
++  EXPECT_EQ(request_status, nullptr);
++  EXPECT_TRUE(observed_request);
++  EXPECT_TRUE(options.terminate);
++  EXPECT_EQ(OrtApis::RunOptionsUnsetTerminate(&options), nullptr);
++  EXPECT_FALSE(options.terminate);
++}
++
++TEST(RunTerminationFlagTest, MatchesOnlyTheBoundExternalGeneration) {
++  std::atomic<uint32_t> cancellation_generation{6};
++  std::atomic<uint32_t> observed_generation{0};
++  RunTerminationFlag flag;
++  flag.BindCancellationGeneration(&cancellation_generation, &observed_generation, 7);
++
++  EXPECT_FALSE(flag);
++  EXPECT_EQ(observed_generation.load(std::memory_order_acquire), 0u);
++  cancellation_generation.store(7, std::memory_order_release);
++  EXPECT_TRUE(flag);
++  EXPECT_EQ(observed_generation.load(std::memory_order_acquire), 0u);
++  flag.AcknowledgeExternalCancellation();
++  EXPECT_EQ(observed_generation.load(std::memory_order_acquire), 7u);
++
++  flag.UnbindCancellationGeneration();
++  EXPECT_FALSE(flag);
++  flag.BindCancellationGeneration(&cancellation_generation, &observed_generation, 8);
++  EXPECT_FALSE(flag);
++}
++
++TEST(RunTerminationFlagTest, DoesNotAcknowledgeARequestThatExecutionNeverObserved) {
++  std::atomic<uint32_t> cancellation_generation{0};
++  std::atomic<uint32_t> observed_generation{0};
++  RunTerminationFlag flag;
++  flag.BindCancellationGeneration(&cancellation_generation, &observed_generation, 19);
++
++  // Model a request that arrives after the last execution checkpoint but
++  // before OrtEndRunCancellation. Merely writing the request cannot mask an
++  // unrelated OrtRun error as a cancellation.
++  cancellation_generation.store(19, std::memory_order_release);
++  EXPECT_EQ(observed_generation.load(std::memory_order_acquire), 0u);
++
++  flag.UnbindCancellationGeneration();
++  EXPECT_FALSE(flag);
++  EXPECT_EQ(observed_generation.load(std::memory_order_acquire), 0u);
++}
++
++TEST(RunTerminationFlagTest, ObservedRequestStillNeedsTheCancellationStatusToWin) {
++  std::atomic<uint32_t> cancellation_generation{23};
++  std::atomic<uint32_t> observed_generation{0};
++  RunTerminationFlag flag;
++  flag.BindCancellationGeneration(&cancellation_generation, &observed_generation, 23);
++
++  // An executor can observe cancellation after another stream has already won
++  // the run's first-failure race. Without the winning-status acknowledgement,
++  // JavaScript must retain that independent failure.
++  EXPECT_TRUE(flag);
++  EXPECT_EQ(observed_generation.load(std::memory_order_acquire), 0u);
++
++  flag.UnbindCancellationGeneration();
++  EXPECT_EQ(observed_generation.load(std::memory_order_acquire), 0u);
++}
++
++TEST(RunTerminationFlagTest, CopiesLocalStateWithoutLeakingActiveGeneration) {
++  std::atomic<uint32_t> cancellation_generation{0};
++  std::atomic<uint32_t> observed_generation{0};
++  RunTerminationFlag original;
++  original.Request();
++  original.BindCancellationGeneration(&cancellation_generation, &observed_generation, 11);
++
++  RunTerminationFlag copied{original};
++  EXPECT_TRUE(copied);
++  copied.Reset();
++  cancellation_generation.store(11, std::memory_order_release);
++
++  EXPECT_TRUE(original);
++  EXPECT_FALSE(copied);
++}
++
++TEST(RunTerminationFlagTest, AssignmentDropsPreviousExternalBinding) {
++  std::atomic<uint32_t> cancellation_generation{13};
++  std::atomic<uint32_t> observed_generation{0};
++  RunTerminationFlag source;
++  RunTerminationFlag destination;
++  destination.BindCancellationGeneration(&cancellation_generation, &observed_generation, 13);
++  ASSERT_TRUE(destination);
++
++  destination = source;
++  EXPECT_FALSE(destination);
++}
++
++TEST(RunTerminationFlagTest, MovePreservesLocalStateWithoutMovingExternalBinding) {
++  std::atomic<uint32_t> cancellation_generation{17};
++  std::atomic<uint32_t> observed_generation{0};
++  RunTerminationFlag source;
++  source.Request();
++  source.BindCancellationGeneration(&cancellation_generation, &observed_generation, 17);
++
++  RunTerminationFlag moved{std::move(source)};
++  EXPECT_TRUE(moved);
++  moved.Reset();
++  EXPECT_FALSE(moved);
++}
++
++}  // namespace test
++}  // namespace onnxruntime
+diff --git a/onnxruntime/wasm/api.cc b/onnxruntime/wasm/api.cc
+index 147eab7116..54e48d39c0 100644
+--- a/onnxruntime/wasm/api.cc
++++ b/onnxruntime/wasm/api.cc
+@@ -16,14 +16,54 @@ WGPUDevice GetDevice(int);
+ }  // namespace onnxruntime
+ #endif
+ 
++#include <atomic>
++#include <cstddef>
++#include <cstdint>
+ #include <iostream>
+ #include <sstream>
+ #include <vector>
+ 
++namespace onnxruntime {
++void BindRunCancellationGeneration(OrtRunOptions* options,
++                                   const std::atomic<uint32_t>* cancellation_generation,
++                                   std::atomic<uint32_t>* observed_generation,
++                                   uint32_t generation) noexcept;
++void UnbindRunCancellationGeneration(OrtRunOptions* options) noexcept;
++}  // namespace onnxruntime
++
+ namespace {
+ OrtEnv* g_env;
+ OrtErrorCode g_last_error_code;
+ std::string g_last_error_message;
++
++struct alignas(uint32_t) RunCancellationMailbox {
++  std::atomic<uint32_t> active_generation{0};
++  std::atomic<uint32_t> cancellation_generation{0};
++  std::atomic<uint32_t> observed_generation{0};
++};
++
++static_assert(sizeof(std::atomic<uint32_t>) == sizeof(uint32_t),
++              "Wasm cancellation mailbox cells must match JavaScript Uint32Array cells.");
++static_assert(std::atomic<uint32_t>::is_always_lock_free,
++              "Wasm cancellation mailbox cells must use native atomic instructions.");
++static_assert(offsetof(RunCancellationMailbox, cancellation_generation) == sizeof(uint32_t),
++              "Wasm cancellation mailbox cells must be contiguous.");
++static_assert(offsetof(RunCancellationMailbox, observed_generation) == 2 * sizeof(uint32_t),
++              "Wasm cancellation acknowledgement must follow the public mailbox cells.");
++
++RunCancellationMailbox g_run_cancellation_mailbox;
++std::atomic<uint32_t> g_next_run_generation{1};
++
++uint32_t NextRunGeneration() {
++  // Generation zero means "no active cancellable run", so skip it. Generation
++  // reuse after the full 32-bit space is outside the supported lifetime of one
++  // Wasm instance; callers must not retain start events indefinitely.
++  uint32_t generation = g_next_run_generation.fetch_add(1, std::memory_order_relaxed);
++  if (generation == 0) {
++    generation = g_next_run_generation.fetch_add(1, std::memory_order_relaxed);
++  }
++  return generation;
++}
+ }  // namespace
+ 
+ enum DataLocation {
+@@ -530,6 +570,61 @@ int OrtReleaseRunOptions(OrtRunOptions* run_options) {
+   return ORT_OK;
+ }
+ 
++void* OrtGetRunCancellationMailbox() {
++  return static_cast<void*>(&g_run_cancellation_mailbox.active_generation);
++}
++
++uint32_t OrtBeginRunCancellation(OrtRunOptions* run_options) {
++  if (run_options == nullptr) {
++    return 0;
++  }
++
++  const uint32_t generation = NextRunGeneration();
++  uint32_t expected_generation = 0;
++  if (!g_run_cancellation_mailbox.active_generation.compare_exchange_strong(
++          expected_generation, generation, std::memory_order_acq_rel, std::memory_order_acquire)) {
++    return 0;
++  }
++
++  // No observer can know this generation before OrtBeginRunCancellation()
++  // returns, so clearing an old request here cannot race with its controller.
++  // The generation counter skips zero; a full 32-bit reuse remains outside the
++  // supported lifetime of one Wasm instance.
++  g_run_cancellation_mailbox.cancellation_generation.store(0, std::memory_order_release);
++  g_run_cancellation_mailbox.observed_generation.store(0, std::memory_order_release);
++  onnxruntime::BindRunCancellationGeneration(
++      run_options, &g_run_cancellation_mailbox.cancellation_generation,
++      &g_run_cancellation_mailbox.observed_generation, generation);
++  return generation;
++}
++
++int OrtIsRunCancellationRequested(uint32_t generation) {
++  return generation != 0 &&
++         g_run_cancellation_mailbox.cancellation_generation.load(std::memory_order_acquire) == generation;
++}
++
++int OrtEndRunCancellation(OrtRunOptions* run_options, uint32_t generation) {
++  if (run_options == nullptr || generation == 0) {
++    return 0;
++  }
++
++  // Capture the executor acknowledgement before publishing the mailbox as
++  // free. A later run is allowed to clear the private acknowledgement cell as
++  // soon as the active-generation compare/exchange succeeds below.
++  const bool cancellation_observed =
++      g_run_cancellation_mailbox.observed_generation.load(std::memory_order_acquire) == generation;
++  uint32_t expected_generation = generation;
++  if (g_run_cancellation_mailbox.active_generation.compare_exchange_strong(
++          expected_generation, 0, std::memory_order_acq_rel, std::memory_order_acquire)) {
++    // _OrtRun has returned before this function is called, so executor workers
++    // no longer hold references to this flag and it is safe to unbind.
++    onnxruntime::UnbindRunCancellationGeneration(run_options);
++    return cancellation_observed;
++  }
++
++  return 0;
++}
++
+ OrtIoBinding* OrtCreateBinding(OrtSession* session) {
+   OrtIoBinding* binding = nullptr;
+   int error_code = CHECK_STATUS(CreateIoBinding, session, &binding);
+diff --git a/onnxruntime/wasm/api.h b/onnxruntime/wasm/api.h
+index c488c16f4a..f7a012e953 100644
+--- a/onnxruntime/wasm/api.h
++++ b/onnxruntime/wasm/api.h
+@@ -15,6 +15,7 @@
+ #endif
+ 
+ #include <stddef.h>
++#include <stdint.h>
+ 
+ struct OrtSession;
+ using ort_session_handle_t = OrtSession*;
+@@ -223,6 +224,35 @@ int EMSCRIPTEN_KEEPALIVE OrtAddRunConfigEntry(ort_run_options_handle_t run_optio
+  */
+ int EMSCRIPTEN_KEEPALIVE OrtReleaseRunOptions(ort_run_options_handle_t run_options);
+ 
++/**
++ * get the address of the process-lifetime cancellation mailbox.
++ * The mailbox contains three aligned uint32_t cells: active generation,
++ * requested cancellation generation, and executor-observed generation. Only
++ * the first two cells form the public cross-agent cancellation pair. In a
++ * threaded Wasm build the backing memory is a SharedArrayBuffer and another
++ * JavaScript agent may update the requested generation with Atomics.store().
++ */
++void* EMSCRIPTEN_KEEPALIVE OrtGetRunCancellationMailbox();
++
++/**
++ * bind run_options to a unique cancellation generation and publish it as active.
++ * The caller must use a new run-options handle for each serialized Run call.
++ * @returns the non-zero generation, or zero when another cancellable run is active.
++ */
++uint32_t EMSCRIPTEN_KEEPALIVE OrtBeginRunCancellation(ort_run_options_handle_t run_options);
++
++/**
++ * test whether JavaScript requested cancellation for generation.
++ */
++int EMSCRIPTEN_KEEPALIVE OrtIsRunCancellationRequested(uint32_t generation);
++
++/**
++ * unbind the generation and clear it from the process-lifetime mailbox.
++ * @returns one only when an execution checkpoint observed this cancellation.
++ */
++int EMSCRIPTEN_KEEPALIVE OrtEndRunCancellation(ort_run_options_handle_t run_options,
++                                               uint32_t generation);
++
+ /**
+  * create an instance of ORT IO binding.
+  */

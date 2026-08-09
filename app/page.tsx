@@ -2911,10 +2911,19 @@ export default function Home() {
       prefetchQueue.pause();
       const prefetchControls: BufferedPrefetchControls = {
         dispose: () => prefetchQueue.dispose(),
-        // Chromium cannot interrupt a synchronous multithreaded WASM call.
-        // Suspend new lookahead but retain the one short passage already in
-        // flight so Resume keeps the warm model and reuses its result.
-        pause: () => prefetchQueue.pause({ cancelPending: false }),
+        pause: () => {
+          const runtime = getOfflineSpeechReadiness();
+          const canCancelActiveInference =
+            isOffline &&
+            runtime.device === "wasm" &&
+            (runtime.wasmThreads ?? 1) > 1;
+          // Abort only lookahead synthesis that the threaded-WASM mailbox can
+          // interrupt. Safe WebGPU/W1/Azure fallback keeps its in-flight result,
+          // and every backend retains audio that has already become ready.
+          return prefetchQueue.pause({
+            cancelPending: canCancelActiveInference,
+          });
+        },
         resume: () => prefetchQueue.resume(),
       };
       bufferedPrefetchControlsRef.current = prefetchControls;
