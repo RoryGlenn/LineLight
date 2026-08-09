@@ -62,6 +62,8 @@ const MAX_FAR_SEEK_START_MS = 500;
 const CANCELLATION_TIMEOUT_MS = 750;
 const CANCELLATION_TIMEOUT_TOLERANCE_MS = 250;
 const FALLBACK_OBSERVATION_MS = CANCELLATION_TIMEOUT_MS + 250;
+const FAR_SEEK_RESET_ANCHOR_KIND = "reviewed-fixture-token";
+const FAR_SEEK_RESET_ANCHOR_ORDINAL = 0;
 const PREPARED_PROFILE_ORIGIN_PORT = 5212;
 const EXTERNAL_MODEL_REQUEST_PATTERN =
   /(?:huggingface\.co|cdn\.jsdelivr\.net|raw\.githubusercontent\.com|kokoro|onnx\/model.*\.onnx|voices\/.*\.bin)/iu;
@@ -505,11 +507,77 @@ export function validateOfflineCancellationEvidence(evidence) {
     prepared?.success === true &&
       prepared?.audioCreatedBeforePause === true &&
       prepared?.newSynthesisRequests === 0 &&
-      prepared?.discarded === false,
+      prepared?.discarded === false &&
+      Number.isInteger(prepared?.snapshotSequence),
     "Resume did not reuse already prepared audio unchanged",
   );
 
   const farSeek = evidence?.threadedWasm?.farSeek;
+  const farSeekReset = farSeek?.reset;
+  pushFailure(
+    failures,
+    farSeekReset?.anchor?.kind === FAR_SEEK_RESET_ANCHOR_KIND &&
+      farSeekReset?.anchor?.ordinal === FAR_SEEK_RESET_ANCHOR_ORDINAL &&
+      farSeekReset?.anchor?.matchCount === 1 &&
+      farSeekReset?.preResetPreparedSnapshotSequence ===
+        prepared?.snapshotSequence &&
+      finiteNumber(prepared?.playedAtMs) &&
+      finiteNumber(farSeekReset?.actionAtMs) &&
+      prepared.playedAtMs < farSeekReset.actionAtMs &&
+      Number.isInteger(farSeekReset?.preResetRequestCount) &&
+      farSeekReset.preResetRequestCount >= 1 &&
+      farSeekReset.preResetRequestCount >=
+        farSeekReset.preResetOpenRequestCount &&
+      Number.isInteger(farSeekReset?.preResetMaxRequestId) &&
+      Number.isInteger(farSeekReset?.preResetOpenRequestCount) &&
+      farSeekReset.preResetOpenRequestCount >= 0 &&
+      farSeekReset?.preResetOpenTerminalCount ===
+        farSeekReset.preResetOpenRequestCount &&
+      farSeekReset?.preResetErrorTerminalCount === 0 &&
+      Number.isInteger(farSeekReset?.preResetRequestBoundarySequence) &&
+      farSeekReset.preResetRequestBoundarySequence >=
+        farSeekReset.preResetPreparedSnapshotSequence &&
+      Number.isInteger(farSeekReset?.boundarySequence) &&
+      farSeekReset.boundarySequence >=
+        farSeekReset.preResetRequestBoundarySequence &&
+      farSeekReset?.currentSynthesisRequested === true &&
+      Number.isInteger(farSeekReset?.currentRequestId) &&
+      Number.isInteger(farSeekReset?.lookaheadRequestId) &&
+      Number.isInteger(farSeekReset?.currentRequestSequence) &&
+      Number.isInteger(farSeekReset?.currentRunStartSequence) &&
+      Number.isInteger(farSeekReset?.currentSuccessSequence) &&
+      Number.isInteger(farSeekReset?.lookaheadRequestSequence) &&
+      Number.isInteger(farSeekReset?.lookaheadRunStartSequence) &&
+      farSeekReset.currentRequestId > farSeekReset.preResetMaxRequestId &&
+      farSeekReset.currentRequestId !== farSeekReset.lookaheadRequestId &&
+      farSeekReset.lookaheadRequestId > farSeekReset.currentRequestId &&
+      farSeekReset.lookaheadRequestId === farSeek?.discardedRequestId &&
+      farSeekReset.currentRequestSequence > farSeekReset.boundarySequence &&
+      farSeekReset.currentRequestSequence <
+        farSeekReset.currentRunStartSequence &&
+      farSeekReset.currentRunStartSequence <
+        farSeekReset.currentSuccessSequence &&
+      farSeekReset.currentSuccessSequence <
+        farSeekReset.lookaheadRequestSequence &&
+      farSeekReset.lookaheadRequestSequence <
+        farSeekReset.lookaheadRunStartSequence &&
+      farSeekReset.currentRequestAtMs <= farSeekReset.currentRunStartAtMs &&
+      farSeekReset.actionAtMs < farSeekReset.currentRequestAtMs &&
+      farSeekReset.currentRunStartAtMs <= farSeekReset.currentSuccessAtMs &&
+      farSeekReset.currentSuccessAtMs < farSeekReset.currentAudioPlayingAtMs &&
+      farSeekReset.currentAudioPlayingAtMs <
+        farSeekReset.lookaheadRequestAtMs &&
+      farSeekReset.lookaheadRequestAtMs <= farSeekReset.lookaheadRunStartAtMs &&
+      farSeekReset.currentWorkerEpoch === first?.workerEpoch &&
+      farSeekReset.currentSessionGeneration === first?.sessionGeneration &&
+      farSeekReset.lookaheadWorkerEpoch === first?.workerEpoch &&
+      farSeekReset.lookaheadSessionGeneration === first?.sessionGeneration &&
+      farSeekReset.workerTerminations === 0 &&
+      farSeekReset.modelRequests === 0 &&
+      farSeekReset.backendChanges === 0 &&
+      farSeekReset.sessionIdentityChanges === 0,
+    "far-seek reset did not establish a fresh active same-session lookahead after prepared-audio proof",
+  );
   pushFailure(
     failures,
     farSeek?.discardedRunProvenActive === true &&
@@ -521,11 +589,20 @@ export function validateOfflineCancellationEvidence(evidence) {
       farSeek?.discardedWorkerEpoch === farSeek?.targetWorkerEpoch &&
       farSeek?.discardedSessionGeneration ===
         farSeek?.targetSessionGeneration &&
+      farSeek?.discardedWorkerEpoch === first?.workerEpoch &&
+      farSeek?.discardedSessionGeneration === first?.sessionGeneration &&
+      farSeek?.targetRequestId > farSeek?.discardedRequestId &&
+      farSeekReset?.lookaheadRunStartAtMs <= farSeek?.actionAtMs &&
+      farSeek.actionAtMs <= farSeek?.discardedTerminalAtMs &&
+      farSeek.discardedTerminalAtMs <= farSeek?.targetRunStartAtMs &&
       finiteNumber(farSeek?.targetAudioPlayingAtMs) &&
       finiteNumber(farSeek?.targetAudioLatencyMs) &&
       finiteNumber(farSeek?.targetRunStartAtMs) &&
       farSeek.targetAudioPlayingAtMs >= farSeek.targetRunStartAtMs &&
-      farSeek.targetAudioLatencyMs >= farSeek.targetRunStartLatencyMs,
+      farSeek.targetRunStartLatencyMs ===
+        farSeek.targetRunStartAtMs - farSeek.actionAtMs &&
+      farSeek.targetAudioLatencyMs ===
+        farSeek.targetAudioPlayingAtMs - farSeek.actionAtMs,
     `far-seek target did not start within ${MAX_FAR_SEEK_START_MS}ms behind a cooperatively discarded run`,
   );
 
@@ -1769,6 +1846,35 @@ function installBrowserInstrumentation() {
       element.click();
       return action;
     },
+    resetForFarSeek(anchorKind, anchorOrdinal) {
+      const matches = Array.from(
+        globalThis.document.querySelectorAll("#pdf-page-1 .pdf-word-overlay"),
+      ).filter(
+        (element) => element.getAttribute("aria-label") === "definition",
+      );
+      if (matches.length !== 1) {
+        throw new Error("The reviewed far-seek reset anchor was not unique.");
+      }
+      const workerEvents = state.workerEvents.slice();
+      const requestBoundarySequence = workerEvents.at(-1)?.sequence ?? 0;
+      const requests = workerEvents
+        .filter(
+          (entry) => entry.direction === "out" && entry.type === "synthesize",
+        )
+        .map(({ epoch, id, sequence }) => ({ epoch, id, sequence }));
+      const action = this.action("reset-for-far-seek");
+      matches[0].click();
+      return {
+        action,
+        anchor: {
+          kind: anchorKind,
+          matchCount: matches.length,
+          ordinal: anchorOrdinal,
+        },
+        requestBoundarySequence,
+        requests,
+      };
+    },
     snapshot() {
       return globalThis.structuredClone({
         actions: state.actions,
@@ -2339,6 +2445,30 @@ function nextEventSequence(state) {
   return state.workerEvents.at(-1)?.sequence ?? 0;
 }
 
+function synthesisTerminalForRequest(state, request) {
+  return state.workerEvents.find(
+    (entry) =>
+      entry.direction === "in" &&
+      entry.epoch === request.epoch &&
+      entry.id === request.id &&
+      entry.sequence > request.sequence &&
+      ["canceled", "error", "success"].includes(entry.type),
+  );
+}
+
+export function findUnterminatedSynthesisRequests(
+  state,
+  maximumRequestSequence = Number.POSITIVE_INFINITY,
+) {
+  return state.workerEvents.filter(
+    (entry) =>
+      entry.direction === "out" &&
+      entry.type === "synthesize" &&
+      entry.sequence <= maximumRequestSequence &&
+      !synthesisTerminalForRequest(state, entry),
+  );
+}
+
 async function startNarration(cdp, timeoutMs) {
   const marker = await browserSnapshot(cdp);
   const action = await clickRecordedAction(cdp, "play-narration");
@@ -2372,6 +2502,7 @@ async function startNarration(cdp, timeoutMs) {
     action,
     audio: playing.result,
     request: currentRequest,
+    state: playing.state,
     success,
   };
 }
@@ -2528,6 +2659,7 @@ async function waitForActiveSpeculation(
             entry.id === request.id,
         );
         if (!start) continue;
+        if (synthesisTerminalForRequest(state, request)) continue;
         const playing = latestNarrationAudioPlaying(state);
         if (!playing || playing.event.atMs > request.atMs) continue;
         return { playing, request, start };
@@ -2659,6 +2791,148 @@ async function resumeNarration(cdp, afterMs, timeoutMs) {
     timeoutMs,
   );
   return { action, ...observed.result, state: observed.state };
+}
+
+async function prepareFarSeekReset({
+  cdp,
+  excludedIds,
+  originalIdentity,
+  preparedState,
+  timeoutMs,
+}) {
+  const preparedSnapshotSequence = nextEventSequence(preparedState);
+  const reset = await evaluate(
+    cdp,
+    `globalThis.__lineLightIssue55.resetForFarSeek(
+      ${JSON.stringify(FAR_SEEK_RESET_ANCHOR_KIND)},
+      ${FAR_SEEK_RESET_ANCHOR_ORDINAL}
+    )`,
+  );
+  const preResetRequests = reset.requests;
+  if (
+    !preResetRequests.length ||
+    reset.requestBoundarySequence < preparedSnapshotSequence
+  ) {
+    throw new Error("The far-seek reset lacks a valid prior request boundary.");
+  }
+  await waitForExpression(
+    cdp,
+    `document.querySelector(".play-button")?.getAttribute("aria-label") === "Play narration"`,
+    "the reset narration transport",
+    timeoutMs,
+  );
+  const settled = await waitForBrowserState(
+    cdp,
+    (state) => {
+      const terminals = preResetRequests.map((request) =>
+        synthesisTerminalForRequest(state, request),
+      );
+      return terminals.every(Boolean) ? { terminals } : null;
+    },
+    "all requests preceding the far-seek reset to reach terminal state",
+    timeoutMs,
+  );
+  const errorTerminals = settled.result.terminals.filter(
+    (terminal) => terminal.type === "error",
+  );
+  if (errorTerminals.length) {
+    throw new Error("A request preceding the far-seek reset failed.");
+  }
+  const openTerminals = settled.result.terminals.filter(
+    (terminal) => terminal.sequence > reset.requestBoundarySequence,
+  );
+  const boundarySequence = nextEventSequence(settled.state);
+  const current = await startNarration(cdp, timeoutMs);
+  const currentStart = current.state.workerEvents.find(
+    (entry) =>
+      entry.direction === "in" &&
+      entry.type === "wasm-run-start" &&
+      entry.id === current.request.id &&
+      entry.epoch === current.request.epoch &&
+      entry.sequence > current.request.sequence,
+  );
+  if (
+    !currentStart ||
+    current.request.sequence <= boundarySequence ||
+    current.success.sequence <= currentStart.sequence ||
+    current.audio.event.atMs <= current.success.atMs ||
+    excludedIds.includes(current.request.id) ||
+    preResetRequests.some(
+      (request) =>
+        request.id === current.request.id &&
+        request.epoch === current.request.epoch,
+    )
+  ) {
+    throw new Error(
+      "The far-seek reset did not produce a new uncached current synthesis after its terminal boundary.",
+    );
+  }
+  if (
+    currentStart.epoch !== originalIdentity.workerEpoch ||
+    currentStart.sessionGeneration !== originalIdentity.sessionGeneration
+  ) {
+    throw new Error("The far-seek reset replaced the warm worker or session.");
+  }
+
+  const active = await waitForActiveSpeculation(cdp, {
+    afterSequence: current.success.sequence,
+    excludeIds: [
+      ...excludedIds,
+      ...preResetRequests.map((request) => request.id),
+      current.request.id,
+    ],
+    timeoutMs,
+  });
+  if (
+    active.request.sequence <= current.success.sequence ||
+    active.request.atMs <= current.audio.event.atMs ||
+    active.start.atMs <= current.audio.event.atMs ||
+    active.request.id === current.request.id ||
+    active.start.epoch !== originalIdentity.workerEpoch ||
+    active.start.sessionGeneration !== originalIdentity.sessionGeneration
+  ) {
+    throw new Error(
+      "The far-seek lookahead was not a new active run after current audio reached playing.",
+    );
+  }
+
+  return {
+    active,
+    current,
+    evidence: {
+      actionAtMs: reset.action.atMs,
+      actionWallTimeMs: reset.action.wallTimeMs,
+      anchor: reset.anchor,
+      boundarySequence,
+      currentAudioPlayingAtMs: current.audio.event.atMs,
+      currentRequestAtMs: current.request.atMs,
+      currentRequestId: current.request.id,
+      currentRequestSequence: current.request.sequence,
+      currentRunStartAtMs: currentStart.atMs,
+      currentRunStartSequence: currentStart.sequence,
+      currentSessionGeneration: currentStart.sessionGeneration,
+      currentSuccessAtMs: current.success.atMs,
+      currentSuccessSequence: current.success.sequence,
+      currentSynthesisRequested: true,
+      currentWorkerEpoch: currentStart.epoch,
+      lookaheadRequestAtMs: active.request.atMs,
+      lookaheadRequestId: active.request.id,
+      lookaheadRequestSequence: active.request.sequence,
+      lookaheadRunStartAtMs: active.start.atMs,
+      lookaheadRunStartSequence: active.start.sequence,
+      lookaheadSessionGeneration: active.start.sessionGeneration,
+      lookaheadWorkerEpoch: active.start.epoch,
+      preResetOpenRequestCount: openTerminals.length,
+      preResetOpenTerminalCount: openTerminals.length,
+      preResetErrorTerminalCount: errorTerminals.length,
+      preResetMaxRequestId: Math.max(
+        ...preResetRequests.map((request) => request.id),
+      ),
+      preResetPreparedSnapshotSequence: preparedSnapshotSequence,
+      preResetRequestBoundarySequence: reset.requestBoundarySequence,
+      preResetRequestCount: preResetRequests.length,
+    },
+  };
 }
 
 async function runThreadedWasmScenario({
@@ -2841,14 +3115,21 @@ async function runThreadedWasmScenario({
     playedAtMs: preparedPlayed.result.playing.atMs,
     requestId: followupActive.request.id,
     resumedCurrentAtMs: preparedResume.event.atMs,
+    snapshotSequence: nextEventSequence(preparedPlayed.state),
     success: true,
   };
 
-  const seekDiscard = await waitForActiveSpeculation(cdp, {
-    afterSequence: followupSuccess.result.sequence,
-    excludeIds: [...excludedIds, followupActive.request.id],
+  const reset = await prepareFarSeekReset({
+    cdp,
+    excludedIds: [...excludedIds, followupActive.request.id],
+    originalIdentity: {
+      sessionGeneration: first.sessionGeneration,
+      workerEpoch: first.workerEpoch,
+    },
+    preparedState: preparedPlayed.state,
     timeoutMs,
   });
+  const seekDiscard = reset.active;
   let crossing = null;
   for (let index = 0; index < 16 && !crossing; index += 1) {
     const action = await clickRecordedAction(
@@ -2871,6 +3152,13 @@ async function runThreadedWasmScenario({
   if (!crossing) {
     throw new Error("Next Sentence never crossed the buffered chunk boundary.");
   }
+  const discardedTerminalBeforeAction = crossing.state.workerEvents.some(
+    (entry) =>
+      entry.id === seekDiscard.request.id &&
+      entry.epoch === seekDiscard.start.epoch &&
+      entry.atMs < crossing.action.atMs &&
+      ["wasm-run-end", "success", "error", "canceled"].includes(entry.type),
+  );
   const farSeekState = await waitForBrowserState(
     cdp,
     (state) => {
@@ -2898,7 +3186,9 @@ async function runThreadedWasmScenario({
     actionAtMs: crossing.action.atMs,
     discardedRequestId: seekDiscard.request.id,
     discardedRunCooperativelyCanceled: true,
-    discardedRunProvenActive: seekDiscard.start.atMs <= crossing.action.atMs,
+    discardedRunProvenActive:
+      seekDiscard.start.atMs <= crossing.action.atMs &&
+      !discardedTerminalBeforeAction,
     discardedSessionGeneration: seekDiscard.start.sessionGeneration,
     discardedTerminalAtMs: farSeekState.result.discardedTerminal.atMs,
     discardedWorkerEpoch: seekDiscard.start.epoch,
@@ -2934,6 +3224,32 @@ async function runThreadedWasmScenario({
   farSeek.targetAudioPlayingAtMs = targetPlaying.result.event.atMs;
   farSeek.targetAudioLatencyMs =
     targetPlaying.result.event.atMs - crossing.action.atMs;
+  const resetPhaseEvents = targetPlaying.state.workerEvents.filter(
+    (entry) => entry.atMs >= reset.evidence.actionAtMs,
+  );
+  farSeek.reset = {
+    ...reset.evidence,
+    backendChanges: resetPhaseEvents.filter(
+      (entry) =>
+        entry.backendDevice !== null &&
+        (entry.backendDevice !== initial.success.backendDevice ||
+          entry.wasmThreads !== initial.success.wasmThreads),
+    ).length,
+    modelRequests: countModelRequests(
+      networkRequests,
+      reset.evidence.actionWallTimeMs,
+      targetPlaying.result.event.wallTimeMs,
+    ),
+    sessionIdentityChanges: resetPhaseEvents.filter(
+      (entry) =>
+        entry.type === "wasm-run-start" &&
+        (entry.epoch !== first.workerEpoch ||
+          entry.sessionGeneration !== first.sessionGeneration),
+    ).length,
+    workerTerminations: resetPhaseEvents.filter(
+      (entry) => entry.type === "worker-terminated",
+    ).length,
+  };
 
   const preTimeoutActive = await waitForActiveSpeculation(cdp, {
     afterSequence: targetSuccess.result.sequence,

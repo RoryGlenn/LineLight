@@ -8,6 +8,7 @@ import {
   countTrackedProcessSurvivors,
   evaluateBrowserStatePredicate,
   findEvidencePrivacyViolations,
+  findUnterminatedSynthesisRequests,
   isAttachedTargetBootstrapRequest,
   parseArguments,
   selectOwnedProcessTree,
@@ -230,13 +231,54 @@ function passingEvidence() {
       },
       farSeek: {
         actionAtMs: 20_000,
+        discardedRequestId: 41,
         discardedRunCooperativelyCanceled: true,
         discardedRunProvenActive: true,
         discardedSessionGeneration: 3,
         discardedTerminalAtMs: 20_020,
         discardedWorkerEpoch: 1,
+        reset: {
+          actionAtMs: 16_000,
+          actionWallTimeMs: 1_000_000,
+          anchor: {
+            kind: "reviewed-fixture-token",
+            matchCount: 1,
+            ordinal: 0,
+          },
+          backendChanges: 0,
+          boundarySequence: 210,
+          currentAudioPlayingAtMs: 16_110,
+          currentRequestAtMs: 16_010,
+          currentRequestId: 40,
+          currentRequestSequence: 211,
+          currentRunStartAtMs: 16_020,
+          currentRunStartSequence: 212,
+          currentSessionGeneration: 3,
+          currentSuccessAtMs: 16_100,
+          currentSuccessSequence: 213,
+          currentSynthesisRequested: true,
+          currentWorkerEpoch: 1,
+          lookaheadRequestAtMs: 16_120,
+          lookaheadRequestId: 41,
+          lookaheadRequestSequence: 214,
+          lookaheadRunStartAtMs: 16_130,
+          lookaheadRunStartSequence: 215,
+          lookaheadSessionGeneration: 3,
+          lookaheadWorkerEpoch: 1,
+          modelRequests: 0,
+          preResetErrorTerminalCount: 0,
+          preResetOpenRequestCount: 1,
+          preResetOpenTerminalCount: 1,
+          preResetMaxRequestId: 39,
+          preResetPreparedSnapshotSequence: 200,
+          preResetRequestBoundarySequence: 205,
+          preResetRequestCount: 8,
+          sessionIdentityChanges: 0,
+          workerTerminations: 0,
+        },
         targetAudioLatencyMs: 100,
         targetAudioPlayingAtMs: 20_100,
+        targetRequestId: 42,
         targetRunStartAtMs: 20_030,
         targetRunStartLatencyMs: 30,
         targetSessionGeneration: 3,
@@ -247,6 +289,8 @@ function passingEvidence() {
         audioCreatedBeforePause: true,
         discarded: false,
         newSynthesisRequests: 0,
+        playedAtMs: 15_000,
+        snapshotSequence: 200,
         success: true,
       },
       sameSessionFollowup: {
@@ -427,9 +471,121 @@ test("fails closed on every source, timing, lifecycle, and fallback gate", () =>
       "already prepared audio",
     ],
     [
+      "far seek reset anchor ambiguity",
+      (evidence) => {
+        evidence.threadedWasm.farSeek.reset.anchor.matchCount = 2;
+      },
+      "far-seek reset",
+    ],
+    [
+      "far seek reset left an old request unterminated",
+      (evidence) => {
+        evidence.threadedWasm.farSeek.reset.preResetOpenTerminalCount = 0;
+      },
+      "far-seek reset",
+    ],
+    [
+      "far seek reset old request error",
+      (evidence) => {
+        evidence.threadedWasm.farSeek.reset.preResetErrorTerminalCount = 1;
+      },
+      "far-seek reset",
+    ],
+    [
+      "far seek reset request escaped atomic boundary",
+      (evidence) => {
+        evidence.threadedWasm.farSeek.reset.preResetRequestBoundarySequence = 199;
+      },
+      "far-seek reset",
+    ],
+    [
+      "far seek reset reused cached current audio",
+      (evidence) => {
+        evidence.threadedWasm.farSeek.reset.currentSynthesisRequested = false;
+      },
+      "far-seek reset",
+    ],
+    [
+      "far seek reset reused a prior request ID",
+      (evidence) => {
+        evidence.threadedWasm.farSeek.reset.currentRequestId = 39;
+      },
+      "far-seek reset",
+    ],
+    [
+      "far seek lookahead began before current audio",
+      (evidence) => {
+        evidence.threadedWasm.farSeek.reset.lookaheadRequestAtMs = 16_100;
+      },
+      "far-seek reset",
+    ],
+    [
+      "far seek reset action followed current request",
+      (evidence) => {
+        evidence.threadedWasm.farSeek.reset.actionAtMs = 16_020;
+      },
+      "far-seek reset",
+    ],
+    [
+      "far seek reset replaced the warm session",
+      (evidence) => {
+        evidence.threadedWasm.farSeek.reset.currentSessionGeneration = 9;
+      },
+      "far-seek reset",
+    ],
+    [
+      "far seek reset phase model request",
+      (evidence) => {
+        evidence.threadedWasm.farSeek.reset.modelRequests = 1;
+      },
+      "far-seek reset",
+    ],
+    [
+      "far seek reset backend change",
+      (evidence) => {
+        evidence.threadedWasm.farSeek.reset.backendChanges = 1;
+      },
+      "far-seek reset",
+    ],
+    [
+      "far seek reset worker termination",
+      (evidence) => {
+        evidence.threadedWasm.farSeek.reset.workerTerminations = 1;
+      },
+      "far-seek reset",
+    ],
+    [
+      "far seek reset session delta",
+      (evidence) => {
+        evidence.threadedWasm.farSeek.reset.sessionIdentityChanges = 1;
+      },
+      "far-seek reset",
+    ],
+    [
       "far seek latency",
       (evidence) => {
         evidence.threadedWasm.farSeek.targetRunStartLatencyMs = 501;
+      },
+      "far-seek target",
+    ],
+    [
+      "far seek action preceded active lookahead",
+      (evidence) => {
+        evidence.threadedWasm.farSeek.reset.lookaheadRunStartAtMs = 20_001;
+      },
+      "far-seek target",
+    ],
+    [
+      "far seek terminal preceded action",
+      (evidence) => {
+        evidence.threadedWasm.farSeek.discardedTerminalAtMs = 19_999;
+      },
+      "far-seek target",
+    ],
+    [
+      "far seek derived latency mismatch",
+      (evidence) => {
+        evidence.threadedWasm.farSeek.targetAudioLatencyMs = 99;
       },
       "far-seek target",
     ],
@@ -751,6 +907,42 @@ test("target coverage counts only the exact offline worker ancestry", () => {
   assert.equal(
     summarizeAttachedTargetCoverage(targets, workerUrl).speechWorkersDetached,
     1,
+  );
+});
+
+test("unterminated synthesis detection respects request epoch and boundary", () => {
+  const request = (id, epoch, sequence) => ({
+    direction: "out",
+    epoch,
+    id,
+    sequence,
+    type: "synthesize",
+  });
+  const terminal = (id, epoch, sequence, type = "success") => ({
+    direction: "in",
+    epoch,
+    id,
+    sequence,
+    type,
+  });
+  const state = {
+    workerEvents: [
+      request(1, 1, 1),
+      terminal(1, 1, 2),
+      request(2, 1, 3),
+      terminal(2, 2, 4),
+      request(3, 1, 5),
+      terminal(3, 1, 6, "canceled"),
+      request(4, 1, 7),
+    ],
+  };
+  assert.deepEqual(
+    findUnterminatedSynthesisRequests(state, 5).map(({ id }) => id),
+    [2],
+  );
+  assert.deepEqual(
+    findUnterminatedSynthesisRequests(state).map(({ id }) => id),
+    [2, 4],
   );
 });
 
