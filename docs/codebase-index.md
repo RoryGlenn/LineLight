@@ -250,7 +250,9 @@ verified range downloads, resumption, assembly, and cache writes.
 policy, storage headroom, adaptive passage sizing, and progress mapping.
 [`app/offline-speech.ts`](../app/offline-speech.ts) owns the page-side worker RPC,
 readiness state, backend retry ladder, Web Lock serialization, and public pack
-operations. [`app/offline-speech.worker.ts`](../app/offline-speech.worker.ts) owns
+operations. [`app/worker-startup-diagnostics.mjs`](../app/worker-startup-diagnostics.mjs)
+owns bounded, local-only worker failure details without serializing document or
+narration data. [`app/offline-speech.worker.ts`](../app/offline-speech.worker.ts) owns
 Transformers/Kokoro configuration, model installation, initialization, warm-up,
 synthesis, runtime fallback, and commit ordering.
 [`app/offline-speech-utils.mjs`](../app/offline-speech-utils.mjs) owns backend
@@ -305,8 +307,9 @@ still need the corresponding real-browser gates.
 offline reuse, and provide the isolation headers required for threaded ONNX
 WebAssembly.
 
-**Runtime:** Browser main for registration, service worker for caching, and edge
-worker for response headers.
+**Runtime:** Browser main for registration, service worker for caching, edge
+worker for production response headers, and the Vite development server for
+local response headers.
 
 **Owns:** [`app/service-worker-registration.mjs`](../app/service-worker-registration.mjs)
 owns environment-aware registration and development cleanup.
@@ -317,12 +320,16 @@ the browser and network. [`public/manifest.webmanifest`](../public/manifest.webm
 owns install metadata. [`worker/index.ts`](../worker/index.ts) owns production
 COOP/COEP/CORP and WebAssembly content-type headers, while
 [`public/_headers`](../public/_headers) owns the complementary static-asset
-header policy; document isolation headers remain an edge-worker responsibility.
+header policy. [`vite.config.ts`](../vite.config.ts) supplies matching COEP and
+CORP headers to source module workers that Vite serves directly during local
+development; production document isolation remains an edge-worker responsibility.
 
 **Entry points:** [`app/page.tsx`](../app/page.tsx) invokes
 [`app/service-worker-registration.mjs`](../app/service-worker-registration.mjs).
 The browser loads [`public/sw-v9.js`](../public/sw-v9.js); production responses
-pass through [`worker/index.ts`](../worker/index.ts).
+pass through [`worker/index.ts`](../worker/index.ts), while local module-worker
+requests pass directly through the development server configured in
+[`vite.config.ts`](../vite.config.ts).
 
 **Change together:** Service-worker cache changes must be
 reviewed with offline runtime-asset retention, generated asset hashing, old
@@ -342,10 +349,12 @@ here.
 [`tests/service-worker.test.mjs`](../tests/service-worker.test.mjs) for lifecycle,
 cache ordering, and failure behavior;
 [`tests/rendered-html.test.mjs`](../tests/rendered-html.test.mjs) for packaged
-registration and headers; and
+registration, production headers, and development-server worker headers; and
 [`tests/offline-model.test.mjs`](../tests/offline-model.test.mjs) for runtime-asset
-retention contracts. Complete offline readiness still requires a first-visit,
-restart, and network-disabled browser check.
+retention and worker-diagnostic contracts. Complete offline readiness still
+requires a first-visit, restart, and network-disabled browser check; development
+worker-header changes also require a fresh-profile browser smoke covering both
+offline narration and PDF.js.
 
 ## Edge routes and deployment assembly
 

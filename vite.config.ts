@@ -67,6 +67,14 @@ export default defineConfig(async () => {
     server: {
       host: "0.0.0.0",
       allowedHosts: ["terminal.local"],
+      // The Cloudflare worker isolates the document, but Vite serves source
+      // module workers directly in development. Give those worker scripts the
+      // matching policies so Brave can load the offline narration and PDF.js
+      // workers instead of blocking them before evaluation.
+      headers: {
+        "Cross-Origin-Embedder-Policy": "require-corp",
+        "Cross-Origin-Resource-Policy": "same-origin",
+      },
       ...(isCodexSeatbeltSandbox
         ? { watch: { useFsEvents: false, usePolling: true } }
         : {}),

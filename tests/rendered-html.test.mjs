@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import { resolve } from "node:path";
 import test from "node:test";
+import { loadConfigFromFile } from "vite";
 
 import {
   OFFLINE_MODEL_REVISION,
@@ -22,6 +24,28 @@ function loadBuiltWorker() {
   );
   return workerPromise;
 }
+
+test("isolates Vite-served development module workers", async () => {
+  const loaded = await loadConfigFromFile(
+    {
+      command: "serve",
+      mode: "test",
+      isPreview: false,
+      isSsrBuild: false,
+    },
+    resolve("vite.config.ts"),
+  );
+
+  assert.ok(loaded, "Vite should load the repository configuration");
+  assert.equal(
+    loaded.config.server?.headers?.["Cross-Origin-Embedder-Policy"],
+    "require-corp",
+  );
+  assert.equal(
+    loaded.config.server?.headers?.["Cross-Origin-Resource-Policy"],
+    "same-origin",
+  );
+});
 
 test("renders development preview metadata", async () => {
   const { default: worker } = await loadBuiltWorker();
