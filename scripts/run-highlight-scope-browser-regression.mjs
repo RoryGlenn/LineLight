@@ -445,6 +445,7 @@ async function startMutationWindow(cdp, view) {
       state.mutation = {
         view: ${JSON.stringify(view)},
         root,
+        shellSelector: ${JSON.stringify(shellSelector)},
         shells,
         mapBefore: Number(root.dataset.${mapCount}) || 0,
         shellCountsBefore: shells.map((shell) => Number(shell.dataset.${shellCount}) || 0),
@@ -483,7 +484,9 @@ async function finishMutationWindow(cdp, view) {
       const state = globalThis.__lineLightIssue62;
       const mutation = state.mutation;
       mutation.observer.disconnect();
-      const currentShells = Array.from(mutation.root.children);
+      const currentShells = Array.from(
+        mutation.root.querySelectorAll(mutation.shellSelector)
+      );
       const shellCountsAfter = mutation.shells.map((shell) => Number(shell.dataset.${shellCount}) || 0);
       const result = {
         rootIdentityPreserved: mutation.root === document.querySelector(${JSON.stringify(view === "focus" ? ".focus-paragraphs" : ".pdf-pages")}),
@@ -791,6 +794,7 @@ export function validateHighlightScopeEvidence(evidence) {
       !interaction?.rootIdentityPreserved ||
       !interaction?.shellIdentityPreserved ||
       interaction.mapRenderCountBefore !== interaction.mapRenderCountAfter ||
+      interaction.changedShellRenderCounts?.length !== 0 ||
       interaction.mutations?.childList !== 0
     ) {
       failures.push(`${view} interactions reconciled the stable shell list.`);

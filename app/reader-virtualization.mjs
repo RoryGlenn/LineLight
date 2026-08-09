@@ -43,6 +43,50 @@ export function selectVirtualizedIndices(
   return Array.from(selected).sort((left, right) => left - right);
 }
 
+/**
+ * Preserve the viewport range and, when distant, a second bounded range around
+ * the active narration item. Spacer math can then keep both ranges in their
+ * real document positions without replacing what the user is browsing.
+ */
+export function selectVirtualizedRanges(
+  viewportStart,
+  viewportEnd,
+  itemCount,
+  activeIndex,
+  overscan,
+) {
+  const count = Math.max(0, Math.trunc(itemCount));
+  if (!count) return [];
+  const radius = Math.max(0, Math.trunc(overscan));
+  const clamp = (index) =>
+    Math.min(count - 1, Math.max(0, Math.trunc(index) || 0));
+  const start = clamp(viewportStart);
+  const end = Math.max(start, clamp(viewportEnd));
+  const ranges = [
+    {
+      start: Math.max(0, start - radius),
+      end: Math.min(count - 1, end + radius),
+    },
+  ];
+  if (Number.isInteger(activeIndex) && activeIndex >= 0 && activeIndex < count) {
+    ranges.push({
+      start: Math.max(0, activeIndex - radius),
+      end: Math.min(count - 1, activeIndex + radius),
+    });
+  }
+  ranges.sort((left, right) => left.start - right.start);
+  const merged = [];
+  for (const range of ranges) {
+    const previous = merged.at(-1);
+    if (previous && range.start <= previous.end + 1) {
+      previous.end = Math.max(previous.end, range.end);
+    } else {
+      merged.push({ ...range });
+    }
+  }
+  return merged;
+}
+
 /** Create the keyed subscription core shared by PDF and Focus shell stores. */
 function createRenderWindowStore(itemCount, initialActiveIndex, overscan) {
   const count = Math.max(0, Math.trunc(itemCount));

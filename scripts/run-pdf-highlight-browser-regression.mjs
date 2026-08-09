@@ -150,13 +150,46 @@ async function getFreePort() {
   });
 }
 
-export function terminateProcessGroup(child) {
-  if (!child?.pid || child.exitCode !== null) return;
+function signalProcessGroup(processGroupId, signal) {
+  if (!Number.isInteger(processGroupId) || processGroupId <= 0) return false;
   try {
-    process.kill(-child.pid, "SIGTERM");
-  } catch {
-    child.kill("SIGTERM");
+    process.kill(-processGroupId, signal);
+    return true;
+  } catch (error) {
+    if (error?.code === "ESRCH") return false;
+    throw error;
   }
+}
+
+function processGroupExists(processGroupId) {
+  return signalProcessGroup(processGroupId, 0);
+}
+
+async function waitForProcessGroupExit(processGroupId, timeoutMs) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (!processGroupExists(processGroupId)) return true;
+    await delay(25);
+  }
+  return !processGroupExists(processGroupId);
+}
+
+export async function stopProcessGroup(
+  processGroupId,
+  timeoutMs = 3_000,
+) {
+  const termSent = signalProcessGroup(processGroupId, "SIGTERM");
+  let closed = await waitForProcessGroupExit(processGroupId, timeoutMs);
+  let forced = false;
+  if (!closed) {
+    forced = signalProcessGroup(processGroupId, "SIGKILL");
+    closed = await waitForProcessGroupExit(processGroupId, timeoutMs);
+  }
+  return { closed, forced, processGroupId, termSent };
+}
+
+export function terminateProcessGroup(child) {
+  signalProcessGroup(child?.pid, "SIGTERM");
 }
 
 async function waitForHttp(url, processHandle, log, timeoutMs = 60_000) {
@@ -205,11 +238,16 @@ export async function startDevelopmentServer() {
 async function pollJson(url, processHandle, timeoutMs = 30_000) {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
-    if (processHandle?.exitCode !== null) {
+    if (
+      processHandle?.exitCode !== null ||
+      processHandle?.signalCode !== null
+    ) {
       throw new Error("The browser stopped before its debugging endpoint opened.");
     }
     try {
-      const response = await fetch(url);
+      const response = await fetch(url, {
+        signal: AbortSignal.timeout(1_000),
+      });
       if (response.ok) return await response.json();
     } catch {
       // The debugging endpoint is still starting.
@@ -246,27 +284,45 @@ export async function startBrowser(executable, headed) {
     detached: true,
     stdio: ["ignore", "ignore", "pipe"],
   });
+  const processGroupId = child.pid;
   const browserErrors = [];
   child.stderr.on("data", (chunk) => {
     browserErrors.push(chunk.toString());
     if (browserErrors.length > 80) browserErrors.shift();
   });
-  const targets = await pollJson(
-    `http://127.0.0.1:${debuggingPort}/json/list`,
-    child,
-  );
-  const pageTarget = targets.find(
-    (target) => target.type === "page" && target.webSocketDebuggerUrl,
-  );
-  if (!pageTarget) {
-    throw new Error(`Brave did not expose a page target.\n${browserErrors.join("")}`);
+  child.on("error", (error) => {
+    browserErrors.push(error.stack ?? String(error));
+  });
+  try {
+    const targets = await pollJson(
+      `http://127.0.0.1:${debuggingPort}/json/list`,
+      child,
+    );
+    const pageTarget = targets.find(
+      (target) => target.type === "page" && target.webSocketDebuggerUrl,
+    );
+    if (!pageTarget) {
+      throw new Error("Brave did not expose a page target.");
+    }
+    return {
+      child,
+      processGroupId,
+      profileDirectory,
+      webSocketDebuggerUrl: pageTarget.webSocketDebuggerUrl,
+      log: () => browserErrors.join(""),
+    };
+  } catch (error) {
+    const shutdown = await stopProcessGroup(processGroupId);
+    await delay(50);
+    await rm(profileDirectory, { recursive: true, force: true });
+    const message = error instanceof Error ? error.message : String(error);
+    const cleanupMessage = shutdown.closed
+      ? ""
+      : `\nBrowser process group ${processGroupId} survived cleanup.`;
+    throw new Error(
+      `${message}\n${browserErrors.join("")}${cleanupMessage}`.trim(),
+    );
   }
-  return {
-    child,
-    profileDirectory,
-    webSocketDebuggerUrl: pageTarget.webSocketDebuggerUrl,
-    log: () => browserErrors.join(""),
-  };
 }
 
 export class CdpSession {

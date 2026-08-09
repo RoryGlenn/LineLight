@@ -96,6 +96,32 @@ the pinned public model assets; it never receives imported documents or
 narration text. When Natural online is selected, only short narration passages
 (including one prepared ahead) are sent to Azure AI Speech for synthesis.
 
+## Large PDF loading
+
+PDF import runs in an app-owned browser worker, with PDF.js parser work in a
+nested worker. LineLight extracts, maps, stores, and posts page one first, making
+its readable Focus text available before attempting the first page bitmap and
+continuing with later pages. The source stays as one local IndexedDB `Blob`;
+text, geometry, and semantic indices are persisted as independently keyed page
+records so opening a saved book can stream page one and bounded batches instead
+of cloning the whole document onto the browser main thread.
+
+Supported browsers rasterize PDF pages with `OffscreenCanvas` and transfer
+bounded `ImageBitmap` results back for lightweight composition. The worker
+implements PDF.js-compatible Alpha/Luminosity soft masks, including their
+alpha transfer maps. General drawing transfer functions and unknown soft-mask
+types use a cooperative fallback that parses the same local source and renders
+only visible pages on the main thread. PDF.js can yield between operator-list
+chunks in this fallback, but an individual drawing operator cannot be
+preempted; unusually complex fallback pages can therefore still pause longer
+than worker-rendered pages.
+
+Closing or replacing a PDF cancels its worker and rejects stale messages and
+bitmaps by job and revision. If page one was already committed, the private
+library intentionally retains that revision as a resumable local import;
+uncommitted or validation-rejected staging is removed only after IndexedDB
+confirms the cleanup transaction.
+
 ## Known limitations
 
 - Scanned or image-only PDFs need OCR, which is not implemented yet.
@@ -125,6 +151,19 @@ Requirements:
 npm ci
 npm run dev
 ```
+
+To exercise the built production Worker and its static-asset headers locally,
+build first and then start the local Wrangler artifact at
+`http://localhost:3000`:
+
+```bash
+npm run build
+npm start
+```
+
+`npm start -- --ip 127.0.0.1 --port 8787` can bind a different local address
+or port. This production path applies the same document, worker-script, and
+WebAssembly isolation headers as the deployed asset binding.
 
 To enable Natural online narration locally, copy the example environment file
 and add the key and region from an Azure AI Speech resource:

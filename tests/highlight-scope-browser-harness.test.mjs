@@ -34,6 +34,7 @@ function passingInteraction() {
     shellIdentityPreserved: true,
     mapRenderCountBefore: 2,
     mapRenderCountAfter: 2,
+    changedShellRenderCounts: [],
     mutations: { childList: 0 },
     longTasks: [],
   };
@@ -79,6 +80,9 @@ test("rejects a word box, shell reconciliation, or interaction Long Task", () =>
   const evidence = passingEvidence();
   evidence.visuals.page.paragraph.exactTokenVisual.transparent = false;
   evidence.interactions.focus.mutations.childList = 1;
+  evidence.interactions.page.changedShellRenderCounts = [
+    { index: 1, before: 2, after: 3 },
+  ];
   evidence.performance.maximumLongTaskMs = 51;
   const failures = validateHighlightScopeEvidence(evidence).join("\n");
   assert.match(failures, /visible exact-word box/iu);

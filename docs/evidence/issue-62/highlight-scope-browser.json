@@ -1,21 +1,21 @@
 {
   "schemaVersion": 1,
   "issue": 62,
-  "recordedAt": "2026-08-09T15:19:37.434Z",
+  "recordedAt": "2026-08-09T18:08:18.893Z",
   "source": {
     "branch": "agent/issue-62-highlight-scope",
     "files": {
-      "app/focus-document-view.tsx": "08f4ace72e51a3412b76eb5a83dbb2e358cba92243124b97a3c88c278ae2760c",
-      "app/globals.css": "1eee42fc05186679b4d825a74889872be0124772cc1e3ba08a7fa74b00173d88",
+      "app/focus-document-view.tsx": "d5f16767180d5e61f4e658030468ce27640b13aa9567a4e4433c35176927792b",
+      "app/globals.css": "b88be95e43069bee38dba5afe5a7aba10926566669b69a0e046abcd7056ccaed",
       "app/highlight-scope.mjs": "84474122fafee6410a162bc789d94907b095e9efc5d3411011e55f0be55cc73b",
-      "app/page.tsx": "ba0b07755492bbbe5ef71f10e29f47060881b01c92482c537d2b4d5dd05dac14",
-      "app/pdf-page-view.tsx": "b9c5079b632458ed3b1c2a52eef541229c946bb84f768bab364a7720241252dc",
+      "app/page.tsx": "9446de3c00ead3e719ae742bfc543c224974aa96b8927366188dbf0dadb9a878",
+      "app/pdf-page-view.tsx": "5031367fdf4a85c4b86ee6976a8bee3d6f47b031091a1505e2a37a9354b36675",
       "app/pdf-text-model.mjs": "61eb74e26f6d7165002ac1b239d800335f00bdd1107a0059c2447d2ced260f00",
-      "app/reader-virtualization.mjs": "9ba558626c0e0761a6ae9f13831f2bcb862709a17edf4be9729c985efd2c80a5",
-      "scripts/run-highlight-scope-browser-regression.mjs": "53b2f9255b728bf00cb6d4238aa7ef71b922d8731907ca55d7e54cb2fce40cdb",
+      "app/reader-virtualization.mjs": "0df45457462979bc5707e03db275a38a3228110deed5008f9af178d64776c262",
+      "scripts/run-highlight-scope-browser-regression.mjs": "5e56086225edd1b00177b9c9eecce8b0668ee3953e6df5aed55f7279a3c802df",
       "tests/highlight-scope.test.mjs": "96d4a76c7ec4bd21ffe9cca5994d1afa8fb2e7af484c825782c29656c953a778",
       "tests/pdf-text-model.test.mjs": "8c8129a8c3210c01f5a5be0e46330015ae2ab1e8cf76077ffed638f992e6b8aa",
-      "tests/reader-virtualization.test.mjs": "6d6ebc0cd7ef365fb2eab55e7a289a321094c302279db8e66c79097d76bd4be5"
+      "tests/reader-virtualization.test.mjs": "31783fdf7bfb4541c8785964cf00adc78b0fc12a9c0ae56642b617e5ec2b398a"
     }
   },
   "browser": {
@@ -138,7 +138,7 @@
         },
         "overlayAriaHidden": null,
         "screenshot": "focus-sentence.png",
-        "screenshotSha256": "e6004271a2bc58d62bf74b8a84ba3497bc16b49c0637f8f8c4f49af1de199f83"
+        "screenshotSha256": "478a10aa4990788084dc1957248389b5445f557168b46111bb11b21dacba336a"
       },
       "paragraph": {
         "regionCount": 1,
@@ -213,7 +213,7 @@
         },
         "overlayAriaHidden": null,
         "screenshot": "focus-paragraph.png",
-        "screenshotSha256": "632b5ebe716e03b8522330e8ca8e4e858ed11b9c331d12c69a29a5de17cabe9a"
+        "screenshotSha256": "30906f79d4bbdc748816ffd156f7a88748c6fb703a056a60e531340008a32fc0"
       }
     },
     "page": {
@@ -222,28 +222,28 @@
         "fragmentCount": 3,
         "fragments": [
           {
-            "left": 482.484375,
+            "left": 482.5,
             "top": 368.40625,
-            "right": 1079.734375,
-            "bottom": 386.40625,
-            "width": 597.25,
-            "height": 18
+            "right": 1079.078125,
+            "bottom": 386.390625,
+            "width": 596.578125,
+            "height": 17.984375
           },
           {
-            "left": 482.484375,
+            "left": 482.5,
             "top": 394.921875,
-            "right": 1102.484375,
-            "bottom": 412.921875,
-            "width": 620,
-            "height": 18
+            "right": 1101.796875,
+            "bottom": 412.90625,
+            "width": 619.296875,
+            "height": 17.984375
           },
           {
-            "left": 482.484375,
+            "left": 482.5,
             "top": 421.3125,
-            "right": 1077.203125,
-            "bottom": 439.3125,
-            "width": 594.71875,
-            "height": 18
+            "right": 1076.546875,
+            "bottom": 439.296875,
+            "width": 594.046875,
+            "height": 17.984375
           }
         ],
         "activeRegionIndices": [
@@ -260,43 +260,43 @@
         },
         "overlayAriaHidden": true,
         "screenshot": "page-sentence.png",
-        "screenshotSha256": "0bda6c8b15ab5a0b4132d264177b1021232e6cb3eefa22d9503fb50751558fc0"
+        "screenshotSha256": "57c1dda13cae4798ac3c22f895a0e2812054c4047786ab2c131d21fa91d580a7"
       },
       "paragraph": {
         "regionCount": 4,
         "fragmentCount": 4,
         "fragments": [
           {
-            "left": 482.484375,
-            "top": 368.40625,
-            "right": 1079.734375,
-            "bottom": 386.40625,
-            "width": 597.25,
-            "height": 18
+            "left": 482.5,
+            "top": 183.40625,
+            "right": 1079.078125,
+            "bottom": 201.390625,
+            "width": 596.578125,
+            "height": 17.984375
           },
           {
-            "left": 482.484375,
-            "top": 394.921875,
-            "right": 1102.484375,
-            "bottom": 412.921875,
-            "width": 620,
-            "height": 18
+            "left": 482.5,
+            "top": 209.921875,
+            "right": 1101.796875,
+            "bottom": 227.90625,
+            "width": 619.296875,
+            "height": 17.984375
           },
           {
-            "left": 482.484375,
-            "top": 421.3125,
-            "right": 1077.203125,
-            "bottom": 439.3125,
-            "width": 594.71875,
-            "height": 18
+            "left": 482.5,
+            "top": 236.3125,
+            "right": 1076.546875,
+            "bottom": 254.296875,
+            "width": 594.046875,
+            "height": 17.984375
           },
           {
-            "left": 482.484375,
-            "top": 447.703125,
-            "right": 1150.078125,
-            "bottom": 465.703125,
-            "width": 667.59375,
-            "height": 18
+            "left": 482.5,
+            "top": 262.703125,
+            "right": 1149.34375,
+            "bottom": 280.6875,
+            "width": 666.84375,
+            "height": 17.984375
           }
         ],
         "activeRegionIndices": [
@@ -314,7 +314,7 @@
         },
         "overlayAriaHidden": true,
         "screenshot": "page-paragraph.png",
-        "screenshotSha256": "45b04c3fa44c03afdee7cc9ae7c25833b0f6387f39fe1ac0e9bd7aa1ef184f6d"
+        "screenshotSha256": "ca3ffb91caa9484d80eff833bc3bd48af054a9a717b2af449ade1f804bfae33f"
       }
     }
   },
@@ -344,9 +344,9 @@
     "focus": {
       "rootIdentityPreserved": true,
       "shellIdentityPreserved": true,
-      "shellCount": 17,
-      "mapRenderCountBefore": 1,
-      "mapRenderCountAfter": 1,
+      "shellCount": 13,
+      "mapRenderCountBefore": 0,
+      "mapRenderCountAfter": 0,
       "changedShellRenderCounts": [],
       "mutations": {
         "childList": 0,
@@ -363,13 +363,13 @@
     "page": {
       "rootIdentityPreserved": true,
       "shellIdentityPreserved": true,
-      "shellCount": 6,
-      "mapRenderCountBefore": 2,
-      "mapRenderCountAfter": 2,
+      "shellCount": 3,
+      "mapRenderCountBefore": 0,
+      "mapRenderCountAfter": 0,
       "changedShellRenderCounts": [],
       "mutations": {
         "childList": 0,
-        "attributes": 18,
+        "attributes": 32,
         "attributeNames": [
           "class",
           "data-active-token",
@@ -446,7 +446,7 @@
     "passed": true
   },
   "persistence": {
-    "appUrl": "http://127.0.0.1:37031/",
+    "appUrl": "http://127.0.0.1:34575/",
     "beforeReload": {
       "fontSize": 22,
       "lineHeight": 1.78,
@@ -540,8 +540,8 @@
   "browserDiagnostics": {
     "errors": [],
     "console": [],
-    "browserStderr": "\nDevTools listening on ws://127.0.0.1:41059/devtools/browser/33f0c168-37fc-42da-bca6-3f4db9f58a2d\nMESA-LOADER: failed to open dri: /usr/lib/x86_64-linux-gnu/gbm/dri_gbm.so: cannot open shared object file: Permission denied (search paths /usr/lib/x86_64-linux-gnu/gbm, suffix _gbm)\n",
-    "serverLogTail": "\n> linelight@0.1.0 dev\n> WRANGLER_LOG_PATH=.wrangler/wrangler.log vite --host 127.0.0.1 --port 37031 --strictPort\n\n\n  VITE v8.2.0  ready in 2742 ms\n\n  ➜  Local:   http://127.0.0.1:37031/\n\nThe Cloudflare Vite plugin detected this dev session is running in an AI agent.\nThe Local Explorer API is available at http://127.0.0.1:37031/cdn-cgi/local/explorer/api\nUseful routes:\n  GET http://127.0.0.1:37031/cdn-cgi/local/explorer/api/local/workers - local Workers and bindings\n  GET http://127.0.0.1:37031/cdn-cgi/local/explorer/api/storage/kv/namespaces - KV namespaces\n  GET http://127.0.0.1:37031/cdn-cgi/local/explorer/api/d1/database - D1 databases\n  GET http://127.0.0.1:37031/cdn-cgi/local/explorer/api/r2/buckets - R2 buckets\n  GET http://127.0.0.1:37031/cdn-cgi/local/explorer/api/workers/durable_objects/namespaces - Durable Object namespaces\n  GET http://127.0.0.1:37031/cdn-cgi/local/explorer/api/workflows - Workflows\n  POST http://127.0.0.1:37031/cdn-cgi/local/explorer/api/local/observability/query - run a read-only SQL query (SELECT/WITH only) over captured request traces and console logs. Tables: spans, logs (read attributes via json(attributes)). Example:\n    curl -X POST http://127.0.0.1:37031/cdn-cgi/local/explorer/api/local/observability/query -H 'Content-Type: application/json' -d '{\"sql\":\"SELECT service, name, outcome, duration_ms FROM spans WHERE parent_id IS NULL LIMIT 20\"}'\nIf the routes above don't cover what you need, fetch the full OpenAPI schema (large - use only as a last resort):\n  GET http://127.0.0.1:37031/cdn-cgi/local/explorer/api - OpenAPI schema\n\n GET / 200 in 1.1s (compile: 1786288767.1s, render: 1.1s)\n GET / 200 in 260ms (compile: 1786288767.1s, render: 223ms)\n GET / 200 in 294ms (compile: 1786288767.1s, render: 260ms)\n"
+    "browserStderr": "\nDevTools listening on ws://127.0.0.1:34217/devtools/browser/708c0131-d826-4ab3-a58c-d75f20376092\nMESA-LOADER: failed to open dri: /usr/lib/x86_64-linux-gnu/gbm/dri_gbm.so: cannot open shared object file: Permission denied (search paths /usr/lib/x86_64-linux-gnu/gbm, suffix _gbm)\n",
+    "serverLogTail": "\n> linelight@0.1.0 dev\n> WRANGLER_LOG_PATH=.wrangler/wrangler.log vite --host 127.0.0.1 --port 34575 --strictPort\n\n\n  VITE v8.2.0  ready in 2975 ms\n\n  ➜  Local:   http://127.0.0.1:34575/\n\nThe Cloudflare Vite plugin detected this dev session is running in an AI agent.\nThe Local Explorer API is available at http://127.0.0.1:34575/cdn-cgi/local/explorer/api\nUseful routes:\n  GET http://127.0.0.1:34575/cdn-cgi/local/explorer/api/local/workers - local Workers and bindings\n  GET http://127.0.0.1:34575/cdn-cgi/local/explorer/api/storage/kv/namespaces - KV namespaces\n  GET http://127.0.0.1:34575/cdn-cgi/local/explorer/api/d1/database - D1 databases\n  GET http://127.0.0.1:34575/cdn-cgi/local/explorer/api/r2/buckets - R2 buckets\n  GET http://127.0.0.1:34575/cdn-cgi/local/explorer/api/workers/durable_objects/namespaces - Durable Object namespaces\n  GET http://127.0.0.1:34575/cdn-cgi/local/explorer/api/workflows - Workflows\n  POST http://127.0.0.1:34575/cdn-cgi/local/explorer/api/local/observability/query - run a read-only SQL query (SELECT/WITH only) over captured request traces and console logs. Tables: spans, logs (read attributes via json(attributes)). Example:\n    curl -X POST http://127.0.0.1:34575/cdn-cgi/local/explorer/api/local/observability/query -H 'Content-Type: application/json' -d '{\"sql\":\"SELECT service, name, outcome, duration_ms FROM spans WHERE parent_id IS NULL LIMIT 20\"}'\nIf the routes above don't cover what you need, fetch the full OpenAPI schema (large - use only as a last resort):\n  GET http://127.0.0.1:34575/cdn-cgi/local/explorer/api - OpenAPI schema\n\n GET / 200 in 1.2s (compile: 1786298888.2s, render: 1.1s)\n GET / 200 in 270ms (compile: 1786298888.2s, render: 224ms)\n GET / 200 in 236ms (compile: 1786298888.2s, render: 204ms)\n"
   },
   "failures": [],
   "passed": true

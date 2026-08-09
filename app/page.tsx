@@ -26,18 +26,26 @@ import {
   migrateReaderHighlightSettings,
 } from "./highlight-scope.mjs";
 import { PdfPageView, type PdfPageLayout } from "./pdf-page-view";
+import { PdfDocumentClient } from "./pdf-document";
+import { createPdfPageStore } from "./pdf-page-store.mjs";
 import {
-  buildPdfOutline,
-  derivePdfPageWordStarts,
-  findActivePdfOutlineItemId,
-} from "./pdf-outline.mjs";
+  appendPdfDocumentChunk,
+  createProgressiveDocumentModel,
+} from "./pdf-document-model.mjs";
 import {
-  PDF_TEXT_MODEL_VERSION,
-  buildPdfTextModel,
-  migrateStoredPdfTextModel,
-  pdfDocumentNeedsTextModelMigration,
-  pdfTextParagraphs,
-} from "./pdf-text-model.mjs";
+  acceptCurrentPdfPosition,
+  isProgressivePdfHydrating,
+  loadedPdfPageNumber,
+  requiredPdfPositionTokenCount,
+  resolveProgressivePdfTarget,
+  shouldDeferPdfProgressWrite,
+} from "./pdf-progressive-navigation.mjs";
+import { reconcilePdfTerminalOutcome } from "./pdf-terminal-reconciliation.mjs";
+import type {
+  PdfWorkerMessage,
+  StoredPdfManifest,
+} from "./pdf-document-types";
+import { findActivePdfOutlineItemId } from "./pdf-outline.mjs";
 import {
   buildSentenceStartIndices,
   buildSpeechChunk,
@@ -113,11 +121,12 @@ import {
   filterLibraryEntries,
   getReaderNavigation,
   getReaderDocument,
+  getReaderPdfSource,
   loadReaderLibrary,
   openReaderDocument,
+  openReaderDocumentMetadata,
   removeReaderDocument,
   renameReaderDocument,
-  saveReaderDocument,
   saveReaderNavigation,
   sortLibraryEntries,
 } from "./reader-library.mjs";
@@ -204,6 +213,14 @@ type ReaderDocument = {
   pdfData?: Uint8Array;
   pdfPages?: PdfPageLayout[];
   pdfTextModelVersion?: number;
+  pdfStorageVersion?: number;
+  pdfRevision?: string;
+  pdfPageCount?: number;
+  pdfCompletedPages?: number;
+  pdfImportStatus?: "importing" | "ready";
+  wordCount?: number;
+  pdfRuntime?: ProgressivePdfRuntime;
+  pdfRuntimeVersion?: number;
   outline?: PdfOutlineItem[];
 };
 
@@ -235,6 +252,25 @@ type StoredReaderPosition = {
   createdAt: number;
 };
 
+type PendingPdfTarget = {
+  behavior: ScrollBehavior;
+  clampOnComplete: boolean;
+  closePanel: boolean;
+  documentId: string;
+  label?: string;
+  pageNumber?: number | null;
+  position?: StoredReaderPosition;
+  preserveProgress: boolean;
+  scroll: boolean;
+  scrollTarget: "page" | "word";
+  tokenIndex: number;
+};
+
+type PendingPdfProgressRestore = {
+  documentId: string;
+  targetIndex: number;
+};
+
 type ReaderBookmark = StoredReaderPosition & {
   id: string;
   name: string;
@@ -257,6 +293,23 @@ type DocumentModel = {
   fullText: string;
   tokens: WordToken[];
   paragraphs: Segment[][];
+};
+
+type ProgressivePdfRuntime = {
+  client: PdfDocumentClient;
+  revision: string;
+  model: DocumentModel & {
+    paragraphCharacterCounts: number[];
+    sentenceStarts: number[];
+    tokenParagraphs: number[];
+    tokenSentences: number[];
+  };
+  store: ReturnType<typeof createPdfPageStore>;
+  fallbackSource?: Blob;
+  manifest: StoredPdfManifest;
+  publishFrame: number | null;
+  renderFallback: boolean;
+  version: number;
 };
 
 type ReaderSettings = {
@@ -349,9 +402,6 @@ const OFFLINE_AUDIO_CACHE_ENTRIES = 6;
 const OFFLINE_PACK_SIZE_LABEL =
   `${Math.round(OFFLINE_PACK_BYTES / 1_000_000)} MB`;
 
-const WORD_PATTERN = /[\p{L}\p{N}]+(?:[’'-][\p{L}\p{N}]+)*|[^\s]/gu;
-const IS_WORD = /^[\p{L}\p{N}]/u;
-
 function findWordAtCharacter(tokens: WordToken[], character: number) {
   let low = 0;
   let high = tokens.length - 1;
@@ -382,217 +432,6 @@ function cleanText(value: string) {
 
 function filenameWithoutExtension(name: string) {
   return name.replace(/\.[^.]+$/, "");
-}
-
-function countWords(value: string) {
-  let count = 0;
-  for (const match of value.matchAll(WORD_PATTERN)) {
-    if (IS_WORD.test(match[0])) count += 1;
-  }
-  return count;
-}
-
-async function parsePdfSource(
-  sourceData: Uint8Array,
-  identity: { id: string; title: string; author?: string },
-): Promise<ReaderDocument> {
-  const pdfjs = await import("pdfjs-dist");
-  pdfjs.GlobalWorkerOptions.workerSrc = new URL(
-    "pdfjs-dist/build/pdf.worker.min.mjs",
-    import.meta.url,
-  ).toString();
-
-  const pdf = await pdfjs.getDocument({ data: sourceData.slice() }).promise;
-  const paragraphs: string[] = [];
-  const pdfPages: PdfPageLayout[] = [];
-  const pageWordStarts: number[] = [];
-  let globalWordCount = 0;
-
-  for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
-    pageWordStarts.push(globalWordCount);
-    const page = await pdf.getPage(pageNumber);
-    const viewport = page.getViewport({ scale: 1 });
-    const content = await page.getTextContent();
-    const items: PdfPageLayout["items"] = [];
-    const textEntries = content.items
-      .filter((item) => "str" in item)
-      .map((item, textDivIndex) => ({ item, textDivIndex }));
-    const textModel = buildPdfTextModel(
-      textEntries.map(({ item }) => ({
-        text: item.str,
-        hasEOL: item.hasEOL,
-      })),
-      globalWordCount,
-    );
-
-    textEntries.forEach(({ item, textDivIndex }, itemIndex) => {
-      const wordIndices = textModel.items[itemIndex]?.wordIndices ?? [];
-      const transformed = pdfjs.Util.transform(
-        viewport.transform,
-        item.transform,
-      );
-      const fontSize = Math.max(1, Math.hypot(transformed[2], transformed[3]));
-      const textStyle = content.styles[item.fontName];
-      const ascent =
-        textStyle?.ascent ??
-        (textStyle?.descent ? 1 + textStyle.descent : 0.82);
-      const angle =
-        (Math.atan2(transformed[1], transformed[0]) * 180) / Math.PI;
-
-      if (item.str && wordIndices.length) {
-        items.push({
-          text: item.str,
-          left: transformed[4],
-          top: transformed[5] - fontSize * ascent,
-          width: Math.max(Math.abs(item.width * viewport.scale), 1),
-          height: fontSize,
-          fontSize,
-          angle,
-          wordStart: Math.min(...wordIndices),
-          wordCount: new Set(wordIndices).size,
-          wordIndices,
-          textDivIndex,
-        });
-      }
-    });
-    globalWordCount += textModel.wordCount;
-
-    pdfPages.push({
-      pageNumber,
-      width: viewport.width,
-      height: viewport.height,
-      items,
-    });
-
-    paragraphs.push(...pdfTextParagraphs(textModel.text));
-  }
-
-  const wordCount = countWords(paragraphs.join(" "));
-  if (wordCount < 8) {
-    await pdf.destroy();
-    throw new Error(
-      "This PDF looks like a scan and has very little selectable text. OCR support is planned for the next version.",
-    );
-  }
-
-  const rawOutline = await pdf.getOutline().catch(() => []);
-  const outline = (await buildPdfOutline(
-    rawOutline,
-    pdf,
-    pageWordStarts,
-    globalWordCount,
-  )) as PdfOutlineItem[];
-  const pageCount = pdf.numPages;
-  await pdf.destroy();
-  return {
-    id: identity.id,
-    title: identity.title,
-    author: identity.author ?? `${pageCount} page PDF`,
-    kind: "pdf",
-    paragraphs,
-    pdfData: sourceData,
-    pdfPages,
-    pdfTextModelVersion: PDF_TEXT_MODEL_VERSION,
-    outline,
-  };
-}
-
-async function parsePdf(file: File): Promise<ReaderDocument> {
-  return parsePdfSource(new Uint8Array(await file.arrayBuffer()), {
-    id: `pdf-${Date.now()}`,
-    title: filenameWithoutExtension(file.name),
-  });
-}
-
-async function ensureStoredPdfReady(
-  document: ReaderDocument,
-): Promise<ReaderDocument> {
-  let readyDocument = document;
-  if (document.kind === "pdf") {
-    const needsTextModelMigration =
-      pdfDocumentNeedsTextModelMigration(document);
-    const storedProgress = needsTextModelMigration
-      ? storedProgressFor(document.id)
-      : null;
-    const legacyPosition =
-      storedProgress === null
-        ? null
-        : createPositionSnapshot(
-            buildDocumentModel(document.paragraphs).tokens,
-            storedProgress,
-            0,
-          );
-    try {
-      const migration = await migrateStoredPdfTextModel(document, {
-        reparse: (source) =>
-          parsePdfSource(source, {
-            id: document.id,
-            title: document.title,
-            author: document.author,
-          }),
-        save: saveReaderDocument,
-      });
-      readyDocument = migration.document as ReaderDocument;
-      if (migration.migrated && legacyPosition) {
-        const migratedModel = buildDocumentModel(readyDocument.paragraphs, {
-          paragraphsStartSentences: true,
-        });
-        const recoveredProgress = resolveStoredPosition(
-          legacyPosition,
-          migratedModel.tokens,
-        );
-        if (recoveredProgress !== null) {
-          try {
-            localStorage.setItem(
-              `guided-reader-progress-${document.id}`,
-              String(recoveredProgress),
-            );
-          } catch {
-            // Private library migration remains valid without localStorage.
-          }
-        }
-      }
-    } catch {
-      // A damaged stored source must not make a previously readable record
-      // disappear. Legacy Focus view remains available for this session.
-      readyDocument = document;
-    }
-  }
-
-  if (
-    readyDocument.kind !== "pdf" ||
-    readyDocument.outline !== undefined ||
-    !readyDocument.pdfData?.length ||
-    !readyDocument.pdfPages?.length
-  ) {
-    return readyDocument;
-  }
-
-  try {
-    const pdfjs = await import("pdfjs-dist");
-    pdfjs.GlobalWorkerOptions.workerSrc = new URL(
-      "pdfjs-dist/build/pdf.worker.min.mjs",
-      import.meta.url,
-    ).toString();
-    const pdf = await pdfjs.getDocument({ data: readyDocument.pdfData.slice() })
-      .promise;
-    try {
-      const rawOutline = await pdf.getOutline().catch(() => []);
-      const outline = (await buildPdfOutline(
-        rawOutline,
-        pdf,
-        derivePdfPageWordStarts(readyDocument.pdfPages),
-        countDocumentWords(readyDocument),
-      )) as PdfOutlineItem[];
-      const updatedDocument = { ...readyDocument, outline };
-      await saveReaderDocument(updatedDocument).catch(() => undefined);
-      return updatedDocument;
-    } finally {
-      await pdf.destroy();
-    }
-  } catch {
-    return readyDocument;
-  }
 }
 
 async function parseEpub(file: File): Promise<ReaderDocument> {
@@ -633,10 +472,13 @@ function storedProgressFor(documentId: string) {
 }
 
 function initialViewFor(document: ReaderDocument): ReaderViewMode {
+  const hasProgressivePages = Boolean(
+    document.pdfRuntime?.store.getSummaries().length,
+  );
   if (
     document.kind !== "pdf" ||
-    !document.pdfData?.length ||
-    !document.pdfPages?.length
+    (!hasProgressivePages && !document.pdfData?.length) ||
+    (!hasProgressivePages && !document.pdfPages?.length)
   ) {
     return "focus";
   }
@@ -763,13 +605,12 @@ export default function Home() {
     typeof window === "undefined" ||
     ("speechSynthesis" in window && "SpeechSynthesisUtterance" in window);
 
-  const model: DocumentModel = useMemo(
-    () =>
-      buildDocumentModel(readerDocument.paragraphs, {
-        paragraphsStartSentences: readerDocument.kind === "pdf",
-      }) as DocumentModel,
-    [readerDocument.kind, readerDocument.paragraphs],
-  );
+  const model: DocumentModel = useMemo(() => {
+    if (readerDocument.pdfRuntime) return readerDocument.pdfRuntime.model;
+    return buildDocumentModel(readerDocument.paragraphs, {
+      paragraphsStartSentences: readerDocument.kind === "pdf",
+    }) as DocumentModel;
+  }, [readerDocument.kind, readerDocument.paragraphs, readerDocument.pdfRuntime]);
   const activeToken = model.tokens[activeWord] ?? model.tokens[0];
   const activeParagraphIndex = activeToken?.paragraphIndex ?? 0;
   const activeHighlightIndex = deriveActiveHighlightIndex(
@@ -785,29 +626,46 @@ export default function Home() {
     () => findActivePdfOutlineItemId(documentOutline, activeWord),
     [activeWord, documentOutline],
   );
-  const tokenSentences = useMemo(
-    () => model.tokens.map((token) => token.sentenceIndex),
-    [model.tokens],
-  );
-  const tokenParagraphs = useMemo(
-    () => model.tokens.map((token) => token.paragraphIndex),
-    [model.tokens],
-  );
+  const tokenSentences = readerDocument.pdfRuntime?.model.tokenSentences ??
+    model.tokens.map((token) => token.sentenceIndex);
+  const tokenParagraphs = readerDocument.pdfRuntime?.model.tokenParagraphs ??
+    model.tokens.map((token) => token.paragraphIndex);
   const visibleLibraryEntries = useMemo(
     () => filterLibraryEntries(libraryEntries, librarySearch) as LibraryEntry[],
     [libraryEntries, librarySearch],
   );
-  const sentenceStarts = useMemo(
-    () => buildSentenceStartIndices(model.tokens),
-    [model.tokens],
-  );
+  const sentenceStarts = readerDocument.pdfRuntime?.model.sentenceStarts ??
+    buildSentenceStartIndices(model.tokens);
   const bookmarkRows = useMemo(
-    () =>
-      bookmarks.map((bookmark) => ({
-        bookmark,
-        resolvedIndex: resolveStoredPosition(bookmark, model.tokens),
-      })),
-    [bookmarks, model.tokens],
+    () => {
+      void readerDocument.pdfRuntimeVersion;
+      const runtime = readerDocument.pdfRuntime;
+      const runtimeIsStreaming = runtime
+        ? isProgressivePdfHydrating(
+            runtime.manifest,
+            runtime.store.getSummaries().length,
+            runtime.model.tokens.length,
+          )
+        : false;
+      return bookmarks.map((bookmark) => {
+        const contextNotLoaded =
+          runtimeIsStreaming &&
+          model.tokens.length < requiredPdfPositionTokenCount(bookmark);
+        return {
+          bookmark,
+          canOpenWhileLoading: contextNotLoaded,
+          resolvedIndex: contextNotLoaded
+            ? null
+            : resolveStoredPosition(bookmark, model.tokens),
+        };
+      });
+    },
+    [
+      bookmarks,
+      model.tokens,
+      readerDocument.pdfRuntime,
+      readerDocument.pdfRuntimeVersion,
+    ],
   );
   const documentSearchMatches = useMemo(
     () =>
@@ -819,17 +677,22 @@ export default function Home() {
     [documentSearch, model.fullText, model.tokens],
   );
   const currentPosition = useMemo(
-    () =>
-      createPositionSnapshot(
+    () => {
+      void readerDocument.pdfRuntimeVersion;
+      return createPositionSnapshot(
         model.tokens,
         activeWord,
         0,
-      ) as StoredReaderPosition | null,
-    [activeWord, model.tokens],
+      ) as StoredReaderPosition | null;
+    },
+    [activeWord, model.tokens, readerDocument.pdfRuntimeVersion],
   );
   const supportsPageView =
     readerDocument.kind === "pdf" &&
-    Boolean(readerDocument.pdfData?.length && readerDocument.pdfPages?.length);
+    Boolean(
+      readerDocument.pdfRuntime?.store.getSummaries().length ||
+        (readerDocument.pdfData?.length && readerDocument.pdfPages?.length),
+    );
   const podcastHostPresetActive = isNarratorPresetActive(settings);
   const progress = model.tokens.length
     ? Math.round(((activeWord + 1) / model.tokens.length) * 100)
@@ -883,6 +746,501 @@ export default function Home() {
   const bookmarksRef = useRef<ReaderBookmark[]>([]);
   const positionHistoryRef = useRef<StoredReaderPosition[]>([]);
   const navigationSaveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const activePdfRuntimeRef = useRef<ProgressivePdfRuntime | null>(null);
+  const pendingPdfTargetRef = useRef<PendingPdfTarget | null>(null);
+  const pendingPdfProgressRestoreRef =
+    useRef<PendingPdfProgressRestore | null>(null);
+  const pdfTargetScrollGenerationRef = useRef(0);
+  const readerLifecycleGenerationRef = useRef(0);
+
+  const acceptVisiblePdfPosition = useCallback(() => {
+    const runtime = activePdfRuntimeRef.current;
+    if (!runtime) return false;
+    const documentId = runtime.manifest.id;
+    const accepted = acceptCurrentPdfPosition(
+      pendingPdfTargetRef.current,
+      pendingPdfProgressRestoreRef.current,
+      documentId,
+      activeWordRef.current,
+    );
+    if (!accepted.accepted) return false;
+    pendingPdfTargetRef.current = accepted.pendingTarget;
+    pendingPdfProgressRestoreRef.current = accepted.pendingRestore;
+    pdfTargetScrollGenerationRef.current += 1;
+    try {
+      localStorage.setItem(
+        `guided-reader-progress-${documentId}`,
+        String(accepted.progressIndex),
+      );
+    } catch {
+      // The in-memory position still wins when local storage is unavailable.
+    }
+    return true;
+  }, []);
+
+  const schedulePdfTargetScroll = useCallback(
+    (
+      runtime: ProgressivePdfRuntime,
+      targetIndex: number,
+      pageNumber: number | null | undefined,
+      destination: PendingPdfTarget["scrollTarget"],
+      behavior: ScrollBehavior,
+    ) => {
+      const generation = ++pdfTargetScrollGenerationRef.current;
+      const deadline = performance.now() + 5_000;
+      const attempt = () => {
+        if (
+          generation !== pdfTargetScrollGenerationRef.current ||
+          activePdfRuntimeRef.current !== runtime ||
+          activeWordRef.current !== targetIndex
+        ) {
+          return;
+        }
+        const word = wordRefs.current.get(targetIndex);
+        const page = pageNumber
+          ? document.getElementById(`pdf-page-${pageNumber}`)
+          : null;
+        const target = destination === "page" ? page ?? word : word ?? page;
+        if (!target && performance.now() < deadline) {
+          requestAnimationFrame(attempt);
+          return;
+        }
+        if (!target) return;
+        programmaticScrollRef.current = true;
+        target.scrollIntoView({
+          behavior,
+          block: destination === "page" ? "start" : "center",
+          inline: "nearest",
+        });
+        window.setTimeout(
+          () => {
+            if (generation === pdfTargetScrollGenerationRef.current) {
+              programmaticScrollRef.current = false;
+            }
+          },
+          behavior === "smooth" ? 700 : 80,
+        );
+      };
+      requestAnimationFrame(attempt);
+    },
+    [],
+  );
+
+  const disposePdfRuntime = useCallback(
+    (runtime?: ProgressivePdfRuntime | null) => {
+      const target = runtime ?? activePdfRuntimeRef.current;
+      if (!target) return;
+      if (activePdfRuntimeRef.current === target) {
+        activePdfRuntimeRef.current = null;
+      }
+      if (pendingPdfTargetRef.current?.documentId === target.manifest.id) {
+        pendingPdfTargetRef.current = null;
+      }
+      pdfTargetScrollGenerationRef.current += 1;
+      programmaticScrollRef.current = false;
+      if (target.publishFrame !== null) cancelAnimationFrame(target.publishFrame);
+      target.client.dispose();
+      target.store.dispose();
+    },
+    [],
+  );
+
+  const startPdfRuntime = useCallback(
+    async ({
+      documentId,
+      title,
+      author,
+      source,
+      restoredWord = 0,
+      readyView = "page",
+    }: {
+      documentId: string;
+      title: string;
+      author: string;
+      source?: File;
+      restoredWord?: number;
+      readyView?: ReaderViewMode;
+    }) => {
+      const lifecycleGeneration = ++readerLifecycleGenerationRef.current;
+      disposePdfRuntime();
+      const safeRestoredWord = Math.max(0, Math.trunc(restoredWord));
+      pendingPdfTargetRef.current =
+        safeRestoredWord > 0
+          ? {
+              behavior: "auto",
+              clampOnComplete: true,
+              closePanel: false,
+              documentId,
+              preserveProgress: true,
+              scroll: true,
+              scrollTarget: readyView === "page" ? "page" : "word",
+              tokenIndex: safeRestoredWord,
+            }
+          : null;
+      pendingPdfProgressRestoreRef.current =
+        safeRestoredWord > 0
+          ? { documentId, targetIndex: safeRestoredWord }
+          : null;
+      const runtime: ProgressivePdfRuntime = {
+        client: null as unknown as PdfDocumentClient,
+        revision: "",
+        model: createProgressiveDocumentModel() as ProgressivePdfRuntime["model"],
+        store: createPdfPageStore({ maxBitmaps: 8 }),
+        fallbackSource: source,
+        manifest: {
+          id: documentId,
+          title,
+          author,
+          kind: "pdf",
+          paragraphs: [],
+          pdfCompletedPages: 0,
+          pdfImportStatus: "importing",
+          pdfPageCount: 0,
+          pdfRevision: "",
+          pdfStorageVersion: 1,
+          pdfTextModelVersion: 0,
+          wordCount: 0,
+        },
+        publishFrame: null,
+        renderFallback: false,
+        version: 0,
+      };
+
+      const publish = (immediate = false) => {
+        if (activePdfRuntimeRef.current !== runtime) return;
+        const update = () => {
+          runtime.publishFrame = null;
+          if (activePdfRuntimeRef.current !== runtime) return;
+          setReaderDocument({
+            ...runtime.manifest,
+            paragraphs: [],
+            pdfRuntime: runtime,
+            pdfRuntimeVersion: runtime.version,
+          });
+        };
+        if (immediate) {
+          if (runtime.publishFrame !== null) {
+            cancelAnimationFrame(runtime.publishFrame);
+            runtime.publishFrame = null;
+          }
+          update();
+        } else if (runtime.publishFrame === null) {
+          runtime.publishFrame = requestAnimationFrame(update);
+        }
+      };
+
+      const resolvePendingTarget = (complete = false) => {
+        const pending = pendingPdfTargetRef.current;
+        if (!pending || pending.documentId !== documentId) return null;
+        const requestedIndex = Math.max(0, Math.trunc(pending.tokenIndex));
+        const resolution = resolveProgressivePdfTarget({
+          clampOnComplete: pending.clampOnComplete,
+          complete,
+          position: pending.position,
+          requestedIndex,
+          tokens: runtime.model.tokens,
+        });
+        const targetIndex = resolution.index;
+
+        if (targetIndex === null) {
+          if (resolution.status === "unavailable") {
+            pendingPdfTargetRef.current = null;
+            if (pending.preserveProgress) {
+              pendingPdfProgressRestoreRef.current = null;
+            }
+            if (pending.label) {
+              setNotice(
+                `${pending.label} could not be matched safely in the current document.`,
+              );
+            }
+          }
+          return null;
+        }
+
+        pendingPdfTargetRef.current = null;
+        if (pending.preserveProgress) {
+          pendingPdfProgressRestoreRef.current = {
+            documentId,
+            targetIndex,
+          };
+        }
+        setActiveWord(targetIndex);
+        activeWordRef.current = targetIndex;
+        setFollowPaused(false);
+        if (pending.closePanel) setShowBookmarks(false);
+        if (pending.label) {
+          setNotice(`${pending.label} opened. Press Play to narrate from here.`);
+        }
+
+        const summaries = runtime.store.getSummaries() as Array<{
+          pageNumber: number;
+          wordStart: number;
+        }>;
+        const resolvedPageNumber = loadedPdfPageNumber(
+          summaries,
+          targetIndex,
+          pending.pageNumber,
+        );
+        return {
+          behavior: pending.behavior,
+          pageNumber: resolvedPageNumber,
+          scroll: pending.scroll,
+          scrollTarget: pending.scrollTarget,
+          targetIndex,
+        };
+      };
+
+      const client = new PdfDocumentClient({
+        onPage(document, page, first) {
+          if (activePdfRuntimeRef.current !== runtime) return;
+          if (runtime.store.getPage(page.pageNumber)) {
+            return;
+          }
+          appendPdfDocumentChunk(runtime.model, page.model);
+          runtime.store.appendPage(page);
+          runtime.manifest = document;
+          runtime.revision = document.pdfRevision;
+          runtime.version += 1;
+          if (first) {
+            setViewMode(readyView);
+          }
+          const resolvedTarget = resolvePendingTarget();
+          publish(first);
+          if (resolvedTarget?.scroll) {
+            schedulePdfTargetScroll(
+              runtime,
+              resolvedTarget.targetIndex,
+              resolvedTarget.pageNumber,
+              resolvedTarget.scrollTarget,
+              resolvedTarget.behavior,
+            );
+          }
+          if (first) {
+            setLibraryEntries((current) => {
+              const existing = current.find((entry) => entry.id === document.id);
+              const timestamp = Date.now();
+              return sortLibraryEntries([
+                {
+                  id: document.id,
+                  title: document.title,
+                  author: document.author,
+                  kind: "pdf",
+                  wordCount: document.wordCount,
+                  createdAt: existing?.createdAt ?? timestamp,
+                  lastOpenedAt: timestamp,
+                },
+                ...current.filter((entry) => entry.id !== document.id),
+              ]) as LibraryEntry[];
+            });
+          }
+        },
+        onBitmap(message: Extract<PdfWorkerMessage, { type: "bitmap" }>) {
+          if (activePdfRuntimeRef.current !== runtime) {
+            message.bitmap.close();
+            return;
+          }
+          runtime.store.setBitmap(message.pageNumber, {
+            bitmap: message.bitmap,
+            height: message.height,
+            scale: message.scale,
+            width: message.width,
+          });
+        },
+        onComplete(document) {
+          if (activePdfRuntimeRef.current !== runtime) return;
+          runtime.manifest = document;
+          runtime.version += 1;
+          const resolvedTarget = resolvePendingTarget(true);
+          setLibraryEntries((current) =>
+            sortLibraryEntries(
+              current.map((entry) =>
+                entry.id === document.id
+                  ? { ...entry, wordCount: document.wordCount }
+                  : entry,
+              ),
+            ) as LibraryEntry[],
+          );
+          publish(true);
+          if (resolvedTarget?.scroll) {
+            schedulePdfTargetScroll(
+              runtime,
+              resolvedTarget.targetIndex,
+              resolvedTarget.pageNumber,
+              resolvedTarget.scrollTarget,
+              resolvedTarget.behavior,
+            );
+          }
+        },
+        onRenderFallback(reason) {
+          if (activePdfRuntimeRef.current !== runtime) return;
+          runtime.renderFallback = true;
+          runtime.version += 1;
+          setNotice(reason);
+          publish(true);
+          if (!runtime.fallbackSource) {
+            void getReaderPdfSource(documentId).then((storedSource) => {
+              if (
+                storedSource &&
+                activePdfRuntimeRef.current === runtime &&
+                !runtime.fallbackSource
+              ) {
+                runtime.fallbackSource = storedSource;
+                runtime.version += 1;
+                publish(true);
+              }
+            });
+          }
+        },
+        onReset() {
+          if (activePdfRuntimeRef.current !== runtime) return;
+          const previousTarget = activeWordRef.current;
+          const pendingTarget = pendingPdfTargetRef.current;
+          if (pendingTarget?.documentId === documentId) {
+            pendingPdfTargetRef.current = {
+              ...pendingTarget,
+              preserveProgress: true,
+            };
+            pendingPdfProgressRestoreRef.current = {
+              documentId,
+              targetIndex: pendingTarget.tokenIndex,
+            };
+          } else if (
+            previousTarget > 0 &&
+            pendingTarget?.documentId !== documentId
+          ) {
+            pendingPdfTargetRef.current = {
+              behavior: "auto",
+              clampOnComplete: true,
+              closePanel: false,
+              documentId,
+              preserveProgress: true,
+              scroll: true,
+              scrollTarget: readyView === "page" ? "page" : "word",
+              tokenIndex: previousTarget,
+            };
+            pendingPdfProgressRestoreRef.current = {
+              documentId,
+              targetIndex: previousTarget,
+            };
+          }
+          runtime.store.clear();
+          runtime.model = createProgressiveDocumentModel() as ProgressivePdfRuntime["model"];
+          runtime.manifest = {
+            ...runtime.manifest,
+            outline: [],
+            pdfCompletedPages: 0,
+            pdfImportStatus: "importing",
+            wordCount: 0,
+          };
+          runtime.version += 1;
+          wordRefs.current.clear();
+          setActiveWord(0);
+          activeWordRef.current = 0;
+          publish(true);
+        },
+        onError(message, outcome) {
+          if (activePdfRuntimeRef.current !== runtime) return;
+          setNotice(message);
+          if (!outcome || outcome === "resumable") return;
+          const pendingTarget =
+            pendingPdfTargetRef.current?.documentId === documentId
+              ? pendingPdfTargetRef.current
+              : null;
+          const pendingRestore =
+            pendingPdfProgressRestoreRef.current?.documentId === documentId
+              ? pendingPdfProgressRestoreRef.current
+              : null;
+          disposePdfRuntime(runtime);
+          wordRefs.current.clear();
+          setActiveWord(0);
+          activeWordRef.current = 0;
+          void reconcilePdfTerminalOutcome({
+            documentId,
+            generation: lifecycleGeneration,
+            getDocument: getReaderDocument,
+            getGeneration: () => readerLifecycleGenerationRef.current,
+            loadLibrary: loadReaderLibrary,
+            onLibrary(snapshot: { entries: LibraryEntry[] }) {
+              setLibraryEntries(snapshot.entries as LibraryEntry[]);
+            },
+            onRecovered(recovered: ReaderDocument) {
+                const recoveredModel = buildDocumentModel(
+                  recovered.paragraphs,
+                  { paragraphsStartSentences: true },
+                ) as DocumentModel;
+                const requestedIndex =
+                  pendingTarget?.tokenIndex ?? pendingRestore?.targetIndex ?? 0;
+                const resolvedIndex = pendingTarget?.position
+                  ? resolveStoredPosition(
+                      pendingTarget.position,
+                      recoveredModel.tokens,
+                    )
+                  : Math.min(
+                      Math.max(0, Math.trunc(requestedIndex)),
+                      Math.max(0, recoveredModel.tokens.length - 1),
+                    );
+                const nextIndex = resolvedIndex ?? 0;
+                if (pendingTarget?.preserveProgress || pendingRestore) {
+                  pendingPdfProgressRestoreRef.current = {
+                    documentId,
+                    targetIndex: nextIndex,
+                  };
+                }
+                setReaderDocument(recovered);
+                setActiveWord(nextIndex);
+                activeWordRef.current = nextIndex;
+                setViewMode("focus");
+            },
+            onDiscarded() {
+              if (
+                pendingPdfProgressRestoreRef.current?.documentId === documentId
+              ) {
+                pendingPdfProgressRestoreRef.current = null;
+              }
+              try {
+                localStorage.removeItem(`guided-reader-progress-${documentId}`);
+              } catch {
+                // IndexedDB cleanup still succeeds if local storage is unavailable.
+              }
+              setReaderDocument(DEMO_DOCUMENT);
+              setViewMode("focus");
+            },
+            outcome,
+          });
+        },
+      });
+      runtime.client = client;
+      activePdfRuntimeRef.current = runtime;
+      setReaderDocument({
+        ...runtime.manifest,
+        paragraphs: [],
+        pdfRuntime: runtime,
+        pdfRuntimeVersion: 0,
+      });
+      setActiveWord(0);
+      activeWordRef.current = 0;
+      setViewMode("focus");
+      const firstPage = source
+        ? await client.import(
+            source,
+            documentId,
+            title,
+            Math.min(2, Math.max(1.25, window.devicePixelRatio || 1)),
+          )
+        : await client.open(
+            documentId,
+            Math.min(2, Math.max(1.25, window.devicePixelRatio || 1)),
+          );
+      if (activePdfRuntimeRef.current !== runtime) {
+        throw new DOMException("The PDF operation was replaced.", "AbortError");
+      }
+      runtime.revision = firstPage.revision;
+      return runtime;
+    },
+    [disposePdfRuntime, schedulePdfTargetScroll],
+  );
+
+  useEffect(() => () => disposePdfRuntime(), [disposePdfRuntime]);
 
   useLayoutEffect(() => {
     activeWordRef.current = activeWord;
@@ -1055,29 +1413,44 @@ export default function Home() {
     loadReaderLibrary()
       .then(async (snapshot) => {
         if (cancelled) return;
-        setLibraryEntries(snapshot.entries as LibraryEntry[]);
+        const entries = snapshot.entries as LibraryEntry[];
+        setLibraryEntries(entries);
         if (!snapshot.activeDocumentId) return;
+        const activeEntry = entries.find(
+          (entry) => entry.id === snapshot.activeDocumentId,
+        );
+        if (activeEntry?.kind === "pdf") {
+          await openReaderDocumentMetadata(activeEntry.id);
+          if (cancelled) return;
+          let readyView: ReaderViewMode = "page";
+          try {
+            if (
+              localStorage.getItem(`guided-reader-view-${activeEntry.id}`) ===
+              "focus"
+            ) {
+              readyView = "focus";
+            }
+          } catch {
+            // The page view remains the default when preferences are unavailable.
+          }
+          await startPdfRuntime({
+            documentId: activeEntry.id,
+            title: activeEntry.title,
+            author: activeEntry.author,
+            restoredWord: storedProgressFor(activeEntry.id) ?? 0,
+            readyView,
+          });
+          return;
+        }
         const storedDocument = (await getReaderDocument(
           snapshot.activeDocumentId,
         )) as ReaderDocument | null;
         if (!storedDocument || cancelled) return;
-        const outlinedDocument = await ensureStoredPdfReady(storedDocument);
-        if (cancelled) return;
-        setLibraryEntries((current) =>
-          current.map((entry) =>
-            entry.id === outlinedDocument.id
-              ? {
-                  ...entry,
-                  wordCount: countDocumentWords(outlinedDocument),
-                }
-              : entry,
-          ),
-        );
-        const storedProgress = clampStoredProgress(outlinedDocument);
-        setReaderDocument(outlinedDocument);
+        const storedProgress = clampStoredProgress(storedDocument);
+        setReaderDocument(storedDocument);
         setActiveWord(storedProgress);
         activeWordRef.current = storedProgress;
-        setViewMode(initialViewFor(outlinedDocument));
+        setViewMode(initialViewFor(storedDocument));
       })
       .catch(() => {
         if (!cancelled) {
@@ -1121,7 +1494,7 @@ export default function Home() {
       disposeServiceWorker();
       disposeOfflineSpeechWorker();
     };
-  }, []);
+  }, [startPdfRuntime]);
 
   useEffect(() => {
     if (
@@ -1179,6 +1552,19 @@ export default function Home() {
   }, [settings, settingsRestored]);
 
   useEffect(() => {
+    const pendingRestore = pendingPdfProgressRestoreRef.current;
+    if (
+      shouldDeferPdfProgressWrite(
+        pendingRestore,
+        readerDocument.id,
+        activeWord,
+      )
+    ) {
+      return;
+    }
+    if (pendingRestore?.documentId === readerDocument.id) {
+      pendingPdfProgressRestoreRef.current = null;
+    }
     try {
       localStorage.setItem(
         `guided-reader-progress-${readerDocument.id}`,
@@ -1695,17 +2081,63 @@ export default function Home() {
   const jumpToPosition = useCallback(
     (
       targetIndex: number,
-      { recordHistory = true, closePanel = false, scroll = true } = {},
+      {
+        behavior = "smooth",
+        closePanel = false,
+        label,
+        pageNumber,
+        position,
+        recordHistory = true,
+        scroll = true,
+        scrollTarget = viewMode === "page" ? "page" : "word",
+      }: {
+        behavior?: ScrollBehavior;
+        closePanel?: boolean;
+        label?: string;
+        pageNumber?: number | null;
+        position?: StoredReaderPosition;
+        recordHistory?: boolean;
+        scroll?: boolean;
+        scrollTarget?: PendingPdfTarget["scrollTarget"];
+      } = {},
     ) => {
-      if (!model.tokens.length) return false;
-      const safeIndex = Math.min(
-        Math.max(0, Math.trunc(targetIndex)),
-        model.tokens.length - 1,
+      const requestedIndex = Math.max(0, Math.trunc(targetIndex));
+      const runtime = activePdfRuntimeRef.current;
+      const runtimeIsCurrent =
+        runtime !== null && readerDocument.pdfRuntime === runtime;
+      const runtimeIsStreaming = Boolean(
+        runtimeIsCurrent &&
+          runtime &&
+          isProgressivePdfHydrating(
+            runtime.manifest,
+            runtime.store.getSummaries().length,
+            runtime.model.tokens.length,
+          ),
       );
+      const positionNeedsMoreContext = Boolean(
+        position &&
+          model.tokens.length < requiredPdfPositionTokenCount(position),
+      );
+      const resolvedPosition =
+        position && !positionNeedsMoreContext
+          ? resolveStoredPosition(position, model.tokens)
+          : null;
+      const resolvedIndex = position ? resolvedPosition : requestedIndex;
+      const shouldWait =
+        runtimeIsStreaming &&
+        (positionNeedsMoreContext ||
+          resolvedIndex === null ||
+          resolvedIndex >= model.tokens.length);
+      if (!model.tokens.length && !shouldWait) return false;
+
       const currentIndex = activeWordRef.current;
       if (
         recordHistory &&
-        isMeaningfulPositionJump(currentIndex, safeIndex, model.tokens.length)
+        isMeaningfulPositionJump(
+          currentIndex,
+          resolvedIndex ?? requestedIndex,
+          runtime?.manifest.wordCount || model.tokens.length,
+        )
       ) {
         const departure = createPositionSnapshot(
           model.tokens,
@@ -1721,14 +2153,89 @@ export default function Home() {
       }
 
       stopSpeech();
+      if (shouldWait && runtime) {
+        const pendingRestore = pendingPdfProgressRestoreRef.current;
+        const preserveProgress =
+          pendingRestore?.documentId === readerDocument.id;
+        if (preserveProgress) {
+          pendingPdfProgressRestoreRef.current = {
+            documentId: readerDocument.id,
+            targetIndex: requestedIndex,
+          };
+        }
+        pendingPdfTargetRef.current = {
+          behavior,
+          clampOnComplete: false,
+          closePanel,
+          documentId: readerDocument.id,
+          label,
+          pageNumber,
+          position,
+          preserveProgress,
+          scroll,
+          scrollTarget,
+          tokenIndex: requestedIndex,
+        };
+        pdfTargetScrollGenerationRef.current += 1;
+        setFollowPaused(false);
+        if (closePanel) setShowBookmarks(false);
+        setNotice(
+          `${label ?? "That position"} is still loading. LineLight will open it as soon as its page is ready.`,
+        );
+        return true;
+      }
+
+      if (resolvedIndex === null) return false;
+      const safeIndex = Math.min(
+        resolvedIndex,
+        Math.max(0, model.tokens.length - 1),
+      );
+      if (pendingPdfTargetRef.current?.documentId === readerDocument.id) {
+        pendingPdfTargetRef.current = null;
+      }
+      const pendingRestore = pendingPdfProgressRestoreRef.current;
+      if (pendingRestore?.documentId === readerDocument.id) {
+        pendingPdfProgressRestoreRef.current = {
+          documentId: readerDocument.id,
+          targetIndex: safeIndex,
+        };
+      }
       setActiveWord(safeIndex);
       activeWordRef.current = safeIndex;
       setFollowPaused(false);
       if (closePanel) setShowBookmarks(false);
-      if (scroll) window.setTimeout(() => scrollToActiveWord("smooth"), 0);
+      if (scroll && runtimeIsCurrent && runtime) {
+        const summaries = runtime.store.getSummaries() as Array<{
+          pageNumber: number;
+          wordStart: number;
+        }>;
+        const resolvedPageNumber = loadedPdfPageNumber(
+          summaries,
+          safeIndex,
+          pageNumber,
+        );
+        schedulePdfTargetScroll(
+          runtime,
+          safeIndex,
+          resolvedPageNumber,
+          scrollTarget,
+          behavior,
+        );
+      } else if (scroll) {
+        window.setTimeout(() => scrollToActiveWord(behavior), 0);
+      }
       return true;
     },
-    [commitNavigation, model.tokens, scrollToActiveWord, stopSpeech],
+    [
+      commitNavigation,
+      model.tokens,
+      readerDocument.id,
+      readerDocument.pdfRuntime,
+      schedulePdfTargetScroll,
+      scrollToActiveWord,
+      stopSpeech,
+      viewMode,
+    ],
   );
 
   const selectRenderedWord = useCallback(
@@ -1740,44 +2247,64 @@ export default function Home() {
 
   const openOutlineItem = useCallback(
     (item: PdfOutlineItem) => {
+      const label = `${item.title}${
+        item.pageNumber === null ? "" : ` · page ${item.pageNumber}`
+      }`;
       if (
         item.tokenIndex === null ||
         !jumpToPosition(item.tokenIndex, {
-          scroll: viewMode !== "page" || item.pageNumber === null,
+          label,
+          pageNumber: item.pageNumber,
+          scrollTarget:
+            viewMode === "page" && item.pageNumber !== null ? "page" : "word",
         })
       ) {
         return;
       }
-      if (viewMode === "page" && item.pageNumber !== null) {
-        window.setTimeout(() => {
-          document
-            .getElementById(`pdf-page-${item.pageNumber}`)
-            ?.scrollIntoView({ behavior: "smooth", block: "start" });
-        }, 0);
-      }
       setShowSidebar(false);
-      setNotice(
-        `${item.title}${
-          item.pageNumber === null ? "" : ` · page ${item.pageNumber}`
-        } opened. Press Play to narrate from here.`,
-      );
+      if (item.tokenIndex < model.tokens.length) {
+        setNotice(`${label} opened. Press Play to narrate from here.`);
+      }
     },
-    [jumpToPosition, viewMode],
+    [jumpToPosition, model.tokens.length, viewMode],
   );
 
   const openStoredPosition = useCallback(
     (position: StoredReaderPosition, label: string) => {
-      const targetIndex = resolveStoredPosition(position, model.tokens);
+      const runtime = activePdfRuntimeRef.current;
+      const runtimeIsStreaming = Boolean(
+        runtime &&
+          readerDocument.pdfRuntime === runtime &&
+          isProgressivePdfHydrating(
+            runtime.manifest,
+            runtime.store.getSummaries().length,
+            runtime.model.tokens.length,
+          ),
+      );
+      const contextNotLoaded =
+        runtimeIsStreaming &&
+        model.tokens.length < requiredPdfPositionTokenCount(position);
+      const targetIndex = contextNotLoaded
+        ? null
+        : resolveStoredPosition(position, model.tokens);
       if (targetIndex === null) {
-        setNotice(
-          `${label} could not be matched safely in the current document.`,
-        );
+        if (
+          runtimeIsStreaming &&
+          jumpToPosition(position.tokenIndex, {
+            closePanel: true,
+            label,
+            position,
+          })
+        ) {
+          return;
+        }
+        setNotice(`${label} could not be matched safely in the current document.`);
         return;
       }
-      jumpToPosition(targetIndex, { closePanel: true });
+      jumpToPosition(targetIndex, { closePanel: true, label });
       setNotice(`${label} opened. Press Play to narrate from here.`);
     },
-    [jumpToPosition, model.tokens],
+    [jumpToPosition, model.tokens, readerDocument.pdfRuntime],
   );
 
   const backToPreviousPosition = useCallback(() => {
@@ -2655,6 +3182,7 @@ export default function Home() {
   );
 
   const togglePlayback = useCallback(() => {
+    acceptVisiblePdfPosition();
     if (isPreparingSpeech) {
       stopSpeech();
       setNotice("Narration stopped.");
@@ -2697,7 +3225,14 @@ export default function Home() {
       return;
     }
     startSpeech();
-  }, [isPlaying, isPreparingSpeech, speechAvailable, startSpeech, stopSpeech]);
+  }, [
+    acceptVisiblePdfPosition,
+    isPlaying,
+    isPreparingSpeech,
+    speechAvailable,
+    startSpeech,
+    stopSpeech,
+  ]);
 
   const seekBufferedPlayback = useCallback(
     (targetIndex: number, resumePlayback = false) => {
@@ -2742,6 +3277,7 @@ export default function Home() {
 
   const moveBySentence = useCallback(
     (direction: -1 | 1) => {
+      acceptVisiblePdfPosition();
       const targetIndex = findAdjacentSentenceStart(
         sentenceStarts,
         activeWordRef.current,
@@ -2759,6 +3295,7 @@ export default function Home() {
       if (restartAfterMove) startSpeech(targetIndex);
     },
     [
+      acceptVisiblePdfPosition,
       isPlaying,
       scrollToActiveWord,
       seekBufferedPlayback,
@@ -2770,6 +3307,7 @@ export default function Home() {
 
   const replayUnit = useCallback(
     (unit: "word" | "sentence" | "paragraph") => {
+      acceptVisiblePdfPosition();
       if (!activeToken) return;
       let target = activeToken.index;
       if (unit === "sentence") {
@@ -2789,6 +3327,7 @@ export default function Home() {
       startSpeech(target);
     },
     [
+      acceptVisiblePdfPosition,
       activeToken,
       model.tokens,
       seekBufferedPlayback,
@@ -2865,9 +3404,51 @@ export default function Home() {
         return;
       }
 
+      readerLifecycleGenerationRef.current += 1;
       setLibraryBusyId(documentId);
       setNotice("");
       try {
+        const selectedEntry = libraryEntries.find(
+          (entry) => entry.id === documentId,
+        );
+        if (!selectedEntry) {
+          throw new Error("This document is no longer in the library.");
+        }
+        if (selectedEntry.kind === "pdf") {
+          const openedEntry = (await openReaderDocumentMetadata(
+            documentId,
+          )) as LibraryEntry | null;
+          if (!openedEntry) {
+            throw new Error("This document is no longer in the library.");
+          }
+          stopSpeech();
+          wordRefs.current.clear();
+          let readyView: ReaderViewMode = "page";
+          try {
+            if (
+              localStorage.getItem(`guided-reader-view-${documentId}`) ===
+              "focus"
+            ) {
+              readyView = "focus";
+            }
+          } catch {
+            // The page view remains the default when preferences are unavailable.
+          }
+          const restoredWord = storedProgressFor(documentId) ?? 0;
+          await startPdfRuntime({
+            documentId,
+            title: openedEntry.title,
+            author: openedEntry.author,
+            restoredWord,
+            readyView,
+          });
+          setFollowPaused(false);
+          setShowSidebar(false);
+          if (restoredWord === 0) {
+            readerRef.current?.scrollTo({ top: 0, behavior: "auto" });
+          }
+          return;
+        }
         const opened = (await openReaderDocument(documentId)) as {
           document: ReaderDocument | null;
           entry: LibraryEntry | null;
@@ -2875,24 +3456,20 @@ export default function Home() {
         if (!opened.document || !opened.entry) {
           throw new Error("This document is no longer in the library.");
         }
-        const outlinedDocument = await ensureStoredPdfReady(opened.document);
-        const readyEntry = {
-          ...opened.entry,
-          wordCount: countDocumentWords(outlinedDocument),
-        };
 
         stopSpeech();
+        disposePdfRuntime(readerDocument.pdfRuntime);
         wordRefs.current.clear();
-        const storedProgress = clampStoredProgress(outlinedDocument);
-        setReaderDocument(outlinedDocument);
+        const storedProgress = clampStoredProgress(opened.document);
+        setReaderDocument(opened.document);
         setActiveWord(storedProgress);
         activeWordRef.current = storedProgress;
-        setViewMode(initialViewFor(outlinedDocument));
+        setViewMode(initialViewFor(opened.document));
         setFollowPaused(false);
         setLibraryEntries(
           (current) =>
             sortLibraryEntries([
-              readyEntry,
+              opened.entry!,
               ...current.filter((entry) => entry.id !== documentId),
             ]) as LibraryEntry[],
         );
@@ -2911,7 +3488,15 @@ export default function Home() {
         setLibraryBusyId(null);
       }
     },
-    [readerDocument.id, scrollToActiveWord, stopSpeech],
+    [
+      libraryEntries,
+      disposePdfRuntime,
+      readerDocument.id,
+      readerDocument.pdfRuntime,
+      scrollToActiveWord,
+      startPdfRuntime,
+      stopSpeech,
+    ],
   );
 
   const submitDocumentRename = useCallback(
@@ -2937,7 +3522,22 @@ export default function Home() {
             ) as LibraryEntry[],
         );
         if (readerDocument.id === documentId) {
-          setReaderDocument(renamed.document);
+          const runtime = activePdfRuntimeRef.current;
+          if (runtime && runtime === readerDocument.pdfRuntime) {
+            runtime.manifest = {
+              ...runtime.manifest,
+              title: renamed.document.title,
+            };
+            runtime.version += 1;
+            setReaderDocument({
+              ...renamed.document,
+              paragraphs: [],
+              pdfRuntime: runtime,
+              pdfRuntimeVersion: runtime.version,
+            });
+          } else {
+            setReaderDocument(renamed.document);
+          }
         }
         setRenamingDocumentId(null);
         setRenameDraft("");
@@ -2952,7 +3552,12 @@ export default function Home() {
         setLibraryBusyId(null);
       }
     },
-    [readerDocument.id, renameDraft, renamingDocumentId],
+    [
+      readerDocument.id,
+      readerDocument.pdfRuntime,
+      renameDraft,
+      renamingDocumentId,
+    ],
   );
 
   const deleteLibraryDocument = useCallback(
@@ -2971,7 +3576,11 @@ export default function Home() {
       );
       setLibraryBusyId(entryToDelete.id);
       try {
-        if (wasActive) stopSpeech();
+        if (wasActive) {
+          readerLifecycleGenerationRef.current += 1;
+          stopSpeech();
+          disposePdfRuntime(readerDocument.pdfRuntime);
+        }
         await removeReaderDocument(entryToDelete.id);
         try {
           localStorage.removeItem(`guided-reader-progress-${entryToDelete.id}`);
@@ -2986,6 +3595,33 @@ export default function Home() {
         }
 
         if (wasActive && remainingEntries.length) {
+          if (remainingEntries[0].kind === "pdf") {
+            const nextEntry = (await openReaderDocumentMetadata(
+              remainingEntries[0].id,
+            )) as LibraryEntry | null;
+            if (!nextEntry) {
+              throw new Error("The next document could not be opened.");
+            }
+            wordRefs.current.clear();
+            const restoredWord = storedProgressFor(nextEntry.id) ?? 0;
+            await startPdfRuntime({
+              documentId: nextEntry.id,
+              title: nextEntry.title,
+              author: nextEntry.author,
+              restoredWord,
+            });
+            setLibraryEntries((current) =>
+              sortLibraryEntries([
+                nextEntry,
+                ...current.filter((entry) => entry.id !== nextEntry.id),
+              ]) as LibraryEntry[],
+            );
+            if (restoredWord === 0) {
+              readerRef.current?.scrollTo({ top: 0, behavior: "auto" });
+            }
+            setNotice(`${entryToDelete.title} was removed from this device.`);
+            return;
+          }
           const nextDocument = (await openReaderDocument(
             remainingEntries[0].id,
           )) as {
@@ -2995,25 +3631,18 @@ export default function Home() {
           if (!nextDocument.document || !nextDocument.entry) {
             throw new Error("The next document could not be opened.");
           }
-          const outlinedDocument = await ensureStoredPdfReady(
-            nextDocument.document,
-          );
-          const readyEntry = {
-            ...nextDocument.entry,
-            wordCount: countDocumentWords(outlinedDocument),
-          };
           wordRefs.current.clear();
-          const storedProgress = clampStoredProgress(outlinedDocument);
-          setReaderDocument(outlinedDocument);
+          const storedProgress = clampStoredProgress(nextDocument.document);
+          setReaderDocument(nextDocument.document);
           setActiveWord(storedProgress);
           activeWordRef.current = storedProgress;
-          setViewMode(initialViewFor(outlinedDocument));
+          setViewMode(initialViewFor(nextDocument.document));
           setLibraryEntries(
             (current) =>
               sortLibraryEntries(
                 current.map((entry) =>
                   entry.id === nextDocument.entry!.id
-                    ? readyEntry
+                    ? nextDocument.entry!
                     : entry,
                 ),
               ) as LibraryEntry[],
@@ -3042,9 +3671,12 @@ export default function Home() {
     },
     [
       libraryEntries,
+      disposePdfRuntime,
       readerDocument.id,
+      readerDocument.pdfRuntime,
       renamingDocumentId,
       scrollToActiveWord,
+      startPdfRuntime,
       stopSpeech,
     ],
   );
@@ -3057,6 +3689,8 @@ export default function Home() {
         setNotice("Choose a PDF, EPUB, or TXT file.");
         return;
       }
+
+      readerLifecycleGenerationRef.current += 1;
 
       const restoreOfflineWorker =
         settings.narrationEngine === "offline" &&
@@ -3082,14 +3716,28 @@ export default function Home() {
       setIsImporting(true);
       setNotice("");
       try {
-        let imported: ReaderDocument;
-        if (extension === "pdf") imported = await parsePdf(file);
-        else if (extension === "epub") imported = await parseEpub(file);
-        else imported = await parseText(file);
+        if (extension === "pdf") {
+          const documentId = `pdf-${Date.now()}`;
+          wordRefs.current.clear();
+          await startPdfRuntime({
+            documentId,
+            title: filenameWithoutExtension(file.name),
+            author: "PDF document",
+            source: file,
+          });
+          setFollowPaused(false);
+          setShowImport(false);
+          setShowSidebar(false);
+          window.setTimeout(() => {
+            readerRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+          }, 0);
+          return;
+        }
 
-        const libraryEntry = (await addReaderDocument(
-          imported,
-        )) as LibraryEntry;
+        const imported =
+          extension === "epub" ? await parseEpub(file) : await parseText(file);
+        disposePdfRuntime();
+        const libraryEntry = (await addReaderDocument(imported)) as LibraryEntry;
         wordRefs.current.clear();
         setReaderDocument(imported);
         setLibraryEntries(
@@ -3101,13 +3749,7 @@ export default function Home() {
         );
         setActiveWord(0);
         activeWordRef.current = 0;
-        setViewMode(
-          imported.kind === "pdf" &&
-            imported.pdfData?.length &&
-            imported.pdfPages?.length
-            ? "page"
-            : "focus",
-        );
+        setViewMode("focus");
         setFollowPaused(false);
         setShowImport(false);
         setShowSidebar(false);
@@ -3130,9 +3772,11 @@ export default function Home() {
     },
     [
       offlinePackState,
+      disposePdfRuntime,
       scheduleOfflineWarmRestore,
       settings.narrationEngine,
       settings.offlineVoice,
+      startPdfRuntime,
       stopSpeech,
     ],
   );
@@ -3542,18 +4186,25 @@ export default function Home() {
         >
           {supportsPageView &&
           viewMode === "page" &&
-          readerDocument.pdfData &&
-          readerDocument.pdfPages ? (
+          readerDocument.pdfRuntime ? (
             <PdfPageView
               key={readerDocument.id}
-              data={readerDocument.pdfData}
-              pages={readerDocument.pdfPages}
+              store={readerDocument.pdfRuntime.store}
+              fallbackSource={readerDocument.pdfRuntime.fallbackSource}
+              renderFallback={readerDocument.pdfRuntime.renderFallback}
               activeWord={activeWord}
               activeHighlightIndex={activeHighlightIndex}
               tokenSentences={tokenSentences}
               tokenParagraphs={tokenParagraphs}
               highlightScope={settings.highlightScope}
               registerWord={registerRenderedWord}
+              requestRender={(pageNumber, scale, options) =>
+                readerDocument.pdfRuntime?.client.requestRender(
+                  pageNumber,
+                  scale,
+                  options,
+                )
+              }
               onSelectWord={selectRenderedWord}
               onRenderError={setNotice}
             />
@@ -3562,6 +4213,9 @@ export default function Home() {
               key={readerDocument.id}
               activeParagraphIndex={activeParagraphIndex}
               activeHighlightIndex={activeHighlightIndex}
+              characterCounts={
+                readerDocument.pdfRuntime?.model.paragraphCharacterCounts
+              }
               className={[
                 "reading-page",
                 `font-${settings.font}`,
@@ -3571,6 +4225,7 @@ export default function Home() {
                 .filter(Boolean)
                 .join(" ")}
               documentId={readerDocument.id}
+              contentVersion={readerDocument.pdfRuntimeVersion ?? 0}
               documentKind={readerDocument.kind}
               fontSize={settings.fontSize}
               focusLines={settings.focusLines}
@@ -3843,12 +4498,19 @@ export default function Home() {
                   </p>
                 ) : bookmarkRows.length ? (
                   <div className="bookmark-list">
-                    {bookmarkRows.map(({ bookmark, resolvedIndex }) => {
+                    {bookmarkRows.map(
+                      ({ bookmark, canOpenWhileLoading, resolvedIndex }) => {
                       const bookmarkProgress =
-                        resolvedIndex === null || !model.tokens.length
+                        resolvedIndex === null && !canOpenWhileLoading
                           ? null
                           : Math.round(
-                              ((resolvedIndex + 1) / model.tokens.length) * 100,
+                              (((resolvedIndex ?? bookmark.tokenIndex) + 1) /
+                                Math.max(
+                                  1,
+                                  readerDocument.pdfRuntime?.manifest
+                                    .wordCount ?? model.tokens.length,
+                                )) *
+                                100,
                             );
                       const isEditing = editingBookmarkId === bookmark.id;
                       return (
@@ -3888,7 +4550,9 @@ export default function Home() {
                               <button
                                 className="bookmark-open"
                                 type="button"
-                                disabled={resolvedIndex === null}
+                                disabled={
+                                  resolvedIndex === null && !canOpenWhileLoading
+                                }
                                 onClick={() =>
                                   openStoredPosition(
                                     bookmark,
@@ -3901,7 +4565,9 @@ export default function Home() {
                                   <small>
                                     {bookmarkProgress === null
                                       ? "Position unavailable"
-                                      : `${bookmarkProgress}%`}
+                                      : canOpenWhileLoading
+                                        ? `${bookmarkProgress}% · loading`
+                                        : `${bookmarkProgress}%`}
                                   </small>
                                 </span>
                                 <span className="bookmark-snippet">
@@ -3931,7 +4597,8 @@ export default function Home() {
                           )}
                         </article>
                       );
-                    })}
+                      },
+                    )}
                   </div>
                 ) : (
                   <p className="bookmark-empty">

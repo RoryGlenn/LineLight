@@ -888,11 +888,17 @@ input:focus-visible {
   display: flex;
   align-items: center;
   flex-direction: column;
-  gap: 38px;
+  gap: 0;
 }
 
 .pdf-page-block {
   width: 100%;
+  margin-bottom: 38px;
+}
+
+.pdf-range-spacer {
+  width: 100%;
+  flex: 0 0 auto;
 }
 
 .pdf-page {
@@ -1097,6 +1103,21 @@ input:focus-visible {
 .focus-paragraph-shell {
   min-width: 0;
   contain: layout style;
+}
+
+.focus-range-spacer {
+  width: 100%;
+}
+
+.reader-visually-hidden {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  padding: 0 !important;
+  overflow: hidden !important;
+  clip: rect(0, 0, 0, 0) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
 }
 
 .reading-copy [data-focus-token] {
