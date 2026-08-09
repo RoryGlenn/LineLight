@@ -209,7 +209,9 @@ async function pollJson(url, processHandle, timeoutMs = 30_000) {
       throw new Error("The browser stopped before its debugging endpoint opened.");
     }
     try {
-      const response = await fetch(url);
+      const response = await fetch(url, {
+        signal: AbortSignal.timeout(1_000),
+      });
       if (response.ok) return await response.json();
     } catch {
       // The debugging endpoint is still starting.
