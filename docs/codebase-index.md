@@ -114,6 +114,8 @@ visible-page-only main-thread fallback.
 while [`app/pdf-document.ts`](../app/pdf-document.ts) owns the job/revision
 client and [`app/pdf-document.worker.ts`](../app/pdf-document.worker.ts) owns
 the progressive document pipeline.
+[`app/pdf-parser.worker.ts`](../app/pdf-parser.worker.ts) is the first-party
+nested-worker bootstrap that imports PDF.js and exposes its parser protocol.
 [`app/pdf-document-types.ts`](../app/pdf-document-types.ts) defines the
 serializable worker/storage contract;
 [`app/pdf-document-protocol.mjs`](../app/pdf-document-protocol.mjs) owns

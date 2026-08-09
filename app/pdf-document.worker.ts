@@ -1,5 +1,5 @@
 import * as pdfjs from "pdfjs-dist";
-import pdfJsWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
+import pdfParserWorkerUrl from "./pdf-parser.worker.ts?worker&url";
 import {
   addReaderPdfPageOne,
   appendReaderPdfPage,
@@ -213,7 +213,7 @@ async function loadPdf(context: ActiveContext, source: Blob) {
   const bytes = new Uint8Array(await source.arrayBuffer());
   assertCurrent(context);
   mark(context, "source-read-end");
-  const parserPort = new Worker(pdfJsWorkerUrl, { type: "module" });
+  const parserPort = new Worker(pdfParserWorkerUrl, { type: "module" });
   context.parserPort = parserPort;
   mark(context, "parser-worker-start");
   try {

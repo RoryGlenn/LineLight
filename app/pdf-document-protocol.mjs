@@ -66,6 +66,19 @@ export function waitForPdfParserWorkerReady(
     const onMessage = (event) => {
       const message = event?.data;
       if (
+        message?.sourceName === "linelight-parser-bootstrap" &&
+        message?.targetName === "main" &&
+        message?.action === "bootstrap-error"
+      ) {
+        const detail = message.data?.message
+          ? ` ${message.data.message}`
+          : "";
+        finish(() =>
+          reject(new Error(`The PDF parser worker could not start.${detail}`)),
+        );
+        return;
+      }
+      if (
         message?.sourceName === "worker" &&
         message?.targetName === "main" &&
         message?.action === "ready"

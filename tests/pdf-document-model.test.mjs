@@ -231,6 +231,22 @@ test("waits for the nested PDF.js protocol before supplying its worker port", as
   const failed = waitForPdfParserWorkerReady(failedPort, { timeoutMs: 100 });
   failedPort.dispatchEvent(new Event("error"));
   await assert.rejects(failed, /could not start/);
+
+  const bootstrapPort = new EventTarget();
+  const bootstrapFailed = waitForPdfParserWorkerReady(bootstrapPort, {
+    timeoutMs: 100,
+  });
+  bootstrapPort.dispatchEvent(
+    new MessageEvent("message", {
+      data: {
+        sourceName: "linelight-parser-bootstrap",
+        targetName: "main",
+        action: "bootstrap-error",
+        data: { message: "module rejected" },
+      },
+    }),
+  );
+  await assert.rejects(bootstrapFailed, /module rejected/);
 });
 
 test("reports discard and legacy recovery only after confirmed cleanup", () => {
