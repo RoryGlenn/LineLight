@@ -116,6 +116,9 @@ client and [`app/pdf-document.worker.ts`](../app/pdf-document.worker.ts) owns
 the progressive document pipeline.
 [`app/pdf-parser.worker.ts`](../app/pdf-parser.worker.ts) is the first-party
 nested-worker bootstrap that imports PDF.js and exposes its parser protocol.
+[`app/pdf-worker-filters.mjs`](../app/pdf-worker-filters.mjs) implements the
+worker-safe transfer and alpha/luminosity soft-mask pixel transforms used by
+supported OffscreenCanvas pages.
 [`app/pdf-document-types.ts`](../app/pdf-document-types.ts) defines the
 serializable worker/storage contract;
 [`app/pdf-document-protocol.mjs`](../app/pdf-document-protocol.mjs) owns
@@ -184,6 +187,8 @@ progress/outline/bookmark targets and explicit playback races are covered by
 [`tests/pdf-progressive-navigation.test.mjs`](../tests/pdf-progressive-navigation.test.mjs);
 and generation-safe terminal UI reconciliation is covered by
 [`tests/pdf-terminal-reconciliation.test.mjs`](../tests/pdf-terminal-reconciliation.test.mjs).
+Worker filter pixel math is covered by
+[`tests/pdf-worker-filters.test.mjs`](../tests/pdf-worker-filters.test.mjs).
 Shared sentence behavior, including unchanged TXT/EPUB paragraph navigation,
 is covered by [`tests/document-model.test.mjs`](../tests/document-model.test.mjs).
 Normalized token mapping, dehyphenation, and multi-font, ligature, rotated, and

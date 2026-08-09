@@ -32,6 +32,7 @@ import type {
 } from "./pdf-document-types";
 import type { PdfPageLayout } from "./pdf-page-view";
 import { createPdfRasterScheduler } from "./pdf-raster-scheduler.mjs";
+import { applyPdfWorkerFilter } from "./pdf-worker-filters.mjs";
 import {
   canStartPdfPage,
   isCurrentPdfSession,
@@ -88,7 +89,11 @@ class OffscreenCanvasFactory {
       throw new Error("OffscreenCanvas is unavailable.");
     }
     const canvas = new OffscreenCanvas(width, height);
-    return { canvas, context: canvas.getContext("2d") };
+    const context = canvas.getContext("2d");
+    return {
+      canvas,
+      context: context ? createFilteredCanvasContext(context) : null,
+    };
   }
 
   reset(
@@ -117,23 +122,135 @@ class OffscreenCanvasFactory {
 // SVG-backed PDF.js filters require a DOM. Pages are inspected before this
 // factory is used; transfer maps and soft masks are routed to the cooperative
 // visible-page fallback instead of being rendered with missing effects.
+type WorkerFilter =
+  | { kind: "alpha"; map?: Uint8Array | Uint8ClampedArray | null }
+  | { kind: "luminosity"; map?: Uint8Array | Uint8ClampedArray | null }
+  | {
+      kind: "transfer";
+      maps: Array<Uint8Array | Uint8ClampedArray>;
+    };
+
+const workerFilters = new Map<string, WorkerFilter>();
+let nextWorkerFilterId = 1;
+
+function registerWorkerFilter(filter: WorkerFilter) {
+  const token = `url(#linelight-pdf-worker-filter-${nextWorkerFilterId++})`;
+  workerFilters.set(token, filter);
+  return token;
+}
+
 class WorkerFilterFactory {
-  addFilter() {
-    return "none";
+  private tokens: string[] = [];
+
+  private add(filter: WorkerFilter) {
+    const token = registerWorkerFilter(filter);
+    this.tokens.push(token);
+    return token;
+  }
+
+  addFilter(maps?: Array<Uint8Array | Uint8ClampedArray> | null) {
+    return maps?.length ? this.add({ kind: "transfer", maps }) : "none";
   }
   addHCMFilter() {
     return "none";
   }
-  addAlphaFilter() {
-    return "none";
+  addAlphaFilter(map?: Uint8Array | Uint8ClampedArray | null) {
+    return this.add({ kind: "alpha", map });
   }
-  addLuminosityFilter() {
-    return "none";
+  addLuminosityFilter(map?: Uint8Array | Uint8ClampedArray | null) {
+    return this.add({ kind: "luminosity", map });
   }
   addHighlightHCMFilter() {
     return "none";
   }
-  destroy() {}
+  destroy() {
+    for (const token of this.tokens) workerFilters.delete(token);
+    this.tokens = [];
+  }
+}
+
+function createFilteredCanvasContext(
+  context: OffscreenCanvasRenderingContext2D,
+) {
+  let activeFilter: WorkerFilter | null = null;
+  const filterStack: Array<WorkerFilter | null> = [];
+  const propertyOverrides = new Map<PropertyKey, unknown>();
+  const save = () => {
+    filterStack.push(activeFilter);
+    context.save();
+  };
+  const restore = () => {
+    activeFilter = filterStack.pop() ?? null;
+    context.restore();
+  };
+  const drawImage = (...arguments_: unknown[]) => {
+    if (!activeFilter) {
+      return Reflect.apply(context.drawImage, context, arguments_);
+    }
+    const source = arguments_[0] as {
+      width?: number;
+      height?: number;
+      displayWidth?: number;
+      displayHeight?: number;
+    };
+    const width = Math.max(
+      1,
+      Math.trunc(source.width ?? source.displayWidth ?? 1),
+    );
+    const height = Math.max(
+      1,
+      Math.trunc(source.height ?? source.displayHeight ?? 1),
+    );
+    const filteredCanvas = new OffscreenCanvas(width, height);
+    const filteredContext = filteredCanvas.getContext("2d");
+    if (!filteredContext) {
+      throw new Error("The PDF filter canvas could not be created.");
+    }
+    filteredContext.drawImage(source as CanvasImageSource, 0, 0);
+    const pixels = filteredContext.getImageData(0, 0, width, height);
+    applyPdfWorkerFilter(pixels, activeFilter);
+    filteredContext.putImageData(pixels, 0, 0);
+    return Reflect.apply(
+      context.drawImage,
+      context,
+      [filteredCanvas, ...arguments_.slice(1)],
+    );
+  };
+  return new Proxy(context, {
+    get(target, property) {
+      if (propertyOverrides.has(property)) {
+        return propertyOverrides.get(property);
+      }
+      if (property === "filter") {
+        const token = [...workerFilters.entries()].find(
+          ([, filter]) => filter === activeFilter,
+        )?.[0];
+        return token ?? target.filter;
+      }
+      if (property === "save") return save;
+      if (property === "restore") return restore;
+      if (property === "drawImage") return drawImage;
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+    set(target, property, value) {
+      if (property === "filter") {
+        const filter = workerFilters.get(String(value));
+        activeFilter = filter ?? null;
+        target.filter = filter ? "none" : String(value);
+        return true;
+      }
+      if (typeof value === "function" || String(property).startsWith("_")) {
+        propertyOverrides.set(property, value);
+        return true;
+      }
+      return Reflect.set(target, property, value, target);
+    },
+    deleteProperty(_target, property) {
+      propertyOverrides.delete(property);
+      return true;
+    },
+  });
 }
 
 function post(message: PdfWorkerMessage, transfer?: Transferable[]) {
@@ -333,17 +450,21 @@ async function hasUnsupportedWorkerFilters(page: pdfjs.PDFPageProxy) {
   for (let index = 0; index < operatorList.fnArray.length; index += 1) {
     const operator = operatorList.fnArray[index];
     const args = operatorList.argsArray[index];
-    if (operator === pdfjs.OPS.beginGroup && args?.[0]?.smask) return true;
-    if (operator !== pdfjs.OPS.setGState) continue;
-    const states = args?.[0];
     if (
-      Array.isArray(states) &&
-      states.some(
-        (state) =>
-          Array.isArray(state) && state[0] === "TR" && state[1] !== null,
-      )
+      operator === pdfjs.OPS.beginGroup &&
+      args?.[0]?.smask &&
+      !["Alpha", "Luminosity"].includes(args[0].smask.subtype)
     ) {
       return true;
+    }
+    if (operator !== pdfjs.OPS.setGState) continue;
+    const states = args?.[0];
+    if (!Array.isArray(states)) continue;
+    for (const state of states) {
+      if (!Array.isArray(state) || state[0] !== "TR" || state[1] === null) {
+        continue;
+      }
+      if (!Array.isArray(state[1])) return true;
     }
   }
   return false;
@@ -394,7 +515,10 @@ async function performPdfPageRender(
     Math.ceil(viewport.width),
     Math.ceil(viewport.height),
   );
-  const canvasContext = canvas.getContext("2d", { alpha: false });
+  const rawCanvasContext = canvas.getContext("2d", { alpha: false });
+  const canvasContext = rawCanvasContext
+    ? createFilteredCanvasContext(rawCanvasContext)
+    : null;
   if (!canvasContext) throw new Error("The PDF canvas could not be created.");
   mark(context, `page-${pageNumber}-raster-start`);
   const renderTask = page.render({
