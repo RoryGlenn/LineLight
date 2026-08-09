@@ -152,6 +152,19 @@ npm ci
 npm run dev
 ```
 
+To exercise the built production Worker and its static-asset headers locally,
+build first and then start the local Wrangler artifact at
+`http://localhost:3000`:
+
+```bash
+npm run build
+npm start
+```
+
+`npm start -- --ip 127.0.0.1 --port 8787` can bind a different local address
+or port. This production path applies the same document, worker-script, and
+WebAssembly isolation headers as the deployed asset binding.
+
 To enable Natural online narration locally, copy the example environment file
 and add the key and region from an Azure AI Speech resource:
 

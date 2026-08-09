@@ -280,18 +280,11 @@ async function waitForHttp(url, processHandle, log, timeoutMs = 60_000) {
 
 async function startProductionServer() {
   const port = await getFreePort();
-  const wranglerExecutable = path.join(
-    REPOSITORY_ROOT,
-    "node_modules",
-    ".bin",
-    "wrangler",
-  );
   const child = spawn(
-    wranglerExecutable,
+    "npm",
     [
-      "dev",
-      "--config",
-      path.join(REPOSITORY_ROOT, "dist", "server", "wrangler.json"),
+      "start",
+      "--",
       "--ip",
       "127.0.0.1",
       "--port",
@@ -897,6 +890,17 @@ const INSTRUMENTATION_SOURCE = `
 `;
 
 async function configurePage(cdp, appUrl, networkState) {
+  const recordAttachError = (entry) => {
+    if (networkState.teardownStarted) {
+      networkState.teardownAttachCancellations.push({
+        ...entry,
+        phase: "teardown",
+        reason: "The harness closed its owned CDP/browser session.",
+      });
+      return;
+    }
+    networkState.attachErrors.push(entry);
+  };
   const consoleEntries = [];
   cdp.on("Runtime.consoleAPICalled", (event, sessionId) => {
     consoleEntries.push({
@@ -1009,7 +1013,7 @@ async function configurePage(cdp, appUrl, networkState) {
           sessionId,
         );
       } catch (error) {
-        networkState.attachErrors.push({
+        recordAttachError({
           error: String(error),
           sessionId,
           targetType: targetInfo.type,
@@ -1019,7 +1023,7 @@ async function configurePage(cdp, appUrl, networkState) {
         if (waitingForDebugger) {
           await cdp.send("Runtime.runIfWaitingForDebugger", {}, sessionId).catch(
             (error) => {
-              networkState.attachErrors.push({
+              recordAttachError({
                 error: `Could not resume target: ${String(error)}`,
                 sessionId,
                 targetType: targetInfo.type,
@@ -1592,6 +1596,8 @@ async function run(options) {
     requestsByKey: new Map(),
     responseFailures: [],
     runtimeExceptions: [],
+    teardownAttachCancellations: [],
+    teardownStarted: false,
     targets: [],
   };
   const evidence = {
@@ -2121,6 +2127,8 @@ async function run(options) {
         importFailures: importNetworkFailures,
         importRequests,
         isolation: networkState.isolation,
+        teardownAttachCancellations:
+          networkState.teardownAttachCancellations,
         responseFailures: importResponseFailures,
       },
       traces: {
@@ -2261,6 +2269,7 @@ async function run(options) {
     };
   } finally {
     reportPhase("teardown-start");
+    networkState.teardownStarted = true;
     const shutdownResults = await Promise.allSettled([
       cdp?.close() ?? Promise.resolve(true),
       stopOwnedProcess(
@@ -2328,6 +2337,8 @@ async function run(options) {
       cdpCommands: cdp?.commandLog ?? [],
       cdpConnectionEvents: cdp?.connectionEvents ?? [],
       phaseLog,
+      teardownAttachCancellations:
+        networkState.teardownAttachCancellations,
       processShutdown: {
         browser: browserShutdown.status === "fulfilled"
           ? browserShutdown.value

@@ -99,16 +99,20 @@ test(
   "serves isolated workers and WebAssembly from the built production origin",
   { timeout: 60_000 },
   async () => {
+    const builtWranglerConfig = JSON.parse(
+      await readFile("dist/server/wrangler.json", "utf8"),
+    );
+    assert.equal(builtWranglerConfig.dev?.ip, "0.0.0.0");
+    assert.equal(builtWranglerConfig.dev?.port, 3000);
     const port = await getFreePort();
     const temporaryDirectory = await mkdtemp(
       path.join(os.tmpdir(), "linelight-built-origin-test-"),
     );
     const child = spawn(
-      resolve("node_modules/.bin/wrangler"),
+      "npm",
       [
-        "dev",
-        "--config",
-        resolve("dist/server/wrangler.json"),
+        "start",
+        "--",
         "--ip",
         "127.0.0.1",
         "--port",

@@ -432,7 +432,9 @@ unversioned runtime manifest through the deployment asset binding, while
 [`public/_headers`](../public/_headers) owns the complementary static-asset
 header policy. [`vite.config.ts`](../vite.config.ts) supplies matching COEP and
 CORP headers to source module workers that Vite serves directly during local
-development; production document isolation remains an edge-worker responsibility.
+development and emits the local production address used by `npm start`; that
+command runs the built Worker and asset binding through local Wrangler so its
+document isolation matches deployment.
 
 **Entry points:** [`app/page.tsx`](../app/page.tsx) invokes
 [`app/service-worker-registration.mjs`](../app/service-worker-registration.mjs).
