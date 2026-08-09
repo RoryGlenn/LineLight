@@ -1134,6 +1134,9 @@ async function run(options) {
       );
     }
   }
+  // Snapshot the reviewed source before screenshots or JSON evidence update
+  // tracked output files. Per-file hashes still bind the exact implementation.
+  const source = await sourceEvidence(options.fixture);
 
   let server;
   let browser;
@@ -1251,7 +1254,7 @@ async function run(options) {
       schemaVersion: 1,
       issue: 60,
       generatedAt: new Date().toISOString(),
-      source: await sourceEvidence(options.fixture),
+      source,
       fixture: {
         path: path.relative(REPOSITORY_ROOT, options.fixture),
         bytes: fixtureStats.size,
