@@ -362,7 +362,10 @@ Transformers/Kokoro configuration, model installation, initialization, warm-up,
 synthesis, pronunciation-weighted boundary generation, runtime fallback, and
 commit ordering.
 [`app/offline-speech-utils.mjs`](../app/offline-speech-utils.mjs) owns backend
-error classification, waveform validation/recovery, and approximate word timing.
+error classification, strict waveform validation, bounded punctuation-only
+token-shape recovery, and approximate word timing. Exhausting those local
+recovery shapes stays request-local rather than restarting the same fp16 graph
+through the backend ladder.
 [`app/phonemizer-runtime.ts`](../app/phonemizer-runtime.ts) preserves the
 phonemizer's prebuilt runtime interface. [`worker/offline-model.mjs`](../worker/offline-model.mjs)
 serves only allowlisted pinned model files.
@@ -405,7 +408,10 @@ policy and progress; and
 for audio and timing helpers. The worker-compatible phonemizer import is probed
 by [`tests/helpers/phonemizer-worker-probe.mjs`](../tests/helpers/phonemizer-worker-probe.mjs).
 Backend fallback, migration, offline restart, performance, and voice quality
-still need the corresponding real-browser gates.
+still need the corresponding real-browser gates. The headed production-browser
+waveform, recovery-shape, onset-boundary, cache, and privacy gate for invalid
+fp16 samples is recorded in
+[`docs/evidence/issue-70/offline-audio-recovery.json`](evidence/issue-70/offline-audio-recovery.json).
 
 ## PWA caching and browser runtime isolation
 

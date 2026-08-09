@@ -54,6 +54,7 @@ import {
   generateUsableOfflineAudio,
   isOfflineBackendRuntimeFailure,
   measureOfflineAudioLeadIn,
+  shouldRetryOfflineSpeechBackend,
 } from "./offline-speech-utils.mjs";
 import { phonemize } from "./phonemizer-runtime";
 
@@ -919,10 +920,7 @@ async function initializeSpeech(
           }),
       );
     } catch (error) {
-      if (
-        activeBackend.device === "webgpu" ||
-        isOfflineBackendRuntimeFailure(error)
-      ) {
+      if (shouldRetryOfflineSpeechBackend(error, activeBackend.device)) {
         await disposeModel().catch(() => undefined);
         throw new BackendUnavailableError(activeBackend, error);
       }
@@ -1005,10 +1003,7 @@ async function generateSpeech(
       }),
     );
   } catch (error) {
-    if (
-      activeBackend.device === "webgpu" ||
-      isOfflineBackendRuntimeFailure(error)
-    ) {
+    if (shouldRetryOfflineSpeechBackend(error, activeBackend.device)) {
       await disposeModel().catch(() => undefined);
       throw new BackendUnavailableError(activeBackend, error);
     }

@@ -130,6 +130,34 @@ export function buildOfflineAudioRecoveryText(text) {
   return `, ${text.trimStart()}`;
 }
 
+const OFFLINE_AUDIO_RECOVERY_PREFIXES = Object.freeze([
+  ",",
+  "...",
+]);
+
+/**
+ * Build a bounded set of lexical-free tokenizer shapes for a waveform that
+ * failed validation. Punctuation changes Kokoro's token/style shape without
+ * adding a spoken word. Keep the original first, prefer the previously proven
+ * comma recovery, then use three ASCII stops to select a genuinely different
+ * token-count/style row. A Set keeps exact candidate strings unique if
+ * strategies ever converge.
+ *
+ * @param {string} text
+ */
+export function buildOfflineAudioRecoveryTexts(text) {
+  const trimmedText = text.trimStart();
+  return Array.from(
+    new Set([
+      text,
+      buildOfflineAudioRecoveryText(text),
+      ...OFFLINE_AUDIO_RECOVERY_PREFIXES.slice(1).map(
+        (prefix) => `${prefix} ${trimmedText}`,
+      ),
+    ]),
+  );
+}
+
 export class InvalidOfflineAudioError extends Error {
   constructor() {
     super("The offline voice runtime generated invalid audio samples.");
@@ -138,10 +166,24 @@ export class InvalidOfflineAudioError extends Error {
 }
 
 /**
+ * Decide whether a thrown synthesis failure belongs to the ONNX backend
+ * ladder. Invalid waveform exhaustion is a deterministic request result, not
+ * a crashed runtime: replaying the same fp16 graph in a fresh worker or at a
+ * different WASM thread count is expensive and does not repair that token
+ * shape.
+ *
+ * @param {unknown} error
+ * @param {"webgpu" | "wasm"} device
+ */
+export function shouldRetryOfflineSpeechBackend(error, device) {
+  if (error instanceof InvalidOfflineAudioError) return false;
+  return device === "webgpu" || isOfflineBackendRuntimeFailure(error);
+}
+
+/**
  * Validate every model result before playback. If fp16 produces non-finite or
- * silent samples for a short tokenizer shape, retry once with lexical-free
- * punctuation context. The retry is bounded and never accepts another corrupt
- * waveform.
+ * silent samples for a short tokenizer shape, try a bounded, deduplicated set
+ * of lexical-free punctuation contexts. No corrupt waveform is ever accepted.
  *
  * @template {{ audio: ArrayLike<number>, sampling_rate: number }} T
  * @param {string} text
@@ -149,28 +191,13 @@ export class InvalidOfflineAudioError extends Error {
  * @returns {Promise<T>}
  */
 export async function generateUsableOfflineAudio(text, generate) {
-  const firstResult = await generate(text);
-  if (
-    hasUsableOfflineAudio(
-      firstResult.audio,
-      firstResult.sampling_rate,
-    )
-  ) {
-    return firstResult;
+  for (const candidate of buildOfflineAudioRecoveryTexts(text)) {
+    const result = await generate(candidate);
+    if (hasUsableOfflineAudio(result.audio, result.sampling_rate)) {
+      return result;
+    }
   }
-
-  const recoveredResult = await generate(
-    buildOfflineAudioRecoveryText(text),
-  );
-  if (
-    !hasUsableOfflineAudio(
-      recoveredResult.audio,
-      recoveredResult.sampling_rate,
-    )
-  ) {
-    throw new InvalidOfflineAudioError();
-  }
-  return recoveredResult;
+  throw new InvalidOfflineAudioError();
 }
 
 /**

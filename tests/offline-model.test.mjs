@@ -296,6 +296,12 @@ test("validates waveforms before ready and preserves q8 after a model-only load"
     /generateUsableOfflineAudio\(\s*"Ready\."/u,
   );
   assert.match(workerSource, /generateUsableOfflineAudio\(text/u);
+  assert.equal(
+    Array.from(
+      workerSource.matchAll(/shouldRetryOfflineSpeechBackend\(error,/gu),
+    ).length,
+    2,
+  );
   assert.match(workerSource, /stage: warm \? "ready" : "loaded"/u);
   assert.match(
     workerSource,
