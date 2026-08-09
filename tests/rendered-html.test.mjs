@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import test from "node:test";
 import { loadConfigFromFile } from "vite";
@@ -153,4 +154,39 @@ test("serves the pinned offline model through the production worker", async () =
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("serves the generated runtime asset manifest through the production worker", async () => {
+  const manifestSource = await readFile(
+    new URL("../dist/client/runtime-assets.json", import.meta.url),
+    "utf8",
+  );
+  let assetRequest;
+  const { default: worker } = await loadBuiltWorker();
+  const response = await worker.fetch(
+    new Request("http://localhost/runtime-assets.json"),
+    {
+      ASSETS: {
+        async fetch(request) {
+          assetRequest = request;
+          return new Response(manifestSource, {
+            headers: { "Content-Type": "application/json" },
+          });
+        },
+      },
+    },
+    {
+      waitUntil() {},
+      passThroughOnException() {},
+    },
+  );
+
+  assert.equal(new URL(assetRequest.url).pathname, "/runtime-assets.json");
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  assert.equal(
+    response.headers.get("content-type"),
+    "application/json; charset=utf-8",
+  );
+  assert.deepEqual(await response.json(), JSON.parse(manifestSource));
 });

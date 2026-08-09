@@ -312,13 +312,19 @@ worker for production response headers, and the Vite development server for
 local response headers.
 
 **Owns:** [`app/service-worker-registration.mjs`](../app/service-worker-registration.mjs)
-owns environment-aware registration and development cleanup.
+owns environment-aware registration, idle deployment leases, last-client
+release signals, low-frequency reconciliation for abruptly closed legacy tabs,
+and the on-demand runtime-storage diagnostic request.
 [`public/sw-v9.js`](../public/sw-v9.js) owns cache versioning, cache-first hashed
-assets, asynchronous cache population, and cache fallback for intercepted
+assets, asynchronous cache population, deployment/client ownership metadata,
+safe pre-v9 migration, retired-hash pruning, and cache fallback for intercepted
 same-origin non-document assets. It deliberately leaves document navigations to
-the browser and network. [`public/manifest.webmanifest`](../public/manifest.webmanifest)
+the browser and network. [`build/sites-vite-plugin.ts`](../build/sites-vite-plugin.ts)
+emits the complete content-hashed asset manifest used by those leases.
+[`public/manifest.webmanifest`](../public/manifest.webmanifest)
 owns install metadata. [`worker/index.ts`](../worker/index.ts) owns production
-COOP/COEP/CORP and WebAssembly content-type headers, while
+COOP/COEP/CORP and WebAssembly content-type headers and serves the generated,
+unversioned runtime manifest through the deployment asset binding, while
 [`public/_headers`](../public/_headers) owns the complementary static-asset
 header policy. [`vite.config.ts`](../vite.config.ts) supplies matching COEP and
 CORP headers to source module workers that Vite serves directly during local
@@ -333,23 +339,33 @@ requests pass directly through the development server configured in
 
 **Change together:** Service-worker cache changes must be
 reviewed with offline runtime-asset retention, generated asset hashing, old
-client compatibility, response streaming, and deployment headers. Isolation
-changes must be tested on the document, worker script, nested worker, and WASM
-paths, not only the HTML response.
+client compatibility, the build-emitted deployment manifest, response
+streaming, and deployment headers. Unknown pre-lease clients must conservatively
+block deletion; known clients protect their complete deployment until release
+or reconciliation proves they have closed. Isolation changes must be tested on
+the document, worker script, nested worker, and WASM paths, not only the HTML
+response.
 
 **State and I/O:** The service worker owns stable Cache Storage entries for
 same-origin generated, non-document assets. It does not intercept page or
 document navigations, so navigation availability remains the browser and
 network's responsibility. Cache writes are optional and must stay off the
-network-response critical path. The service worker does not own the large model
-and voice caches, although offline narration retains its bundled runtime assets
-here.
+network-response critical path. Cleanup runs from an idle client message rather
+than activation or narration startup. A separate metadata cache records the
+current manifest and live deployment leases; diagnostics count only the stable
+runtime cache and finite pre-v9 caches. The service worker never scans or
+deletes the large model and voice caches or their fp16 ready receipt, although
+offline narration retains its bundled worker and WASM assets in the runtime
+cache.
 
 **Verification:** Use
 [`tests/service-worker.test.mjs`](../tests/service-worker.test.mjs) for lifecycle,
-cache ordering, and failure behavior;
+manifest completeness, old-client retention, last-client cleanup, interrupted
+cleanup, bounded repeated deployments, byte diagnostics, cache ordering, and
+failure behavior;
 [`tests/rendered-html.test.mjs`](../tests/rendered-html.test.mjs) for packaged
-registration, production headers, and development-server worker headers; and
+registration, manifest routing, production headers, and development-server
+worker headers; and
 [`tests/offline-model.test.mjs`](../tests/offline-model.test.mjs) for runtime-asset
 retention and worker-diagnostic contracts. Complete offline readiness still
 requires a first-visit, restart, and network-disabled browser check; development
@@ -452,7 +468,9 @@ owns npm installation policy. [`eslint.config.mjs`](../eslint.config.mjs),
 [`scripts/install-ci.sh`](../scripts/install-ci.sh) owns bounded CI installation;
 [`scripts/sites-env.sh`](../scripts/sites-env.sh) owns the Cloudflare-compatible
 command environment; [`scripts/build-verified.sh`](../scripts/build-verified.sh)
-owns serialized production builds; and
+owns serialized production builds; [`build/sites-vite-plugin.ts`](../build/sites-vite-plugin.ts)
+packages Sites metadata and emits the deterministic client runtime-asset
+manifest; and
 [`scripts/validate-artifact.sh`](../scripts/validate-artifact.sh) owns packaged
 worker/artifact assertions. [`scripts/audit-dependencies.mjs`](../scripts/audit-dependencies.mjs)
 owns the narrow advisory allowlist enforced by CI.
