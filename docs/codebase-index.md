@@ -166,11 +166,13 @@ scrolling in the coordinator, and virtualization.
 **State and I/O:** User-selected PDFs are transferred directly to the document
 worker and never uploaded. IndexedDB v4 stores one local source `Blob`, a
 lightweight manifest, and independently keyed page text/layout/model records;
-page one commits before background extraction. Ready documents stream page one
-directly and then bounded batches, and v3 documents migrate lazily while their
-recoverable record remains intact. The main thread retains the progressive
-semantic reader model, bounded page selectors, and at most eight worker
-bitmaps.
+page one commits and publishes its semantic model before initial rasterization
+or background extraction. Ready documents stream page one directly and then
+bounded batches, and v3 documents migrate lazily while their recoverable record
+remains intact. The main thread retains the progressive semantic reader model,
+bounded page selectors, and at most eight worker bitmaps. Browser evidence uses
+actual worker bitmap ordering as the page-priority gate; transparent measured
+overlay and background-shell timings remain diagnostic.
 
 **Verification:** Parser and ordering behavior is covered by
 [`tests/epub-parser.test.mjs`](../tests/epub-parser.test.mjs) and

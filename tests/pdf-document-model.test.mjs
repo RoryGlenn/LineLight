@@ -12,6 +12,7 @@ import {
   prioritizePdfRenderRequests,
 } from "../app/pdf-document-model.mjs";
 import {
+  canStartPdfInitialRaster,
   canStartPdfPage,
   discardStalePdfMessage,
   isCurrentPdfSession,
@@ -145,11 +146,17 @@ test("shares the in-flight page-one raster and serializes a newer scale", async 
 test("gates background pages until durable page one and its raster settle", () => {
   const milestones = {
     pageOnePersisted: false,
+    pageOnePosted: false,
     pageOneRasterSettled: false,
   };
+  assert.equal(canStartPdfInitialRaster(milestones), false);
   assert.equal(canStartPdfPage(1, milestones), true);
   assert.equal(canStartPdfPage(2, milestones), false);
   milestones.pageOnePersisted = true;
+  assert.equal(canStartPdfInitialRaster(milestones), false);
+  assert.equal(canStartPdfPage(2, milestones), false);
+  milestones.pageOnePosted = true;
+  assert.equal(canStartPdfInitialRaster(milestones), true);
   assert.equal(canStartPdfPage(2, milestones), false);
   milestones.pageOneRasterSettled = true;
   assert.equal(canStartPdfPage(2, milestones), true);

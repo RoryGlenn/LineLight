@@ -99,12 +99,12 @@ narration text. When Natural online is selected, only short narration passages
 ## Large PDF loading
 
 PDF import runs in an app-owned browser worker, with PDF.js parser work in a
-nested worker. LineLight extracts, maps, and stores page one first, displays its
-readable Focus text, and attempts its first page bitmap before continuing with
-later pages. The source stays as one local IndexedDB `Blob`; text, geometry, and
-semantic indices are persisted as independently keyed page records so opening a
-saved book can stream page one and bounded batches instead of cloning the whole
-document onto the browser main thread.
+nested worker. LineLight extracts, maps, stores, and posts page one first, making
+its readable Focus text available before attempting the first page bitmap and
+continuing with later pages. The source stays as one local IndexedDB `Blob`;
+text, geometry, and semantic indices are persisted as independently keyed page
+records so opening a saved book can stream page one and bounded batches instead
+of cloning the whole document onto the browser main thread.
 
 Supported browsers rasterize PDF pages with `OffscreenCanvas` and transfer
 bounded `ImageBitmap` results back for lightweight composition. The worker

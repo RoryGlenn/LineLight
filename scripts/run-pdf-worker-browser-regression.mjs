@@ -793,6 +793,10 @@ const INSTRUMENTATION_SOURCE = `
       const background = document.querySelector(
         '.pdf-page-block[data-pdf-page-index]:not([data-pdf-page-index="0"])'
       );
+      const backgroundBitmap = document.querySelector(
+        '.pdf-page-block[data-pdf-page-index]:not([data-pdf-page-index="0"]) ' +
+        'canvas[data-pdf-render-source]'
+      );
       if (pageOne && current.pageOneShellAt === null) {
         current.pageOneShellAt = now;
       }
@@ -821,6 +825,14 @@ const INSTRUMENTATION_SOURCE = `
         current.backgroundPageAt = now;
         current.backgroundPageNumber = Number(background.dataset.pdfPageIndex) + 1;
       }
+      if (backgroundBitmap && current.backgroundBitmapAt === null) {
+        const block = backgroundBitmap.closest(".pdf-page-block");
+        current.backgroundBitmapAt = now;
+        current.backgroundBitmapPageNumber =
+          Number(block?.dataset.pdfPageIndex ?? 0) + 1;
+        current.backgroundBitmapRenderSource =
+          backgroundBitmap.dataset.pdfRenderSource ?? null;
+      }
     }
     requestAnimationFrame(monitor);
   };
@@ -842,6 +854,9 @@ const INSTRUMENTATION_SOURCE = `
       pageOneCanvas: null,
       backgroundPageAt: null,
       backgroundPageNumber: null,
+      backgroundBitmapAt: null,
+      backgroundBitmapPageNumber: null,
+      backgroundBitmapRenderSource: null,
       control: null,
       controls: [],
       outcome: null,
@@ -1111,6 +1126,84 @@ async function waitForFirstVisiblePage(cdp, label, timeoutMs) {
     `${label} page one to display a completed bitmap`,
     timeoutMs,
   );
+}
+
+async function captureIncompleteFocusContent(
+  cdp,
+  { documentId, expectedPages, expectedTitle },
+) {
+  await evaluate(
+    cdp,
+    `(() => {
+      const button = Array.from(document.querySelectorAll(".view-switcher button"))
+        .find((candidate) => candidate.textContent?.trim().endsWith("Focus"));
+      if (!button) throw new Error("The PDF Focus view control was not found.");
+      button.click();
+    })()`,
+  );
+  const content = await waitForExpression(
+    cdp,
+    `(() => {
+      if (document.querySelector("h1")?.textContent !== ${JSON.stringify(expectedTitle)}) {
+        return false;
+      }
+      const page = document.querySelector(".reading-page");
+      const words = Array.from(page?.querySelectorAll(".spoken-word") ?? [])
+        .filter((word) => {
+          const rectangle = word.getBoundingClientRect();
+          const style = getComputedStyle(word);
+          return rectangle.width > 0 && rectangle.height > 0 &&
+            rectangle.bottom > 0 && rectangle.right > 0 &&
+            rectangle.top < innerHeight && rectangle.left < innerWidth &&
+            style.display !== "none" && style.visibility !== "hidden" &&
+            Number(style.opacity) > 0;
+        });
+      const text = words.map((word) => word.textContent ?? "").join("").trim();
+      return text ? {
+        at: performance.now(),
+        text: text.slice(0, 240),
+        visibleWordCount: words.length,
+        view: "focus"
+      } : false;
+    })()`,
+    "readable Focus content while the PDF import is incomplete",
+    10_000,
+  );
+  const library = await inspectLibrary(cdp);
+  const record = library.pdfs.find((candidate) => candidate.id === documentId);
+  const incomplete = Boolean(
+    record &&
+      record.pdfImportStatus === "importing" &&
+      record.pdfCompletedPages >= 1 &&
+      record.pdfCompletedPages < expectedPages &&
+      record.storedPageCount >= 1 &&
+      record.wordCount > 0 &&
+      record.hasSource,
+  );
+  await evaluate(
+    cdp,
+    `(() => {
+      const button = Array.from(document.querySelectorAll(".view-switcher button"))
+        .find((candidate) => candidate.textContent?.trim().endsWith("Page"));
+      if (!button) throw new Error("The PDF Page view control was not found.");
+      button.click();
+    })()`,
+  );
+  await waitForExpression(
+    cdp,
+    `(() => {
+      const page = document.querySelector("#pdf-page-1");
+      const canvas = page?.querySelector('canvas[data-pdf-render-source="worker-bitmap"]');
+      if (!canvas || page.querySelector(".pdf-page-loading")) return false;
+      const rectangle = canvas.getBoundingClientRect();
+      return rectangle.width > 0 && rectangle.height > 0 &&
+        rectangle.bottom > 0 && rectangle.right > 0 &&
+        rectangle.top < innerHeight && rectangle.left < innerWidth;
+    })()`,
+    "the worker-rendered PDF page after the Focus content probe",
+    10_000,
+  );
+  return { ...content, incomplete, library, record: record ?? null };
 }
 
 async function waitForBackgroundPage(cdp, label, timeoutMs = 30_000) {
@@ -1430,7 +1523,10 @@ function traceSummary(trace, { documentId, endLabel, startLabel }) {
   };
 }
 
-function workerOrdering(summary, { requireComplete = false } = {}) {
+function workerOrdering(
+  summary,
+  { expectedPages = null, requireComplete = false } = {},
+) {
   const stage = (name) => summary.pdfMarks.find((mark) => mark.stage === name);
   const pageOnePersisted = stage("page-1-persisted");
   const rasterStart = stage("page-1-raster-start");
@@ -1438,6 +1534,9 @@ function workerOrdering(summary, { requireComplete = false } = {}) {
   const pageOnePosted = stage("page-1-posted");
   const pageTwoTextStart = stage("page-2-text-start");
   const complete = stage("complete");
+  const finalPageTextEnd = Number.isInteger(expectedPages)
+    ? stage(`page-${expectedPages}-text-end`)
+    : null;
   const usesWorkerRaster = Boolean(rasterStart || rasterEnd);
   return {
     complete,
@@ -1449,17 +1548,23 @@ function workerOrdering(summary, { requireComplete = false } = {}) {
       Boolean(pageOnePosted) &&
       Boolean(pageOnePersisted) &&
       Boolean(pageTwoTextStart) &&
-      pageOnePersisted.timestampMicroseconds <=
-        (rasterStart?.timestampMicroseconds ?? pageOnePosted.timestampMicroseconds) &&
-      pageOnePosted.timestampMicroseconds <= pageTwoTextStart.timestampMicroseconds &&
-      (!requireComplete || Boolean(complete)) &&
+      pageOnePersisted.timestampMicroseconds <= pageOnePosted.timestampMicroseconds &&
+      pageOnePosted.timestampMicroseconds <=
+        (rasterStart?.timestampMicroseconds ?? pageTwoTextStart.timestampMicroseconds) &&
+      (!requireComplete ||
+        (Boolean(complete) &&
+          Boolean(finalPageTextEnd) &&
+          pageTwoTextStart.timestampMicroseconds <=
+            finalPageTextEnd.timestampMicroseconds &&
+          finalPageTextEnd.timestampMicroseconds <= complete.timestampMicroseconds)) &&
       (!usesWorkerRaster ||
         (Boolean(rasterStart) &&
           Boolean(rasterEnd) &&
           rasterStart.timestampMicroseconds <= rasterEnd.timestampMicroseconds &&
-          rasterEnd.timestampMicroseconds <= pageOnePosted.timestampMicroseconds)),
+          rasterEnd.timestampMicroseconds <= pageTwoTextStart.timestampMicroseconds)),
     rasterEnd,
     rasterStart,
+    finalPageTextEnd,
     usesWorkerRaster,
   };
 }
@@ -1516,9 +1621,19 @@ function importTiming(instrumentation, label) {
       run.pageOneTextAt !== null &&
       run.pageOneBitmapAt !== null &&
       run.pageOneTextAt <= run.pageOneBitmapAt,
+    pageOneOverlayBeforeWindowEnd:
+      run.pageOneTextAt !== null && run.pageOneTextAt <= activeEnd,
+    pageOneShellByBitmap:
+      run.pageOneShellAt !== null &&
+      run.pageOneBitmapAt !== null &&
+      run.pageOneShellAt <= run.pageOneBitmapAt,
     firstBitmapBeforeBackgroundDom:
       run.pageOneBitmapAt !== null &&
       (run.backgroundPageAt === null || run.pageOneBitmapAt <= run.backgroundPageAt),
+    firstBitmapBeforeBackgroundBitmap:
+      run.pageOneBitmapAt !== null &&
+      run.backgroundBitmapAt !== null &&
+      run.pageOneBitmapAt <= run.backgroundBitmapAt,
     firstPageWindowLongTasks: instrumentation.longTasks.filter(
       (entry) =>
         entry.startTime >= run.startedAt &&
@@ -1676,6 +1791,14 @@ async function run(options) {
     );
     reportPhase("full-first-page-visible");
     const fullLibraryAtFirstPaint = await inspectLibrary(cdp);
+    const fullRecordAtFirstPaint = fullLibraryAtFirstPaint.pdfs.find(
+      (document) => document.id === fullLibraryAtFirstPaint.activeDocumentId,
+    );
+    const fullFocusContent = await captureIncompleteFocusContent(cdp, {
+      documentId: fullRecordAtFirstPaint?.id,
+      expectedPages: options.expectedPages,
+      expectedTitle: referenceTitle,
+    });
     await captureScreenshot(
       cdp,
       path.join(options.outputDirectory, "full-first-page.png"),
@@ -1702,9 +1825,10 @@ async function run(options) {
     traceStarted = false;
     activeTraceName = null;
 
-    const fullRecordAtFirstPaint = fullLibraryAtFirstPaint.pdfs.find(
-      (document) => document.id === fullCompletion.record.id,
-    );
+    const completedFullRecordAtFirstPaint =
+      fullRecordAtFirstPaint?.id === fullCompletion.record.id
+        ? fullRecordAtFirstPaint
+        : null;
     const fullTrace = traceSummary(
       JSON.parse(traceTexts["full-import-trace.json"]),
       {
@@ -1713,7 +1837,10 @@ async function run(options) {
         startLabel: "full",
       },
     );
-    const fullOrdering = workerOrdering(fullTrace, { requireComplete: true });
+    const fullOrdering = workerOrdering(fullTrace, {
+      expectedPages: options.expectedPages,
+      requireComplete: true,
+    });
     const fullTiming = importTiming(fullInstrumentation, "full");
     const fullScenarioTiming = scenarioTiming(fullInstrumentation, "full");
 
@@ -1802,9 +1929,13 @@ async function run(options) {
     traceStarted = false;
     activeTraceName = null;
 
-    const cancelRecordAtFirstPaint = cancelLibraryAtFirstPaint.pdfs.find(
-      (document) => document.id === cancelPrefix.record.id,
+    const activeCancelRecordAtFirstPaint = cancelLibraryAtFirstPaint.pdfs.find(
+      (document) => document.id === cancelLibraryAtFirstPaint.activeDocumentId,
     );
+    const cancelRecordAtFirstPaint =
+      activeCancelRecordAtFirstPaint?.id === cancelPrefix.record.id
+        ? activeCancelRecordAtFirstPaint
+        : null;
     const largeRecordAfterReplacement = libraryAfterReplacement.pdfs.find(
       (document) => document.id === cancelPrefix.record.id,
     );
@@ -1819,7 +1950,9 @@ async function run(options) {
         startLabel: "cancel-large",
       },
     );
-    const cancellationOrdering = workerOrdering(cancellationTrace);
+    const cancellationOrdering = workerOrdering(cancellationTrace, {
+      expectedPages: options.expectedPages,
+    });
     const replacementDispatchedAt = cancellationTrace.harnessMarks.find(
       (mark) => mark.name === "linelight:harness:replacement-dispatched",
     )?.timestampMicroseconds;
@@ -1868,7 +2001,7 @@ async function run(options) {
     );
 
     const firstPaintRecords = [
-      ["full import", fullRecordAtFirstPaint],
+      ["full import", completedFullRecordAtFirstPaint],
       ["cancellation import", cancelRecordAtFirstPaint],
     ];
     for (const [label, record] of firstPaintRecords) {
@@ -1876,8 +2009,12 @@ async function run(options) {
         evidence.failures.push(`The ${label} had no durable first-paint record.`);
       } else if (
         record.pdfImportStatus !== "importing" ||
+        record.title !== referenceTitle ||
+        record.pdfCompletedPages < 1 ||
         record.pdfCompletedPages >= options.expectedPages ||
+        record.pdfPageCount !== options.expectedPages ||
         record.storedPageCount < 1 ||
+        record.wordCount < 1 ||
         !record.hasSource
       ) {
         evidence.failures.push(
@@ -1904,24 +2041,27 @@ async function run(options) {
       ["replacement", replacementTiming],
     ]) {
       if (
-        !timing?.pageOneTextBeforeBitmap ||
+        !timing?.pageOneShellByBitmap ||
         timing?.pageOneRenderSource !== "worker-bitmap" ||
         timing?.renderFallback !== "false" ||
         timing?.renderFallbackObserved
       ) {
         evidence.failures.push(
-          `The ${label} did not display readable page-one text before an actual worker bitmap with fallback disabled.`,
+          `The ${label} did not expose its page-one shell with an actual worker bitmap and fallback disabled.`,
         );
       }
     }
-    if (!fullTiming?.firstBitmapBeforeBackgroundDom) {
+    if (!fullFocusContent.incomplete || fullFocusContent.visibleWordCount < 1) {
       evidence.failures.push(
-        "The full import's first visible bitmap did not precede background-page DOM.",
+        "The full import did not expose visible readable Focus content from a durable incomplete prefix.",
       );
     }
-    if (!cancelTiming?.firstBitmapBeforeBackgroundDom) {
+    if (
+      !fullTiming?.firstBitmapBeforeBackgroundBitmap ||
+      fullTiming.backgroundBitmapRenderSource !== "worker-bitmap"
+    ) {
       evidence.failures.push(
-        "The cancellation import's first visible bitmap did not precede background-page DOM.",
+        "The full import's first worker bitmap did not precede an actual background-page worker bitmap.",
       );
     }
     if (
@@ -2084,6 +2224,7 @@ async function run(options) {
         cancellation: cancelFirstPage,
         cancellationLibraryAtFirstPaint: cancelLibraryAtFirstPaint,
         full: fullFirstPage,
+        fullFocusContent,
         fullLibraryAtFirstPaint,
         replacement: replacementFirstPage,
       },

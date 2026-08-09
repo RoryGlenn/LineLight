@@ -33,6 +33,11 @@ export function canStartPdfPage(pageNumber, milestones) {
   );
 }
 
+/** Page-one raster work starts only after its durable model is published. */
+export function canStartPdfInitialRaster(milestones) {
+  return Boolean(milestones?.pageOnePersisted && milestones?.pageOnePosted);
+}
+
 /** Stored page records may mount while the nested PDF parser is still opening. */
 export async function waitForPdfDocumentReady(context) {
   if (context?.document) return context.document;

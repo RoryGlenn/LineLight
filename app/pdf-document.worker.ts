@@ -34,6 +34,7 @@ import type { PdfPageLayout } from "./pdf-page-view";
 import { createPdfRasterScheduler } from "./pdf-raster-scheduler.mjs";
 import { applyPdfWorkerFilter } from "./pdf-worker-filters.mjs";
 import {
+  canStartPdfInitialRaster,
   canStartPdfPage,
   isCurrentPdfSession,
   isPdfCancellationForSession,
@@ -631,6 +632,7 @@ async function processSource(
     let manifest: StoredPdfManifest | null = null;
     const milestones = {
       pageOnePersisted: false,
+      pageOnePosted: false,
       pageOneRasterSettled: false,
     };
     for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
@@ -674,12 +676,16 @@ async function processSource(
           page: record,
           first: true,
         });
+        milestones.pageOnePosted = true;
+        mark(context, "page-1-posted");
+        if (!canStartPdfInitialRaster(milestones)) {
+          throw new Error("PDF page-one raster started before its model was published.");
+        }
         await renderPdfPage(context, 1, request.scale);
         milestones.pageOneRasterSettled = true;
         renderQueue = renderQueue.filter(
           (queued) => queued.pageNumber !== 1,
         );
-        mark(context, "page-1-posted");
       } else {
         manifest = (await appendReaderPdfPage(
           context.documentId,
