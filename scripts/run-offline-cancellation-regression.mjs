@@ -616,7 +616,20 @@ export function validateOfflineCancellationEvidence(evidence) {
       evidence?.network?.outstandingRequests === 0 &&
       evidence?.network?.outstandingAttachPromises === 0 &&
       evidence?.network?.offlineSpeechWorkerAttached === true &&
-      (evidence?.network?.nestedPthreadWorkersAttached ?? 0) >= 1,
+      (evidence?.network?.nestedPthreadWorkersAttached ?? 0) >= 1 &&
+      Array.isArray(evidence?.network?.targetBootstrapSettlements) &&
+      evidence.network.targetBootstrapSettlements.length >= 1 &&
+      evidence.network.targetBootstrapSettlements.every(
+        (entry) =>
+          entry.method === "GET" &&
+          entry.resourceType === "Script" &&
+          ["service_worker", "shared_worker", "worker"].includes(
+            entry.targetType,
+          ) &&
+          entry.terminalReason === "target-attached" &&
+          typeof entry.url === "string" &&
+          entry.url.startsWith(`${evidence?.run?.appOrigin}/`),
+      ),
     "page/worker network instrumentation was incomplete or observed a failure",
   );
   pushFailure(
@@ -1967,6 +1980,17 @@ export function summarizeAttachedTargetCoverage(targets, expectedWorkerUrl) {
   };
 }
 
+export function isAttachedTargetBootstrapRequest(request, target) {
+  return (
+    target.attachComplete === true &&
+    ["service_worker", "shared_worker", "worker"].includes(target.type) &&
+    request.method === "GET" &&
+    request.resourceType === "Script" &&
+    request.sessionId === target.parentSessionId &&
+    request.url === target.url
+  );
+}
+
 async function configurePage(cdp, appUrl, expectedWorkerPath) {
   const consoleEntries = [];
   const networkRequests = [];
@@ -1978,9 +2002,31 @@ async function configurePage(cdp, appUrl, expectedWorkerPath) {
   const attachFailures = [];
   const attachPromises = new Set();
   const outstandingRequests = new Set();
+  const targetBootstrapSettlements = [];
   let lastActivityAtMs = performance.now();
   const markActivity = () => {
     lastActivityAtMs = performance.now();
+  };
+  const reconcileTargetBootstrapRequests = () => {
+    for (const target of targets) {
+      if (target.bootstrapRequestKey) continue;
+      for (const requestKey of outstandingRequests) {
+        const request = requestsByKey.get(requestKey);
+        if (!request || !isAttachedTargetBootstrapRequest(request, target)) {
+          continue;
+        }
+        target.bootstrapRequestKey = requestKey;
+        outstandingRequests.delete(requestKey);
+        targetBootstrapSettlements.push({
+          method: request.method,
+          resourceType: request.resourceType,
+          targetType: target.type,
+          terminalReason: "target-attached",
+          url: request.url,
+        });
+        break;
+      }
+    }
   };
   cdp.on("Runtime.consoleAPICalled", (entry, sessionId) => {
     consoleEntries.push({
@@ -2009,6 +2055,7 @@ async function configurePage(cdp, appUrl, expectedWorkerPath) {
     const requestKey = `${sessionId ?? "page"}:${entry.requestId}`;
     requestsByKey.set(requestKey, request);
     outstandingRequests.add(requestKey);
+    reconcileTargetBootstrapRequests();
   });
   cdp.on("Network.loadingFinished", (entry, sessionId) => {
     markActivity();
@@ -2042,6 +2089,7 @@ async function configurePage(cdp, appUrl, expectedWorkerPath) {
     const { sessionId, targetInfo, waitingForDebugger } = entry;
     const target = {
       attachComplete: false,
+      bootstrapRequestKey: null,
       detached: false,
       parentSessionId,
       sessionId,
@@ -2058,6 +2106,7 @@ async function configurePage(cdp, appUrl, expectedWorkerPath) {
     )
       .then((result) => {
         target.attachComplete = result.attached && result.resumed;
+        reconcileTargetBootstrapRequests();
       })
       .finally(() => {
         attachPromises.delete(attachPromise);
@@ -2134,6 +2183,7 @@ async function configurePage(cdp, appUrl, expectedWorkerPath) {
     responseFailures,
     serviceWorkerBypassed: true,
     settle,
+    targetBootstrapSettlements,
     targetCoverage,
     targets,
   };
@@ -3394,6 +3444,7 @@ async function run(options) {
         outstandingRequests: page.outstandingRequests.size,
         responseFailures: page.responseFailures,
         serviceWorkerBypassed: page.serviceWorkerBypassed,
+        targetBootstrapSettlements: page.targetBootstrapSettlements,
         targetCounts: Object.fromEntries(
           [...new Set(page.targets.map((target) => target.type))]
             .sort()

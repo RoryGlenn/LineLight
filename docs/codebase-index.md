@@ -431,6 +431,12 @@ for audio and timing helpers.
 [`tests/offline-run-cancellation.test.mjs`](../tests/offline-run-cancellation.test.mjs)
 covers mailbox validation, epochs, generations, terminal acknowledgment,
 watchdog state, and the threaded-WASM-only page/worker boundary.
+[`tests/offline-speech-recovery.test.mjs`](../tests/offline-speech-recovery.test.mjs)
+executes worker-timeout replacement, live-request replay, stale-message
+isolation, and installed-cache reuse against the production speech module.
+[`tests/onnxruntime-vendor.test.mjs`](../tests/onnxruntime-vendor.test.mjs)
+binds the reviewed runtime archive, legal inventory, declarations, dependency
+topology, cancellation exports, and initialized shared-memory protocol.
 [`tests/offline-cancellation-harness.test.mjs`](../tests/offline-cancellation-harness.test.mjs)
 keeps the headed evidence validator fail-closed across active-run identity,
 Pause and CPU timing, far seek, timeout replay, fallback, network, artifact,

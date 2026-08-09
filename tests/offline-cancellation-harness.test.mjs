@@ -8,6 +8,7 @@ import {
   countTrackedProcessSurvivors,
   evaluateBrowserStatePredicate,
   findEvidencePrivacyViolations,
+  isAttachedTargetBootstrapRequest,
   parseArguments,
   selectOwnedProcessTree,
   summarizeAttachedTargetCoverage,
@@ -190,6 +191,15 @@ function passingEvidence() {
       outstandingRequests: 0,
       responseFailures: [],
       serviceWorkerBypassed: true,
+      targetBootstrapSettlements: [
+        {
+          method: "GET",
+          resourceType: "Script",
+          targetType: "worker",
+          terminalReason: "target-attached",
+          url: "http://127.0.0.1:5212/assets/offline-speech.worker-test.js",
+        },
+      ],
     },
     privacy: { narrationTextRecorded: false },
     run: {
@@ -480,6 +490,20 @@ test("fails closed on every source, timing, lifecycle, and fallback gate", () =>
       "network instrumentation was incomplete",
     ],
     [
+      "worker bootstrap overmatch",
+      (evidence) => {
+        evidence.network.targetBootstrapSettlements[0].method = "POST";
+      },
+      "network instrumentation was incomplete",
+    ],
+    [
+      "missing worker bootstrap settlement",
+      (evidence) => {
+        evidence.network.targetBootstrapSettlements = [];
+      },
+      "network instrumentation was incomplete",
+    ],
+    [
       "unsettled network",
       (evidence) => {
         evidence.network.outstandingRequests = 1;
@@ -727,6 +751,50 @@ test("target coverage counts only the exact offline worker ancestry", () => {
   assert.equal(
     summarizeAttachedTargetCoverage(targets, workerUrl).speechWorkersDetached,
     1,
+  );
+});
+
+test("worker bootstrap settlement requires exact attached target identity", () => {
+  const request = {
+    method: "GET",
+    resourceType: "Script",
+    sessionId: "speech-session",
+    url: "http://127.0.0.1:5212/assets/offline-speech.worker.js",
+  };
+  const target = {
+    attachComplete: true,
+    parentSessionId: "speech-session",
+    type: "worker",
+    url: request.url,
+  };
+  assert.equal(isAttachedTargetBootstrapRequest(request, target), true);
+  assert.equal(
+    isAttachedTargetBootstrapRequest(request, {
+      ...target,
+      attachComplete: false,
+    }),
+    false,
+  );
+  assert.equal(
+    isAttachedTargetBootstrapRequest(
+      { ...request, sessionId: "unrelated-session" },
+      target,
+    ),
+    false,
+  );
+  assert.equal(
+    isAttachedTargetBootstrapRequest(
+      { ...request, url: "http://127.0.0.1:5212/assets/unrelated.js" },
+      target,
+    ),
+    false,
+  );
+  assert.equal(
+    isAttachedTargetBootstrapRequest(
+      { ...request, resourceType: "Fetch" },
+      target,
+    ),
+    false,
   );
 });
 
