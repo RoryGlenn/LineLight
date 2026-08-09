@@ -1,0 +1,299 @@
+{
+  "schemaVersion": 1,
+  "issue": 70,
+  "generatedAt": "2026-08-09T18:38:42Z",
+  "source": {
+    "baseCommit": "83255db50d3d4cfe0bb816e1480a7f45c7c52862",
+    "branch": "agent/issue-70-invalid-audio",
+    "files": {
+      "app/offline-speech-utils.mjs": "3d24f54a8ecbdfd1e69f060929852ca1c1c72a6020e77bdc3e5601e196d5af33",
+      "app/offline-speech.worker.ts": "20891af0add60f2ac0e1a1697ad49f7d060e8ac8d0cae58e40b564181fceacad",
+      "tests/offline-speech-utils.test.mjs": "164147b608e7bd3797718d2fc098f4802f9d1fe5d0babdb581dfd3f8986ee38e",
+      "tests/offline-model.test.mjs": "4f48ed467068c74080e7b8cfd215338da80b6b70d27fafb6fbbd709581ea9370"
+    }
+  },
+  "privacy": {
+    "documentTextRecorded": false,
+    "probeTextRecorded": false,
+    "diagnosticNarrationTextRecorded": false,
+    "textIsRepresentedAs": "candidate id, character count, and source-word length shape"
+  },
+  "baseline": {
+    "backend": {
+      "device": "wasm",
+      "modelDtype": "fp16"
+    },
+    "invalidShapes": [
+      {
+        "candidateId": "known-invalid-shape-long",
+        "characterCount": 19,
+        "wordShape": [8, 2, 1, 4],
+        "runs": [
+          {
+            "wasmThreads": 4,
+            "sampleCount": 46200,
+            "nonFiniteSamples": 46200,
+            "audioDurationSeconds": 1.925
+          },
+          {
+            "wasmThreads": 1,
+            "sampleCount": 46200,
+            "nonFiniteSamples": 46200,
+            "audioDurationSeconds": 1.925
+          }
+        ]
+      },
+      {
+        "candidateId": "known-invalid-shape-short",
+        "characterCount": 10,
+        "wordShape": [2, 1, 4],
+        "runs": [
+          {
+            "wasmThreads": 4,
+            "sampleCount": 37800,
+            "nonFiniteSamples": 37800,
+            "audioDurationSeconds": 1.575
+          },
+          {
+            "wasmThreads": 1,
+            "sampleCount": 37800,
+            "nonFiniteSamples": 37800,
+            "audioDurationSeconds": 1.575
+          }
+        ]
+      }
+    ],
+    "punctuationShapeMatrix": [
+      {
+        "candidateId": "original",
+        "characterCount": 19,
+        "wasmThreads": 4,
+        "sampleCount": 46200,
+        "nonFiniteSamples": 46200,
+        "audioDurationSeconds": 1.925
+      },
+      {
+        "candidateId": "leading-comma",
+        "characterCount": 21,
+        "wasmThreads": 4,
+        "sampleCount": 48000,
+        "nonFiniteSamples": 0,
+        "audioDurationSeconds": 2
+      },
+      {
+        "candidateId": "leading-ascii-ellipsis",
+        "characterCount": 23,
+        "wasmThreads": 4,
+        "sampleCount": 46800,
+        "nonFiniteSamples": 0,
+        "audioDurationSeconds": 1.95
+      }
+    ],
+    "threadFallbackChangedValidity": false
+  },
+  "recovery": {
+    "candidateOrder": [
+      "original",
+      "leading-comma",
+      "leading-ascii-ellipsis"
+    ],
+    "maximumModelAttemptsPerRequest": 3,
+    "punctuationOnly": true,
+    "strictlyValidatesEveryAttempt": true,
+    "preservesOriginalCacheKeyAndSourceBoundaries": true,
+    "invalidAudioExhaustionRestartsBackend": false,
+    "workerInjection": {
+      "runtime": "node:worker_threads importing the production recovery helper",
+      "injectedInvalidAttempts": 2,
+      "successfulAttempt": 3,
+      "returnedSamplesFinite": true
+    }
+  },
+  "environment": {
+    "appUrl": "http://127.0.0.1:5212/",
+    "browser": "/usr/bin/brave-browser",
+    "headed": true,
+    "visibilityState": "visible",
+    "navigatorWebdriver": false,
+    "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+    "hardwareConcurrency": 18,
+    "crossOriginIsolated": true,
+    "workerPath": "/assets/offline-speech.worker-OvSA1SXZ.js"
+  },
+  "cachePreflight": {
+    "modelRangeCount": 20,
+    "modelRangesContiguous": true,
+    "retainedModelBytes": 163234740,
+    "fp16ReadyMarkerHeaderValid": true,
+    "fp16ReadyMarkerBodyValid": true,
+    "requiredVoiceCount": 5,
+    "modelRouteRequests": 0,
+    "thirdPartyRequests": 0
+  },
+  "thresholds": {
+    "maximumOnsetBoundaryDeltaSeconds": 0.000041666666666666665,
+    "maximumQualityDurationSpreadSeconds": 0.25,
+    "maximumQualityOnsetSpreadSeconds": 0.2,
+    "maximumQualityRmsRatio": 2,
+    "minimumQualityAudibleOnsetSeconds": 0.05,
+    "maximumQualityLeading100MillisecondsPeak": 0.005
+  },
+  "representativeGate": {
+    "records": [
+      {
+        "candidateId": "known-invalid-shape-heart",
+        "characterCount": 19,
+        "wordShape": [8, 2, 1, 4],
+        "voice": "af_heart",
+        "rate": 1,
+        "synthesisMilliseconds": 1872.074999988079,
+        "audioDurationSeconds": 2,
+        "sampleCount": 48000,
+        "peak": 0.76806640625,
+        "rms": 0.0663359984823808,
+        "firstAudibleSeconds": 0.3122916666666667,
+        "firstBoundarySeconds": 0.3122916666666667,
+        "onsetBoundaryDeltaSeconds": 0,
+        "boundaryCount": 4
+      },
+      {
+        "candidateId": "known-invalid-shape-bella",
+        "characterCount": 10,
+        "wordShape": [2, 1, 4],
+        "voice": "af_bella",
+        "rate": 0.75,
+        "synthesisMilliseconds": 979.7899999916553,
+        "audioDurationSeconds": 2.175,
+        "sampleCount": 52200,
+        "peak": 0.41357421875,
+        "rms": 0.05086539023050844,
+        "firstAudibleSeconds": 0.46170833333333333,
+        "firstBoundarySeconds": 0.46170833333333333,
+        "onsetBoundaryDeltaSeconds": 0,
+        "boundaryCount": 3
+      },
+      {
+        "candidateId": "short-punctuation-michael",
+        "characterCount": 45,
+        "wordShape": [1, 6, 5, 5, 6, 8, 7],
+        "voice": "am_michael",
+        "rate": 1.25,
+        "synthesisMilliseconds": 1294.6099999845028,
+        "audioDurationSeconds": 3.025,
+        "sampleCount": 72600,
+        "peak": 0.603515625,
+        "rms": 0.060963562987301545,
+        "firstAudibleSeconds": 0.35683333333333334,
+        "firstBoundarySeconds": 0.35683333333333334,
+        "onsetBoundaryDeltaSeconds": 0,
+        "boundaryCount": 7
+      },
+      {
+        "candidateId": "sentence-emma",
+        "characterCount": 59,
+        "wordShape": [7, 9, 5, 2, 4, 6, 4, 5, 7],
+        "voice": "bf_emma",
+        "rate": 0.75,
+        "synthesisMilliseconds": 2462.9950000047684,
+        "audioDurationSeconds": 5.825,
+        "sampleCount": 139800,
+        "peak": 0.61572265625,
+        "rms": 0.0868690721122096,
+        "firstAudibleSeconds": 0.29091666666666666,
+        "firstBoundarySeconds": 0.29091666666666666,
+        "onsetBoundaryDeltaSeconds": 0,
+        "boundaryCount": 9
+      },
+      {
+        "candidateId": "sentence-george",
+        "characterCount": 62,
+        "wordShape": [3, 11, 8, 6, 6, 3, 9, 8],
+        "voice": "bm_george",
+        "rate": 1.25,
+        "synthesisMilliseconds": 1751.9350000023842,
+        "audioDurationSeconds": 4.075,
+        "sampleCount": 97800,
+        "peak": 0.52880859375,
+        "rms": 0.08073206098052363,
+        "firstAudibleSeconds": 0.24783333333333332,
+        "firstBoundarySeconds": 0.24783333333333332,
+        "onsetBoundaryDeltaSeconds": 0,
+        "boundaryCount": 8
+      }
+    ],
+    "backend": {
+      "device": "wasm",
+      "modelDtype": "fp16",
+      "wasmThreads": 8
+    },
+    "allSamplesFinite": true,
+    "allWaveformsNonSilent": true,
+    "allSourceBoundariesExactMonotonicAndInRange": true,
+    "allFirstBoundariesMatchMeasuredOnset": true,
+    "passed": true
+  },
+  "punctuationQuality": {
+    "voice": "af_heart",
+    "rate": 1,
+    "records": [
+      {
+        "candidateId": "finite-original-heart",
+        "characterCount": 29,
+        "wordShape": [2, 2, 1, 5, 2, 6, 3],
+        "audioDurationSeconds": 2.35,
+        "sampleCount": 56400,
+        "firstAudibleSeconds": 0.33,
+        "rms": 0.06553099573465027,
+        "leading100MillisecondsPeak": 0.0000019073486328125,
+        "leading100MillisecondsMaxStep": 0.0000026226043701171875,
+        "boundaryCount": 7,
+        "onsetBoundaryDeltaSeconds": 0,
+        "audioSha256": "179355afda4a6c9a68adc4e396054b4256de52c6545747d47c7d32d0e81ad8ea"
+      },
+      {
+        "candidateId": "finite-comma-heart",
+        "characterCount": 31,
+        "wordShape": [2, 2, 1, 5, 2, 6, 3],
+        "audioDurationSeconds": 2.35,
+        "sampleCount": 56400,
+        "firstAudibleSeconds": 0.3333333333333333,
+        "rms": 0.06588596949095554,
+        "leading100MillisecondsPeak": 0.0000019073486328125,
+        "leading100MillisecondsMaxStep": 0.0000026226043701171875,
+        "boundaryCount": 7,
+        "onsetBoundaryDeltaSeconds": 0,
+        "audioSha256": "ae7243972a4f5f4f0c70b9d39224acee7cc4ca65d77f2ab36bb2f4884b80217a"
+      },
+      {
+        "candidateId": "finite-ascii-ellipsis-heart",
+        "characterCount": 33,
+        "wordShape": [2, 2, 1, 5, 2, 6, 3],
+        "audioDurationSeconds": 2.375,
+        "sampleCount": 57000,
+        "firstAudibleSeconds": 0.3062916666666667,
+        "rms": 0.06535739084806319,
+        "leading100MillisecondsPeak": 0.0000019073486328125,
+        "leading100MillisecondsMaxStep": 0.0000026226043701171875,
+        "boundaryCount": 7,
+        "onsetBoundaryDeltaSeconds": 0,
+        "audioSha256": "b487d45c79692745446fe26818668db8f0b90728c6a3f545cb96f01293077024"
+      }
+    ],
+    "durationSpreadSeconds": 0.02499999999999991,
+    "onsetSpreadSeconds": 0.02704166666666663,
+    "rmsRatio": 1.0080875113898158,
+    "sameSourceWordShape": true,
+    "sameBoundaryCount": true,
+    "leadingClickFree": true,
+    "byteIdentical": false,
+    "passed": true
+  },
+  "diagnostics": {
+    "modelRouteRequests": 0,
+    "thirdPartyRequests": 0,
+    "consoleEntryCount": 0,
+    "consoleErrorCount": 0,
+    "serializedNarrationText": false
+  },
+  "passed": true
+}

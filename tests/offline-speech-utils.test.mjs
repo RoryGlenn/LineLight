@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { Worker } from "node:worker_threads";
 
 import {
   InvalidOfflineAudioError,
   buildOfflineAudioRecoveryText,
+  buildOfflineAudioRecoveryTexts,
   buildWordPhonemeBatch,
   buildPhonemeWeightedBoundaries,
   countBatchedWordPhonemes,
@@ -13,6 +15,7 @@ import {
   hasUsableOfflineAudio,
   isOfflineBackendRuntimeFailure,
   measureOfflineAudioLeadIn,
+  shouldRetryOfflineSpeechBackend,
 } from "../app/offline-speech-utils.mjs";
 
 test("extracts source offsets for punctuation and contractions", () => {
@@ -77,6 +80,14 @@ test("rejects silent and non-finite offline model output", () => {
   assert.equal(
     buildOfflineAudioRecoveryText("sentence at a time."),
     ", sentence at a time.",
+  );
+  assert.deepEqual(
+    buildOfflineAudioRecoveryTexts("sentence at a time."),
+    [
+      "sentence at a time.",
+      ", sentence at a time.",
+      "... sentence at a time.",
+    ],
   );
 });
 
@@ -150,8 +161,87 @@ test("retries invalid model audio once with lexical-free context", async () => {
   ]);
 });
 
-test("rejects a second invalid model waveform without another retry", async () => {
+test("advances through bounded punctuation shapes until audio is usable", async () => {
   const calls = [];
+  const finite = {
+    audio: new Float32Array([0, 0.2]),
+    sampling_rate: 24_000,
+  };
+  const result = await generateUsableOfflineAudio(
+    "sentence at a time.",
+    async (text) => {
+      calls.push(text);
+      return calls.length < 3
+        ? {
+            audio: new Float32Array([Number.NaN]),
+            sampling_rate: 24_000,
+          }
+        : finite;
+    },
+  );
+
+  assert.equal(result, finite);
+  assert.deepEqual(calls, [
+    "sentence at a time.",
+    ", sentence at a time.",
+    "... sentence at a time.",
+  ]);
+});
+
+test("recovers inside a worker when the first two shapes are invalid", async () => {
+  const moduleUrl = new URL(
+    "../app/offline-speech-utils.mjs",
+    import.meta.url,
+  ).href;
+  const source = `
+    import { parentPort } from "node:worker_threads";
+    import { generateUsableOfflineAudio } from ${JSON.stringify(moduleUrl)};
+    let attempts = 0;
+    const result = await generateUsableOfflineAudio(
+      "sentence at a time.",
+      async () => {
+        attempts += 1;
+        return {
+          audio: attempts < 3
+            ? new Float32Array([Number.NaN])
+            : new Float32Array([0, 0.25]),
+          sampling_rate: 24_000,
+        };
+      },
+    );
+    parentPort.postMessage({ attempts, samples: Array.from(result.audio) });
+  `;
+  const worker = new Worker(
+    new URL(`data:text/javascript,${encodeURIComponent(source)}`),
+  );
+  const result = await new Promise((resolve, reject) => {
+    worker.once("message", resolve);
+    worker.once("error", reject);
+  });
+
+  assert.deepEqual(result, { attempts: 3, samples: [0, 0.25] });
+  await worker.terminate();
+});
+
+test("returns one candidate per bounded tokenizer-shape strategy", () => {
+  const candidates = buildOfflineAudioRecoveryTexts("sentence at a time.");
+
+  assert.equal(candidates.length, new Set(candidates).size);
+  assert.equal(candidates.length, 3);
+  assert.deepEqual(
+    candidates.map((candidate) => candidate.length),
+    [19, 21, 23],
+  );
+  assert.deepEqual(buildOfflineAudioRecoveryTexts(", sentence."), [
+    ", sentence.",
+    ", , sentence.",
+    "... , sentence.",
+  ]);
+});
+
+test("rejects bounded invalid model waveforms without backend replay", async () => {
+  const calls = [];
+  let error;
   await assert.rejects(
     generateUsableOfflineAudio("at a time.", async (text) => {
       calls.push(text);
@@ -160,9 +250,42 @@ test("rejects a second invalid model waveform without another retry", async () =
         sampling_rate: 24_000,
       };
     }),
-    InvalidOfflineAudioError,
+    (candidateError) => {
+      error = candidateError;
+      return candidateError instanceof InvalidOfflineAudioError;
+    },
   );
-  assert.deepEqual(calls, ["at a time.", ", at a time."]);
+  assert.deepEqual(calls, [
+    "at a time.",
+    ", at a time.",
+    "... at a time.",
+  ]);
+  assert.equal(shouldRetryOfflineSpeechBackend(error, "wasm"), false);
+  assert.equal(shouldRetryOfflineSpeechBackend(error, "webgpu"), false);
+});
+
+test("restarts only genuine backend failures", () => {
+  assert.equal(
+    shouldRetryOfflineSpeechBackend(
+      new WebAssembly.RuntimeError("memory access out of bounds"),
+      "wasm",
+    ),
+    true,
+  );
+  assert.equal(
+    shouldRetryOfflineSpeechBackend(
+      new Error("WebGPU command failed"),
+      "webgpu",
+    ),
+    true,
+  );
+  assert.equal(
+    shouldRetryOfflineSpeechBackend(
+      new Error("The selected voice is unavailable"),
+      "wasm",
+    ),
+    false,
+  );
 });
 
 test("uses measured waveform onset for the first highlight", () => {
