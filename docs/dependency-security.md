@@ -1,6 +1,6 @@
 # Dependency security posture
 
-Last reviewed: 2026-08-01
+Last reviewed: 2026-08-08
 
 LineLight treats dependency updates as part of the production build, even when
 the affected package is primarily development tooling. CI installs from the
@@ -16,20 +16,24 @@ releases, including:
 
 - Next.js 16.2.12 and React Server Components 19.2.8;
 - Vite 8.2.0;
-- Cloudflare's Vite plugin 1.50.0 and Wrangler 4.118.0;
+- Cloudflare's Vite plugin 1.51.1 and Wrangler 4.120.0;
 - patched transitive releases of brace-expansion, fast-uri, js-yaml, undici,
   and ws.
 
-The current lockfile reports zero known vulnerabilities. This is a dated audit
-result, not a permanent guarantee; CI repeats the audit on every proposed
-change.
+The current lockfile reports zero unapproved high or critical findings. Two
+high-severity `image-size` 2.0.2 advisories are accepted only through verified
+development-only paths: `GHSA-5P2G-FCMC-QVQQ` and
+`GHSA-W3RX-R6R6-PGPR`. The exact package, version, advisory IDs, and dev-only
+reachability are enforced by `scripts/audit-dependencies.mjs`; any production
+path or new finding fails CI. This is a dated audit result, not a permanent
+guarantee, so CI repeats the audit on every proposed change.
 
 ## Audited overrides
 
 Three transitive packages need explicit overrides because an otherwise-current
 parent package constrains them to an advisory-affected release:
 
-- `postcss` 8.5.25 replaces Next.js's older 8.4.31 copy. It stays on PostCSS 8,
+- `postcss` 8.5.26 replaces Next.js's older 8.4.31 copy. It stays on PostCSS 8,
   and the production CSS build exercises the integration.
 - `esbuild` 0.28.1 replaces the older copy used by Drizzle Kit's deprecated
   `@esbuild-kit` loader. `drizzle-kit check`, type checking, and the production

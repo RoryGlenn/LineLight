@@ -27,6 +27,7 @@ import {
 import {
   buildSentenceStartIndices,
   buildSpeechChunk,
+  createSilentPcmWav,
   findAdjacentSentenceStart,
   findBufferedSeekOffset,
   findTimedBoundaryIndex,
@@ -40,26 +41,39 @@ import {
 } from "./azure-speech";
 import {
   OFFLINE_PACK_BYTES,
-  OFFLINE_SPEECH_CHUNK_CHARACTERS,
-  OFFLINE_SPEECH_LOOKAHEAD_CHUNKS,
   OFFLINE_VOICES,
   type OfflineVoiceId,
 } from "./offline-speech-config";
 import {
+  OFFLINE_FIRST_CHUNK_CHARACTERS,
   OFFLINE_INSTALL_IDLE_DELAY_MS,
+  OFFLINE_WARM_IDLE_TIMEOUT_MS,
+  adaptOfflineSpeechChunkCharacters,
   evaluateOfflineStorageHeadroom,
+  mapOfflineNarrationPhaseProgress,
+  shouldAbortOfflineWarmRestore,
+  shouldDisposeOfflineWorkerForImport,
+  shouldRestoreOfflineWorkerAfterImport,
   shouldScheduleOfflinePreparation,
 } from "./offline-preparation.mjs";
 import {
   OfflineSpeechError,
   disposeOfflineSpeechWorker,
+  getOfflineVoicePackBytes,
+  getOfflineVoicePackRetainedBytes,
+  getOfflineVoicePackStatus,
+  getOfflineSpeechReadiness,
+  initializeOfflineSpeech,
   installOfflineVoicePack,
-  isOfflineVoicePackInstalled,
+  preloadOfflineSpeechRuntime,
   removeOfflineVoicePack,
   synthesizeOfflineSpeech,
   type OfflineSpeechResult,
 } from "./offline-speech";
-import { createSpeechPrefetchQueue } from "./speech-prefetch.mjs";
+import {
+  createBoundedSpeechAudioCache,
+  createSpeechPrefetchQueue,
+} from "./speech-prefetch.mjs";
 import {
   DEFAULT_NARRATION_ENGINE,
   NARRATION_PREFERENCE_VERSION,
@@ -122,13 +136,30 @@ type OfflinePackState =
 type OfflineRuntimeInfo = {
   audioDurationSeconds: number;
   device: "webgpu" | "wasm";
+  reusedAudio: boolean;
   synthesisMilliseconds: number;
   wasmThreads: number | null;
+};
+
+type OfflineAudioCache = {
+  clear: () => void;
+  get: (key: string) => OfflineSpeechResult | undefined;
+  set: (
+    key: string,
+    value: OfflineSpeechResult,
+    byteLength: number,
+  ) => boolean;
 };
 
 type NarrationReadiness = {
   progress: number;
   label: string;
+};
+
+type BufferedPrefetchControls = {
+  dispose: () => void;
+  pause: () => number;
+  resume: () => void;
 };
 
 type BufferedSeekState = {
@@ -140,6 +171,11 @@ type BufferedSeekState = {
     audioOffsetSeconds: number;
     tokenIndex: number;
   }>;
+};
+
+type NarrationAudioPrime = {
+  audio: HTMLAudioElement;
+  audioUrl: string;
 };
 
 type ReaderDocument = {
@@ -290,9 +326,10 @@ const AZURE_VOICES: AzureVoiceOption[] = [
 ];
 
 const AZURE_SPEECH_CHUNK_CHARACTERS = 700;
-const OFFLINE_PACK_SIZE_LABEL = `${Math.round(
-  OFFLINE_PACK_BYTES / 1_000_000,
-)} MB`;
+const OFFLINE_AUDIO_CACHE_BYTES = 12 * 1024 * 1024;
+const OFFLINE_AUDIO_CACHE_ENTRIES = 6;
+const OFFLINE_PACK_SIZE_LABEL =
+  `${Math.round(OFFLINE_PACK_BYTES / 1_000_000)} MB`;
 
 const WORD_PATTERN = /[\p{L}\p{N}]+(?:[’'-][\p{L}\p{N}]+)*|[^\s]/gu;
 const IS_WORD = /^[\p{L}\p{N}]/u;
@@ -693,6 +730,7 @@ export default function Home() {
   const [offlineInstallLabel, setOfflineInstallLabel] = useState(
     "Checking the included voice…",
   );
+  const [offlineUpgradeRequired, setOfflineUpgradeRequired] = useState(false);
   const [offlineRuntimeInfo, setOfflineRuntimeInfo] =
     useState<OfflineRuntimeInfo | null>(null);
   const [settingsRestored, setSettingsRestored] = useState(false);
@@ -796,10 +834,24 @@ export default function Home() {
   const bufferedAudioUrlsRef = useRef<Map<HTMLAudioElement, string>>(new Map());
   const bufferedAnimationFrameRef = useRef<number | null>(null);
   const bufferedAbortRef = useRef<AbortController | null>(null);
-  const bufferedPrefetchDisposeRef = useRef<(() => void) | null>(null);
+  const bufferedPrefetchControlsRef =
+    useRef<BufferedPrefetchControls | null>(null);
+  const narrationAudioPrimeRef = useRef<NarrationAudioPrime | null>(null);
   const speechSessionRef = useRef(0);
   const automaticOfflineInstallAttemptedRef = useRef(false);
   const offlineInstallAbortRef = useRef<AbortController | null>(null);
+  const pendingOfflineStartIndexRef = useRef<number | null>(null);
+  const offlineWarmRestoreAbortRef = useRef<AbortController | null>(null);
+  const offlineWarmRestoreIdleRef = useRef<number | null>(null);
+  const offlineWarmRestoreTimeoutRef = useRef<number | null>(null);
+  const offlineWarmRestoreStartedRef = useRef(false);
+  const offlineAudioCacheRef = useRef<OfflineAudioCache | null>(null);
+  if (offlineAudioCacheRef.current === null) {
+    offlineAudioCacheRef.current = createBoundedSpeechAudioCache({
+      maxBytes: OFFLINE_AUDIO_CACHE_BYTES,
+      maxEntries: OFFLINE_AUDIO_CACHE_ENTRIES,
+    }) as OfflineAudioCache;
+  }
   const programmaticScrollRef = useRef(false);
   const activeWordRef = useRef(0);
   const bookmarksRef = useRef<ReaderBookmark[]>([]);
@@ -992,14 +1044,18 @@ export default function Home() {
       }).catch(() => undefined);
     }
 
-    isOfflineVoicePackInstalled()
-      .then((installed) => {
+    getOfflineVoicePackStatus()
+      .then(({ installed, upgradeRequired }) => {
         if (!cancelled) {
           setOfflinePackState(installed ? "ready" : "missing");
+          setOfflineUpgradeRequired(upgradeRequired);
         }
       })
       .catch(() => {
-        if (!cancelled) setOfflinePackState("missing");
+        if (!cancelled) {
+          setOfflinePackState("missing");
+          setOfflineUpgradeRequired(false);
+        }
       });
 
     return () => {
@@ -1008,6 +1064,27 @@ export default function Home() {
       disposeOfflineSpeechWorker();
     };
   }, []);
+
+  useEffect(() => {
+    if (
+      !settingsRestored ||
+      settings.narrationEngine !== "offline" ||
+      offlinePackState !== "ready" ||
+      isImporting
+    ) {
+      return;
+    }
+
+    // Fetch and retain the content-hashed worker while the app is online. The
+    // model stays unloaded until initialization, but an installed pack can now
+    // start after the network disappears or the app shell is upgraded.
+    preloadOfflineSpeechRuntime();
+  }, [
+    isImporting,
+    offlinePackState,
+    settings.narrationEngine,
+    settingsRestored,
+  ]);
 
   useEffect(() => {
     if (!settingsRestored) return;
@@ -1064,6 +1141,7 @@ export default function Home() {
 
   const releaseBufferedAudio = useCallback((audio: HTMLAudioElement) => {
     audio.onplay = null;
+    audio.onplaying = null;
     audio.onpause = null;
     audio.onended = null;
     audio.onerror = null;
@@ -1082,9 +1160,45 @@ export default function Home() {
     }
   }, []);
 
+  const releaseNarrationAudioPrime = useCallback(() => {
+    const prime = narrationAudioPrimeRef.current;
+    if (!prime) return;
+    narrationAudioPrimeRef.current = null;
+    prime.audio.pause();
+    prime.audio.removeAttribute("src");
+    prime.audio.load();
+    URL.revokeObjectURL(prime.audioUrl);
+  }, []);
+
+  const primeNarrationAudioOutput = useCallback(() => {
+    releaseNarrationAudioPrime();
+    const audio = new Audio();
+    const audioUrl = URL.createObjectURL(
+      new Blob([createSilentPcmWav()], { type: "audio/wav" }),
+    );
+    const prime = { audio, audioUrl };
+    narrationAudioPrimeRef.current = prime;
+    audio.preload = "auto";
+    audio.loop = true;
+    // Keep the element non-muted so Chromium opens the real output path. The
+    // PCM samples themselves are zero, so this remains inaudible.
+    audio.muted = false;
+    audio.volume = 0.01;
+    audio.src = audioUrl;
+    audio.load();
+    void audio.play().catch(() => {
+      // A non-trusted automatic start may be rejected. Narration generation is
+      // still valid, and Stop can race the play promise with an AbortError.
+      if (narrationAudioPrimeRef.current === prime) {
+        releaseNarrationAudioPrime();
+      }
+    });
+  }, [releaseNarrationAudioPrime]);
+
   const clearBufferedPlayback = useCallback(() => {
-    bufferedPrefetchDisposeRef.current?.();
-    bufferedPrefetchDisposeRef.current = null;
+    releaseNarrationAudioPrime();
+    bufferedPrefetchControlsRef.current?.dispose();
+    bufferedPrefetchControlsRef.current = null;
     bufferedAbortRef.current?.abort();
     bufferedAbortRef.current = null;
 
@@ -1098,30 +1212,163 @@ export default function Home() {
     }
     bufferedAudioRef.current = null;
     bufferedSeekStateRef.current = null;
-  }, [releaseBufferedAudio]);
+  }, [releaseBufferedAudio, releaseNarrationAudioPrime]);
 
-  const stopSpeech = useCallback(() => {
-    speechSessionRef.current += 1;
-    clearSpeechStartTimer();
-    if (typeof window !== "undefined" && "speechSynthesis" in window) {
-      window.speechSynthesis.cancel();
+  const cancelOfflineWarmRestore = useCallback(
+    (
+      { abortActive = true }: { abortActive?: boolean } = {},
+    ) => {
+    if (
+      offlineWarmRestoreIdleRef.current !== null &&
+      typeof window !== "undefined" &&
+      "cancelIdleCallback" in window
+    ) {
+      window.cancelIdleCallback(offlineWarmRestoreIdleRef.current);
     }
-    clearFallbackTimer();
-    clearBufferedPlayback();
-    utteranceRef.current = null;
-    setIsPlaying(false);
-    setIsPreparingSpeech(false);
-  }, [clearBufferedPlayback, clearFallbackTimer, clearSpeechStartTimer]);
+    offlineWarmRestoreIdleRef.current = null;
+    if (
+      offlineWarmRestoreTimeoutRef.current !== null &&
+      typeof window !== "undefined"
+    ) {
+      window.clearTimeout(offlineWarmRestoreTimeoutRef.current);
+    }
+    offlineWarmRestoreTimeoutRef.current = null;
+    if (
+      shouldAbortOfflineWarmRestore({
+        abortActive,
+        started: offlineWarmRestoreStartedRef.current,
+      })
+    ) {
+      offlineWarmRestoreAbortRef.current?.abort();
+      offlineWarmRestoreAbortRef.current = null;
+      offlineWarmRestoreStartedRef.current = false;
+    }
+  }, []);
+
+  const scheduleOfflineWarmRestore = useCallback(
+    (voice: OfflineVoiceId) => {
+      if (offlineWarmRestoreAbortRef.current) {
+        return offlineWarmRestoreAbortRef.current;
+      }
+
+      const abortController = new AbortController();
+      offlineWarmRestoreAbortRef.current = abortController;
+      offlineWarmRestoreStartedRef.current = false;
+      const restore = () => {
+        offlineWarmRestoreIdleRef.current = null;
+        offlineWarmRestoreTimeoutRef.current = null;
+        if (abortController.signal.aborted) return;
+        offlineWarmRestoreStartedRef.current = true;
+        void initializeOfflineSpeech({
+          voice,
+          signal: abortController.signal,
+          warm: false,
+        })
+          .catch(() => undefined)
+          .finally(() => {
+            if (offlineWarmRestoreAbortRef.current === abortController) {
+              offlineWarmRestoreAbortRef.current = null;
+              offlineWarmRestoreStartedRef.current = false;
+            }
+          });
+      };
+
+      const scheduleTimeout = window.setTimeout.bind(window);
+      if ("requestIdleCallback" in window) {
+        offlineWarmRestoreIdleRef.current = window.requestIdleCallback(
+          restore,
+          { timeout: OFFLINE_WARM_IDLE_TIMEOUT_MS },
+        );
+      } else {
+        offlineWarmRestoreTimeoutRef.current = scheduleTimeout(restore, 0);
+      }
+      return abortController;
+    },
+    [],
+  );
+
+  const stopSpeech = useCallback(
+    (
+      { preservePendingOfflineStart = false }: {
+        preservePendingOfflineStart?: boolean;
+      } = {},
+    ) => {
+      if (!preservePendingOfflineStart) {
+        pendingOfflineStartIndexRef.current = null;
+      }
+      cancelOfflineWarmRestore();
+      speechSessionRef.current += 1;
+      clearSpeechStartTimer();
+      if (typeof window !== "undefined" && "speechSynthesis" in window) {
+        window.speechSynthesis.cancel();
+      }
+      clearFallbackTimer();
+      clearBufferedPlayback();
+      utteranceRef.current = null;
+      setIsPlaying(false);
+      setIsPreparingSpeech(false);
+    },
+    [
+      cancelOfflineWarmRestore,
+      clearBufferedPlayback,
+      clearFallbackTimer,
+      clearSpeechStartTimer,
+    ],
+  );
 
   useEffect(() => stopSpeech, [stopSpeech]);
 
+  useEffect(() => {
+    if (
+      !libraryReady ||
+      !settingsRestored ||
+      settings.narrationEngine !== "offline" ||
+      offlinePackState !== "ready" ||
+      isImporting ||
+      offlineWarmRestoreAbortRef.current ||
+      getOfflineSpeechReadiness().state === "ready"
+    ) {
+      return;
+    }
+
+    // Once the document has painted, load the stored model in its worker. A
+    // later Play can join initialization already in flight instead of paying
+    // the whole cold-start cost after the click.
+    const scheduledController = scheduleOfflineWarmRestore(
+      settings.offlineVoice,
+    );
+    return () => {
+      // Import can schedule its replacement before this effect's cleanup runs.
+      // Never let an old cleanup cancel the newly-owned controller.
+      if (
+        offlineWarmRestoreAbortRef.current === scheduledController
+      ) {
+        cancelOfflineWarmRestore();
+      }
+    };
+  }, [
+    cancelOfflineWarmRestore,
+    isImporting,
+    libraryReady,
+    offlinePackState,
+    scheduleOfflineWarmRestore,
+    settings.narrationEngine,
+    settings.offlineVoice,
+    settingsRestored,
+  ]);
+
   const downloadOfflineVoice = useCallback(
     async (automatic = false) => {
-      if (offlinePackState === "installing") return;
+      if (
+        offlinePackState === "installing" ||
+        offlineInstallAbortRef.current
+      ) {
+        return;
+      }
 
       const abortController = new AbortController();
       offlineInstallAbortRef.current = abortController;
-      stopSpeech();
+      stopSpeech({ preservePendingOfflineStart: true });
       setOfflinePackState("installing");
       setOfflineInstallProgress(0);
       setOfflineInstallLabel("Preparing LineLight's included offline voice…");
@@ -1132,10 +1379,16 @@ export default function Home() {
       );
 
       try {
-        const storageEstimate = await navigator.storage?.estimate?.();
+        const [storageEstimate, packBytes, retainedPackBytes] =
+          await Promise.all([
+            navigator.storage?.estimate?.(),
+            getOfflineVoicePackBytes(),
+            getOfflineVoicePackRetainedBytes(),
+          ]);
         const storageHeadroom = evaluateOfflineStorageHeadroom(
-          OFFLINE_PACK_BYTES,
+          packBytes,
           storageEstimate,
+          retainedPackBytes,
         );
         if (storageHeadroom.sufficient === false) {
           throw new OfflineSpeechError(
@@ -1146,6 +1399,7 @@ export default function Home() {
         }
         await navigator.storage?.persist?.().catch(() => false);
         await installOfflineVoicePack({
+          voice: settings.offlineVoice,
           signal: abortController.signal,
           onProgress: ({ progress, label }) => {
             setOfflineInstallProgress(progress);
@@ -1153,29 +1407,45 @@ export default function Home() {
           },
         });
 
-        if (!(await isOfflineVoicePackInstalled())) {
+        const installedStatus = await getOfflineVoicePackStatus();
+        if (
+          !installedStatus.installed ||
+          installedStatus.upgradeRequired
+        ) {
           throw new OfflineSpeechError(
             "The included voice finished loading, but the browser did not keep every file. Check storage permissions and try again.",
           );
         }
 
+        // q8 and fp16 can synthesize the same passage differently. Never let
+        // audio retained before a successful model update mask the validated
+        // fp16 runtime after the migration commits.
+        offlineAudioCacheRef.current?.clear();
         setOfflinePackState("ready");
+        setOfflineUpgradeRequired(false);
         setOfflineInstallProgress(100);
         setOfflineInstallLabel("The included offline voices are ready.");
         setNotice(
           "LineLight's included natural voice is ready. Narration text now stays on this device.",
         );
       } catch (error) {
+        const recoveredStatus = await getOfflineVoicePackStatus();
+        const storedPackAvailable = recoveredStatus.installed;
+        setOfflineUpgradeRequired(recoveredStatus.upgradeRequired);
         if (error instanceof DOMException && error.name === "AbortError") {
           automaticOfflineInstallAttemptedRef.current = false;
-          setOfflinePackState("missing");
+          setOfflinePackState(
+            storedPackAvailable ? "ready" : "missing",
+          );
           setOfflineInstallProgress(0);
           setOfflineInstallLabel(
             "Offline voice preparation paused while the document opens.",
           );
           return;
         }
-        setOfflinePackState("error");
+        setOfflinePackState(
+          storedPackAvailable ? "ready" : "error",
+        );
         const message =
           error instanceof Error
             ? error.message
@@ -1183,7 +1453,11 @@ export default function Home() {
         const displayMessage = message;
         setOfflineInstallLabel(displayMessage);
         setNotice(
-          automatic
+          storedPackAvailable
+            ? recoveredStatus.upgradeRequired
+              ? `${displayMessage} The stored compatibility voice is still available offline.`
+              : "The included offline voice is stored and ready."
+            : automatic
             ? `${displayMessage} Offline natural remains selected.`
             : displayMessage,
         );
@@ -1193,7 +1467,11 @@ export default function Home() {
         }
       }
     },
-    [offlinePackState, stopSpeech],
+    [
+      offlinePackState,
+      settings.offlineVoice,
+      stopSpeech,
+    ],
   );
 
   useEffect(() => {
@@ -1214,7 +1492,7 @@ export default function Home() {
         void downloadOfflineVoice(true);
       };
       if ("requestIdleCallback" in window) {
-        idleCallbackId = window.requestIdleCallback(prepare, { timeout: 5_000 });
+        idleCallbackId = window.requestIdleCallback(prepare, { timeout: 1_000 });
       } else {
         prepare();
       }
@@ -1235,7 +1513,9 @@ export default function Home() {
   ]);
 
   const deleteOfflineVoice = useCallback(async () => {
+    pendingOfflineStartIndexRef.current = null;
     stopSpeech();
+    offlineAudioCacheRef.current?.clear();
     setOfflinePackState("removing");
     setOfflineInstallLabel("Removing the included offline voice…");
 
@@ -1243,6 +1523,7 @@ export default function Home() {
       await removeOfflineVoicePack();
       automaticOfflineInstallAttemptedRef.current = false;
       setOfflinePackState("missing");
+      setOfflineUpgradeRequired(false);
       setOfflineRuntimeInfo(null);
       setOfflineInstallProgress(0);
       setOfflineInstallLabel("Included offline voice removed.");
@@ -1717,11 +1998,16 @@ export default function Home() {
     ) => {
       if (!model.tokens.length) return;
       const isOffline = engine === "offline";
+      const safeIndex = Math.min(
+        Math.max(0, startIndex),
+        model.tokens.length - 1,
+      );
 
       if (isOffline && offlinePackState !== "ready") {
+        pendingOfflineStartIndexRef.current = safeIndex;
         if (offlinePackState === "missing" || offlinePackState === "error") {
           automaticOfflineInstallAttemptedRef.current = true;
-          void downloadOfflineVoice(true);
+          void downloadOfflineVoice(false);
         }
         setIsPlaying(false);
         setIsPreparingSpeech(false);
@@ -1734,10 +2020,10 @@ export default function Home() {
         return;
       }
 
-      const safeIndex = Math.min(
-        Math.max(0, startIndex),
-        model.tokens.length - 1,
-      );
+      // If idle initialization is already running, let this Play request queue
+      // behind it and reuse the model. If it has not started yet, cancel only
+      // the scheduled callback so synthesis can begin immediately.
+      cancelOfflineWarmRestore({ abortActive: false });
       const sessionId = speechSessionRef.current + 1;
       speechSessionRef.current = sessionId;
 
@@ -1747,6 +2033,10 @@ export default function Home() {
       clearSpeechStartTimer();
       clearFallbackTimer();
       clearBufferedPlayback();
+      // Open Chromium's media-output path inside this trusted action while the
+      // natural voice is generated. Without it, the first real Audio element
+      // can spend another ~1.8 seconds starting the device after synthesis.
+      primeNarrationAudioOutput();
 
       const abortController = new AbortController();
       bufferedAbortRef.current = abortController;
@@ -1759,13 +2049,13 @@ export default function Home() {
         normalizeNarrationReadiness(
           1,
           isOffline
-            ? "Checking the included offline voice…"
+            ? "Starting the included offline voice…"
             : "Connecting to the natural voice…",
         ),
       );
       setNotice(
         isOffline
-          ? "Preparing a natural voice on this device…"
+          ? "Starting a natural voice on this device…"
           : "Preparing a natural voice…",
       );
 
@@ -1794,6 +2084,7 @@ export default function Home() {
       type SpeechChunk = NonNullable<ReturnType<typeof buildSpeechChunk>>;
       type PreparedAudio = {
         audio: HTMLAudioElement;
+        reusedAudio: boolean;
         synthesis: AzureSpeechResult | OfflineSpeechResult;
       };
 
@@ -1804,58 +2095,112 @@ export default function Home() {
         }
       };
 
+      let offlineChunkCharacters = OFFLINE_FIRST_CHUNK_CHARACTERS;
+
       const buildChunk = (chunkStartIndex: number) =>
         buildSpeechChunk(
           model.fullText,
           model.tokens,
           chunkStartIndex,
           isOffline
-            ? OFFLINE_SPEECH_CHUNK_CHARACTERS
+            ? offlineChunkCharacters
             : AZURE_SPEECH_CHUNK_CHARACTERS,
         );
 
       const prepareChunkNow = async (
         chunk: SpeechChunk,
+        {
+          signal,
+          speculative = false,
+        }: { signal: AbortSignal; speculative?: boolean },
       ): Promise<PreparedAudio> => {
-        if (abortController.signal.aborted) {
+        if (abortController.signal.aborted || signal.aborted) {
           throw new DOMException(
             "Speech preparation was canceled.",
             "AbortError",
           );
         }
 
-        const synthesis = isOffline
-          ? await synthesizeOfflineSpeech({
+        let reusedAudio = false;
+        let synthesis: AzureSpeechResult | OfflineSpeechResult;
+        if (isOffline) {
+          const cacheKey = JSON.stringify([
+            settings.offlineVoice,
+            settings.rate,
+            chunk.text,
+          ]);
+          const cachedSynthesis = offlineAudioCacheRef.current?.get(cacheKey);
+          if (cachedSynthesis) {
+            reusedAudio = true;
+            synthesis = cachedSynthesis;
+            reportNarrationReadiness(
+              chunk.startIndex,
+              94,
+              "Reusing prepared narration audio…",
+            );
+          } else {
+            reportNarrationReadiness(
+              chunk.startIndex,
+              4,
+              "Loading the included voice and generating narration…",
+            );
+            const generatedSynthesis = await synthesizeOfflineSpeech({
               text: chunk.text,
               voice: settings.offlineVoice,
               rate: settings.rate,
-              signal: abortController.signal,
-              onProgress: ({ progress, label }) => {
+              signal,
+              preserveWorkerOnAbort: speculative,
+              onProgress: ({ progress, label, stage }) => {
+                const narrationPhase =
+                  stage === "synthesizing"
+                    ? "synthesizing"
+                    : "initializing";
                 reportNarrationReadiness(
                   chunk.startIndex,
-                  progress,
+                  mapOfflineNarrationPhaseProgress(
+                    narrationPhase,
+                    progress,
+                  ),
                   label,
                 );
               },
-            })
-          : await (async () => {
-              reportNarrationReadiness(
-                chunk.startIndex,
-                34,
-                "Generating narration audio…",
+            });
+            synthesis = generatedSynthesis;
+            if (!abortController.signal.aborted && !signal.aborted) {
+              offlineAudioCacheRef.current?.set(
+                cacheKey,
+                generatedSynthesis,
+                generatedSynthesis.audioData.byteLength,
               );
-              return synthesizeAzureSpeech({
-                text: chunk.text,
-                voice: settings.azureVoice,
-                signal: abortController.signal,
-              });
-            })();
+            }
+          }
+        } else {
+          reportNarrationReadiness(
+            chunk.startIndex,
+            34,
+            "Generating narration audio…",
+          );
+          synthesis = await synthesizeAzureSpeech({
+            text: chunk.text,
+            voice: settings.azureVoice,
+            signal,
+          });
+        }
 
-        if (abortController.signal.aborted) {
+        if (abortController.signal.aborted || signal.aborted) {
           throw new DOMException(
             "Speech preparation was canceled.",
             "AbortError",
           );
+        }
+
+        if (isOffline && !reusedAudio) {
+          const offlineSynthesis = synthesis as OfflineSpeechResult;
+          offlineChunkCharacters = adaptOfflineSpeechChunkCharacters({
+            currentCharacters: offlineChunkCharacters,
+            synthesisMilliseconds: offlineSynthesis.synthesisMilliseconds,
+            audioDurationSeconds: offlineSynthesis.audioDurationSeconds,
+          });
         }
 
         reportNarrationReadiness(
@@ -1888,16 +2233,7 @@ export default function Home() {
           markAudioReady();
         }
 
-        return { audio, synthesis };
-      };
-      let preparationTail = Promise.resolve();
-      const prepareChunk = (chunk: SpeechChunk) => {
-        const prepared = preparationTail.then(() => prepareChunkNow(chunk));
-        preparationTail = prepared.then(
-          () => undefined,
-          () => undefined,
-        );
-        return prepared;
+        return { audio, reusedAudio, synthesis };
       };
 
       const handleBufferedSpeechFailure = (
@@ -1944,18 +2280,32 @@ export default function Home() {
       const prefetchQueue = createSpeechPrefetchQueue({
         startIndex: safeIndex,
         endIndex: model.tokens.length,
-        lookahead: isOffline ? OFFLINE_SPEECH_LOOKAHEAD_CHUNKS : 1,
+        lookahead: 1,
         buildChunk,
         getNextIndex: (chunk: SpeechChunk) => chunk.nextIndex,
-        prepareChunk,
+        prepareChunk: prepareChunkNow,
+        discardPrepared: (prepared: PreparedAudio) => {
+          releaseBufferedAudio(prepared.audio);
+        },
       });
-      const disposePrefetch = () => prefetchQueue.dispose();
-      bufferedPrefetchDisposeRef.current = disposePrefetch;
+      // Give the first Blob decode and audio.play() exclusive priority. The
+      // current non-speculative preparation remains active while paused, and
+      // audio.onplaying resumes the one-chunk lookahead only after sound starts.
+      prefetchQueue.pause();
+      const prefetchControls: BufferedPrefetchControls = {
+        dispose: () => prefetchQueue.dispose(),
+        // Chromium cannot interrupt a synchronous multithreaded WASM call.
+        // Suspend new lookahead but retain the one short passage already in
+        // flight so Resume keeps the warm model and reuses its result.
+        pause: () => prefetchQueue.pause({ cancelPending: false }),
+        resume: () => prefetchQueue.resume(),
+      };
+      bufferedPrefetchControlsRef.current = prefetchControls;
 
       const finishBufferedSpeech = () => {
-        disposePrefetch();
-        if (bufferedPrefetchDisposeRef.current === disposePrefetch) {
-          bufferedPrefetchDisposeRef.current = null;
+        prefetchControls.dispose();
+        if (bufferedPrefetchControlsRef.current === prefetchControls) {
+          bufferedPrefetchControlsRef.current = null;
         }
         bufferedAudioRef.current = null;
         bufferedAbortRef.current = null;
@@ -1976,12 +2326,13 @@ export default function Home() {
         }
 
         clearBoundaryAnimation();
-        const { audio, synthesis } = prepared;
+        const { audio, reusedAudio, synthesis } = prepared;
         bufferedAudioRef.current = audio;
         if (isOffline && "device" in synthesis) {
           setOfflineRuntimeInfo({
             audioDurationSeconds: synthesis.audioDurationSeconds,
             device: synthesis.device,
+            reusedAudio,
             synthesisMilliseconds: synthesis.synthesisMilliseconds,
             wasmThreads: synthesis.wasmThreads,
           });
@@ -2039,9 +2390,19 @@ export default function Home() {
           bufferedAnimationFrameRef.current =
             window.requestAnimationFrame(updateBoundary);
         };
+        audio.onplaying = () => {
+          if (speechSessionRef.current !== sessionId) return;
+          if (audio.paused || audio.ended) return;
+          releaseNarrationAudioPrime();
+          // `play` fires as soon as the media element becomes unpaused. Wait
+          // for decoded audio to reach the output path before giving ONNX the
+          // CPU for speculative work.
+          prefetchControls.resume();
+        };
         audio.onpause = () => {
           clearBoundaryAnimation();
           if (speechSessionRef.current === sessionId && !audio.ended) {
+            prefetchControls.pause();
             setIsPlaying(false);
           }
         };
@@ -2120,6 +2481,8 @@ export default function Home() {
             error instanceof DOMException &&
             error.name === "NotAllowedError"
           ) {
+            releaseNarrationAudioPrime();
+            prefetchControls.pause();
             setIsPreparingSpeech(false);
             setIsPlaying(false);
             setNotice(
@@ -2150,11 +2513,14 @@ export default function Home() {
       clearBufferedPlayback,
       clearFallbackTimer,
       clearSpeechStartTimer,
+      cancelOfflineWarmRestore,
       downloadOfflineVoice,
       model.fullText,
       model.tokens,
       offlinePackState,
+      primeNarrationAudioOutput,
       releaseBufferedAudio,
+      releaseNarrationAudioPrime,
       settings.azureVoice,
       settings.offlineVoice,
       settings.rate,
@@ -2162,6 +2528,30 @@ export default function Home() {
       startDeviceSpeech,
     ],
   );
+
+  useEffect(() => {
+    if (pendingOfflineStartIndexRef.current === null) {
+      return;
+    }
+    if (offlinePackState === "missing") {
+      queueMicrotask(() => {
+        automaticOfflineInstallAttemptedRef.current = true;
+        void downloadOfflineVoice(false);
+      });
+      return;
+    }
+    if (offlinePackState !== "ready") return;
+    const startIndex = pendingOfflineStartIndexRef.current;
+    pendingOfflineStartIndexRef.current = null;
+    if (settings.narrationEngine === "offline") {
+      queueMicrotask(() => startBufferedSpeech("offline", startIndex));
+    }
+  }, [
+    downloadOfflineVoice,
+    offlinePackState,
+    settings.narrationEngine,
+    startBufferedSpeech,
+  ]);
 
   const startSpeech = useCallback(
     (startIndex = activeWordRef.current) => {
@@ -2183,6 +2573,7 @@ export default function Home() {
 
     if (isPlaying) {
       if (bufferedAudioRef.current) {
+        bufferedPrefetchControlsRef.current?.pause();
         bufferedAudioRef.current.pause();
       } else if (speechAvailable) {
         window.speechSynthesis.pause();
@@ -2198,7 +2589,11 @@ export default function Home() {
       !bufferedAudio.ended &&
       bufferedAudio.paused
     ) {
+      const prefetchControls = bufferedPrefetchControlsRef.current;
       void bufferedAudio.play().catch(() => {
+        if (bufferedAudioRef.current !== bufferedAudio) return;
+        prefetchControls?.pause();
+        setIsPlaying(false);
         setNotice(
           "Brave blocked audio playback. Allow sound for this site, then press Play again.",
         );
@@ -2214,6 +2609,47 @@ export default function Home() {
     startSpeech();
   }, [isPlaying, isPreparingSpeech, speechAvailable, startSpeech, stopSpeech]);
 
+  const seekBufferedPlayback = useCallback(
+    (targetIndex: number, resumePlayback = false) => {
+      const bufferedSeekState = bufferedSeekStateRef.current;
+      if (
+        !bufferedSeekState ||
+        bufferedSeekState.sessionId !== speechSessionRef.current ||
+        bufferedSeekState.audio !== bufferedAudioRef.current
+      ) {
+        return false;
+      }
+
+      const audioOffset = findBufferedSeekOffset(
+        bufferedSeekState,
+        targetIndex,
+      );
+      if (audioOffset === null) return false;
+
+      try {
+        bufferedSeekState.audio.currentTime = audioOffset;
+        setActiveWord(targetIndex);
+        activeWordRef.current = targetIndex;
+        window.setTimeout(() => scrollToActiveWord("smooth"), 0);
+        if (resumePlayback && bufferedSeekState.audio.paused) {
+          const prefetchControls = bufferedPrefetchControlsRef.current;
+          void bufferedSeekState.audio.play().catch(() => {
+            if (bufferedAudioRef.current !== bufferedSeekState.audio) return;
+            prefetchControls?.pause();
+            setIsPlaying(false);
+            setNotice(
+              "Brave blocked audio playback. Allow sound for this site, then press Play again.",
+            );
+          });
+        }
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    [scrollToActiveWord],
+  );
+
   const moveBySentence = useCallback(
     (direction: -1 | 1) => {
       const targetIndex = findAdjacentSentenceStart(
@@ -2223,35 +2659,23 @@ export default function Home() {
       );
       if (targetIndex === null) return;
 
-      const bufferedSeekState = bufferedSeekStateRef.current;
-      if (
-        bufferedSeekState &&
-        bufferedSeekState.sessionId === speechSessionRef.current &&
-        bufferedSeekState.audio === bufferedAudioRef.current
-      ) {
-        const audioOffset = findBufferedSeekOffset(
-          bufferedSeekState,
-          targetIndex,
-        );
-        if (audioOffset !== null) {
-          try {
-            bufferedSeekState.audio.currentTime = audioOffset;
-            setActiveWord(targetIndex);
-            activeWordRef.current = targetIndex;
-            window.setTimeout(() => scrollToActiveWord("smooth"), 0);
-            return;
-          } catch {
-            // Fall back to stopping and repositioning if media seeking fails.
-          }
-        }
-      }
+      if (seekBufferedPlayback(targetIndex)) return;
 
+      const restartAfterMove = isPlaying;
       stopSpeech();
       setActiveWord(targetIndex);
       activeWordRef.current = targetIndex;
       window.setTimeout(() => scrollToActiveWord("smooth"), 0);
+      if (restartAfterMove) startSpeech(targetIndex);
     },
-    [scrollToActiveWord, sentenceStarts, stopSpeech],
+    [
+      isPlaying,
+      scrollToActiveWord,
+      seekBufferedPlayback,
+      sentenceStarts,
+      startSpeech,
+      stopSpeech,
+    ],
   );
 
   const replayUnit = useCallback(
@@ -2270,10 +2694,17 @@ export default function Home() {
             (token) => token.paragraphIndex === activeToken.paragraphIndex,
           )?.index ?? target;
       }
+      if (seekBufferedPlayback(target, true)) return;
       stopSpeech();
       startSpeech(target);
     },
-    [activeToken, model.tokens, startSpeech, stopSpeech],
+    [
+      activeToken,
+      model.tokens,
+      seekBufferedPlayback,
+      startSpeech,
+      stopSpeech,
+    ],
   );
 
   const returnToNarration = useCallback(() => {
@@ -2529,12 +2960,17 @@ export default function Home() {
         return;
       }
 
+      const restoreOfflineWorker =
+        settings.narrationEngine === "offline" &&
+        shouldRestoreOfflineWorkerAfterImport({
+          packState: offlinePackState,
+          readinessState: getOfflineSpeechReadiness().state,
+          restorePending: offlineWarmRestoreAbortRef.current !== null,
+        });
+      const restoreOfflineVoice = settings.offlineVoice;
       stopSpeech();
       offlineInstallAbortRef.current?.abort();
-      if (
-        offlinePackState === "installing" ||
-        settings.narrationEngine === "offline"
-      ) {
+      if (shouldDisposeOfflineWorkerForImport(offlinePackState)) {
         disposeOfflineSpeechWorker();
       }
       if (offlinePackState === "installing") {
@@ -2588,10 +3024,19 @@ export default function Home() {
         );
       } finally {
         setIsImporting(false);
+        if (restoreOfflineWorker) {
+          scheduleOfflineWarmRestore(restoreOfflineVoice);
+        }
         if (fileInputRef.current) fileInputRef.current.value = "";
       }
     },
-    [offlinePackState, settings.narrationEngine, stopSpeech],
+    [
+      offlinePackState,
+      scheduleOfflineWarmRestore,
+      settings.narrationEngine,
+      settings.offlineVoice,
+      stopSpeech,
+    ],
   );
 
   const handleFileInput = (event: ChangeEvent<HTMLInputElement>) => {
@@ -3123,7 +3568,7 @@ export default function Home() {
                 </p>
                 <span>
                   {activeVoiceReadiness
-                    ? `${activeVoiceReadiness.progress}% loaded`
+                    ? `${activeVoiceReadiness.progress}% ready`
                     : `${activeToken?.text ?? "Start"} · ${progress}%`}
                 </span>
                 {activeVoiceReadiness && (
@@ -3972,8 +4417,15 @@ export default function Home() {
                           <span>
                             <strong>Stored on this device</strong>
                             Five voices are available without internet.
+                            {offlineUpgradeRequired && (
+                              <small>
+                                A faster, quality-preserving voice update is
+                                available when this device is online.
+                              </small>
+                            )}
                             {offlineRuntimeInfo && (
                               <small>
+                                Last narration ·{" "}
                                 {offlineRuntimeInfo.device === "webgpu"
                                   ? "WebGPU accelerated"
                                   : `WebAssembly · ${
@@ -3983,25 +4435,41 @@ export default function Home() {
                                         ? "thread"
                                         : "threads"
                                     }`}
-                                {" · generated "}
-                                {offlineRuntimeInfo.audioDurationSeconds.toFixed(
-                                  1,
+                                {offlineRuntimeInfo.reusedAudio ? (
+                                  <> · reused prepared audio</>
+                                ) : (
+                                  <>
+                                    {" · generated "}
+                                    {offlineRuntimeInfo.audioDurationSeconds.toFixed(
+                                      1,
+                                    )}
+                                    {"s of audio in "}
+                                    {(
+                                      offlineRuntimeInfo.synthesisMilliseconds /
+                                      1000
+                                    ).toFixed(1)}
+                                    s
+                                  </>
                                 )}
-                                {"s of audio in "}
-                                {(
-                                  offlineRuntimeInfo.synthesisMilliseconds /
-                                  1000
-                                ).toFixed(1)}
-                                s
                               </small>
                             )}
                           </span>
-                          <button
-                            type="button"
-                            onClick={() => void deleteOfflineVoice()}
-                          >
-                            Remove
-                          </button>
+                          <div className="offline-pack-actions">
+                            {offlineUpgradeRequired && (
+                              <button
+                                type="button"
+                                onClick={() => void downloadOfflineVoice()}
+                              >
+                                Update
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => void deleteOfflineVoice()}
+                            >
+                              Remove
+                            </button>
+                          </div>
                         </div>
                       </>
                     ) : (
@@ -4065,9 +4533,9 @@ export default function Home() {
                       LineLight includes this voice and stores it locally on
                       first launch. After preparation, speech is generated on
                       this device and narration text never leaves it. Word
-                      highlighting follows an audio-synchronized phoneme
-                      estimate because Kokoro does not provide exact word
-                      timestamps.{" "}
+                      highlighting follows an audio-synchronized estimate
+                      weighted by word length and punctuation because Kokoro
+                      does not provide exact word timestamps.{" "}
                       <a
                         href="/offline-voice-license.txt"
                         target="_blank"

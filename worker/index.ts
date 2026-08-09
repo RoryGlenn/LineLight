@@ -25,6 +25,40 @@ interface ExecutionContext {
   passThroughOnException(): void;
 }
 
+function withRuntimeHeaders(request: Request, response: Response) {
+  const url = new URL(request.url);
+  const contentType = response.headers.get("content-type") ?? "";
+  const isDocument = /^text\/html\b/iu.test(contentType);
+  const isRuntimeAsset = url.pathname.startsWith("/assets/");
+  const isWorkerScript = isRuntimeAsset && url.pathname.endsWith(".js");
+  const isWasm = url.pathname.endsWith(".wasm");
+  if (!isDocument && !isRuntimeAsset && !isWasm) return response;
+
+  const headers = new Headers(response.headers);
+  if (isDocument) {
+    // SharedArrayBuffer unlocks ONNX's threaded WASM fallback when WebGPU is
+    // unavailable. Every narration/runtime asset is same-origin or explicitly
+    // CORP-protected, so the reader can use a cross-origin-isolated agent.
+    headers.set("Cross-Origin-Embedder-Policy", "require-corp");
+    headers.set("Cross-Origin-Opener-Policy", "same-origin");
+    headers.set("Origin-Agent-Cluster", "?1");
+  }
+  if (isRuntimeAsset) {
+    headers.set("Cross-Origin-Resource-Policy", "same-origin");
+  }
+  if (isWorkerScript) {
+    // Dedicated workers need their own embedder policy to join the isolated
+    // agent cluster and create ONNX's nested WASM workers.
+    headers.set("Cross-Origin-Embedder-Policy", "require-corp");
+  }
+  if (isWasm) headers.set("Content-Type", "application/wasm");
+  return new Response(response.body, {
+    headers,
+    status: response.status,
+    statusText: response.statusText,
+  });
+}
+
 // Image security config. SVG sources with .svg extension auto-skip the
 // optimization endpoint on the client side (served directly, no proxy).
 // To route SVGs through the optimizer (with security headers), set
@@ -61,7 +95,8 @@ const worker = {
       );
     }
 
-    return handler.fetch(request, env, ctx);
+    const response = await handler.fetch(request, env, ctx);
+    return withRuntimeHeaders(request, response);
   },
 };
 

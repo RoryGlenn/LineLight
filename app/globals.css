@@ -2268,6 +2268,12 @@ input:focus-visible {
   font-size: 9px;
 }
 
+.offline-pack-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 .offline-pack-ready button,
 .voice-pack-button {
   min-height: 34px;

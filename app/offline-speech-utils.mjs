@@ -3,6 +3,29 @@ const WORD_PATTERN =
 const PRONOUNCED_SYMBOL_PATTERN = /[\p{L}\p{M}]/gu;
 
 /**
+ * Identify failures that should advance the ONNX backend ladder. WebGPU model
+ * operations treat every exception as backend-specific in the worker; this
+ * classifier also catches ordinary WASM runtime failures whose names omit the
+ * words ONNX or WASM.
+ *
+ * @param {unknown} error
+ */
+export function isOfflineBackendRuntimeFailure(error) {
+  const name = error instanceof Error ? error.name : "";
+  let message = error instanceof Error ? error.message : String(error);
+  if (error && typeof error === "object") {
+    try {
+      message = `${message} ${JSON.stringify(error)}`;
+    } catch {
+      // String(error) remains available for non-serializable runtime values.
+    }
+  }
+  return /(?:adapter|allocat(?:e|ion).*memory|backend|bad_alloc|compileerror|compute\s*pipeline|device\s*lost|failed\s+to\s+create\s+(?:a\s+)?session|gpu|kernel|linkerror|memory\s+access\s+out\s+of\s+bounds|onnx|operationerror|operator|ort\b|out\s+of\s+memory|runtimeerror|runtime\s*session|shader|tensor|wasm|webassembly)/iu.test(
+    `${name} ${message}`,
+  );
+}
+
+/**
  * Find words and their offsets inside a synthesis passage.
  *
  * @param {string} text
@@ -69,6 +92,120 @@ export function countBatchedWordPhonemes(words, phonemeEntries) {
   );
 }
 
+/**
+ * Reject empty, silent, or non-finite model output before it is serialized as
+ * a WAV. Some ONNX backends can complete successfully while returning NaN
+ * samples, which media elements otherwise treat as playable silence.
+ *
+ * @param {ArrayLike<number> | undefined | null} samples
+ * @param {number} samplingRate
+ */
+export function hasUsableOfflineAudio(samples, samplingRate) {
+  if (
+    !samples ||
+    samples.length === 0 ||
+    !Number.isFinite(samplingRate) ||
+    samplingRate <= 0
+  ) {
+    return false;
+  }
+
+  let peak = 0;
+  for (let index = 0; index < samples.length; index += 1) {
+    const sample = Number(samples[index]);
+    if (!Number.isFinite(sample)) return false;
+    peak = Math.max(peak, Math.abs(sample));
+  }
+  return peak > 0.000001;
+}
+
+/**
+ * Add a lexical-free context token when fp16 inference returns invalid audio.
+ * Kokoro ignores the leading comma as a spoken word, while its tokenizer avoids
+ * the input shapes that can produce non-finite WASM output for short fragments.
+ *
+ * @param {string} text
+ */
+export function buildOfflineAudioRecoveryText(text) {
+  return `, ${text.trimStart()}`;
+}
+
+export class InvalidOfflineAudioError extends Error {
+  constructor() {
+    super("The offline voice runtime generated invalid audio samples.");
+    this.name = "InvalidOfflineAudioError";
+  }
+}
+
+/**
+ * Validate every model result before playback. If fp16 produces non-finite or
+ * silent samples for a short tokenizer shape, retry once with lexical-free
+ * punctuation context. The retry is bounded and never accepts another corrupt
+ * waveform.
+ *
+ * @template {{ audio: ArrayLike<number>, sampling_rate: number }} T
+ * @param {string} text
+ * @param {(text: string) => Promise<T>} generate
+ * @returns {Promise<T>}
+ */
+export async function generateUsableOfflineAudio(text, generate) {
+  const firstResult = await generate(text);
+  if (
+    hasUsableOfflineAudio(
+      firstResult.audio,
+      firstResult.sampling_rate,
+    )
+  ) {
+    return firstResult;
+  }
+
+  const recoveredResult = await generate(
+    buildOfflineAudioRecoveryText(text),
+  );
+  if (
+    !hasUsableOfflineAudio(
+      recoveredResult.audio,
+      recoveredResult.sampling_rate,
+    )
+  ) {
+    throw new InvalidOfflineAudioError();
+  }
+  return recoveredResult;
+}
+
+/**
+ * Measure the waveform onset used for approximate word highlighting. Recovery
+ * punctuation can add a short silent lead-in, so a fixed 80 ms estimate would
+ * highlight the first word noticeably before it is spoken.
+ *
+ * @param {ArrayLike<number>} samples
+ * @param {number} samplingRate
+ * @param {number} [threshold]
+ */
+export function measureOfflineAudioLeadIn(
+  samples,
+  samplingRate,
+  threshold,
+) {
+  if (!samples?.length || !Number.isFinite(samplingRate) || samplingRate <= 0) {
+    return 0;
+  }
+  let peak = 0;
+  for (let index = 0; index < samples.length; index += 1) {
+    const sample = Math.abs(Number(samples[index]));
+    if (Number.isFinite(sample)) peak = Math.max(peak, sample);
+  }
+  const audibleThreshold = Number.isFinite(threshold)
+    ? Math.max(0, threshold)
+    : Math.max(0.005, peak * 0.01);
+  for (let index = 0; index < samples.length; index += 1) {
+    if (Math.abs(Number(samples[index])) >= audibleThreshold) {
+      return index / samplingRate;
+    }
+  }
+  return 0;
+}
+
 function punctuationPauseUnits(trailingText) {
   if (/[.!?]/u.test(trailingText)) return 4.5;
   if (/[\n\r]/u.test(trailingText)) return 3.5;
@@ -86,11 +223,13 @@ function punctuationPauseUnits(trailingText) {
  * @param {string} text
  * @param {number} audioDurationSeconds
  * @param {number[]} phonemeCounts
+ * @param {{ leadingSilenceSeconds?: number }} [timing]
  */
 export function buildPhonemeWeightedBoundaries(
   text,
   audioDurationSeconds,
   phonemeCounts,
+  timing = {},
 ) {
   const words = extractTimedWords(text);
   if (!words.length || audioDurationSeconds <= 0) return [];
@@ -104,7 +243,17 @@ export function buildPhonemeWeightedBoundaries(
     (sum, word) => sum + word.phonemeUnits + word.pauseUnits,
     0,
   );
-  const leadingSilence = Math.min(0.08, audioDurationSeconds * 0.025);
+  const defaultLeadingSilence = Math.min(
+    0.08,
+    audioDurationSeconds * 0.025,
+  );
+  const measuredLeadingSilence = Number(timing.leadingSilenceSeconds);
+  const leadingSilence = Number.isFinite(measuredLeadingSilence)
+    ? Math.min(
+        Math.max(0, measuredLeadingSilence),
+        audioDurationSeconds * 0.5,
+      )
+    : defaultLeadingSilence;
   const trailingSilence = Math.min(0.06, audioDurationSeconds * 0.02);
   const timedDuration = Math.max(
     0,

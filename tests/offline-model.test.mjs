@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
@@ -9,12 +10,25 @@ import {
 } from "../app/narration-defaults.mjs";
 import {
   OFFLINE_MODEL_DTYPE,
+  OFFLINE_FP16_READY_MARKER_URL,
+  OFFLINE_FP16_READY_MARKER_VERSION,
+  OFFLINE_LEGACY_Q8_MODEL_FILE,
   OFFLINE_MODEL_REVISION,
   OFFLINE_MODEL_ROUTE_PREFIX,
   OFFLINE_MODEL_RUNTIME,
+  OFFLINE_RUNTIME_CACHE_NAME,
+  OFFLINE_WEBGPU_MODEL_BYTES,
+  OFFLINE_WEBGPU_ADAPTER_TIMEOUT_MS,
+  OFFLINE_WEBGPU_MODEL_DTYPE,
+  OFFLINE_WEBGPU_MODEL_FILE,
   OFFLINE_WASM_PROXY,
   OFFLINE_WASM_THREADS,
+  constrainOfflineBackendPreference,
+  nextOfflineSpeechBackend,
+  probeWebGpuAdapter,
   resolveOfflineModelRequest,
+  selectOfflineModelDtype,
+  selectOfflineSpeechBackend,
 } from "../app/offline-model-manifest.mjs";
 import { handleOfflineModelRequest } from "../worker/offline-model.mjs";
 
@@ -55,16 +69,247 @@ test("never silently falls back from offline narration to browser speech", () =>
   assert.equal(allowsDeviceFallback("azure"), true);
 });
 
-test("pairs the included q8 model with the compatible WASM runtime", () => {
-  assert.equal(OFFLINE_MODEL_DTYPE, "q8");
-  assert.equal(OFFLINE_MODEL_RUNTIME, "wasm");
-  assert.equal(OFFLINE_WASM_THREADS, 1);
+test("pairs device-specific Kokoro artifacts with a safe runtime ladder", () => {
+  assert.equal(OFFLINE_MODEL_DTYPE, "fp16");
+  assert.equal(OFFLINE_WEBGPU_MODEL_DTYPE, "fp16");
+  assert.equal(OFFLINE_WEBGPU_MODEL_FILE, "onnx/model_fp16.onnx");
+  assert.equal(OFFLINE_WEBGPU_MODEL_BYTES, 163_234_740);
+  assert.equal(OFFLINE_WEBGPU_ADAPTER_TIMEOUT_MS, 500);
+  assert.equal(OFFLINE_MODEL_RUNTIME, "webgpu");
+  assert.equal(OFFLINE_WASM_THREADS, 8);
   assert.equal(OFFLINE_WASM_PROXY, false);
+
+  assert.deepEqual(
+    selectOfflineSpeechBackend({
+      crossOriginIsolated: false,
+      hardwareConcurrency: 20,
+      webGpuAvailable: true,
+    }),
+    { device: "webgpu", wasmThreads: null },
+  );
+  assert.deepEqual(
+    selectOfflineSpeechBackend({
+      crossOriginIsolated: true,
+      hardwareConcurrency: 10,
+      webGpuAvailable: false,
+    }),
+    { device: "wasm", wasmThreads: 8 },
+  );
+  assert.deepEqual(
+    selectOfflineSpeechBackend({
+      crossOriginIsolated: true,
+      hardwareConcurrency: 20,
+      webGpuAvailable: false,
+    }),
+    { device: "wasm", wasmThreads: 8 },
+  );
+  assert.deepEqual(
+    selectOfflineSpeechBackend({
+      crossOriginIsolated: false,
+      hardwareConcurrency: 20,
+      webGpuAvailable: false,
+    }),
+    { device: "wasm", wasmThreads: 1 },
+  );
+  assert.deepEqual(
+    selectOfflineSpeechBackend({
+      crossOriginIsolated: true,
+      forceSingleThreadWasm: true,
+      hardwareConcurrency: 20,
+      webGpuAvailable: false,
+    }),
+    { device: "wasm", wasmThreads: 1 },
+  );
+  assert.deepEqual(
+    nextOfflineSpeechBackend({ device: "webgpu", wasmThreads: null }),
+    { device: "wasm", wasmThreads: null },
+  );
+  assert.deepEqual(
+    nextOfflineSpeechBackend({ device: "wasm", wasmThreads: 8 }),
+    { device: "wasm", wasmThreads: 1 },
+  );
+  assert.equal(
+    nextOfflineSpeechBackend({ device: "wasm", wasmThreads: 1 }),
+    null,
+  );
+
+  const threadedFallback = nextOfflineSpeechBackend({
+    device: "webgpu",
+    wasmThreads: null,
+  });
+  assert.deepEqual(
+    constrainOfflineBackendPreference(
+      {
+        device: threadedFallback.device,
+        wasmThreads: threadedFallback.wasmThreads ?? undefined,
+      },
+      true,
+    ),
+    { device: "wasm" },
+  );
+  const singleThreadFallback = nextOfflineSpeechBackend({
+    device: "wasm",
+    wasmThreads: 8,
+  });
+  assert.deepEqual(
+    constrainOfflineBackendPreference(
+      {
+        device: singleThreadFallback.device,
+        wasmThreads: singleThreadFallback.wasmThreads ?? undefined,
+      },
+      true,
+    ),
+    { device: "wasm", wasmThreads: 1 },
+  );
+});
+
+test("keeps q8 selected until an explicit fp16 validation commits", () => {
+  assert.equal(
+    selectOfflineModelDtype({
+      fp16Available: false,
+      legacyQ8Available: true,
+    }),
+    "q8",
+  );
+  assert.equal(
+    selectOfflineModelDtype({
+      fp16Available: true,
+      legacyQ8Available: true,
+    }),
+    "q8",
+  );
+  assert.equal(
+    selectOfflineModelDtype({
+      fp16Available: true,
+      legacyQ8Available: true,
+      preferFp16: true,
+    }),
+    "fp16",
+  );
+  assert.equal(selectOfflineModelDtype(), "fp16");
+});
+
+test("bounds WebGPU adapter detection and ignores late results", async () => {
+  const fp16Adapter = {
+    features: { has: (feature) => feature === "shader-f16" },
+  };
+  assert.equal(
+    await probeWebGpuAdapter({
+      requestAdapter: async () => fp16Adapter,
+    }),
+    true,
+  );
+  assert.equal(
+    await probeWebGpuAdapter({
+      requestAdapter: async () => null,
+    }),
+    false,
+  );
+  assert.equal(
+    await probeWebGpuAdapter({
+      requestAdapter: async () => {
+        throw new Error("adapter failed");
+      },
+    }),
+    false,
+  );
+  assert.equal(
+    await probeWebGpuAdapter({
+      requestAdapter: () => {
+        throw new Error("synchronous adapter failure");
+      },
+    }),
+    false,
+  );
+
+  let fireDeadline = () => {};
+  let resolveAdapter = () => {};
+  let clearCalls = 0;
+  const lateAdapter = new Promise((resolve) => {
+    resolveAdapter = () => resolve(fp16Adapter);
+  });
+  const probe = probeWebGpuAdapter({
+    requestAdapter: () => lateAdapter,
+    timeoutMs: 500,
+    setTimeoutFn: (callback) => {
+      fireDeadline = callback;
+      return 17;
+    },
+    clearTimeoutFn: () => {
+      clearCalls += 1;
+    },
+  });
+  fireDeadline();
+  assert.equal(await probe, false);
+  resolveAdapter();
+  await Promise.resolve();
+  assert.equal(clearCalls, 1);
+});
+
+test("retries WebGPU on a later page load after a transient runtime failure", async () => {
+  const source = await readFile("app/offline-speech.ts", "utf8");
+
+  assert.match(source, /let webGpuDisabledForSession = false/u);
+  assert.match(source, /webGpuDisabledForSession = true/u);
+  assert.doesNotMatch(source, /offline-webgpu-disabled/u);
+  assert.doesNotMatch(
+    source,
+    /localStorage[^\n]*(?:webgpu|backend)|(?:webgpu|backend)[^\n]*localStorage/iu,
+  );
+});
+
+test("validates waveforms before ready and preserves q8 after a model-only load", async () => {
+  const workerSource = await readFile("app/offline-speech.worker.ts", "utf8");
+
+  assert.match(
+    workerSource,
+    /generateUsableOfflineAudio\(\s*"Ready\."/u,
+  );
+  assert.match(workerSource, /generateUsableOfflineAudio\(text/u);
+  assert.match(workerSource, /stage: warm \? "ready" : "loaded"/u);
+  assert.match(
+    workerSource,
+    /const warm = message\.warm !== false;[\s\S]*initializeSpeech\([\s\S]*if \(warm\) \{[\s\S]*removeUnusedModelArtifact/u,
+  );
+  assert.match(
+    workerSource,
+    /installModelFiles[\s\S]*installBackend\.wasmThreads \?\? undefined,\s*true,\s*true,[\s\S]*retainOfflineSpeechRuntime\(\)[\s\S]*await removeUnusedModelArtifact\(\);[\s\S]*commitOfflineModelReadyMarker/u,
+  );
+  assert.doesNotMatch(workerSource, /invalidateOfflineModelReadyMarker/u);
+});
+
+test("uses every validated fp16 cache alias for WebGPU selection", async () => {
+  const workerSource = await readFile("app/offline-speech.worker.ts", "utf8");
+  const start = workerSource.indexOf("const webGpuAvailable =");
+  const selection = workerSource.slice(
+    start,
+    workerSource.indexOf("const selectedBackend =", start),
+  );
+
+  assert.match(selection, /fp16Available/u);
+  assert.match(selection, /hasWebGpuAdapter/u);
+  assert.doesNotMatch(selection, /hasWebGpuModelArtifact/u);
+});
+
+test("keeps the validation receipt private to Cache Storage", () => {
+  assert.equal(OFFLINE_FP16_READY_MARKER_VERSION, "fp16-ready-v1");
+  assert.match(OFFLINE_FP16_READY_MARKER_URL, /Kokoro-82M/u);
+  assert.equal(resolveOfflineModelRequest(OFFLINE_FP16_READY_MARKER_URL), null);
+});
+
+test("shares one stable cache for the retained speech runtime", async () => {
+  const serviceWorkerSource = await readFile("public/sw-v9.js", "utf8");
+
+  assert.equal(OFFLINE_RUNTIME_CACHE_NAME, "linelight-assets-v1");
+  assert.match(
+    serviceWorkerSource,
+    /const CACHE_NAME = "linelight-assets-v1";/u,
+  );
 });
 
 test("only resolves pinned, allowlisted offline model assets", () => {
   const allowed = resolveOfflineModelRequest(
-    `${OFFLINE_MODEL_ROUTE_PREFIX}onnx/model_quantized.onnx`,
+    `${OFFLINE_MODEL_ROUTE_PREFIX}${OFFLINE_WEBGPU_MODEL_FILE}`,
   );
 
   assert.ok(allowed);
@@ -80,6 +325,11 @@ test("only resolves pinned, allowlisted offline model assets", () => {
       "/offline-model/someone-else/arbitrary-model/model.onnx",
     ),
     null,
+  );
+  assert.ok(
+    resolveOfflineModelRequest(
+      `${OFFLINE_MODEL_ROUTE_PREFIX}${OFFLINE_LEGACY_Q8_MODEL_FILE}`,
+    ),
   );
 });
 

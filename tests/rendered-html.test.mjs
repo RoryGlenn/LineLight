@@ -48,12 +48,13 @@ test("renders development preview metadata", async () => {
   );
   assert.equal(
     response.headers.get("cross-origin-embedder-policy"),
-    null,
+    "require-corp",
   );
   assert.equal(
     response.headers.get("cross-origin-opener-policy"),
-    null,
+    "same-origin",
   );
+  assert.equal(response.headers.get("origin-agent-cluster"), "?1");
   const html = await response.text();
   const manifestLinks =
     html.match(/<link(?=[^>]*\brel=["']manifest["'])[^>]*>/gi) ?? [];
