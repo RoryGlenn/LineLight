@@ -1042,8 +1042,16 @@ export function validatePdfSharpnessEvidence(evidence) {
 
   const network = evidence?.network;
   const networkTargets = Array.isArray(network?.targets) ? network.targets : [];
+  const networkRequests = Array.isArray(network?.requests)
+    ? network.requests
+    : [];
   const nonPageRequests = Array.isArray(network?.nonPageRequests)
     ? network.nonPageRequests
+    : [];
+  const targetBootstrapSettlements = Array.isArray(
+    network?.targetBootstrapSettlements,
+  )
+    ? network.targetBootstrapSettlements
     : [];
   const targetBySession = new Map(
     networkTargets.map((target) => [target?.sessionId, target]),
@@ -1057,6 +1065,59 @@ export function validatePdfSharpnessEvidence(evidence) {
     target?.phase === "forced-main-fallback" &&
     String(target?.url).startsWith("blob:");
   const targetChain = (target) => [target, ...(target?.ancestry ?? [])];
+  const requestIdentity = (sessionId, requestId) =>
+    `${sessionId ?? "page"}:${requestId}`;
+  const requestByIdentity = new Map(
+    networkRequests.map((request) => [
+      requestIdentity(request?.sessionId, request?.requestId),
+      request,
+    ]),
+  );
+  const targetSetupComplete = (target) => {
+    const expectedCommands = [
+      "network-enable",
+      "runtime-enable",
+      "cache-disable",
+      "auto-attach",
+      ...(target?.waitingForDebugger === true ? ["resume"] : []),
+    ];
+    return (
+      target?.attachComplete === true &&
+      target?.resumed === true &&
+      Array.isArray(target?.commands) &&
+      target.commands.map(({ name }) => name).join(",") ===
+        expectedCommands.join(",") &&
+      target.commands.every(({ status }) => status === "completed")
+    );
+  };
+  const validBootstrapSettlement = (settlement) => {
+    const target = targetBySession.get(settlement?.targetSessionId);
+    const request = requestByIdentity.get(
+      requestIdentity(settlement?.requestSessionId, settlement?.requestId),
+    );
+    return (
+      targetSetupComplete(target) &&
+      target?.type === "worker" &&
+      settlement?.targetType === "worker" &&
+      settlement?.targetDetachedAtSettlement === false &&
+      settlement?.targetId === target?.targetId &&
+      settlement?.targetParentSessionId === target?.parentSessionId &&
+      settlement?.phase === target?.phase &&
+      settlement?.terminalReason === "target-attached" &&
+      settlement?.method === "GET" &&
+      settlement?.resourceType === "Script" &&
+      request?.method === settlement.method &&
+      request?.type === settlement.resourceType &&
+      request?.phase === settlement.phase &&
+      request?.sessionId === settlement.requestSessionId &&
+      request?.url === settlement.url &&
+      request?.bootstrapTargetSessionId === target?.sessionId &&
+      target?.parentSessionId === request?.sessionId &&
+      target?.url === request?.url &&
+      target?.bootstrapRequestKey ===
+        requestIdentity(request?.sessionId, request?.requestId)
+    );
+  };
   const computedCoverageTargets = {
     forcedBlobWrapper: networkTargets.filter(blobWrapper),
     forcedParserWorker: networkTargets.filter(
@@ -1075,6 +1136,28 @@ export function validatePdfSharpnessEvidence(evidence) {
         targetChain(target).some(documentWorker),
     ),
   };
+  const bootstrapRequestIdentities = targetBootstrapSettlements.map(
+    (settlement) => requestIdentity(
+      settlement?.requestSessionId,
+      settlement?.requestId,
+    ),
+  );
+  const bootstrapTargetSessions = targetBootstrapSettlements.map(
+    (settlement) => settlement?.targetSessionId,
+  );
+  const normalBootstrapTargets = [
+    ...computedCoverageTargets.normalDocumentWorker,
+    ...computedCoverageTargets.normalParserWorker,
+  ];
+  const bootstrapCoverageComplete =
+    targetBootstrapSettlements.length > 0 &&
+    targetBootstrapSettlements.every(validBootstrapSettlement) &&
+    new Set(bootstrapRequestIdentities).size ===
+      bootstrapRequestIdentities.length &&
+    new Set(bootstrapTargetSessions).size === bootstrapTargetSessions.length &&
+    normalBootstrapTargets.every((target) =>
+      bootstrapTargetSessions.includes(target.sessionId),
+    );
   const coverageTargets = network?.coverageTargets;
   const coverageNames = [
     "normalDocumentWorker",
@@ -1154,6 +1237,16 @@ export function validatePdfSharpnessEvidence(evidence) {
             documentWorker,
           ),
       ).length;
+      const documentBootstrapSettlementCount =
+        targetBootstrapSettlements.filter((settlement) => {
+          const target = targetBySession.get(settlement?.targetSessionId);
+          return target?.phase === id && documentWorker(target);
+        }).length;
+      const parserBootstrapSettlementCount =
+        targetBootstrapSettlements.filter((settlement) => {
+          const target = targetBySession.get(settlement?.targetSessionId);
+          return target?.phase === id && parserWorker(target);
+        }).length;
       const sessionIds = (targets) =>
         targets.map(({ sessionId }) => sessionId).sort().join(",");
       return (
@@ -1161,11 +1254,17 @@ export function validatePdfSharpnessEvidence(evidence) {
         parserTargets.length > 0 &&
         documentRequestCount > 0 &&
         parserRequestCount > 0 &&
+        documentBootstrapSettlementCount === documentTargets.length &&
+        parserBootstrapSettlementCount === parserTargets.length &&
         Array.isArray(reported?.documentTargets) &&
         Array.isArray(reported?.parserTargets) &&
         sessionIds(reported.documentTargets) === sessionIds(documentTargets) &&
         sessionIds(reported.parserTargets) === sessionIds(parserTargets) &&
+        reported?.documentBootstrapSettlementCount ===
+          documentBootstrapSettlementCount &&
         reported?.documentRequestCount === documentRequestCount &&
+        reported?.parserBootstrapSettlementCount ===
+          parserBootstrapSettlementCount &&
         reported?.parserRequestCount === parserRequestCount
       );
     });
@@ -1181,6 +1280,7 @@ export function validatePdfSharpnessEvidence(evidence) {
   if (
     network?.sourceSha256 !== fixture?.sha256 ||
     network?.sourceStayedLocal !== true ||
+    network?.serviceWorkerBypassed !== true ||
     network?.referenceScheme !== "file:" ||
     network?.sourceRequest !== null ||
     !nonNegativeInteger(network?.localRequestCount) ||
@@ -1200,7 +1300,19 @@ export function validatePdfSharpnessEvidence(evidence) {
         !nonEmptyString(target?.phase) ||
         !nonEmptyString(target?.type) ||
         typeof target?.url !== "string" ||
-        !Array.isArray(target?.ancestry),
+        !Array.isArray(target?.ancestry) ||
+        !targetSetupComplete(target),
+    ) ||
+    !Array.isArray(network?.requests) ||
+    network.requests.length !== network.localRequestCount ||
+    network.requests.some(
+      (request) =>
+        !nonEmptyString(request?.method) ||
+        !nonEmptyString(request?.phase) ||
+        !nonEmptyString(request?.requestId) ||
+        !nonEmptyString(request?.type) ||
+        typeof request?.url !== "string" ||
+        !(request?.sessionId === null || nonEmptyString(request.sessionId)),
     ) ||
     !Array.isArray(network?.nonPageRequests) ||
     network.nonPageRequests.length === 0 ||
@@ -1213,6 +1325,7 @@ export function validatePdfSharpnessEvidence(evidence) {
     requestCounts.total !== network.nonPageRequests.length ||
     !coverageComplete ||
     !requestCoverageComplete ||
+    !bootstrapCoverageComplete ||
     !matrixCoverageComplete ||
     !Array.isArray(network?.networkFixedPoints) ||
     fixedPoints.map(({ label }) => label).join(",") !==
@@ -1229,10 +1342,15 @@ export function validatePdfSharpnessEvidence(evidence) {
         !nonNegativeInteger(point?.targetCount) ||
         point.targetCount === 0 ||
         point.attachPromiseCount < point.targetCount ||
+        !nonNegativeInteger(point?.targetBootstrapSettlementCount) ||
+        point.targetBootstrapSettlementCount >
+          targetBootstrapSettlements.length ||
         point?.pendingAttachCount !== 0,
     ) ||
     finalFixedPoint?.requestCount !== network.localRequestCount ||
-    finalFixedPoint?.completedRequestCount !== network.completedRequestCount
+    finalFixedPoint?.completedRequestCount !== network.completedRequestCount ||
+    finalFixedPoint?.targetBootstrapSettlementCount !==
+      targetBootstrapSettlements.length
   ) {
     fail("PDF source or recursively attached worker network evidence failed");
   }

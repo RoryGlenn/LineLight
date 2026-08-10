@@ -25,12 +25,15 @@ import {
   classifyPdfRasterTransition,
   completeCdpNetworkRequest,
   decodePngScreenshot,
+  isCdpTargetBootstrapRequest,
   matchesPdfFallbackInjection,
   planPdfVirtualScroll,
   probePdfBitmapBudget,
   recordCdpNetworkRequest,
+  reconcileCdpTargetBootstrapRequests,
   selectPdfFallbackAbortCandidate,
   selectPdfFallbackScenarioEvents,
+  sendToCdpSession,
   summarizePdfModelCompletion,
 } from
   "../scripts/run-pdf-sharpness-browser-regression.mjs";
@@ -526,40 +529,75 @@ function passingEvidence() {
     issue: 68,
     matrix,
     network: (() => {
+      const completedAttachCommands = () => [
+        { name: "network-enable", status: "completed" },
+        { name: "runtime-enable", status: "completed" },
+        { name: "cache-disable", status: "completed" },
+        { name: "auto-attach", status: "completed" },
+        { name: "resume", status: "completed" },
+      ];
       const normalPairs = PDF_SHARPNESS_MATRIX.map(({ id }, index) => {
         const documentTarget = {
           ancestry: [],
+          attachComplete: true,
+          bootstrapRequestKey: null,
+          commands: completedAttachCommands(),
+          detached: false,
+          parentSessionId: null,
           phase: id,
+          resumed: true,
           sessionId: `normal-document-session-${index}`,
           targetId: `normal-document-target-${index}`,
           type: "worker",
           url: "http://127.0.0.1/assets/pdf-document.worker-test.js",
+          waitingForDebugger: true,
         };
         const parserTarget = {
           ancestry: [documentTarget],
+          attachComplete: true,
+          bootstrapRequestKey: null,
+          commands: completedAttachCommands(),
+          detached: false,
+          parentSessionId: documentTarget.sessionId,
           phase: id,
+          resumed: true,
           sessionId: `normal-parser-session-${index}`,
           targetId: `normal-parser-target-${index}`,
           type: "worker",
           url: "http://127.0.0.1/assets/pdf-parser.worker-test.js",
+          waitingForDebugger: true,
         };
         return { documentTarget, id, parserTarget };
       });
       const forcedWrapper = {
         ancestry: [],
+        attachComplete: true,
+        bootstrapRequestKey: null,
+        commands: completedAttachCommands(),
+        detached: false,
+        parentSessionId: null,
         phase: "forced-main-fallback",
+        resumed: true,
         sessionId: "forced-wrapper-session",
         targetId: "forced-wrapper-target",
         type: "worker",
         url: "blob:http://127.0.0.1/forced-wrapper",
+        waitingForDebugger: true,
       };
       const forcedParser = {
         ancestry: [forcedWrapper],
+        attachComplete: true,
+        bootstrapRequestKey: null,
+        commands: completedAttachCommands(),
+        detached: false,
+        parentSessionId: forcedWrapper.sessionId,
         phase: "forced-main-fallback",
+        resumed: true,
         sessionId: "forced-parser-session",
         targetId: "forced-parser-target",
         type: "worker",
         url: "http://127.0.0.1/assets/pdf-parser.worker-test.js",
+        waitingForDebugger: true,
       };
       const targets = [
         ...normalPairs.flatMap(({ documentTarget, parserTarget }) => [
@@ -569,11 +607,74 @@ function passingEvidence() {
         forcedWrapper,
         forcedParser,
       ];
-      const nonPageRequests = targets.map((target, index) => ({
-        sessionId: target.sessionId,
-        url: `http://127.0.0.1/assets/worker-request-${index}.js`,
-      }));
-      const requestCount = nonPageRequests.length;
+      const targetBootstrapSettlements = [];
+      const bootstrapRequests = normalPairs.flatMap(
+        ({ documentTarget, id, parserTarget }, index) => {
+          const documentRequest = {
+            bootstrapTargetSessionId: documentTarget.sessionId,
+            method: "GET",
+            phase: id,
+            requestId: `normal-document-request-${index}`,
+            sessionId: null,
+            type: "Script",
+            url: documentTarget.url,
+          };
+          const parserRequest = {
+            bootstrapTargetSessionId: parserTarget.sessionId,
+            method: "GET",
+            phase: id,
+            requestId: `normal-parser-request-${index}`,
+            sessionId: documentTarget.sessionId,
+            type: "Script",
+            url: parserTarget.url,
+          };
+          for (const [request, target] of [
+            [documentRequest, documentTarget],
+            [parserRequest, parserTarget],
+          ]) {
+            target.bootstrapRequestKey =
+              `${request.sessionId ?? "page"}:${request.requestId}`;
+            targetBootstrapSettlements.push({
+              method: request.method,
+              phase: request.phase,
+              requestId: request.requestId,
+              requestSessionId: request.sessionId,
+              resourceType: request.type,
+              targetDetachedAtSettlement: false,
+              targetId: target.targetId,
+              targetParentSessionId: target.parentSessionId,
+              targetSessionId: target.sessionId,
+              targetType: target.type,
+              terminalReason: "target-attached",
+              url: request.url,
+            });
+          }
+          return [documentRequest, parserRequest];
+        },
+      );
+      const runtimeRequests = [
+        ...normalPairs.map(({ id, parserTarget }, index) => ({
+          method: "GET",
+          phase: id,
+          requestId: `normal-runtime-request-${index}`,
+          sessionId: parserTarget.sessionId,
+          type: "Fetch",
+          url: `http://127.0.0.1/assets/worker-request-${index}.bin`,
+        })),
+        ...[forcedWrapper, forcedParser].map((target, index) => ({
+          method: "GET",
+          phase: target.phase,
+          requestId: `forced-runtime-request-${index}`,
+          sessionId: target.sessionId,
+          type: "Fetch",
+          url: `http://127.0.0.1/assets/forced-request-${index}.bin`,
+        })),
+      ];
+      const requests = [...bootstrapRequests, ...runtimeRequests];
+      const nonPageRequests = requests.filter(
+        (request) => request.sessionId !== null,
+      );
+      const requestCount = requests.length;
       return {
         attachErrors: [],
         networkFixedPoints: [
@@ -587,6 +688,8 @@ function passingEvidence() {
           label,
           pendingAttachCount: 0,
           requestCount,
+          targetBootstrapSettlementCount:
+            targetBootstrapSettlements.length,
           targetCount: targets.length,
         })),
         completedRequestCount: requestCount,
@@ -608,8 +711,10 @@ function passingEvidence() {
           normalPairs.map(({ documentTarget, id, parserTarget }) => [
             id,
             {
+              documentBootstrapSettlementCount: 1,
               documentRequestCount: 2,
               documentTargets: [documentTarget],
+              parserBootstrapSettlementCount: 1,
               parserRequestCount: 1,
               parserTargets: [parserTarget],
             },
@@ -624,9 +729,12 @@ function passingEvidence() {
         },
         nonPageRequests,
         referenceScheme: "file:",
+        requests,
+        serviceWorkerBypassed: true,
         sourceRequest: null,
         sourceSha256: SHA,
         sourceStayedLocal: true,
+        targetBootstrapSettlements,
         targets,
       };
     })(),
@@ -818,6 +926,20 @@ test("records fixed-point diagnostics without private URL or payload data", () =
       url: parserUrl,
     }],
     requests: [{ method: "GET", url: workerUrl }],
+    targetBootstrapSettlements: [{
+      method: "GET",
+      phase: "desktop-dpr1-zoom100",
+      requestId: "document-bootstrap-request",
+      requestSessionId: null,
+      resourceType: "Script",
+      targetDetachedAtSettlement: false,
+      targetId: "document-target",
+      targetParentSessionId: null,
+      targetSessionId: "document-session",
+      targetType: "worker",
+      terminalReason: "target-attached",
+      url: workerUrl,
+    }],
     targets: [
       {
         detached: false,
@@ -870,6 +992,7 @@ test("records fixed-point diagnostics without private URL or payload data", () =
     "outcome",
     "pendingAttaches",
     "recentActivity",
+    "targetBootstrapSettlements",
     "targets",
     "wait",
   ]);
@@ -889,6 +1012,10 @@ test("records fixed-point diagnostics without private URL or payload data", () =
   assert.equal(diagnostic.targets[1].ancestry[0].urlClass,
     "pdf-document-worker");
   assert.equal(diagnostic.recentActivity[0].command, "runtime-enable");
+  assert.equal(
+    diagnostic.targetBootstrapSettlements[0].urlClass,
+    "pdf-document-worker",
+  );
   assert.equal(diagnostic.wait.elapsedMs, 10_001);
   assert.equal(diagnostic.wait.recentSamples[0].inflightRequestCount, 1);
   assert.match(diagnostic.inflightRequests[0].identityHash, /^[a-f0-9]{64}$/u);
@@ -899,6 +1026,7 @@ test("records fixed-point diagnostics without private URL or payload data", () =
     inflightRequestCount: 1,
     pendingAttachCount: 1,
     requestCount: 1,
+    targetBootstrapSettlementCount: 1,
     targetCount: 2,
   });
   const serialized = JSON.stringify(diagnostic);
@@ -919,6 +1047,8 @@ test("records fixed-point diagnostics without private URL or payload data", () =
   networkState.requests[0].url =
     `${appUrl}assets/pdf-document.worker-next.js?new=secret`;
   networkState.targets[0].url =
+    `${appUrl}assets/pdf-document.worker-next.js?new=secret`;
+  networkState.targetBootstrapSettlements[0].url =
     `${appUrl}assets/pdf-document.worker-next.js?new=secret`;
   networkState.targets[1].url =
     `${appUrl}assets/pdf-parser.worker-next.js?new=secret`;
@@ -1296,6 +1426,113 @@ test("keeps CDP requests bound to the exact flattened session", () => {
   assert.equal(exactSession?.requestId, "shared-request-id");
   assert.equal(networkState.inflightRequests.size, 0);
   assert.equal(networkState.completedRequestCount, 1);
+});
+
+test("settles exact worker bootstraps one-to-one in either event order", () => {
+  const requestEvent = {
+    request: {
+      method: "GET",
+      url: "http://127.0.0.1/assets/pdf-parser.worker-test.js",
+    },
+    requestId: "bootstrap-request",
+    type: "Script",
+  };
+  const target = {
+    attachComplete: true,
+    bootstrapRequestKey: null,
+    detached: false,
+    parentSessionId: "document-session",
+    phase: "desktop-dpr1-zoom100",
+    resumed: true,
+    sessionId: "parser-session",
+    targetId: "parser-target",
+    type: "worker",
+    url: requestEvent.request.url,
+  };
+  const createState = () => ({
+    byId: new Map(),
+    completedRequestCount: 0,
+    inflightRequests: new Set(),
+    phase: "desktop-dpr1-zoom100",
+    requests: [],
+    targetBootstrapSettlements: [],
+    targets: [],
+  });
+
+  const requestFirst = createState();
+  recordCdpNetworkRequest(requestFirst, requestEvent, "document-session");
+  assert.deepEqual(reconcileCdpTargetBootstrapRequests(requestFirst), []);
+  requestFirst.targets.push(structuredClone(target));
+  const requestFirstSettlements =
+    reconcileCdpTargetBootstrapRequests(requestFirst);
+  assert.equal(requestFirstSettlements.length, 1);
+  assert.equal(requestFirst.inflightRequests.size, 0);
+  assert.equal(requestFirst.completedRequestCount, 1);
+  assert.equal(requestFirst.requests.length, 1);
+  assert.equal(requestFirstSettlements[0].terminalReason, "target-attached");
+  assert.equal(
+    requestFirst.requests[0].bootstrapTargetSessionId,
+    target.sessionId,
+  );
+  const lateNetworkTerminal = completeCdpNetworkRequest(
+    requestFirst,
+    { requestId: requestEvent.requestId },
+    "document-session",
+  );
+  assert.equal(lateNetworkTerminal, null);
+  assert.equal(requestFirst.completedRequestCount, 1);
+  assert.equal(requestFirst.targetBootstrapSettlements.length, 1);
+
+  const attachFirst = createState();
+  attachFirst.targets.push(structuredClone(target));
+  assert.deepEqual(reconcileCdpTargetBootstrapRequests(attachFirst), []);
+  recordCdpNetworkRequest(attachFirst, requestEvent, "document-session");
+  assert.equal(reconcileCdpTargetBootstrapRequests(attachFirst).length, 1);
+  assert.equal(attachFirst.inflightRequests.size, 0);
+
+  const matchingRequest = {
+    method: "GET",
+    phase: target.phase,
+    sessionId: target.parentSessionId,
+    type: "Script",
+    url: target.url,
+  };
+  assert.equal(isCdpTargetBootstrapRequest(matchingRequest, target), true);
+  for (const [name, request, changedTarget] of [
+    ["URL", { ...matchingRequest, url: `${target.url}?wrong=1` }, target],
+    ["session", { ...matchingRequest, sessionId: "wrong-session" }, target],
+    ["method", { ...matchingRequest, method: "POST" }, target],
+    ["resource type", { ...matchingRequest, type: "Fetch" }, target],
+    ["target type", matchingRequest, { ...target, type: "service_worker" }],
+    ["unattached", matchingRequest, { ...target, attachComplete: false }],
+    ["failed resume", matchingRequest, { ...target, resumed: false }],
+  ]) {
+    assert.equal(
+      isCdpTargetBootstrapRequest(request, changedTarget),
+      false,
+      `${name} mismatch settled`,
+    );
+  }
+});
+
+test("bounds every flattened child-target CDP command", async () => {
+  const cdp = {
+    nextId: 1,
+    pending: new Map(),
+    webSocket: { send() {} },
+  };
+  await assert.rejects(
+    sendToCdpSession(
+      cdp,
+      "Network.enable",
+      {},
+      "service-worker-session",
+      1,
+    ),
+    /Timed out waiting for CDP Network\.enable/u,
+  );
+  assert.equal(cdp.pending.size, 0);
+  assert.equal(cdp.nextId, 2);
 });
 
 test("requires three unchanged quiet CDP samples for a fixed point", () => {
@@ -1792,6 +2029,52 @@ test("rejects each material Issue 68 acceptance regression", async (t) => {
     ["matrix phase request coverage", (value) => {
       value.network.matrixCoverage[PDF_SHARPNESS_MATRIX[4].id]
         .parserRequestCount = 0;
+    }, /recursively attached worker network/u],
+    ["service worker bypass", (value) => {
+      value.network.serviceWorkerBypassed = false;
+    }, /recursively attached worker network/u],
+    ["bootstrap settlement URL", (value) => {
+      value.network.targetBootstrapSettlements[0].url += "?wrong=1";
+    }, /recursively attached worker network/u],
+    ["bootstrap settlement session", (value) => {
+      value.network.targetBootstrapSettlements[0].requestSessionId =
+        "wrong-session";
+    }, /recursively attached worker network/u],
+    ["bootstrap settlement method", (value) => {
+      value.network.targetBootstrapSettlements[0].method = "POST";
+    }, /recursively attached worker network/u],
+    ["bootstrap settlement resource type", (value) => {
+      value.network.targetBootstrapSettlements[0].resourceType = "Fetch";
+    }, /recursively attached worker network/u],
+    ["bootstrap settlement target type", (value) => {
+      value.network.targetBootstrapSettlements[0].targetType =
+        "service_worker";
+    }, /recursively attached worker network/u],
+    ["bootstrap settlement unattached target", (value) => {
+      const targetSession =
+        value.network.targetBootstrapSettlements[0].targetSessionId;
+      value.network.targets.find(
+        (target) => target.sessionId === targetSession,
+      ).attachComplete = false;
+    }, /recursively attached worker network/u],
+    ["bootstrap settlement failed target command", (value) => {
+      const targetSession =
+        value.network.targetBootstrapSettlements[0].targetSessionId;
+      value.network.targets.find(
+        (target) => target.sessionId === targetSession,
+      ).commands[0].status = "failed";
+    }, /recursively attached worker network/u],
+    ["bootstrap settlement duplicate identity", (value) => {
+      value.network.targetBootstrapSettlements.push({
+        ...value.network.targetBootstrapSettlements[0],
+      });
+      for (const point of value.network.networkFixedPoints) {
+        point.targetBootstrapSettlementCount += 1;
+      }
+    }, /recursively attached worker network/u],
+    ["matrix phase bootstrap settlement coverage", (value) => {
+      value.network.matrixCoverage[PDF_SHARPNESS_MATRIX[0].id]
+        .documentBootstrapSettlementCount = 0;
     }, /recursively attached worker network/u],
     ["recursive attach fixed point", (value) => {
       value.network.networkFixedPoints.pop();

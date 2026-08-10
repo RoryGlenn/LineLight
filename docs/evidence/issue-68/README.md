@@ -109,10 +109,17 @@ validator additionally requires:
 - recursive CDP attachment to a fixed point covering normal document/parser
   workers and the forced blob-wrapper/parser chain, with their session ancestry
   and non-page request counts in every one of the six matrix phases; attachment
-  promises and all observed network requests must reach a quiet fixed point
-  before the privacy snapshot, with no attach error, external request, request
-  for the imported PDF source, or other network failure; and a local `file:`
-  reference comparison.
+  commands are explicitly bounded and must complete before a paused target is
+  resumed. The page bypasses its service worker for direct origin observation.
+  A worker script request transferred into an attached target settles only when
+  one fully attached and resumed `worker` has the exact raw URL, parent session,
+  phase, `GET` method, and `Script` resource type; the request remains in the
+  evidence with a one-to-one `target-attached` terminal record. Each matrix
+  phase requires both document- and parser-worker settlements. All remaining
+  attachment promises and observed network requests must reach a quiet fixed
+  point before the privacy snapshot, with no attach error, external request,
+  request for the imported PDF source, or other network failure; and a local
+  `file:` reference comparison.
 
 The validator also requires the exact reviewed source-file key set and one
 unique, expected filename/path/hash/byte reference for every screenshot. A
