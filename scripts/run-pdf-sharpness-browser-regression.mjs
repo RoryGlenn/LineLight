@@ -72,6 +72,29 @@ const FALLBACK_IMPORT_DIAGNOSTIC_RUN_TIMEOUT_MS = 180_000;
 const FALLBACK_IMPORT_DIAGNOSTIC_LABEL = "fallback-import-diagnostic";
 const FALLBACK_IMPORT_DIAGNOSTIC_SCREENSHOT =
   "linelight-fallback-import-diagnostic.png";
+const REFERENCE_CAPTURE_DIAGNOSTIC_TIMEOUT_MS = 120_000;
+const REFERENCE_CAPTURE_DIAGNOSTIC_TARGET_PAGE = 2;
+const REFERENCE_CAPTURE_DIAGNOSTIC_REPORT =
+  "pdf-sharpness-reference-capture-diagnostic.json";
+export const REFERENCE_CAPTURE_DIAGNOSTIC_CANDIDATES = Object.freeze([
+  "reference-capture-candidate-1.png",
+  "reference-capture-candidate-2.png",
+]);
+export const REFERENCE_CAPTURE_DIAGNOSTIC_STEPS = Object.freeze([
+  "browser-launch",
+  "cdp-connect",
+  "configure",
+  "navigate",
+  "viewer-ready",
+  "stable-candidates",
+  "source-finalize",
+]);
+export const REFERENCE_CAPTURE_DIAGNOSTIC_STAGES = Object.freeze(
+  REFERENCE_CAPTURE_DIAGNOSTIC_STEPS.flatMap((step) => [
+    `${step}-started`,
+    `${step}-completed`,
+  ]),
+);
 export const FALLBACK_IMPORT_DIAGNOSTIC_STEPS = Object.freeze([
   "connect",
   "baseline",
@@ -102,6 +125,30 @@ const CDP_WORKER_TARGET_TYPES = new Set([
   "shared_worker",
   "worker",
 ]);
+
+export function createReferenceCaptureDiagnosticProgress() {
+  return { history: [], terminalStage: null };
+}
+
+export function markReferenceCaptureDiagnosticStage(progress, stage) {
+  if (!progress || !Array.isArray(progress.history)) {
+    throw new Error("Reference-capture diagnostic progress is unavailable.");
+  }
+  const expected = REFERENCE_CAPTURE_DIAGNOSTIC_STAGES[progress.history.length];
+  if (stage !== expected) {
+    throw new Error("Reference-capture diagnostic stage ordering is invalid.");
+  }
+  progress.history.push(stage);
+  progress.terminalStage = stage;
+  return stage;
+}
+
+async function runReferenceCaptureDiagnosticStage(progress, step, operation) {
+  markReferenceCaptureDiagnosticStage(progress, `${step}-started`);
+  const result = await operation();
+  markReferenceCaptureDiagnosticStage(progress, `${step}-completed`);
+  return result;
+}
 
 export function createFallbackImportDiagnosticProgress() {
   return { history: [], terminalStage: null };
@@ -1481,6 +1528,289 @@ function isOutsideRepository(candidatePath) {
   );
 }
 
+const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
+const COMMIT_PATTERN = /^[a-f0-9]{40}$/u;
+
+function isExactReferenceDiagnosticSource(source) {
+  const files = source?.files &&
+      typeof source.files === "object" &&
+      !Array.isArray(source.files)
+    ? source.files
+    : null;
+  const actualKeys = files ? Object.keys(files).sort() : [];
+  const expectedKeys = [...PDF_SHARPNESS_SOURCE_FILES].sort();
+  return (
+    COMMIT_PATTERN.test(source?.commit ?? "") &&
+    COMMIT_PATTERN.test(source?.tree ?? "") &&
+    Array.isArray(source?.preflightStatus) &&
+    source.preflightStatus.length === 0 &&
+    source?.postCaptureCommit === source?.commit &&
+    source?.postCaptureTree === source?.tree &&
+    Array.isArray(source?.postCaptureStatus) &&
+    source.postCaptureStatus.length === 0 &&
+    actualKeys.length === expectedKeys.length &&
+    actualKeys.every((key, index) =>
+      key === expectedKeys[index] && SHA256_PATTERN.test(files[key] ?? "")
+    )
+  );
+}
+
+function summarizeReferenceDiagnosticSource(source) {
+  return {
+    commit: COMMIT_PATTERN.test(source?.commit ?? "") ? source.commit : null,
+    files: Object.fromEntries(PDF_SHARPNESS_SOURCE_FILES.map((file) => [
+      file,
+      SHA256_PATTERN.test(source?.files?.[file] ?? "")
+        ? source.files[file]
+        : null,
+    ])),
+    postCaptureClean:
+      Array.isArray(source?.postCaptureStatus) &&
+      source.postCaptureStatus.length === 0,
+    postCaptureCommit: COMMIT_PATTERN.test(source?.postCaptureCommit ?? "")
+      ? source.postCaptureCommit
+      : null,
+    postCaptureTree: COMMIT_PATTERN.test(source?.postCaptureTree ?? "")
+      ? source.postCaptureTree
+      : null,
+    preflightClean:
+      Array.isArray(source?.preflightStatus) &&
+      source.preflightStatus.length === 0,
+    tree: COMMIT_PATTERN.test(source?.tree ?? "") ? source.tree : null,
+  };
+}
+
+function sanitizeReferenceDiagnosticAnalysis(analysis) {
+  const nonNegativeInteger = (value) =>
+    Number.isInteger(value) && value >= 0;
+  const nonNegativeFinite = (value) =>
+    Number.isFinite(value) && value >= 0;
+  const ratio = (value) =>
+    Number.isFinite(value) && value >= 0 && value <= 1;
+  const bounds = analysis?.pageBounds;
+  const boundsValid = bounds === null || (
+    bounds &&
+    nonNegativeFinite(bounds.height) &&
+    nonNegativeFinite(bounds.width) &&
+    nonNegativeFinite(bounds.x) &&
+    nonNegativeFinite(bounds.y)
+  );
+  if (
+    !nonNegativeInteger(analysis?.height) ||
+    !nonNegativeInteger(analysis?.width) ||
+    !nonNegativeInteger(analysis?.inkPixels) ||
+    !ratio(analysis?.inkRatio) ||
+    !nonNegativeInteger(analysis?.inkRowBands) ||
+    !ratio(analysis?.inkSpanRatio) ||
+    !nonNegativeInteger(analysis?.pagePixels) ||
+    !nonNegativeInteger(analysis?.pageWhitePixels) ||
+    !ratio(analysis?.pageWhiteRatio) ||
+    analysis?.proof !== "white-page-with-rendered-ink" ||
+    typeof analysis?.renderedPage !== "boolean" ||
+    !boundsValid
+  ) {
+    return null;
+  }
+  return {
+    height: analysis.height,
+    inkPixels: analysis.inkPixels,
+    inkRatio: analysis.inkRatio,
+    inkRowBands: analysis.inkRowBands,
+    inkSpanRatio: analysis.inkSpanRatio,
+    pageBounds: bounds
+      ? {
+          height: bounds.height,
+          width: bounds.width,
+          x: bounds.x,
+          y: bounds.y,
+        }
+      : null,
+    pagePixels: analysis.pagePixels,
+    pageWhitePixels: analysis.pageWhitePixels,
+    pageWhiteRatio: analysis.pageWhiteRatio,
+    proof: analysis.proof,
+    renderedPage: analysis.renderedPage,
+    width: analysis.width,
+  };
+}
+
+function summarizeReferenceDiagnosticProgress(progress, runnerFailure) {
+  const history = Array.isArray(progress?.history) &&
+      progress.history.every((stage) =>
+        REFERENCE_CAPTURE_DIAGNOSTIC_STAGES.includes(stage)
+      )
+    ? [...progress.history]
+    : [];
+  const sequenceComplete =
+    history.length === REFERENCE_CAPTURE_DIAGNOSTIC_STAGES.length &&
+    history.every(
+      (stage, index) => stage === REFERENCE_CAPTURE_DIAGNOSTIC_STAGES[index],
+    );
+  const terminalStage = REFERENCE_CAPTURE_DIAGNOSTIC_STAGES.includes(
+    progress?.terminalStage,
+  )
+    ? progress.terminalStage
+    : null;
+  const failureCategory = runnerFailure
+    ? terminalStage
+      ? `${terminalStage.replace(/-(?:started|completed)$/u, "")}-failure`
+      : "pre-diagnostic-failure"
+    : "none";
+  return { failureCategory, history, sequenceComplete, terminalStage };
+}
+
+export function buildReferenceCaptureDiagnosticReport({
+  capture,
+  fixture,
+  outputDirectory,
+  progress,
+  recordedAt = new Date().toISOString(),
+  runnerFailure,
+  source,
+  teardown,
+}) {
+  const expectedFixturePath = path.relative(
+    REPOSITORY_ROOT,
+    path.resolve(DEFAULT_PDF_HIGHLIGHT_FIXTURE),
+  );
+  const fixtureBound =
+    fixture?.path === expectedFixturePath &&
+    fixture?.bytes === PUBLIC_PDF_FIXTURE_BYTES &&
+    fixture?.sha256 === PUBLIC_PDF_FIXTURE_SHA256;
+  const outputIsExternal = isOutsideRepository(outputDirectory);
+  const candidates = Array.isArray(capture?.candidates)
+    ? capture.candidates
+    : [];
+  const publicCandidates = candidates.map((candidate, index) => {
+    const expectedName = REFERENCE_CAPTURE_DIAGNOSTIC_CANDIDATES[index];
+    const expectedPath = expectedName && outputIsExternal
+      ? path.relative(
+        REPOSITORY_ROOT,
+        path.join(outputDirectory, expectedName),
+      )
+      : null;
+    const analysis = sanitizeReferenceDiagnosticAnalysis(candidate?.analysis);
+    const bound =
+      Boolean(expectedName) &&
+      candidate?.path === expectedPath &&
+      Number.isInteger(candidate?.bytes) &&
+      candidate.bytes > 0 &&
+      SHA256_PATTERN.test(candidate?.sha256 ?? "") &&
+      Number.isInteger(candidate?.attempt) &&
+      candidate.attempt > 0 &&
+      Boolean(analysis);
+    return bound
+      ? {
+          analysis,
+          artifact: {
+            bytes: candidate.bytes,
+            path: expectedName,
+            sha256: candidate.sha256,
+          },
+          attempt: candidate.attempt,
+        }
+      : null;
+  });
+  const stableCandidatesBound =
+    outputIsExternal &&
+    capture?.configurationId === PDF_SHARPNESS_MATRIX[0].id &&
+    capture?.referenceScheme === "file:" &&
+    capture?.targetPage === REFERENCE_CAPTURE_DIAGNOSTIC_TARGET_PAGE &&
+    Number.isInteger(capture?.attempts) &&
+    capture.attempts >= 2 &&
+    Number.isInteger(capture?.captureErrorCount) &&
+    capture.captureErrorCount >= 0 &&
+    candidates.length === REFERENCE_CAPTURE_DIAGNOSTIC_CANDIDATES.length &&
+    publicCandidates.every(Boolean) &&
+    publicCandidates[0].attempt < publicCandidates[1].attempt &&
+    publicCandidates[1].attempt <= capture.attempts &&
+    publicCandidates[0].artifact.bytes === publicCandidates[1].artifact.bytes &&
+    publicCandidates[0].artifact.sha256 ===
+      publicCandidates[1].artifact.sha256 &&
+    JSON.stringify(publicCandidates[0].analysis) ===
+      JSON.stringify(publicCandidates[1].analysis);
+  const progressSummary = summarizeReferenceDiagnosticProgress(
+    progress,
+    runnerFailure,
+  );
+  const sourceBound = isExactReferenceDiagnosticSource(source);
+  const teardownFailed =
+    teardown?.reference?.present !== true ||
+    teardown?.reference?.cdpClosed !== true ||
+    teardown?.reference?.processClosed !== true ||
+    teardown?.reference?.profileRemoved !== true ||
+    Boolean(teardown?.reference?.error) ||
+    teardown?.errorCount !== 0;
+  const failures = [
+    ...(runnerFailure
+      ? ["The bounded reference-capture diagnostic runner reported a failure."]
+      : []),
+    ...(!progressSummary.sequenceComplete
+      ? ["The reference-capture diagnostic stage sequence is incomplete or invalid."]
+      : []),
+    ...(!sourceBound
+      ? ["The reference-capture diagnostic source binding is not exact and clean."]
+      : []),
+    ...(!fixtureBound
+      ? ["The reference-capture diagnostic fixture is not the exact public fixture."]
+      : []),
+    ...(!outputIsExternal
+      ? ["The reference-capture diagnostic output is not external."]
+      : []),
+    ...(!stableCandidatesBound
+      ? ["The reference-capture diagnostic did not retain two stable byte-identical candidates."]
+      : []),
+    ...(teardownFailed
+      ? ["The owned reference browser/CDP/profile did not tear down cleanly."]
+      : []),
+  ];
+  return {
+    artifacts: {
+      candidates: stableCandidatesBound ? publicCandidates : [],
+      sourceCommit: sourceBound ? source.commit : null,
+      sourceTree: sourceBound ? source.tree : null,
+    },
+    capture: {
+      attempts: Number.isInteger(capture?.attempts) ? capture.attempts : null,
+      captureErrorCount: Number.isInteger(capture?.captureErrorCount)
+        ? capture.captureErrorCount
+        : null,
+      stableByteIdentical: stableCandidatesBound,
+    },
+    completed:
+      progressSummary.sequenceComplete &&
+      sourceBound &&
+      fixtureBound &&
+      stableCandidatesBound &&
+      !teardownFailed &&
+      !runnerFailure,
+    configuration: {
+      id: PDF_SHARPNESS_MATRIX[0].id,
+      targetPage: REFERENCE_CAPTURE_DIAGNOSTIC_TARGET_PAGE,
+    },
+    diagnostic: true,
+    diagnosticSchemaVersion: 1,
+    execution: progressSummary,
+    failures,
+    fixture: fixtureBound ? fixture : null,
+    mode: "reference-capture",
+    recordedAt,
+    source: summarizeReferenceDiagnosticSource(source),
+    teardown: {
+      errorCount: Number.isInteger(teardown?.errorCount)
+        ? teardown.errorCount
+        : null,
+      reference: {
+        cdpClosed: teardown?.reference?.cdpClosed === true,
+        errorPresent: Boolean(teardown?.reference?.error),
+        present: teardown?.reference?.present === true,
+        processClosed: teardown?.reference?.processClosed === true,
+        profileRemoved: teardown?.reference?.profileRemoved === true,
+      },
+    },
+  };
+}
+
 export function buildFirstNetworkDiagnosticReport({
   build,
   fixture,
@@ -2489,6 +2819,7 @@ function parseArguments(argv) {
     browser: process.env.LINELIGHT_BROWSER ?? "/usr/bin/brave-browser",
     diagnoseFallbackImport: false,
     diagnoseFirstNetworkFixedPoint: false,
+    diagnoseReferenceCapture: false,
     fixture: DEFAULT_PDF_HIGHLIGHT_FIXTURE,
     outputDirectory:
       process.env.LINELIGHT_PDF_SHARPNESS_EVIDENCE ??
@@ -2504,6 +2835,9 @@ function parseArguments(argv) {
     }
     else if (argument === "--diagnose-first-network-fixed-point") {
       options.diagnoseFirstNetworkFixedPoint = true;
+    }
+    else if (argument === "--diagnose-reference-capture") {
+      options.diagnoseReferenceCapture = true;
     }
     else if (argument === "--fixture") options.fixture = argv[++index];
     else if (argument === "--output") {
@@ -2525,12 +2859,15 @@ function parseArguments(argv) {
           "                   Persist once, reload in fallback mode, re-import, then cleanup.",
           "  --diagnose-first-network-fixed-point",
           "                   Stop after the first matrix network gate and cleanup.",
+          "  --diagnose-reference-capture",
+          "                   Capture two stable native-viewer frames for the first desktop case.",
           "  --fixture PATH   Selectable-text PDF used for both original and import.",
           "  --output DIR     Transient evidence directory.",
           "  --record         Write review evidence to docs/evidence/issue-68/.",
           "",
-          "The runner always makes a fresh production build, uses visible browsers,",
-          "owns its loopback server, and refuses a dirty source tree.",
+          "Acceptance and app diagnostics make a fresh production build and own",
+          "their loopback server; reference capture opens only one visible browser",
+          "for the native viewer. Every mode refuses a dirty source tree.",
           "",
         ].join("\n"),
       );
@@ -2549,11 +2886,21 @@ function parseArguments(argv) {
       "Fallback-import diagnostic mode cannot be combined with --record.",
     );
   }
-  if (options.diagnoseFirstNetworkFixedPoint && options.diagnoseFallbackImport) {
+  if (options.record && options.diagnoseReferenceCapture) {
+    throw new Error(
+      "Reference-capture diagnostic mode cannot be combined with --record.",
+    );
+  }
+  const enabledDiagnosticModes = [
+    options.diagnoseFirstNetworkFixedPoint,
+    options.diagnoseFallbackImport,
+    options.diagnoseReferenceCapture,
+  ].filter(Boolean).length;
+  if (enabledDiagnosticModes > 1) {
     throw new Error("Issue #68 diagnostic modes are mutually exclusive.");
   }
   if (
-    (options.diagnoseFirstNetworkFixedPoint || options.diagnoseFallbackImport) &&
+    enabledDiagnosticModes === 1 &&
     !options.outputProvided
   ) {
     throw new Error(
@@ -2565,7 +2912,7 @@ function parseArguments(argv) {
   options.fixture = path.resolve(options.fixture);
   options.outputDirectory = path.resolve(options.outputDirectory);
   if (
-    (options.diagnoseFirstNetworkFixedPoint || options.diagnoseFallbackImport) &&
+    enabledDiagnosticModes === 1 &&
     options.fixture !== path.resolve(DEFAULT_PDF_HIGHLIGHT_FIXTURE)
   ) {
     throw new Error(
@@ -2573,11 +2920,19 @@ function parseArguments(argv) {
     );
   }
   if (
-    (options.diagnoseFirstNetworkFixedPoint || options.diagnoseFallbackImport) &&
+    enabledDiagnosticModes === 1 &&
     !isOutsideRepository(options.outputDirectory)
   ) {
     throw new Error(
       "Issue #68 diagnostic output must be outside the source repository.",
+    );
+  }
+  if (
+    options.diagnoseReferenceCapture &&
+    existsSync(options.outputDirectory)
+  ) {
+    throw new Error(
+      "Reference-capture diagnostic output must be a fresh absent directory.",
     );
   }
   if (
@@ -3124,6 +3479,8 @@ const INSTRUMENTATION_SOURCE = String.raw`
   const workerEvents = [];
   const workerLifecycle = [];
   const bitmapEventByObject = new WeakMap();
+  let activitySequence = 0;
+  let drawInvocationSequence = 0;
   let workerInstanceSequence = 0;
   globalThis.Worker = class Issue68Worker extends NativeWorker {
     constructor(url, options) {
@@ -3175,6 +3532,7 @@ const INSTRUMENTATION_SOURCE = String.raw`
             });
           }
           const workerEvent = {
+            activityId: ++activitySequence,
             at: performance.now(),
             completedPages: Number(message.completedPages) || null,
             direction: "from-worker",
@@ -3231,6 +3589,7 @@ const INSTRUMENTATION_SOURCE = String.raw`
         const documentId = message?.documentId;
         const revision = message?.revision ?? null;
         workerEvents.push({
+          activityId: ++activitySequence,
           at: performance.now(),
           direction: "to-worker",
           distance: Number(message?.distance),
@@ -3764,35 +4123,93 @@ const INSTRUMENTATION_SOURCE = String.raw`
   };
   const nativeDrawImage = CanvasRenderingContext2D.prototype.drawImage;
   CanvasRenderingContext2D.prototype.drawImage = function issue68DrawImage(...args) {
+    const destination = this.canvas;
+    const connected = Boolean(destination?.isConnected);
+    const fallbackAttempt = connected ? args[0]?.[stagingSymbol] ?? null : null;
+    const fallbackCompose = Boolean(fallbackAttempt);
+    const transferredBitmapEventId = connected
+      ? bitmapEventByObject.get(args[0]) ?? null
+      : null;
+    let invocation = null;
+    if (connected) {
+      const block = destination.closest(".pdf-page-block");
+      const reader = document.querySelector(".reader-scroll");
+      const blockRect = block?.getBoundingClientRect() ?? null;
+      const readerRect = reader?.getBoundingClientRect() ?? null;
+      const geometry = blockRect
+        ? {
+            bottom: blockRect.bottom,
+            left: blockRect.left,
+            right: blockRect.right,
+            top: blockRect.top
+          }
+        : null;
+      const readerViewport = readerRect
+        ? {
+            bottom: readerRect.bottom,
+            left: readerRect.left,
+            right: readerRect.right,
+            top: readerRect.top
+          }
+        : null;
+      invocation = {
+        activityId: ++activitySequence,
+        at: performance.now(),
+        bitmapEventId: transferredBitmapEventId,
+        distance: Number(block?.dataset.pdfPageDistance),
+        drawInvocationId: ++drawInvocationSequence,
+        geometry,
+        geometryVisible: Boolean(
+          blockRect && readerRect &&
+          blockRect.bottom > readerRect.top &&
+          blockRect.top < readerRect.bottom &&
+          blockRect.right > readerRect.left &&
+          blockRect.left < readerRect.right
+        ),
+        height: destination.height,
+        page: Number(block?.dataset.pdfPageIndex || -1) + 1,
+        priorityProbe: currentPriorityProbe,
+        readerViewport,
+        visible: block?.dataset.pdfPageVisible === "true",
+        visiblePages: Array.from(document.querySelectorAll(
+          '.pdf-page-block[data-pdf-page-visible="true"]'
+        )).map((candidate) =>
+          Number(candidate.dataset.pdfPageIndex) + 1
+        ).filter(Number.isInteger).sort((left, right) => left - right),
+        width: destination.width
+      };
+    }
     const result = nativeDrawImage.apply(this, args);
-    if (this.canvas?.isConnected) {
-      const destination = this.canvas;
-      const fallbackAttempt = args[0]?.[stagingSymbol] ?? null;
-      const fallbackCompose = Boolean(fallbackAttempt);
-      const transferredBitmapEventId = bitmapEventByObject.get(args[0]) ?? null;
+    if (connected && invocation) {
       queueMicrotask(() => {
-        const block = destination.closest(".pdf-page-block");
-        const page = Number(block?.dataset.pdfPageIndex || -1) + 1;
         const draw = {
-          at: performance.now(),
-          bitmapEventId: transferredBitmapEventId,
+          activityId: invocation.activityId,
+          at: invocation.at,
+          bitmapEventId: invocation.bitmapEventId,
           compositionId: state.draws.length + 1,
-          distance: Number(block?.dataset.pdfPageDistance),
-          height: destination.height,
-          page,
+          distance: invocation.distance,
+          drawInvocationId: invocation.drawInvocationId,
+          geometry: invocation.geometry,
+          geometryVisible: invocation.geometryVisible,
+          height: invocation.height,
+          page: invocation.page,
+          readerViewport: invocation.readerViewport,
           scale: Number(destination.dataset.pdfRasterScale) || null,
           source: destination.dataset.pdfRenderSource ||
             (fallbackCompose ? "main-fallback" : "worker-bitmap"),
-          visible: block?.dataset.pdfPageVisible === "true",
-          visiblePages: Array.from(document.querySelectorAll(
-            '.pdf-page-block[data-pdf-page-visible="true"]'
-          )).map((candidate) =>
-            Number(candidate.dataset.pdfPageIndex) + 1
-          ).filter(Number.isInteger).sort((left, right) => left - right),
-          width: destination.width
+          visible: invocation.visible,
+          visiblePages: invocation.visiblePages,
+          width: invocation.width
         };
         state.draws.push(draw);
-        if (currentPriorityProbe) currentPriorityProbe.compositions.push(draw);
+        if (
+          invocation.priorityProbe &&
+          invocation.activityId > invocation.priorityProbe.scrollAction.activityId &&
+          invocation.drawInvocationId >
+            invocation.priorityProbe.scrollAction.drawInvocationBoundary
+        ) {
+          invocation.priorityProbe.compositions.push(draw);
+        }
         if (fallbackCompose) {
           state.fallback.events.push({
             abortSignalId: fallbackAttempt.abortSignalId,
@@ -3973,10 +4390,27 @@ const INSTRUMENTATION_SOURCE = String.raw`
       event.revision === latestImport?.revision &&
       event.at >= latestImport.at
     ) ?? null;
+    const reader = document.querySelector('.reader-scroll');
+    const rectangle = (element) => {
+      const rect = element?.getBoundingClientRect() ?? null;
+      return rect
+        ? {
+            bottom: rect.bottom,
+            left: rect.left,
+            right: rect.right,
+            top: rect.top
+          }
+        : null;
+    };
     const action = {
+      activityId: ++activitySequence,
       at: performance.now(),
       drawBoundary: state.draws.length,
+      drawInvocationBoundary: drawInvocationSequence,
       eventId: workerEvents.length,
+      readerViewportBefore: rectangle(reader),
+      scrollTopBefore: Number(reader?.scrollTop),
+      targetGeometryBefore: rectangle(block),
       targetPage,
       type: 'rapid-scroll-action'
     };
@@ -3988,6 +4422,7 @@ const INSTRUMENTATION_SOURCE = String.raw`
         canvasHeight: canvas?.height ?? null,
         canvasWidth: canvas?.width ?? null,
         distance: Number(block?.dataset.pdfPageDistance),
+        latestBitmapActivityId: latestBitmap?.activityId ?? null,
         latestBitmapEventId: latestBitmap?.eventId ?? null,
         latestBitmapHeight: latestBitmap?.height ?? null,
         latestBitmapScale: latestBitmap?.scale ?? null,
@@ -3997,16 +4432,20 @@ const INSTRUMENTATION_SOURCE = String.raw`
         targetWidth: Number(canvas?.dataset.pdfRasterTargetWidth) || null,
         visible: block?.dataset.pdfPageVisible === 'true'
       },
-      targetPage,
-      workerEventStart: action.eventId
+      targetPage
     };
     block.scrollIntoView({ behavior: 'auto', block: 'center' });
+    action.readerViewportAfter = rectangle(reader);
+    action.scrollTopAfter = Number(reader?.scrollTop);
+    action.targetGeometryAfter = rectangle(block);
     return structuredClone(action);
   };
   state.finishPriorityProbe = () => {
     if (currentPriorityProbe) {
-      currentPriorityProbe.workerEvents = workerEvents.slice(
-        currentPriorityProbe.workerEventStart
+      currentPriorityProbe.workerEvents = workerEvents.filter(
+        (event) =>
+          Number.isInteger(event.activityId) &&
+          event.activityId > currentPriorityProbe.scrollAction.activityId
       );
       const block = document.querySelector(
         '#pdf-page-' + currentPriorityProbe.targetPage
@@ -5576,6 +6015,61 @@ async function waitForRenderedReferenceScreenshot(
   );
 }
 
+async function captureStableReferenceDiagnosticCandidates(
+  cdp,
+  outputDirectory,
+) {
+  const deadline = Date.now() + SCENARIO_TIMEOUT_MS;
+  let attempts = 0;
+  let captureErrorCount = 0;
+  let previous = null;
+  while (Date.now() < deadline) {
+    attempts += 1;
+    try {
+      const screenshot = await cdp.send("Page.captureScreenshot", {
+        captureBeyondViewport: false,
+        format: "png",
+        fromSurface: true,
+      });
+      const bytes = Buffer.from(screenshot.data, "base64");
+      const candidate = {
+        analysis: analyzeReferencePixels(decodePngScreenshot(bytes)),
+        attempt: attempts,
+        bytes,
+        sha256: await sha256Bytes(bytes),
+      };
+      if (
+        previous &&
+        previous.sha256 === candidate.sha256 &&
+        previous.bytes.equals(candidate.bytes)
+      ) {
+        const candidates = [];
+        for (const [index, stable] of [previous, candidate].entries()) {
+          const filePath = path.join(
+            outputDirectory,
+            REFERENCE_CAPTURE_DIAGNOSTIC_CANDIDATES[index],
+          );
+          await writeFile(filePath, stable.bytes);
+          candidates.push({
+            ...(await fileArtifact(filePath)),
+            analysis: stable.analysis,
+            attempt: stable.attempt,
+          });
+        }
+        return { attempts, candidates, captureErrorCount };
+      }
+      previous = candidate;
+    } catch {
+      captureErrorCount += 1;
+      previous = null;
+    }
+    await delay(100);
+  }
+  throw new Error(
+    "The reference-capture diagnostic did not observe two stable screenshots.",
+  );
+}
+
 async function captureReferenceScreenshots(
   cdp,
   fixture,
@@ -5921,7 +6415,9 @@ async function collectMatrixRun(
     browserExpression(`
       return globalThis.__lineLightIssue68.draws.find((draw) =>
         draw.page === ${priorityTarget} &&
-        draw.compositionId > ${priorityScrollAction.drawBoundary} &&
+        draw.activityId > ${priorityScrollAction.activityId} &&
+        draw.drawInvocationId > ${priorityScrollAction.drawInvocationBoundary} &&
+        draw.geometryVisible === true &&
         draw.visible === true &&
         draw.visiblePages.includes(${priorityTarget}) &&
         draw.source === 'worker-bitmap' &&
@@ -6010,11 +6506,11 @@ async function collectMatrixRun(
   );
   const postScrollWorkerEvents = (priorityProbe?.workerEvents ?? []).filter(
     (event) =>
-      Number.isInteger(event.eventId) &&
-      event.eventId > Number(priorityProbe?.scrollAction?.eventId) &&
+      Number.isInteger(event.activityId) &&
+      event.activityId > Number(priorityProbe?.scrollAction?.activityId) &&
       event.jobId === modelCompletion.importJobId &&
       event.revision === modelCompletion.revision,
-  );
+  ).sort((left, right) => left.activityId - right.activityId);
   const visibleRenderRequests = postScrollWorkerEvents.filter(
     (event) =>
       event.direction === "to-worker" &&
@@ -6042,18 +6538,22 @@ async function collectMatrixRun(
     ? postScrollBitmaps.find(
         (event) =>
           event.pageNumber === priorityTarget &&
-          event.eventId > targetVisibleRequest.eventId,
+          event.activityId > targetVisibleRequest.activityId,
       ) ?? null
     : null;
   const postScrollCompositions = (priorityProbe?.compositions ?? []).filter(
     (composition) =>
-      Number.isInteger(composition?.compositionId) &&
-      composition.compositionId >
-        Number(priorityProbe?.scrollAction?.drawBoundary),
-  );
+      Number.isInteger(composition?.activityId) &&
+      composition.activityId >
+        Number(priorityProbe?.scrollAction?.activityId) &&
+      Number.isInteger(composition?.drawInvocationId) &&
+      composition.drawInvocationId >
+        Number(priorityProbe?.scrollAction?.drawInvocationBoundary),
+  ).sort((left, right) => left.activityId - right.activityId);
   const targetComposition = postScrollCompositions.find(
     (composition) =>
       composition.page === priorityTarget &&
+      composition.geometryVisible === true &&
       composition.visible === true &&
       Array.isArray(composition.visiblePages) &&
       composition.visiblePages.includes(priorityTarget) &&
@@ -6070,6 +6570,7 @@ async function collectMatrixRun(
     ) <= 1e-7;
   const summarizePriorityEvent = (event) => event
     ? {
+        activityId: event.activityId,
         distance: Number.isFinite(event.distance) ? event.distance : null,
         enabled: typeof event.enabled === "boolean" ? event.enabled : null,
         eventId: event.eventId,
@@ -6090,34 +6591,47 @@ async function collectMatrixRun(
     : null;
   const summarizePriorityComposition = (composition) => composition
     ? {
+        activityId: composition.activityId,
         at: composition.at,
         bitmapEventId: composition.bitmapEventId ?? null,
         compositionId: composition.compositionId,
+        drawInvocationId: composition.drawInvocationId,
+        geometry: composition.geometry,
+        geometryVisible: composition.geometryVisible,
         height: composition.height,
         page: composition.page,
+        readerViewport: composition.readerViewport,
         scale: composition.scale,
         source: composition.source,
         visible: composition.visible,
         visiblePages: composition.visiblePages,
         width: composition.width,
-      }
+    }
     : null;
-  const staleWorkerBitmaps = postScrollBitmaps.filter((bitmap) =>
-    bitmap.pageNumber !== priorityTarget &&
-    postScrollWorkerEvents.some((request) =>
-      request.direction === "to-worker" &&
-      request.type === "render" &&
-      request.enabled === true &&
-      request.visible === false &&
-      request.pageNumber === bitmap.pageNumber &&
-      request.eventId < bitmap.eventId
-    )
+  const staleBitmapCutoffActivityId = cachedTargetSatisfied
+    ? targetComposition?.activityId
+    : targetBitmapAfterVisibleRequest?.activityId;
+  const nonTargetBitmaps = postScrollBitmaps.filter(
+    (bitmap) => bitmap.pageNumber !== priorityTarget,
   );
+  const staleWorkerBitmaps = nonTargetBitmaps.filter((bitmap) =>
+    (
+      !Number.isInteger(staleBitmapCutoffActivityId) ||
+      bitmap.activityId < staleBitmapCutoffActivityId
+    )
+  ).map(summarizePriorityEvent);
   const staleNonVisibleCompositions = postScrollCompositions.filter(
     (composition) =>
-      composition.visible !== true ||
-      !Array.isArray(composition.visiblePages) ||
-      !composition.visiblePages.includes(composition.page),
+      (
+        !Number.isInteger(targetComposition?.activityId) ||
+        composition.activityId < targetComposition.activityId
+      ) &&
+      (
+        composition.geometryVisible !== true ||
+        composition.visible !== true ||
+        !Array.isArray(composition.visiblePages) ||
+        !composition.visiblePages.includes(composition.page)
+      ),
   ).map(summarizePriorityComposition);
 
   return {
@@ -6191,6 +6705,7 @@ async function collectMatrixRun(
       firstWorkerBitmapPage: priorityBitmaps[0]?.pageNumber ?? null,
       firstPostScrollCompositionPage:
         postScrollCompositions[0]?.page ?? null,
+      nonTargetBitmaps: nonTargetBitmaps.map(summarizePriorityEvent),
       staleNonVisibleCompositions,
       staleWorkerBitmaps,
       targetAfter: priorityProbe?.targetAfter ?? null,
@@ -7081,6 +7596,144 @@ function ensureCleanBoundSource(source) {
   }
 }
 
+function finalizeReferenceDiagnosticSource(source) {
+  source.postCaptureCommit = gitOutput(["rev-parse", "HEAD"]);
+  source.postCaptureTree = gitOutput(["rev-parse", "HEAD^{tree}"]);
+  source.postCaptureStatus = gitStatus();
+  if (!isExactReferenceDiagnosticSource(source)) {
+    throw new Error(
+      "The source commit/tree changed or became dirty during the reference diagnostic.",
+    );
+  }
+}
+
+async function runReferenceCaptureDiagnostic(options, source) {
+  if (existsSync(options.outputDirectory)) {
+    throw new Error(
+      "Reference-capture diagnostic output must be a fresh absent directory.",
+    );
+  }
+  await mkdir(options.outputDirectory, { recursive: true });
+  const fixture = await fileArtifact(options.fixture);
+  const progress = createReferenceCaptureDiagnosticProgress();
+  let capture = null;
+  let referenceBrowser = null;
+  let referenceCdp = null;
+  let referenceShutdown = null;
+  let runnerFailure = null;
+  try {
+    await runBoundedDiagnosticOperation(async () => {
+      referenceBrowser = await runReferenceCaptureDiagnosticStage(
+        progress,
+        "browser-launch",
+        () => startBrowser(options.browser, true),
+      );
+      referenceCdp = await runReferenceCaptureDiagnosticStage(
+        progress,
+        "cdp-connect",
+        () => CdpSession.connect(referenceBrowser.webSocketDebuggerUrl),
+      );
+      await runReferenceCaptureDiagnosticStage(
+        progress,
+        "configure",
+        () => Promise.all([
+          referenceCdp.send("Page.enable"),
+          referenceCdp.send("Runtime.enable"),
+          applyMatrixConfiguration(
+            referenceCdp,
+            PDF_SHARPNESS_MATRIX[0],
+            true,
+          ),
+        ]),
+      );
+      const requestedUrl = new URL(pathToFileURL(options.fixture));
+      requestedUrl.hash =
+        `page=${REFERENCE_CAPTURE_DIAGNOSTIC_TARGET_PAGE}&zoom=page-width`;
+      await runReferenceCaptureDiagnosticStage(
+        progress,
+        "navigate",
+        () => referenceCdp.send("Page.navigate", { url: requestedUrl.href }),
+      );
+      await runReferenceCaptureDiagnosticStage(
+        progress,
+        "viewer-ready",
+        () => waitForExpression(
+          referenceCdp,
+          `document.readyState === 'complete' &&
+            (document.contentType === 'application/pdf' ||
+              Boolean(document.querySelector('embed[type="application/pdf"]')) ||
+              location.protocol === 'chrome-extension:')`,
+          "desktop-dpr1-zoom100 reference-capture diagnostic",
+          SCENARIO_TIMEOUT_MS,
+        ),
+      );
+      const stable = await runReferenceCaptureDiagnosticStage(
+        progress,
+        "stable-candidates",
+        () => captureStableReferenceDiagnosticCandidates(
+          referenceCdp,
+          options.outputDirectory,
+        ),
+      );
+      capture = {
+        ...stable,
+        configurationId: PDF_SHARPNESS_MATRIX[0].id,
+        referenceScheme: requestedUrl.protocol,
+        targetPage: REFERENCE_CAPTURE_DIAGNOSTIC_TARGET_PAGE,
+      };
+      await runReferenceCaptureDiagnosticStage(
+        progress,
+        "source-finalize",
+        () => finalizeReferenceDiagnosticSource(source),
+      );
+    }, {
+      onTimeout() {
+        referenceCdp?.close();
+      },
+      timeoutMs: REFERENCE_CAPTURE_DIAGNOSTIC_TIMEOUT_MS,
+    });
+  } catch (error) {
+    runnerFailure = error;
+    if (!source.postCaptureStatus) {
+      try {
+        finalizeReferenceDiagnosticSource(source);
+      } catch {
+        // The independently validated source summary stays fail-closed.
+      }
+    }
+  } finally {
+    const [cleanup] = await Promise.allSettled([
+      closeOwnedBrowser(referenceCdp, referenceBrowser),
+    ]);
+    referenceShutdown = cleanupResult(cleanup, "browser");
+  }
+  const report = buildReferenceCaptureDiagnosticReport({
+    capture,
+    fixture,
+    outputDirectory: options.outputDirectory,
+    progress,
+    runnerFailure,
+    source,
+    teardown: {
+      errorCount: referenceShutdown?.error ? 1 : 0,
+      reference: referenceShutdown,
+    },
+  });
+  const diagnosticPath = path.join(
+    options.outputDirectory,
+    REFERENCE_CAPTURE_DIAGNOSTIC_REPORT,
+  );
+  await writeFile(diagnosticPath, `${JSON.stringify(report, null, 2)}\n`);
+  if (report.failures.length) {
+    throw new Error(
+      `Issue #68 reference-capture diagnostic completed with a failed gate. Evidence: ${diagnosticPath}\n${report.failures.join("\n")}`,
+    );
+  }
+  process.stdout.write(
+    `Issue #68 reference-capture diagnostic completed: ${diagnosticPath}\n`,
+  );
+}
+
 async function run(options) {
   if (!process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) {
     throw new Error(
@@ -7094,6 +7747,10 @@ async function run(options) {
       "Issue #68 acceptance evidence requires a clean committed source tree.\n" +
       source.preflightStatus.join("\n"),
     );
+  }
+  if (options.diagnoseReferenceCapture) {
+    await runReferenceCaptureDiagnostic(options, source);
+    return;
   }
   await buildProductionArtifact();
   ensureCleanBoundSource(source);

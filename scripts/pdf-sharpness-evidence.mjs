@@ -124,6 +124,25 @@ function emptyArray(value) {
   return Array.isArray(value) && value.length === 0;
 }
 
+function validGeometryRect(rect) {
+  return (
+    [rect?.bottom, rect?.left, rect?.right, rect?.top].every(finite) &&
+    rect.bottom >= rect.top &&
+    rect.right >= rect.left
+  );
+}
+
+function geometryIntersectsViewport(rect, viewport) {
+  return (
+    validGeometryRect(viewport) &&
+    validGeometryRect(rect) &&
+    rect.bottom > viewport.top &&
+    rect.top < viewport.bottom &&
+    rect.right > viewport.left &&
+    rect.left < viewport.right
+  );
+}
+
 function classifyLongTasks(value) {
   if (value === undefined) return "missing";
   if (!Array.isArray(value)) return "malformed";
@@ -197,17 +216,6 @@ function validComposedCanvasFrame(frame, { count = null, pixels = null } = {}) {
     0,
   );
   const viewport = frame?.readerViewport;
-  const validRect = (rect) =>
-    [rect?.bottom, rect?.left, rect?.right, rect?.top].every(finite) &&
-    rect.bottom >= rect.top &&
-    rect.right >= rect.left;
-  const intersectsViewport = (rect) =>
-    validRect(viewport) &&
-    validRect(rect) &&
-    rect.bottom > viewport.top &&
-    rect.top < viewport.bottom &&
-    rect.right > viewport.left &&
-    rect.left < viewport.right;
   return (
     finite(frame?.at) &&
     nonNegativeInteger(frame?.composedCount) &&
@@ -229,7 +237,7 @@ function validComposedCanvasFrame(frame, { count = null, pixels = null } = {}) {
       (entry) =>
         entry?.visible === true &&
         entry?.geometryVisible === true &&
-        intersectsViewport(entry?.geometry) &&
+        geometryIntersectsViewport(entry?.geometry, viewport) &&
         Number.isInteger(entry?.width) &&
         entry.width > 0 &&
         Number.isInteger(entry?.height) &&
@@ -658,6 +666,9 @@ export function validatePdfSharpnessEvidence(evidence) {
     const priorityBitmaps = Array.isArray(priority?.targetBitmaps)
       ? priority.targetBitmaps
       : [];
+    const priorityNonTargetBitmaps = Array.isArray(priority?.nonTargetBitmaps)
+      ? priority.nonTargetBitmaps
+      : [];
     const priorityVisiblePages = priorityComposition?.visiblePages;
     const priorityBaseValid =
       Number.isInteger(priorityTarget) &&
@@ -666,8 +677,21 @@ export function validatePdfSharpnessEvidence(evidence) {
       priorityAction?.type === "rapid-scroll-action" &&
       priorityAction?.targetPage === priorityTarget &&
       finite(priorityAction?.at) &&
+      Number.isInteger(priorityAction?.activityId) &&
+      priorityAction.activityId > 0 &&
       nonNegativeInteger(priorityAction?.eventId) &&
       nonNegativeInteger(priorityAction?.drawBoundary) &&
+      nonNegativeInteger(priorityAction?.drawInvocationBoundary) &&
+      finite(priorityAction?.scrollTopBefore) &&
+      finite(priorityAction?.scrollTopAfter) &&
+      priorityAction.scrollTopAfter !== priorityAction.scrollTopBefore &&
+      validGeometryRect(priorityAction?.readerViewportBefore) &&
+      validGeometryRect(priorityAction?.readerViewportAfter) &&
+      validGeometryRect(priorityAction?.targetGeometryBefore) &&
+      geometryIntersectsViewport(
+        priorityAction?.targetGeometryAfter,
+        priorityAction?.readerViewportAfter,
+      ) &&
       priorityBefore?.visible === false &&
       priorityBefore?.distance === 1 &&
       priorityBefore?.canvasWidth === 0 &&
@@ -687,10 +711,20 @@ export function validatePdfSharpnessEvidence(evidence) {
       priorityComposition?.page === priorityTarget &&
       priorityComposition?.source === "worker-bitmap" &&
       priorityComposition?.visible === true &&
+      priorityComposition?.geometryVisible === true &&
+      geometryIntersectsViewport(
+        priorityComposition?.geometry,
+        priorityComposition?.readerViewport,
+      ) &&
       finite(priorityComposition?.at) &&
       priorityComposition.at >= priorityAction.at &&
+      Number.isInteger(priorityComposition?.activityId) &&
+      priorityComposition.activityId > priorityAction.activityId &&
+      Number.isInteger(priorityComposition?.drawInvocationId) &&
+      priorityComposition.drawInvocationId >
+        priorityAction.drawInvocationBoundary &&
       Number.isInteger(priorityComposition?.compositionId) &&
-      priorityComposition.compositionId > priorityAction.drawBoundary &&
+      priorityComposition.compositionId > 0 &&
       Number.isInteger(priorityComposition?.bitmapEventId) &&
       priorityComposition.bitmapEventId > 0 &&
       priorityComposition?.width === priorityAfter.targetWidth &&
@@ -704,11 +738,30 @@ export function validatePdfSharpnessEvidence(evidence) {
       new Set(priorityVisiblePages).size === priorityVisiblePages.length &&
       Array.isArray(priority?.targetRenderRequests) &&
       Array.isArray(priority?.targetBitmaps) &&
+      Array.isArray(priority?.nonTargetBitmaps) &&
+      priorityNonTargetBitmaps.every(
+        (bitmap) =>
+          bitmap?.type === "bitmap" &&
+          Number.isInteger(bitmap?.pageNumber) &&
+          bitmap.pageNumber !== priorityTarget &&
+          Number.isInteger(bitmap?.activityId) &&
+          bitmap.activityId > priorityAction.activityId &&
+          Number.isInteger(bitmap?.eventId) &&
+          bitmap.eventId > 0 &&
+          SHA256_PATTERN.test(bitmap?.identityHash ?? ""),
+      ) &&
+      new Set(priorityNonTargetBitmaps.map((bitmap) => bitmap.activityId)).size ===
+        priorityNonTargetBitmaps.length &&
+      new Set(priorityNonTargetBitmaps.map((bitmap) => bitmap.eventId)).size ===
+        priorityNonTargetBitmaps.length &&
       priority?.firstPostScrollCompositionPage === priorityTarget &&
       emptyArray(priority?.staleNonVisibleCompositions) &&
       emptyArray(priority?.staleWorkerBitmaps);
     const cachedPriority =
       priority?.targetPath === "cached-target" &&
+      Number.isInteger(priorityBefore?.latestBitmapActivityId) &&
+      priorityBefore.latestBitmapActivityId > 0 &&
+      priorityBefore.latestBitmapActivityId < priorityAction?.activityId &&
       Number.isInteger(priorityBefore?.latestBitmapEventId) &&
       priorityBefore.latestBitmapEventId > 0 &&
       priorityBefore?.latestBitmapWidth === priorityAfter?.targetWidth &&
@@ -725,13 +778,20 @@ export function validatePdfSharpnessEvidence(evidence) {
       priorityRequests.length === 0 &&
       priorityBitmaps.length === 0 &&
       priorityRequest === null &&
-      priorityBitmap === null;
+      priorityBitmap === null &&
+      priorityNonTargetBitmaps.every(
+        (bitmap) => bitmap.activityId > priorityComposition?.activityId,
+      );
     const beforeBitmapMissing =
+      priorityBefore?.latestBitmapActivityId === null &&
       priorityBefore?.latestBitmapEventId === null &&
       priorityBefore?.latestBitmapWidth === null &&
       priorityBefore?.latestBitmapHeight === null &&
       priorityBefore?.latestBitmapScale === null;
     const beforeBitmapUndersized =
+      Number.isInteger(priorityBefore?.latestBitmapActivityId) &&
+      priorityBefore.latestBitmapActivityId > 0 &&
+      priorityBefore.latestBitmapActivityId < priorityAction?.activityId &&
       Number.isInteger(priorityBefore?.latestBitmapEventId) &&
       priorityBefore.latestBitmapEventId > 0 &&
       Number.isInteger(priorityBefore?.latestBitmapWidth) &&
@@ -757,6 +817,8 @@ export function validatePdfSharpnessEvidence(evidence) {
       priorityRequest?.distance === 0 &&
       finite(priorityRequest?.scale) &&
       closeTo(priorityRequest.scale, priorityAfter?.targetScale, 1e-7) &&
+      Number.isInteger(priorityRequest?.activityId) &&
+      priorityRequest.activityId > priorityAction?.activityId &&
       Number.isInteger(priorityRequest?.eventId) &&
       priorityRequest.eventId > priorityAction?.eventId &&
       SHA256_PATTERN.test(priorityRequest?.identityHash ?? "") &&
@@ -768,12 +830,18 @@ export function validatePdfSharpnessEvidence(evidence) {
       priorityBitmap?.width === priorityAfter?.targetWidth &&
       priorityBitmap?.height === priorityAfter?.targetHeight &&
       closeTo(priorityBitmap?.scale, priorityAfter?.targetScale, 1e-7) &&
+      Number.isInteger(priorityBitmap?.activityId) &&
+      priorityBitmap.activityId > priorityRequest?.activityId &&
       Number.isInteger(priorityBitmap?.eventId) &&
       priorityBitmap.eventId > priorityRequest?.eventId &&
       SHA256_PATTERN.test(priorityBitmap?.identityHash ?? "") &&
       priorityBitmaps[0]?.eventId === priorityBitmap.eventId &&
       priorityBitmaps[0]?.identityHash === priorityBitmap.identityHash &&
-      priorityComposition?.bitmapEventId === priorityBitmap?.eventId;
+      priorityComposition?.bitmapEventId === priorityBitmap?.eventId &&
+      priorityComposition?.activityId > priorityBitmap?.activityId &&
+      priorityNonTargetBitmaps.every(
+        (bitmap) => bitmap.activityId > priorityBitmap?.activityId,
+      );
     if (!priorityBaseValid || (!cachedPriority && !renderedPriority)) {
       fail(`${expected.id} did not render the current viewport first`);
     }

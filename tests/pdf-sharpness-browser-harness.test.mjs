@@ -21,6 +21,9 @@ import {
 import {
   FALLBACK_IMPORT_DIAGNOSTIC_STAGES,
   FALLBACK_IMPORT_DIAGNOSTIC_STEPS,
+  REFERENCE_CAPTURE_DIAGNOSTIC_CANDIDATES,
+  REFERENCE_CAPTURE_DIAGNOSTIC_STAGES,
+  REFERENCE_CAPTURE_DIAGNOSTIC_STEPS,
   analyzeReferencePixels,
   asyncBrowserExpression,
   advanceCdpFixedPointStability,
@@ -28,10 +31,12 @@ import {
   buildFallbackWorkerModuleSource,
   buildFallbackImportDiagnosticReport,
   buildFirstNetworkDiagnosticReport,
+  buildReferenceCaptureDiagnosticReport,
   classifyCdpDiagnosticUrl,
   classifyPdfRasterTransition,
   completeCdpNetworkRequest,
   createFallbackImportDiagnosticProgress,
+  createReferenceCaptureDiagnosticProgress,
   decodePngScreenshot,
   dispatchPausedServiceWorkerCommands,
   dispatchToCdpSession,
@@ -44,6 +49,7 @@ import {
   isCdpTargetSetupComplete,
   matchesPdfFallbackInjection,
   markFallbackImportDiagnosticStage,
+  markReferenceCaptureDiagnosticStage,
   planPdfVirtualScroll,
   probePdfBitmapBudget,
   recordCdpNetworkRequest,
@@ -127,6 +133,33 @@ const PUBLIC_PDF_FIXTURE =
 const PUBLIC_PDF_FIXTURE_BYTES = 4_745;
 const PUBLIC_PDF_FIXTURE_SHA256 =
   "1addfceae4b869eec37dae4755d576ccd0fd7e1ce505dc856da3b96acbf3f06c";
+
+const passingReferenceDiagnosticSource = () => ({
+  commit: COMMIT,
+  files: Object.fromEntries(
+    PDF_SHARPNESS_SOURCE_FILES.map((file) => [file, SHA]),
+  ),
+  postCaptureCommit: COMMIT,
+  postCaptureStatus: [],
+  postCaptureTree: TREE,
+  preflightStatus: [],
+  tree: TREE,
+});
+
+const passingReferenceAnalysis = () => ({
+  height: 900,
+  inkPixels: 117_209,
+  inkRatio: 0.1433617710913372,
+  inkRowBands: 1,
+  inkSpanRatio: 1,
+  pageBounds: { height: 841, width: 1_011, x: 89, y: 59 },
+  pagePixels: 817_575,
+  pageWhitePixels: 696_249,
+  pageWhiteRatio: 0.851602605265572,
+  proof: "white-page-with-rendered-ink",
+  renderedPage: false,
+  width: 1_100,
+});
 
 function artifact(name, digit) {
   return {
@@ -1311,6 +1344,148 @@ test("rejects a second parser child for the exact fallback import worker", () =>
   );
 });
 
+test("builds a noncanonical privacy-safe reference-capture diagnostic", () => {
+  const outputDirectory = path.join(
+    os.tmpdir(),
+    "issue-68-reference-capture-diagnostic",
+  );
+  const progress = createReferenceCaptureDiagnosticProgress();
+  for (const stage of REFERENCE_CAPTURE_DIAGNOSTIC_STAGES) {
+    markReferenceCaptureDiagnosticStage(progress, stage);
+  }
+  const candidates = REFERENCE_CAPTURE_DIAGNOSTIC_CANDIDATES.map(
+    (name, index) => ({
+      analysis: passingReferenceAnalysis(),
+      attempt: index + 4,
+      bytes: 43_448,
+      path: path.relative(path.resolve("."), path.join(outputDirectory, name)),
+      sha256: "d".repeat(64),
+    }),
+  );
+  const input = {
+    capture: {
+      attempts: 5,
+      candidates,
+      captureErrorCount: 0,
+      configurationId: PDF_SHARPNESS_MATRIX[0].id,
+      referenceScheme: "file:",
+      targetPage: 2,
+    },
+    fixture: {
+      bytes: PUBLIC_PDF_FIXTURE_BYTES,
+      path: PUBLIC_PDF_FIXTURE,
+      sha256: PUBLIC_PDF_FIXTURE_SHA256,
+    },
+    outputDirectory,
+    progress,
+    recordedAt: "2026-08-10T00:00:00.000Z",
+    runnerFailure: null,
+    source: passingReferenceDiagnosticSource(),
+    teardown: {
+      errorCount: 0,
+      reference: {
+        cdpClosed: true,
+        error: null,
+        present: true,
+        processClosed: true,
+        profileRemoved: true,
+      },
+    },
+  };
+  const report = buildReferenceCaptureDiagnosticReport(input);
+  assert.equal(report.diagnostic, true);
+  assert.equal(report.completed, true);
+  assert.equal(report.capture.stableByteIdentical, true);
+  assert.equal(report.execution.sequenceComplete, true);
+  assert.equal(report.mode, "reference-capture");
+  assert.deepEqual(report.failures, []);
+  assert.equal(report.artifacts.candidates.length, 2);
+  assert.equal(report.artifacts.candidates[0].analysis.renderedPage, false);
+  assert.deepEqual(
+    report.artifacts.candidates.map(({ artifact: value }) => value.path),
+    [...REFERENCE_CAPTURE_DIAGNOSTIC_CANDIDATES],
+  );
+  assert.equal("passed" in report, false);
+  assert.equal("schemaVersion" in report, false);
+  assert.doesNotMatch(JSON.stringify(report), new RegExp(outputDirectory, "u"));
+
+  const mutations = [
+    (value) => { value.fixture.bytes -= 1; },
+    (value) => { value.source.files[PDF_SHARPNESS_SOURCE_FILES[0]] = null; },
+    (value) => { value.source.postCaptureStatus = ["private/path.pdf"]; },
+    (value) => { value.progress.history.pop(); },
+    (value) => { value.capture.configurationId = "mobile-dpr3-zoom100"; },
+    (value) => { value.capture.referenceScheme = "https:"; },
+    (value) => { value.capture.targetPage = 3; },
+    (value) => { value.capture.candidates.pop(); },
+    (value) => { value.capture.candidates[1].sha256 = "e".repeat(64); },
+    (value) => { value.capture.candidates[1].analysis.inkPixels += 1; },
+    (value) => { value.capture.candidates[1].attempt = 4; },
+    (value) => { value.teardown.reference.profileRemoved = false; },
+  ];
+  for (const mutate of mutations) {
+    const value = structuredClone(input);
+    mutate(value);
+    const failed = buildReferenceCaptureDiagnosticReport(value);
+    assert.ok(failed.failures.length > 0);
+    assert.equal(failed.completed, false);
+  }
+
+  const repositoryOutput = structuredClone(input);
+  repositoryOutput.outputDirectory = path.join(
+    path.resolve("."),
+    "outputs/reference-diagnostic",
+  );
+  const repositoryReport = buildReferenceCaptureDiagnosticReport(
+    repositoryOutput,
+  );
+  assert.equal(repositoryReport.completed, false);
+  assert.ok(repositoryReport.failures.length > 0);
+
+  const firstFailure = structuredClone(input);
+  firstFailure.runnerFailure = new Error(
+    "private /tmp/profile-a document paragraph secret=alpha",
+  );
+  firstFailure.progress.history = REFERENCE_CAPTURE_DIAGNOSTIC_STAGES.slice(
+    0,
+    9,
+  );
+  firstFailure.progress.terminalStage = firstFailure.progress.history.at(-1);
+  const secondFailure = structuredClone(firstFailure);
+  secondFailure.runnerFailure = new Error(
+    "different https://example.test/?token=beta private text",
+  );
+  const firstBytes = JSON.stringify(
+    buildReferenceCaptureDiagnosticReport(firstFailure),
+  );
+  const secondBytes = JSON.stringify(
+    buildReferenceCaptureDiagnosticReport(secondFailure),
+  );
+  assert.equal(firstBytes, secondBytes);
+  assert.doesNotMatch(
+    firstBytes,
+    /profile-a|paragraph|secret|example\.test|token=beta|private text/u,
+  );
+});
+
+test("enforces the exact reference-capture diagnostic stage order", () => {
+  const progress = createReferenceCaptureDiagnosticProgress();
+  assert.equal(
+    markReferenceCaptureDiagnosticStage(
+      progress,
+      REFERENCE_CAPTURE_DIAGNOSTIC_STAGES[0],
+    ),
+    REFERENCE_CAPTURE_DIAGNOSTIC_STAGES[0],
+  );
+  assert.throws(
+    () => markReferenceCaptureDiagnosticStage(
+      progress,
+      REFERENCE_CAPTURE_DIAGNOSTIC_STAGES[2],
+    ),
+    /stage ordering is invalid/u,
+  );
+});
+
 test("builds a noncanonical privacy-safe fallback import diagnostic", () => {
   const outputDirectory = path.join(os.tmpdir(), "issue-68-fallback-diagnostic");
   const capture = passingFallbackImportCapture();
@@ -1583,6 +1758,7 @@ function passingEvidence() {
     const priorityRequest = priorityCached
       ? null
       : {
+          activityId: 110,
           distance: 0,
           enabled: true,
           eventId: 101,
@@ -1597,6 +1773,7 @@ function passingEvidence() {
     const priorityBitmap = priorityCached
       ? null
       : {
+          activityId: 120,
           distance: null,
           enabled: null,
           eventId: 102,
@@ -1713,18 +1890,44 @@ function passingEvidence() {
       },
       visibleFirst: {
         firstComposedPage: priorityTarget,
-        firstPostScrollBitmapPage: priorityCached ? null : priorityTarget,
+        firstPostScrollBitmapPage: priorityCached ? 5 : priorityTarget,
         firstPostScrollCompositionPage: priorityTarget,
         firstPostScrollVisibleRequestPage:
           priorityCached ? null : priorityTarget,
         firstWorkerBitmapPage: priorityTarget,
         scrollAction: {
+          activityId: 100,
           at: 100,
           drawBoundary: 89,
+          drawInvocationBoundary: 89,
           eventId: 100,
+          readerViewportAfter: { bottom: 700, left: 0, right: 700, top: 0 },
+          readerViewportBefore: { bottom: 700, left: 0, right: 700, top: 0 },
+          scrollTopAfter: 2_000,
+          scrollTopBefore: 1_000,
+          targetGeometryAfter: { bottom: 650, left: 20, right: 620, top: 50 },
+          targetGeometryBefore: {
+            bottom: 1_600,
+            left: 20,
+            right: 620,
+            top: 800,
+          },
           targetPage: priorityTarget,
           type: "rapid-scroll-action",
         },
+        nonTargetBitmaps: [{
+          activityId: priorityCached ? 120 : 140,
+          distance: null,
+          enabled: null,
+          eventId: 103,
+          height: previewHeight,
+          identityHash: diagnosticIdentity(configuration.id, "bitmap", 103),
+          pageNumber: 5,
+          scale: previewScale,
+          type: "bitmap",
+          visible: null,
+          width: previewWidth,
+        }],
         staleNonVisibleCompositions: [],
         staleWorkerBitmaps: [],
         targetAfter: {
@@ -1742,6 +1945,7 @@ function passingEvidence() {
           canvasHeight: 0,
           canvasWidth: 0,
           distance: 1,
+          latestBitmapActivityId: 80,
           latestBitmapEventId: 80,
           latestBitmapHeight: priorityCached ? targetHeight : previewHeight,
           latestBitmapScale: priorityCached ? targetScale : previewScale,
@@ -1755,11 +1959,16 @@ function passingEvidence() {
         targetBitmapCount: priorityCached ? 0 : 1,
         targetBitmaps: priorityCached ? [] : [structuredClone(priorityBitmap)],
         targetComposition: {
+          activityId: priorityCached ? 110 : 130,
           at: 110,
           bitmapEventId: priorityBitmapEventId,
           compositionId: 90,
+          drawInvocationId: 90,
+          geometry: { bottom: 650, left: 20, right: 620, top: 50 },
+          geometryVisible: true,
           height: targetHeight,
           page: priorityTarget,
+          readerViewport: { bottom: 700, left: 0, right: 700, top: 0 },
           scale: targetScale,
           source: "worker-bitmap",
           visible: true,
@@ -4232,6 +4441,22 @@ test("marks priority in the same task as the final mounted target scroll", async
     source,
     /bitmapEventByObject\.set\(message\.bitmap, workerEvent\.eventId\)[\s\S]*bitmapEventByObject\.get\(args\[0\]\)/u,
   );
+  assert.match(
+    source,
+    /activityId: \+\+activitySequence[\s\S]*drawInvocationId: \+\+drawInvocationSequence[\s\S]*priorityProbe: currentPriorityProbe[\s\S]*queueMicrotask/u,
+  );
+  assert.match(
+    source,
+    /drawInvocationBoundary: drawInvocationSequence[\s\S]*currentPriorityProbe = \{[\s\S]*block\.scrollIntoView/u,
+  );
+  assert.match(
+    source,
+    /invocation\.priorityProbe[\s\S]*invocation\.drawInvocationId >[\s\S]*scrollAction\.drawInvocationBoundary/u,
+  );
+  assert.match(
+    source,
+    /staleBitmapCutoffActivityId = cachedTargetSatisfied[\s\S]*targetComposition\?\.activityId[\s\S]*targetBitmapAfterVisibleRequest\?\.activityId/u,
+  );
 });
 
 test("uses composition and bitmap sequence when timer samples tie", () => {
@@ -4484,8 +4709,41 @@ test("rejects each material Issue 68 acceptance regression", async (t) => {
     ["priority equal-time pre-boundary composition", (value) => {
       const priority = value.matrix[2].visibleFirst;
       priority.targetComposition.at = priority.scrollAction.at;
-      priority.targetComposition.compositionId =
-        priority.scrollAction.drawBoundary;
+      priority.targetComposition.drawInvocationId =
+        priority.scrollAction.drawInvocationBoundary;
+    }, /current viewport first/u],
+    ["priority missing action activity identity", (value) => {
+      delete value.matrix[2].visibleFirst.scrollAction.activityId;
+    }, /current viewport first/u],
+    ["priority request activity before action", (value) => {
+      value.matrix[2].visibleFirst.targetVisibleRequest.activityId = 99;
+      value.matrix[2].visibleFirst.targetRenderRequests[0].activityId = 99;
+    }, /current viewport first/u],
+    ["priority bitmap activity before request", (value) => {
+      const priority = value.matrix[2].visibleFirst;
+      priority.targetBitmapAfterVisibleRequest.activityId = 109;
+      priority.targetBitmaps[0].activityId = 109;
+    }, /current viewport first/u],
+    ["priority composition geometry misses reader", (value) => {
+      value.matrix[2].visibleFirst.targetComposition.geometry = {
+        bottom: 900,
+        left: 20,
+        right: 620,
+        top: 800,
+      };
+    }, /current viewport first/u],
+    ["priority action did not move scroll position", (value) => {
+      const action = value.matrix[2].visibleFirst.scrollAction;
+      action.scrollTopAfter = action.scrollTopBefore;
+    }, /current viewport first/u],
+    ["cached priority bitmap preempts target composition", (value) => {
+      value.matrix[0].visibleFirst.nonTargetBitmaps[0].activityId = 105;
+    }, /current viewport first/u],
+    ["render priority bitmap preempts target bitmap", (value) => {
+      value.matrix[2].visibleFirst.nonTargetBitmaps[0].activityId = 115;
+    }, /current viewport first/u],
+    ["priority missing non-target bitmap sequence", (value) => {
+      delete value.matrix[2].visibleFirst.nonTargetBitmaps;
     }, /current viewport first/u],
     ["priority non-visible composition", (value) => {
       value.matrix[2].visibleFirst.staleNonVisibleCompositions.push({
@@ -5469,6 +5727,7 @@ test("documents a headed, fresh-build-only command without launching it", async 
   assert.match(stdout, /visible browser/u);
   assert.match(stdout, /--diagnose-fallback-import/u);
   assert.match(stdout, /--diagnose-first-network-fixed-point/u);
+  assert.match(stdout, /--diagnose-reference-capture/u);
   assert.doesNotMatch(stdout, /headless/u);
 });
 
@@ -5570,6 +5829,134 @@ test("keeps the first-network diagnostic bounded and non-recording", async () =>
   assert.match(source, /pdf-sharpness-network-diagnostic\.json/u);
 });
 
+test("keeps the reference-capture diagnostic bounded and noncanonical", async () => {
+  const runner = "scripts/run-pdf-sharpness-browser-regression.mjs";
+  const freshOutput = path.join(
+    os.tmpdir(),
+    `issue-68-reference-cli-${process.pid}`,
+  );
+  await rm(freshOutput, { force: true, recursive: true });
+  await assert.rejects(
+    execFileAsync(
+      process.execPath,
+      [runner, "--diagnose-reference-capture", "--record"],
+      { cwd: path.resolve(".") },
+    ),
+    /cannot be combined with --record/u,
+  );
+  await assert.rejects(
+    execFileAsync(
+      process.execPath,
+      [runner, "--diagnose-reference-capture"],
+      { cwd: path.resolve(".") },
+    ),
+    /requires an explicit --output/u,
+  );
+  await assert.rejects(
+    execFileAsync(
+      process.execPath,
+      [
+        runner,
+        "--diagnose-reference-capture",
+        "--output",
+        "outputs/issue-68-reference-diagnostic",
+      ],
+      { cwd: path.resolve(".") },
+    ),
+    /output must be outside the source repository/u,
+  );
+  await assert.rejects(
+    execFileAsync(
+      process.execPath,
+      [
+        runner,
+        "--diagnose-reference-capture",
+        "--fixture",
+        path.join(os.tmpdir(), "private-reader-document.pdf"),
+        "--output",
+        freshOutput,
+      ],
+      { cwd: path.resolve(".") },
+    ),
+    /requires the exact repository PDF fixture/u,
+  );
+  await assert.rejects(
+    execFileAsync(
+      process.execPath,
+      [
+        runner,
+        "--diagnose-reference-capture",
+        "--diagnose-fallback-import",
+        "--output",
+        freshOutput,
+      ],
+      { cwd: path.resolve(".") },
+    ),
+    /diagnostic modes are mutually exclusive/u,
+  );
+  const existingOutput = await mkdtemp(
+    path.join(os.tmpdir(), "issue-68-reference-existing-"),
+  );
+  try {
+    await assert.rejects(
+      execFileAsync(
+        process.execPath,
+        [
+          runner,
+          "--diagnose-reference-capture",
+          "--output",
+          existingOutput,
+        ],
+        { cwd: path.resolve(".") },
+      ),
+      /fresh absent directory/u,
+    );
+  } finally {
+    await rm(existingOutput, { force: true, recursive: true });
+  }
+  await assert.rejects(
+    execFileAsync(
+      process.execPath,
+      [
+        runner,
+        "--diagnose-reference-capture",
+        "--output",
+        freshOutput,
+      ],
+      {
+        cwd: path.resolve("."),
+        env: { ...process.env, DISPLAY: "", WAYLAND_DISPLAY: "" },
+      },
+    ),
+    /requires a graphical DISPLAY or WAYLAND_DISPLAY/u,
+  );
+
+  const source = await readFile(runner, "utf8");
+  for (const step of REFERENCE_CAPTURE_DIAGNOSTIC_STEPS) {
+    assert.match(
+      source,
+      new RegExp(
+        `runReferenceCaptureDiagnosticStage\\(\\s*progress,\\s*"${step}"`,
+        "u",
+      ),
+      `${step} must bind one exact diagnostic operation`,
+    );
+  }
+  assert.match(
+    source,
+    /if \(options\.diagnoseReferenceCapture\) \{[\s\S]*runReferenceCaptureDiagnostic\(options, source\);[\s\S]*return;[\s\S]*buildProductionArtifact/u,
+  );
+  assert.match(
+    source,
+    /runBoundedDiagnosticOperation\(async \(\) => \{[\s\S]*captureStableReferenceDiagnosticCandidates[\s\S]*referenceCdp\?\.close\(\)[\s\S]*closeOwnedBrowser/u,
+  );
+  assert.match(source, /pdf-sharpness-reference-capture-diagnostic\.json/u);
+  assert.doesNotMatch(
+    buildReferenceCaptureDiagnosticReport.toString(),
+    /\bpassed\b|schemaVersion/u,
+  );
+});
+
 test("keeps the fallback-import diagnostic bounded and noncanonical", async () => {
   const runner = "scripts/run-pdf-sharpness-browser-regression.mjs";
   await assert.rejects(
@@ -5633,10 +6020,14 @@ test("keeps the fallback-import diagnostic bounded and noncanonical", async () =
 
   const source = await readFile(runner, "utf8");
   for (const step of FALLBACK_IMPORT_DIAGNOSTIC_STEPS) {
-    assert.equal(
-      source.match(new RegExp(`"${step}"`, "gu"))?.length,
-      2,
-      `${step} must appear once in the fixed enum and once at its operation`,
+    assert.match(
+      source,
+      new RegExp(
+        `runFallbackImportDiagnosticStage\\(\\s*` +
+          `(?:progress|fallbackDiagnosticProgress),\\s*"${step}"`,
+        "u",
+      ),
+      `${step} must bind one exact fallback diagnostic operation`,
     );
   }
   assert.match(

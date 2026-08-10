@@ -261,10 +261,15 @@ independently recomputed preview targets that either exactly satisfy the final
 backing without a redundant draw or upgrade through distinct bitmap/composition
 identities, current viewport priority after import-bound worker completion and
 bounded traversal of virtualized page shells. The priority boundary is recorded
-atomically with the final target scroll after mounting, and distinguishes an
-exact cache-satisfied composition with zero new target requests/bitmaps from
-one exact request/bitmap/composition chain bound to the transferred bitmap
-object. Peak canvas frames bind every composed page to a scroll-root/page-rect
+atomically with the final target scroll after mounting. One monotonic activity
+sequence covers worker events, the scroll action, and draw invocations; each
+draw also captures an invocation ID and independent page/reader geometry before
+its deferred metadata record. The proof distinguishes an exact cache-satisfied
+composition with zero new target requests/bitmaps from one exact
+request/bitmap/composition chain bound to the transferred bitmap object, and
+rejects only non-target output that overtakes the path-specific target cutoff;
+later adjacent prefetch remains recorded and allowed. Peak canvas frames bind
+every composed page to a scroll-root/page-rect
 intersection that is recomputed independently from the product visibility flag,
 cross-check both recorded maxima, and retain the exact visible page set and
 pixel sum rather than imposing a fixed page count, while the store
@@ -312,6 +317,13 @@ Its exact before/after
 stage sequence and stage-derived fixed failure category retain partial,
 privacy-safe setup hash/count/condition evidence without serializing raw
 exceptions.
+A third, reference-only diagnostic opens page 2 of the exact public fixture in
+the first desktop native-viewer configuration and retains two consecutive
+byte-identical PNG candidates plus the unchanged analyzer metrics. It starts no
+app build or server, writes only to a fresh absent external directory, binds
+the exact clean source and fixture, strips raw errors and output paths, proves
+its one owned reference browser/CDP/profile teardown, and remains a distinct
+noncanonical report that cannot satisfy acceptance.
 The independently testable acceptance contract lives in
 [`scripts/pdf-sharpness-evidence.mjs`](../scripts/pdf-sharpness-evidence.mjs),
 its fast and opt-in browser gates live in

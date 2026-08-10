@@ -72,11 +72,38 @@ privacy-safe hashes, counts, and independently derived source/model/library
 condition booleans even when a later setup step fails, rather than being
 discarded as one null result.
 
-The runner always makes a fresh production build, serves that exact artifact on
-an owned loopback Wrangler process, and opens visible Brave windows. It refuses
-an uncommitted source tree and binds the source commit/tree, reviewed-file
-hashes, runtime manifest deployment, deterministic PDF hash, screenshots, and
-JSON result. Recorded evidence accepts only the repository's deterministic PDF
+When the native PDF-viewer readiness classifier itself needs diagnosis, use
+the distinct first-desktop capture mode with a fresh, absent external output
+directory:
+
+```bash
+node scripts/run-pdf-sharpness-browser-regression.mjs \
+  --diagnose-reference-capture --output /tmp/issue-68-reference-diagnostic
+```
+
+This mode accepts only the exact public fixture, applies the first desktop
+configuration, opens page 2 in the native viewer, and retains exactly two
+consecutive byte-identical candidate PNGs. Its noncanonical `diagnostic: true`
+report binds both fixed basenames, byte counts, hashes, and the unchanged
+reference analyzer's metrics to the exact clean source commit/tree and reviewed
+file hashes. A stable candidate may deliberately report `renderedPage: false`:
+that observation is diagnosis, never Issue 68 acceptance, and the report has no
+`passed` field or acceptance schema version. Raw capture exceptions, local
+output paths, private fixtures, and browser-profile paths are never serialized;
+only a fixed stage-derived failure category and teardown booleans are retained.
+The mode starts no app server and makes no production build, but its single
+owned reference browser, CDP connection, process, and disposable profile must
+all tear down successfully. It rejects `--record`, another diagnostic mode,
+repository-resident output, an existing output directory, and any substituted
+fixture.
+
+The acceptance, network, and fallback-import paths always make a fresh
+production build, serve that exact artifact on an owned loopback Wrangler
+process, and open visible Brave windows. Every path refuses an uncommitted
+source tree. The build-backed paths additionally bind the runtime manifest
+deployment, deterministic PDF hash, screenshots, and JSON result to that exact
+source commit/tree and reviewed-file hash set. Recorded evidence accepts only
+the repository's deterministic PDF
 fixture; a private local PDF is permitted only with transient `--output`, so its
 rendered pixels cannot be committed accidentally. Reference-browser,
 app-browser, and server cleanup run as
@@ -112,15 +139,22 @@ validator additionally requires:
   scale, so no timing sleep or app-reported target stands in for either path;
 - the current viewport to compose first after a rapid scroll, with no stale
   non-visible composition and no lower-resolution overwrite. The target shell
-  is mounted before the probe, then the causal boundary is recorded in the same
-  browser task immediately before the final `scrollIntoView`, so progressive
-  traversal and already-running background work cannot be mislabeled as
-  post-scroll priority. An exact cached bitmap that already satisfies the
-  target must compose with exactly zero new target requests or bitmaps; an
-  undersized or missing bitmap must instead produce exactly one first
-  post-action visible request, exactly one later target bitmap, and the bound
-  visible composition. The composition records the actual transferred
-  `ImageBitmap` event identity rather than inferring it from equal dimensions.
+  is mounted before the probe, then one main-thread activity sequence records
+  the final scroll action, worker messages, and draw invocations. Each draw's
+  invocation ID, page/reader rectangles, product visibility, and independent
+  geometric intersection are captured synchronously; only render source and
+  scale are filled in by the deferred recorder. The action snapshots the draw
+  invocation boundary and immediately calls `scrollIntoView` in that same
+  browser task, so a draw invoked before the scroll cannot be mislabeled by a
+  later microtask. An exact cached bitmap that already satisfies the target
+  must compose with exactly zero new target requests or bitmaps, before any
+  non-target bitmap. An undersized or missing bitmap must instead produce
+  exactly one first post-action visible request, exactly one later target
+  bitmap, and the bound visible composition; only a non-target bitmap that
+  overtakes that target bitmap is stale. Later adjacent-page prefetch output is
+  retained and allowed after the applicable target cutoff. The composition
+  records the actual transferred `ImageBitmap` event identity rather than
+  inferring it from equal dimensions.
   The matrix must prove both
   paths. Before those probes, the harness requires the exact six-page worker
   model to complete and reaches distant virtualized shells through bounded
