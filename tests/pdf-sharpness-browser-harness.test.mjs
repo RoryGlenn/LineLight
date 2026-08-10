@@ -1525,6 +1525,7 @@ test("builds a noncanonical privacy-safe reference-capture diagnostic", () => {
     (value) => { value.capture.viewer.protocol = "https:"; },
     (value) => { value.capture.viewer.contentType = "text/plain"; },
     (value) => { value.capture.candidates.pop(); },
+    (value) => { value.capture.captureErrorCount = value.capture.attempts - 1; },
     (value) => { value.capture.candidates[1].sha256 = "e".repeat(64); },
     (value) => { value.capture.candidates[1].analysis.inkPixels += 1; },
     (value) => {

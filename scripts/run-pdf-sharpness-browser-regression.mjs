@@ -2151,6 +2151,7 @@ export function buildReferenceCaptureDiagnosticReport({
     capture.attempts >= 2 &&
     Number.isInteger(capture?.captureErrorCount) &&
     capture.captureErrorCount >= 0 &&
+    capture.captureErrorCount <= capture.attempts - 2 &&
     candidates.length === REFERENCE_CAPTURE_DIAGNOSTIC_CANDIDATES.length &&
     publicCandidates.every(Boolean) &&
     publicCandidates[0].attempt + 1 === publicCandidates[1].attempt &&
