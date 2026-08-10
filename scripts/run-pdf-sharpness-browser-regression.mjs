@@ -1588,6 +1588,23 @@ function sanitizeReferenceDiagnosticAnalysis(analysis) {
   const ratio = (value) =>
     Number.isFinite(value) && value >= 0 && value <= 1;
   const bounds = analysis?.pageBounds;
+  const segmentationValid =
+    analysis?.segmentationVersion === 2 &&
+    nonNegativeInteger(analysis?.substantialComponentCount) &&
+    nonNegativeInteger(analysis?.winnerWhiteArea) &&
+    nonNegativeInteger(analysis?.runnerUpWhiteArea) &&
+    (analysis.substantialComponentCount === 0
+      ? analysis.winnerWhiteArea === 0 &&
+        analysis.runnerUpWhiteArea === 0 &&
+        analysis.winnerDominanceRatio === null
+      : analysis.winnerWhiteArea > 0 &&
+        (analysis.runnerUpWhiteArea === 0
+          ? analysis.winnerDominanceRatio === null
+          : nonNegativeFinite(analysis.winnerDominanceRatio) &&
+            Math.abs(
+              analysis.winnerDominanceRatio -
+                analysis.winnerWhiteArea / analysis.runnerUpWhiteArea,
+            ) <= 1e-9));
   const boundsValid = bounds === null || (
     bounds &&
     nonNegativeFinite(bounds.height) &&
@@ -1607,6 +1624,7 @@ function sanitizeReferenceDiagnosticAnalysis(analysis) {
     !ratio(analysis?.pageWhiteRatio) ||
     analysis?.proof !== "white-page-with-rendered-ink" ||
     typeof analysis?.renderedPage !== "boolean" ||
+    !segmentationValid ||
     !boundsValid
   ) {
     return null;
@@ -1630,7 +1648,12 @@ function sanitizeReferenceDiagnosticAnalysis(analysis) {
     pageWhiteRatio: analysis.pageWhiteRatio,
     proof: analysis.proof,
     renderedPage: analysis.renderedPage,
+    runnerUpWhiteArea: analysis.runnerUpWhiteArea,
+    segmentationVersion: analysis.segmentationVersion,
+    substantialComponentCount: analysis.substantialComponentCount,
     width: analysis.width,
+    winnerDominanceRatio: analysis.winnerDominanceRatio,
+    winnerWhiteArea: analysis.winnerWhiteArea,
   };
 }
 
@@ -3303,12 +3326,6 @@ export function decodePngScreenshot(bytes) {
   return { height, pixels, width };
 }
 
-function median(values) {
-  if (values.length === 0) return 0;
-  const sorted = [...values].sort((left, right) => left - right);
-  return sorted[Math.floor(sorted.length / 2)];
-}
-
 /**
  * Prove that a screenshot contains a substantial white PDF page and multiple
  * lines of rendered ink, rather than a blank/loading viewer surface.
@@ -3326,7 +3343,12 @@ export function analyzeReferencePixels({ height, pixels, width }) {
     pageWhiteRatio: 0,
     proof: "white-page-with-rendered-ink",
     renderedPage: false,
+    runnerUpWhiteArea: 0,
+    segmentationVersion: 2,
+    substantialComponentCount: 0,
     width: Number(width) || 0,
+    winnerDominanceRatio: null,
+    winnerWhiteArea: 0,
   };
   if (
     !Number.isInteger(width) ||
@@ -3347,51 +3369,102 @@ export function analyzeReferencePixels({ height, pixels, width }) {
     pixels[offset + 1] >= 235 &&
     pixels[offset + 2] >= 235 &&
     pixels[offset + 3] >= 200;
-  const qualifyingRows = [];
-  const minimumWhitePixels = Math.max(80, Math.ceil(width * 0.45));
-  for (let y = 0; y < height; y += 1) {
-    let firstWhite = width;
-    let lastWhite = -1;
-    let whitePixels = 0;
-    for (let x = 0; x < width; x += 1) {
-      if (!isWhite((y * width + x) * 4)) continue;
-      whitePixels += 1;
-      firstWhite = Math.min(firstWhite, x);
-      lastWhite = x;
-    }
-    if (whitePixels >= minimumWhitePixels) {
-      qualifyingRows.push({ firstWhite, lastWhite, whitePixels, y });
-    }
+  const whiteMask = new Uint8Array(width * height);
+  for (let pixel = 0; pixel < whiteMask.length; pixel += 1) {
+    if (isWhite(pixel * 4)) whiteMask[pixel] = 1;
   }
-
-  let bestRows = [];
-  let currentRows = [];
-  for (const row of qualifyingRows) {
-    if (
-      currentRows.length > 0 &&
-      row.y > currentRows[currentRows.length - 1].y + 16
-    ) {
-      if (currentRows.length > bestRows.length) bestRows = currentRows;
-      currentRows = [];
+  const queue = new Int32Array(width * height);
+  const components = [];
+  for (let start = 0; start < whiteMask.length; start += 1) {
+    if (whiteMask[start] !== 1) continue;
+    whiteMask[start] = 0;
+    queue[0] = start;
+    let head = 0;
+    let tail = 1;
+    let left = start % width;
+    let right = left;
+    let top = Math.floor(start / width);
+    let bottom = top;
+    while (head < tail) {
+      const pixel = queue[head];
+      head += 1;
+      const x = pixel % width;
+      const y = Math.floor(pixel / width);
+      left = Math.min(left, x);
+      right = Math.max(right, x);
+      top = Math.min(top, y);
+      bottom = Math.max(bottom, y);
+      if (x > 0 && whiteMask[pixel - 1] === 1) {
+        whiteMask[pixel - 1] = 0;
+        queue[tail] = pixel - 1;
+        tail += 1;
+      }
+      if (x + 1 < width && whiteMask[pixel + 1] === 1) {
+        whiteMask[pixel + 1] = 0;
+        queue[tail] = pixel + 1;
+        tail += 1;
+      }
+      if (y > 0 && whiteMask[pixel - width] === 1) {
+        whiteMask[pixel - width] = 0;
+        queue[tail] = pixel - width;
+        tail += 1;
+      }
+      if (y + 1 < height && whiteMask[pixel + width] === 1) {
+        whiteMask[pixel + width] = 0;
+        queue[tail] = pixel + width;
+        tail += 1;
+      }
     }
-    currentRows.push(row);
+    components.push({
+      bottom,
+      height: bottom - top + 1,
+      left,
+      right,
+      top,
+      whiteArea: tail,
+      width: right - left + 1,
+    });
   }
-  if (currentRows.length > bestRows.length) bestRows = currentRows;
+  components.sort((left, right) =>
+    right.whiteArea - left.whiteArea ||
+    left.top - right.top ||
+    left.left - right.left ||
+    left.bottom - right.bottom ||
+    left.right - right.right
+  );
 
+  const minimumPageWidth = Math.max(120, Math.ceil(width * 0.25));
   const minimumPageHeight = Math.max(80, Math.ceil(height * 0.25));
-  if (bestRows.length < minimumPageHeight) return empty;
-  const pageLeft = median(bestRows.map((row) => row.firstWhite));
-  const pageRight = median(bestRows.map((row) => row.lastWhite));
-  const pageTop = bestRows[0].y;
-  const pageBottom = bestRows[bestRows.length - 1].y;
-  const pageWidth = pageRight - pageLeft + 1;
-  const pageHeight = pageBottom - pageTop + 1;
+  const substantialComponents = components.filter((component) =>
+    component.width >= minimumPageWidth &&
+    component.height >= minimumPageHeight
+  );
+  const winner = substantialComponents[0] ?? null;
+  const runnerUp = winner
+    ? components.find((component) => component !== winner) ?? null
+    : null;
+  const segmentation = {
+    runnerUpWhiteArea: runnerUp?.whiteArea ?? 0,
+    segmentationVersion: 2,
+    substantialComponentCount: substantialComponents.length,
+    winnerDominanceRatio:
+      winner && runnerUp
+        ? winner.whiteArea / runnerUp.whiteArea
+        : null,
+    winnerWhiteArea: winner?.whiteArea ?? 0,
+  };
   if (
-    pageWidth < Math.max(120, Math.ceil(width * 0.25)) ||
-    pageHeight < minimumPageHeight
+    !winner ||
+    (runnerUp && winner.whiteArea <= runnerUp.whiteArea)
   ) {
-    return empty;
+    return { ...empty, ...segmentation };
   }
+  const pageLeft = winner.left;
+  const pageRight = winner.right;
+  const pageTop = winner.top;
+  const pageBottom = winner.bottom;
+  const pageWidth = winner.width;
+  const pageHeight = winner.height;
 
   const insetX = Math.max(2, Math.floor(pageWidth * 0.01));
   const insetY = Math.max(2, Math.floor(pageHeight * 0.01));
@@ -3401,7 +3474,9 @@ export function analyzeReferencePixels({ height, pixels, width }) {
   const interiorBottom = pageBottom - insetY;
   const interiorWidth = interiorRight - interiorLeft + 1;
   const interiorHeight = interiorBottom - interiorTop + 1;
-  if (interiorWidth <= 0 || interiorHeight <= 0) return empty;
+  if (interiorWidth <= 0 || interiorHeight <= 0) {
+    return { ...empty, ...segmentation };
+  }
 
   let inkMaximumX = -1;
   let inkMinimumX = width;
@@ -3460,6 +3535,7 @@ export function analyzeReferencePixels({ height, pixels, width }) {
       inkRatio <= PDF_SHARPNESS_REFERENCE_MAX_INK_RATIO &&
       inkRowBands >= PDF_SHARPNESS_REFERENCE_MIN_INK_ROW_BANDS &&
       inkSpanRatio >= PDF_SHARPNESS_REFERENCE_MIN_INK_SPAN_RATIO,
+    ...segmentation,
     width,
   };
 }

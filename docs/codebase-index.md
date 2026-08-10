@@ -319,10 +319,13 @@ privacy-safe setup hash/count/condition evidence without serializing raw
 exceptions.
 A third, reference-only diagnostic opens page 2 of the exact public fixture in
 the first desktop native-viewer configuration and retains two consecutive
-byte-identical PNG candidates plus the unchanged analyzer metrics. It starts no
-app build or server, writes only to a fresh absent external directory, binds
-the exact clean source and fixture, strips raw errors and output paths, proves
-its one owned reference browser/CDP/profile teardown, and remains a distinct
+byte-identical PNG candidates plus the analyzer's versioned segmentation
+metrics. The analyzer forms deterministic 4-connected components with the
+existing white predicate, requires one uniquely largest substantial white page,
+then preserves the existing inset and rendered-ink thresholds. It starts no app
+build or server, writes only to a fresh absent external directory, binds the
+exact clean source and fixture, strips raw errors and output paths, proves its
+one owned reference browser/CDP/profile teardown, and remains a distinct
 noncanonical report that cannot satisfy acceptance.
 The independently testable acceptance contract lives in
 [`scripts/pdf-sharpness-evidence.mjs`](../scripts/pdf-sharpness-evidence.mjs),

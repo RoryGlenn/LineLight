@@ -84,9 +84,10 @@ node scripts/run-pdf-sharpness-browser-regression.mjs \
 This mode accepts only the exact public fixture, applies the first desktop
 configuration, opens page 2 in the native viewer, and retains exactly two
 consecutive byte-identical candidate PNGs. Its noncanonical `diagnostic: true`
-report binds both fixed basenames, byte counts, hashes, and the unchanged
-reference analyzer's metrics to the exact clean source commit/tree and reviewed
-file hashes. A stable candidate may deliberately report `renderedPage: false`:
+report binds both fixed basenames, byte counts, hashes, and the reference
+analyzer's versioned segmentation metrics to the exact clean source
+commit/tree and reviewed file hashes. A stable candidate may deliberately
+report `renderedPage: false`:
 that observation is diagnosis, never Issue 68 acceptance, and the report has no
 `passed` field or acceptance schema version. Raw capture exceptions, local
 output paths, private fixtures, and browser-profile paths are never serialized;
@@ -124,9 +125,17 @@ preventing desktop zoom from being counted twice.
 Each scenario pairs a screenshot of the original local PDF in Brave's PDF
 viewer with LineLight's imported rendering of the same hashed page. A reference
 screenshot is accepted only after decoded pixels prove a substantial white page
-with multiple, broadly distributed lines of rendered ink; a fixed delay,
-nonempty PNG, blank page, or loading surface cannot satisfy readiness. The JSON
-validator additionally requires:
+with multiple, broadly distributed lines of rendered ink. The readiness
+classifier uses the unchanged white-pixel predicate to form deterministic
+4-connected components, retains only components meeting the existing minimum
+page width and height, and requires one uniquely largest white-area component.
+Its version-2 proof records the substantial-component count, winner and
+runner-up white areas, and their exact dominance ratio before applying the
+unchanged 1% inset and five rendered-ink thresholds. A disconnected white
+thumbnail rail, toolbar, blank page, clipped page, spinner, loading surface, or
+ambiguous tied components therefore cannot satisfy readiness. The JSON
+validator independently checks those segmentation metrics and additionally
+requires:
 
 - an adjacent page cached at the independently derived, safety-capped preview
   target of at most 1.25x, then actually drawn into its connected visible

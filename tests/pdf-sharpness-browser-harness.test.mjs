@@ -148,17 +148,22 @@ const passingReferenceDiagnosticSource = () => ({
 
 const passingReferenceAnalysis = () => ({
   height: 900,
-  inkPixels: 117_209,
-  inkRatio: 0.1433617710913372,
-  inkRowBands: 1,
-  inkSpanRatio: 1,
-  pageBounds: { height: 841, width: 1_011, x: 89, y: 59 },
-  pagePixels: 817_575,
-  pageWhitePixels: 696_249,
-  pageWhiteRatio: 0.851602605265572,
+  inkPixels: 9_106,
+  inkRatio: 0.014523125996810207,
+  inkRowBands: 4,
+  inkSpanRatio: 0.6855263157894737,
+  pageBounds: { height: 841, width: 774, x: 306, y: 59 },
+  pagePixels: 627_000,
+  pageWhitePixels: 614_930,
+  pageWhiteRatio: 0.980749601275917,
   proof: "white-page-with-rendered-ink",
-  renderedPage: false,
+  renderedPage: true,
+  runnerUpWhiteArea: 14_947,
+  segmentationVersion: 2,
+  substantialComponentCount: 1,
   width: 1_100,
+  winnerDominanceRatio: 42.63196628085903,
+  winnerWhiteArea: 637_220,
 });
 
 function artifact(name, digit) {
@@ -1400,7 +1405,7 @@ test("builds a noncanonical privacy-safe reference-capture diagnostic", () => {
   assert.equal(report.mode, "reference-capture");
   assert.deepEqual(report.failures, []);
   assert.equal(report.artifacts.candidates.length, 2);
-  assert.equal(report.artifacts.candidates[0].analysis.renderedPage, false);
+  assert.equal(report.artifacts.candidates[0].analysis.renderedPage, true);
   assert.deepEqual(
     report.artifacts.candidates.map(({ artifact: value }) => value.path),
     [...REFERENCE_CAPTURE_DIAGNOSTIC_CANDIDATES],
@@ -1420,6 +1425,12 @@ test("builds a noncanonical privacy-safe reference-capture diagnostic", () => {
     (value) => { value.capture.candidates.pop(); },
     (value) => { value.capture.candidates[1].sha256 = "e".repeat(64); },
     (value) => { value.capture.candidates[1].analysis.inkPixels += 1; },
+    (value) => {
+      delete value.capture.candidates[1].analysis.segmentationVersion;
+    },
+    (value) => {
+      value.capture.candidates[1].analysis.winnerDominanceRatio += 1;
+    },
     (value) => { value.capture.candidates[1].attempt = 4; },
     (value) => { value.teardown.reference.profileRemoved = false; },
   ];
@@ -1818,7 +1829,12 @@ function passingEvidence() {
           pageWhiteRatio: 0.9,
           proof: "white-page-with-rendered-ink",
           renderedPage: true,
+          runnerUpWhiteArea: 10_000,
+          segmentationVersion: 2,
+          substantialComponentCount: 1,
           width: 1200,
+          winnerDominanceRatio: 72,
+          winnerWhiteArea: 720_000,
         },
         referenceScreenshot,
         sourceSha256: SHA,
@@ -4656,6 +4672,38 @@ test("rejects each material Issue 68 acceptance regression", async (t) => {
       value.matrix[0].comparison.referenceReadiness.inkPixels = 0;
       value.matrix[0].comparison.referenceReadiness.inkRatio = 0;
     }, /rendered-page pixel proof/u],
+    ["missing reference segmentation version", (value) => {
+      delete value.matrix[0].comparison.referenceReadiness.segmentationVersion;
+    }, /rendered-page pixel proof/u],
+    ["forged reference proof", (value) => {
+      value.matrix[0].comparison.referenceReadiness.proof =
+        "white-page-with-any-ink";
+    }, /rendered-page pixel proof/u],
+    ["missing reference winner area", (value) => {
+      delete value.matrix[0].comparison.referenceReadiness.winnerWhiteArea;
+    }, /rendered-page pixel proof/u],
+    ["missing reference runner-up area", (value) => {
+      delete value.matrix[0].comparison.referenceReadiness.runnerUpWhiteArea;
+    }, /rendered-page pixel proof/u],
+    ["missing reference substantial count", (value) => {
+      delete value.matrix[0].comparison.referenceReadiness
+        .substantialComponentCount;
+    }, /rendered-page pixel proof/u],
+    ["missing reference dominance", (value) => {
+      delete value.matrix[0].comparison.referenceReadiness
+        .winnerDominanceRatio;
+    }, /rendered-page pixel proof/u],
+    ["forged reference substantial count", (value) => {
+      value.matrix[0].comparison.referenceReadiness.substantialComponentCount = 0;
+    }, /rendered-page pixel proof/u],
+    ["forged reference winner area", (value) => {
+      const readiness = value.matrix[0].comparison.referenceReadiness;
+      readiness.winnerWhiteArea = readiness.runnerUpWhiteArea;
+      readiness.winnerDominanceRatio = 1;
+    }, /rendered-page pixel proof/u],
+    ["forged reference dominance", (value) => {
+      value.matrix[0].comparison.referenceReadiness.winnerDominanceRatio += 1;
+    }, /rendered-page pixel proof/u],
     ["stale priority", (value) => {
       value.matrix[0].visibleFirst.firstPostScrollCompositionPage = 3;
     }, /current viewport first/u],
@@ -5398,74 +5446,167 @@ test("decodes CDP-style RGBA PNG scanlines for reference analysis", () => {
   );
 });
 
-test("requires rendered ink on a substantial reference PDF page", () => {
-  const width = 240;
-  const height = 180;
-  const createPixels = (withInk) => {
-    const pixels = new Uint8ClampedArray(width * height * 4);
-    for (let offset = 0; offset < pixels.length; offset += 4) {
-      pixels[offset] = 70;
-      pixels[offset + 1] = 70;
-      pixels[offset + 2] = 70;
+function createReferencePixels(width, height, value = 70) {
+  const pixels = new Uint8ClampedArray(width * height * 4);
+  for (let offset = 0; offset < pixels.length; offset += 4) {
+    pixels[offset] = value;
+    pixels[offset + 1] = value;
+    pixels[offset + 2] = value;
+    pixels[offset + 3] = 255;
+  }
+  return pixels;
+}
+
+function paintReferenceRectangle(
+  pixels,
+  width,
+  { height, value, width: rectangleWidth, x, y },
+) {
+  for (let row = y; row < y + height; row += 1) {
+    for (let column = x; column < x + rectangleWidth; column += 1) {
+      const offset = (row * width + column) * 4;
+      pixels[offset] = value;
+      pixels[offset + 1] = value;
+      pixels[offset + 2] = value;
       pixels[offset + 3] = 255;
     }
-    for (let y = 20; y < 170; y += 1) {
-      for (let x = 25; x < 215; x += 1) {
-        const offset = (y * width + x) * 4;
-        pixels[offset] = 250;
-        pixels[offset + 1] = 250;
-        pixels[offset + 2] = 250;
-        pixels[offset + 3] = 255;
-      }
-    }
-    if (withInk) {
-      for (const top of [45, 75, 105]) {
-        for (let y = top; y < top + 4; y += 1) {
-          for (let x = 50; x < 185; x += 1) {
-            const offset = (y * width + x) * 4;
-            pixels[offset] = 30;
-            pixels[offset + 1] = 30;
-            pixels[offset + 2] = 30;
-          }
-        }
-      }
-    }
+  }
+}
+
+test("segments a rendered PDF page from disconnected viewer white stripes", () => {
+  const width = 400;
+  const height = 300;
+  const pixels = createReferencePixels(width, height);
+  paintReferenceRectangle(pixels, width, {
+    height: 270,
+    value: 250,
+    width: 90,
+    x: 10,
+    y: 20,
+  });
+  paintReferenceRectangle(pixels, width, {
+    height: 250,
+    value: 250,
+    width: 240,
+    x: 140,
+    y: 30,
+  });
+  for (const y of [80, 120, 160, 200]) {
+    paintReferenceRectangle(pixels, width, {
+      height: 4,
+      value: 30,
+      width: 160,
+      x: 180,
+      y,
+    });
+  }
+
+  const rendered = analyzeReferencePixels({ height, pixels, width });
+  assert.equal(rendered.segmentationVersion, 2);
+  assert.equal(rendered.proof, "white-page-with-rendered-ink");
+  assert.equal(rendered.substantialComponentCount, 1);
+  assert.deepEqual(
+    rendered.pageBounds,
+    { height: 250, width: 240, x: 140, y: 30 },
+  );
+  assert.equal(rendered.runnerUpWhiteArea, 90 * 270);
+  assert.equal(
+    rendered.winnerDominanceRatio,
+    rendered.winnerWhiteArea / rendered.runnerUpWhiteArea,
+  );
+  assert.equal(rendered.renderedPage, true);
+  assert.ok(rendered.inkRowBands >= 4);
+  assert.ok(rendered.inkSpanRatio > 0.5);
+});
+
+test("rejects blank pages, spinners, stripes, toolbars, and clipped pages", () => {
+  const width = 240;
+  const height = 180;
+  const createPage = () => {
+    const pixels = createReferencePixels(width, height);
+    paintReferenceRectangle(pixels, width, {
+      height: 150,
+      value: 250,
+      width: 190,
+      x: 25,
+      y: 20,
+    });
     return pixels;
   };
 
-  const rendered = analyzeReferencePixels({
-    height,
-    pixels: createPixels(true),
-    width,
-  });
-  assert.equal(rendered.renderedPage, true);
-  assert.ok(rendered.inkRowBands >= 3);
-  assert.ok(rendered.inkSpanRatio > 0.5);
-
   const blank = analyzeReferencePixels({
     height,
-    pixels: createPixels(false),
+    pixels: createPage(),
     width,
   });
   assert.equal(blank.renderedPage, false);
   assert.equal(blank.inkPixels, 0);
 
-  const loadingPixels = createPixels(false);
-  for (let y = 85; y < 105; y += 1) {
-    for (let x = 110; x < 130; x += 1) {
-      const offset = (y * width + x) * 4;
-      loadingPixels[offset] = 30;
-      loadingPixels[offset + 1] = 30;
-      loadingPixels[offset + 2] = 30;
-    }
-  }
-  const loading = analyzeReferencePixels({
+  const spinnerPixels = createPage();
+  paintReferenceRectangle(spinnerPixels, width, {
+    height: 20,
+    value: 30,
+    width: 20,
+    x: 110,
+    y: 85,
+  });
+  const spinner = analyzeReferencePixels({
     height,
-    pixels: loadingPixels,
+    pixels: spinnerPixels,
     width,
   });
-  assert.ok(loading.inkPixels >= 100);
-  assert.equal(loading.renderedPage, false);
+  assert.ok(spinner.inkPixels >= 100);
+  assert.equal(spinner.inkRowBands, 1);
+  assert.equal(spinner.renderedPage, false);
+
+  for (const rectangle of [
+    { height: 180, width: 80, x: 0, y: 0 },
+    { height: 60, width: 240, x: 0, y: 0 },
+    { height: 79, width: 180, x: 20, y: 20 },
+  ]) {
+    const pixels = createReferencePixels(width, height);
+    paintReferenceRectangle(pixels, width, {
+      ...rectangle,
+      value: 250,
+    });
+    const result = analyzeReferencePixels({ height, pixels, width });
+    assert.equal(result.substantialComponentCount, 0);
+    assert.equal(result.pageBounds, null);
+    assert.equal(result.renderedPage, false);
+  }
+});
+
+test("fails closed when white-page components are absent or tied", () => {
+  const absent = analyzeReferencePixels({
+    height: 180,
+    pixels: createReferencePixels(240, 180),
+    width: 240,
+  });
+  assert.equal(absent.substantialComponentCount, 0);
+  assert.equal(absent.winnerWhiteArea, 0);
+  assert.equal(absent.runnerUpWhiteArea, 0);
+  assert.equal(absent.winnerDominanceRatio, null);
+  assert.equal(absent.renderedPage, false);
+
+  const width = 500;
+  const height = 300;
+  const pixels = createReferencePixels(width, height);
+  for (const x of [30, 290]) {
+    paintReferenceRectangle(pixels, width, {
+      height: 200,
+      value: 250,
+      width: 180,
+      x,
+      y: 50,
+    });
+  }
+  const tied = analyzeReferencePixels({ height, pixels, width });
+  assert.equal(tied.substantialComponentCount, 2);
+  assert.equal(tied.winnerWhiteArea, 36_000);
+  assert.equal(tied.runnerUpWhiteArea, 36_000);
+  assert.equal(tied.winnerDominanceRatio, 1);
+  assert.equal(tied.pageBounds, null);
+  assert.equal(tied.renderedPage, false);
 });
 
 test("binds fallback delay to a real attempt instead of a caller page", async () => {

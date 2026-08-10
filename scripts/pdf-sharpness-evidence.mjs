@@ -490,9 +490,34 @@ export function validatePdfSharpnessEvidence(evidence) {
     }
     const referenceReadiness = comparison?.referenceReadiness;
     const pageBounds = referenceReadiness?.pageBounds;
+    const minimumReferencePageWidth = Number.isInteger(referenceReadiness?.width)
+      ? Math.max(120, Math.ceil(referenceReadiness.width * 0.25))
+      : Number.POSITIVE_INFINITY;
+    const minimumReferencePageHeight = Number.isInteger(referenceReadiness?.height)
+      ? Math.max(80, Math.ceil(referenceReadiness.height * 0.25))
+      : Number.POSITIVE_INFINITY;
+    const runnerUpWhiteArea = referenceReadiness?.runnerUpWhiteArea;
+    const winnerWhiteArea = referenceReadiness?.winnerWhiteArea;
+    const winnerDominanceValid = runnerUpWhiteArea === 0
+      ? referenceReadiness?.winnerDominanceRatio === null
+      : finite(referenceReadiness?.winnerDominanceRatio) &&
+        referenceReadiness.winnerDominanceRatio > 1 &&
+        closeTo(
+          referenceReadiness.winnerDominanceRatio,
+          winnerWhiteArea / runnerUpWhiteArea,
+          1e-9,
+        );
     if (
       referenceReadiness?.renderedPage !== true ||
       referenceReadiness?.proof !== "white-page-with-rendered-ink" ||
+      referenceReadiness?.segmentationVersion !== 2 ||
+      !Number.isInteger(referenceReadiness?.substantialComponentCount) ||
+      referenceReadiness.substantialComponentCount < 1 ||
+      !Number.isInteger(winnerWhiteArea) ||
+      winnerWhiteArea < 1 ||
+      !nonNegativeInteger(runnerUpWhiteArea) ||
+      winnerWhiteArea <= runnerUpWhiteArea ||
+      !winnerDominanceValid ||
       !Number.isInteger(referenceReadiness?.attempts) ||
       referenceReadiness.attempts < 1 ||
       !Number.isInteger(referenceReadiness?.width) ||
@@ -505,13 +530,20 @@ export function validatePdfSharpnessEvidence(evidence) {
       !Number.isInteger(pageBounds?.height) ||
       pageBounds.width < 1 ||
       pageBounds.height < 1 ||
+      pageBounds.width < minimumReferencePageWidth ||
+      pageBounds.height < minimumReferencePageHeight ||
       pageBounds.x + pageBounds.width > referenceReadiness.width ||
       pageBounds.y + pageBounds.height > referenceReadiness.height ||
+      winnerWhiteArea > pageBounds.width * pageBounds.height ||
+      runnerUpWhiteArea > referenceReadiness.width * referenceReadiness.height ||
+      (referenceReadiness.substantialComponentCount > 1 &&
+        runnerUpWhiteArea < 1) ||
       !Number.isInteger(referenceReadiness?.pagePixels) ||
       referenceReadiness.pagePixels < 1 ||
       referenceReadiness.pagePixels > pageBounds.width * pageBounds.height ||
       !nonNegativeInteger(referenceReadiness?.pageWhitePixels) ||
       referenceReadiness.pageWhitePixels > referenceReadiness.pagePixels ||
+      referenceReadiness.pageWhitePixels > winnerWhiteArea ||
       !finite(referenceReadiness?.pageWhiteRatio) ||
       referenceReadiness.pageWhiteRatio <
         PDF_SHARPNESS_REFERENCE_MIN_WHITE_RATIO ||
