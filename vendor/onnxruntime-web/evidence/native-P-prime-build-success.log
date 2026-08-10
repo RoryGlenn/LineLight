@@ -1,0 +1,1832 @@
++zsh:5> export PATH=/tmp/issue55-build/vcpkg/downloads/tools/ninja/1.12.1-linux:/tmp/issue55-build/tools/node-v20.19.4-linux-x64/bin:/tmp/issue55-build/tools/cmake-3.31.6-linux-x86_64/bin:/home/ubuntu/.codex/tmp/arg0/codex-arg0OZjOQa:/home/ubuntu/.local/bin:/home/ubuntu/.asdf/shims:/home/ubuntu/repos/stripe-cli:/home/ubuntu/bin:/usr/local/go/bin:/home/ubuntu/.local/share/pnpm:/home/ubuntu/.atuin/bin:/home/ubuntu/.local/share/solana/install/active_release/bin:/home/ubuntu/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin:/home/ubuntu/.vscode/extensions/openai.chatgpt-26.803.41515-linux-x64/bin/linux-x86_64
++zsh:6> export VCPKG_INSTALLATION_ROOT=/tmp/issue55-build/vcpkg
++zsh:7> python3.12 tools/ci_build/build.py --build_dir /tmp/issue55-build/native-P-prime --config Release --update --build --parallel 32 --use_vcpkg --skip_submodule_sync --cmake_generator Ninja --target onnxruntime_test_all
+2026-08-09 16:27:00,669 tools_python_utils [INFO] - flatbuffers module is not installed. parse_config will not be available
+2026-08-09 16:27:00,673 build [DEBUG] - Command line arguments:
+  --build_dir /tmp/issue55-build/native-P-prime --config Release --update --build --parallel 32 --use_vcpkg --skip_submodule_sync --cmake_generator Ninja --target onnxruntime_test_all
+2026-08-09 16:27:00,676 build [INFO] - Build started
+2026-08-09 16:27:00,676 build [INFO] - Generating CMake build tree
+2026-08-09 16:27:00,684 build [INFO] - /tmp/issue55-build/tools/cmake-3.31.6-linux-x86_64/bin/cmake /tmp/issue55-build/onnxruntime-final-ack/cmake -Donnxruntime_ENABLE_EXTERNAL_CUSTOM_OP_SCHEMAS=OFF -Donnxruntime_RUN_ONNX_TESTS=OFF -Donnxruntime_GENERATE_TEST_REPORTS=ON -DPython_EXECUTABLE=/usr/bin/python3.12 -Donnxruntime_USE_VCPKG=ON -Donnxruntime_USE_MIMALLOC=OFF -Donnxruntime_ENABLE_PYTHON=OFF -Donnxruntime_BUILD_CSHARP=OFF -Donnxruntime_BUILD_JAVA=OFF -Donnxruntime_BUILD_NODEJS=OFF -Donnxruntime_BUILD_OBJC=OFF -Donnxruntime_BUILD_SHARED_LIB=OFF -Donnxruntime_BUILD_APPLE_FRAMEWORK=OFF -Donnxruntime_USE_DNNL=OFF -Donnxruntime_USE_NNAPI_BUILTIN=OFF -Donnxruntime_USE_VSINPU=OFF -Donnxruntime_USE_RKNPU=OFF -Donnxruntime_ENABLE_MICROSOFT_INTERNAL=OFF -Donnxruntime_USE_VITISAI=OFF -Donnxruntime_USE_TENSORRT=OFF -Donnxruntime_USE_TENSORRT_BUILTIN_PARSER=ON -Donnxruntime_USE_TENSORRT_INTERFACE=OFF -Donnxruntime_USE_CUDA_INTERFACE=OFF -Donnxruntime_USE_OPENVINO_INTERFACE=OFF -Donnxruntime_USE_VITISAI_INTERFACE=OFF -Donnxruntime_USE_QNN_INTERFACE=OFF -Donnxruntime_USE_MIGRAPHX=OFF -Donnxruntime_DISABLE_CONTRIB_OPS=OFF -Donnxruntime_DISABLE_ML_OPS=OFF -Donnxruntime_DISABLE_RTTI=OFF -Donnxruntime_DISABLE_EXCEPTIONS=OFF -Donnxruntime_MINIMAL_BUILD=OFF -Donnxruntime_EXTENDED_MINIMAL_BUILD=OFF -Donnxruntime_MINIMAL_BUILD_CUSTOM_OPS=OFF -Donnxruntime_REDUCED_OPS_BUILD=OFF -Donnxruntime_BUILD_MS_EXPERIMENTAL_OPS=OFF -Donnxruntime_ENABLE_LTO=OFF -Donnxruntime_USE_ACL=OFF -Donnxruntime_USE_ARMNN=OFF -Donnxruntime_ARMNN_RELU_USE_CPU=ON -Donnxruntime_ARMNN_BN_USE_CPU=ON -Donnxruntime_USE_JSEP=OFF -Donnxruntime_USE_WEBGPU=OFF -Donnxruntime_USE_EXTERNAL_DAWN=OFF -Donnxruntime_ENABLE_NVTX_PROFILE=OFF -Donnxruntime_ENABLE_TRAINING=OFF -Donnxruntime_ENABLE_TRAINING_OPS=OFF -Donnxruntime_ENABLE_TRAINING_APIS=OFF -Donnxruntime_ENABLE_CPU_FP16_OPS=OFF -Donnxruntime_USE_NCCL=OFF -Donnxruntime_BUILD_BENCHMARKS=OFF -Donnxruntime_USE_ROCM=OFF -Donnxruntime_GCOV_COVERAGE=OFF -Donnxruntime_ENABLE_MEMORY_PROFILE=OFF -Donnxruntime_ENABLE_CUDA_LINE_NUMBER_INFO=OFF -Donnxruntime_USE_CUDA_NHWC_OPS=OFF -Donnxruntime_BUILD_WEBASSEMBLY_STATIC_LIB=OFF -Donnxruntime_ENABLE_WEBASSEMBLY_EXCEPTION_CATCHING=ON -Donnxruntime_ENABLE_WEBASSEMBLY_API_EXCEPTION_CATCHING=OFF -Donnxruntime_ENABLE_WEBASSEMBLY_EXCEPTION_THROWING=ON -Donnxruntime_WEBASSEMBLY_RUN_TESTS_IN_BROWSER=OFF -Donnxruntime_ENABLE_WEBASSEMBLY_THREADS=OFF -Donnxruntime_ENABLE_WEBASSEMBLY_MEMORY64=OFF -Donnxruntime_ENABLE_WEBASSEMBLY_DEBUG_INFO=OFF -Donnxruntime_ENABLE_WEBASSEMBLY_PROFILING=OFF -Donnxruntime_ENABLE_LAZY_TENSOR=OFF -Donnxruntime_ENABLE_CUDA_PROFILING=OFF -Donnxruntime_ENABLE_ROCM_PROFILING=OFF -Donnxruntime_USE_XNNPACK=OFF -Donnxruntime_USE_WEBNN=OFF -Donnxruntime_USE_CANN=OFF -Donnxruntime_USE_TRITON_KERNEL=OFF -Donnxruntime_DISABLE_FLOAT8_TYPES=OFF -Donnxruntime_DISABLE_SPARSE_TENSORS=OFF -Donnxruntime_DISABLE_OPTIONAL_TYPE=OFF -Donnxruntime_CUDA_MINIMAL=OFF -Donnxruntime_USE_KLEIDIAI=ON -DCMAKE_TOOLCHAIN_FILE=/tmp/issue55-build/vcpkg/scripts/buildsystems/vcpkg.cmake -DVCPKG_INSTALL_OPTIONS=--x-feature=tests;--overlay-triplets=/tmp/issue55-build/native-P-prime/default -G Ninja -DCMAKE_BUILD_TYPE=Release
+CMake Deprecation Warning at CMakeLists.txt:9 (cmake_policy):
+  The OLD behavior for policy CMP0104 will be removed from a future version
+  of CMake.
+
+  The cmake-policies(7) manual explains that the OLD behaviors of all
+  policies are deprecated and that a policy should be set to OLD only under
+  specific short-term circumstances.  Projects should be ported to the NEW
+  behavior and not rely on setting a policy to OLD.
+
+
+-- Running vcpkg install
+Detecting compiler hash for triplet x64-linux...
+Compiler found: /usr/bin/c++
+All requested packages are currently installed.
+Total install time: 125 us
+abseil provides CMake targets:
+
+  # this is heuristically generated, and may not be correct
+  find_package(absl CONFIG REQUIRED)
+  # note: 186 additional targets are not displayed.
+  target_link_libraries(main PRIVATE absl::any absl::log absl::base absl::bits)
+
+abseil provides pkg-config modules:
+
+  # Abseil absl_check library
+  absl_absl_check
+
+  # Abseil absl_log library
+  absl_absl_log
+
+  # Abseil absl_vlog_is_on library
+  absl_absl_vlog_is_on
+
+  # Abseil algorithm library
+  absl_algorithm
+
+  # Abseil algorithm_container library
+  absl_algorithm_container
+
+  # Abseil any library
+  absl_any
+
+  # Abseil any_invocable library
+  absl_any_invocable
+
+  # Abseil atomic_hook library
+  absl_atomic_hook
+
+  # Abseil bad_any_cast library
+  absl_bad_any_cast
+
+  # Abseil bad_any_cast_impl library
+  absl_bad_any_cast_impl
+
+  # Abseil bad_optional_access library
+  absl_bad_optional_access
+
+  # Abseil bad_variant_access library
+  absl_bad_variant_access
+
+  # Abseil base library
+  absl_base
+
+  # Abseil base_internal library
+  absl_base_internal
+
+  # Abseil bind_front library
+  absl_bind_front
+
+  # Abseil bits library
+  absl_bits
+
+  # Abseil bounded_utf8_length_sequence library
+  absl_bounded_utf8_length_sequence
+
+  # Abseil btree library
+  absl_btree
+
+  # Abseil charset library
+  absl_charset
+
+  # Abseil check library
+  absl_check
+
+  # Abseil city library
+  absl_city
+
+  # Abseil civil_time library
+  absl_civil_time
+
+  # Abseil cleanup library
+  absl_cleanup
+
+  # Abseil cleanup_internal library
+  absl_cleanup_internal
+
+  # Abseil common_policy_traits library
+  absl_common_policy_traits
+
+  # Abseil compare library
+  absl_compare
+
+  # Abseil compressed_tuple library
+  absl_compressed_tuple
+
+  # Abseil config library
+  absl_config
+
+  # Abseil container_common library
+  absl_container_common
+
+  # Abseil container_memory library
+  absl_container_memory
+
+  # Abseil cord library
+  absl_cord
+
+  # Abseil cord_internal library
+  absl_cord_internal
+
+  # Abseil cordz_functions library
+  absl_cordz_functions
+
+  # Abseil cordz_handle library
+  absl_cordz_handle
+
+  # Abseil cordz_info library
+  absl_cordz_info
+
+  # Abseil cordz_sample_token library
+  absl_cordz_sample_token
+
+  # Abseil cordz_statistics library
+  absl_cordz_statistics
+
+  # Abseil cordz_update_scope library
+  absl_cordz_update_scope
+
+  # Abseil cordz_update_tracker library
+  absl_cordz_update_tracker
+
+  # Abseil core_headers library
+  absl_core_headers
+
+  # Abseil crc32c library
+  absl_crc32c
+
+  # Abseil crc_cord_state library
+  absl_crc_cord_state
+
+  # Abseil crc_cpu_detect library
+  absl_crc_cpu_detect
+
+  # Abseil crc_internal library
+  absl_crc_internal
+
+  # Abseil debugging library
+  absl_debugging
+
+  # Abseil debugging_internal library
+  absl_debugging_internal
+
+  # Abseil decode_rust_punycode library
+  absl_decode_rust_punycode
+
+  # Abseil demangle_internal library
+  absl_demangle_internal
+
+  # Abseil demangle_rust library
+  absl_demangle_rust
+
+  # Abseil die_if_null library
+  absl_die_if_null
+
+  # Abseil dynamic_annotations library
+  absl_dynamic_annotations
+
+  # Abseil endian library
+  absl_endian
+
+  # Abseil errno_saver library
+  absl_errno_saver
+
+  # Abseil examine_stack library
+  absl_examine_stack
+
+  # Abseil exponential_biased library
+  absl_exponential_biased
+
+  # Abseil failure_signal_handler library
+  absl_failure_signal_handler
+
+  # Abseil fast_type_id library
+  absl_fast_type_id
+
+  # Abseil fixed_array library
+  absl_fixed_array
+
+  # Abseil flags library
+  absl_flags
+
+  # Abseil flags_commandlineflag library
+  absl_flags_commandlineflag
+
+  # Abseil flags_commandlineflag_internal library
+  absl_flags_commandlineflag_internal
+
+  # Abseil flags_config library
+  absl_flags_config
+
+  # Abseil flags_internal library
+  absl_flags_internal
+
+  # Abseil flags_marshalling library
+  absl_flags_marshalling
+
+  # Abseil flags_parse library
+  absl_flags_parse
+
+  # Abseil flags_path_util library
+  absl_flags_path_util
+
+  # Abseil flags_private_handle_accessor library
+  absl_flags_private_handle_accessor
+
+  # Abseil flags_program_name library
+  absl_flags_program_name
+
+  # Abseil flags_reflection library
+  absl_flags_reflection
+
+  # Abseil flags_usage library
+  absl_flags_usage
+
+  # Abseil flags_usage_internal library
+  absl_flags_usage_internal
+
+  # Abseil flat_hash_map library
+  absl_flat_hash_map
+
+  # Abseil flat_hash_set library
+  absl_flat_hash_set
+
+  # Abseil function_ref library
+  absl_function_ref
+
+  # Abseil graphcycles_internal library
+  absl_graphcycles_internal
+
+  # Abseil has_ostream_operator library
+  absl_has_ostream_operator
+
+  # Abseil hash library
+  absl_hash
+
+  # Abseil hash_container_defaults library
+  absl_hash_container_defaults
+
+  # Abseil hash_function_defaults library
+  absl_hash_function_defaults
+
+  # Abseil hash_policy_traits library
+  absl_hash_policy_traits
+
+  # Abseil hashtable_debug library
+  absl_hashtable_debug
+
+  # Abseil hashtable_debug_hooks library
+  absl_hashtable_debug_hooks
+
+  # Abseil hashtablez_sampler library
+  absl_hashtablez_sampler
+
+  # Abseil if_constexpr library
+  absl_if_constexpr
+
+  # Abseil inlined_vector library
+  absl_inlined_vector
+
+  # Abseil inlined_vector_internal library
+  absl_inlined_vector_internal
+
+  # Abseil int128 library
+  absl_int128
+
+  # Abseil kernel_timeout_internal library
+  absl_kernel_timeout_internal
+
+  # Abseil layout library
+  absl_layout
+
+  # Abseil leak_check library
+  absl_leak_check
+
+  # Abseil log library
+  absl_log
+
+  # Abseil log_entry library
+  absl_log_entry
+
+  # Abseil log_flags library
+  absl_log_flags
+
+  # Abseil log_globals library
+  absl_log_globals
+
+  # Abseil log_initialize library
+  absl_log_initialize
+
+  # Abseil log_internal_append_truncated library
+  absl_log_internal_append_truncated
+
+  # Abseil log_internal_check_impl library
+  absl_log_internal_check_impl
+
+  # Abseil log_internal_check_op library
+  absl_log_internal_check_op
+
+  # Abseil log_internal_conditions library
+  absl_log_internal_conditions
+
+  # Abseil log_internal_config library
+  absl_log_internal_config
+
+  # Abseil log_internal_flags library
+  absl_log_internal_flags
+
+  # Abseil log_internal_fnmatch library
+  absl_log_internal_fnmatch
+
+  # Abseil log_internal_format library
+  absl_log_internal_format
+
+  # Abseil log_internal_globals library
+  absl_log_internal_globals
+
+  # Abseil log_internal_log_impl library
+  absl_log_internal_log_impl
+
+  # Abseil log_internal_log_sink_set library
+  absl_log_internal_log_sink_set
+
+  # Abseil log_internal_message library
+  absl_log_internal_message
+
+  # Abseil log_internal_nullguard library
+  absl_log_internal_nullguard
+
+  # Abseil log_internal_nullstream library
+  absl_log_internal_nullstream
+
+  # Abseil log_internal_proto library
+  absl_log_internal_proto
+
+  # Abseil log_internal_strip library
+  absl_log_internal_strip
+
+  # Abseil log_internal_structured library
+  absl_log_internal_structured
+
+  # Abseil log_internal_voidify library
+  absl_log_internal_voidify
+
+  # Abseil log_severity library
+  absl_log_severity
+
+  # Abseil log_sink library
+  absl_log_sink
+
+  # Abseil log_sink_registry library
+  absl_log_sink_registry
+
+  # Abseil log_streamer library
+  absl_log_streamer
+
+  # Abseil log_structured library
+  absl_log_structured
+
+  # Abseil low_level_hash library
+  absl_low_level_hash
+
+  # Abseil malloc_internal library
+  absl_malloc_internal
+
+  # Abseil memory library
+  absl_memory
+
+  # Abseil meta library
+  absl_meta
+
+  # Abseil no_destructor library
+  absl_no_destructor
+
+  # Abseil node_hash_map library
+  absl_node_hash_map
+
+  # Abseil node_hash_set library
+  absl_node_hash_set
+
+  # Abseil node_slot_policy library
+  absl_node_slot_policy
+
+  # Abseil non_temporal_arm_intrinsics library
+  absl_non_temporal_arm_intrinsics
+
+  # Abseil non_temporal_memcpy library
+  absl_non_temporal_memcpy
+
+  # Abseil nullability library
+  absl_nullability
+
+  # Abseil numeric library
+  absl_numeric
+
+  # Abseil numeric_representation library
+  absl_numeric_representation
+
+  # Abseil optional library
+  absl_optional
+
+  # Abseil overload library
+  absl_overload
+
+  # Abseil periodic_sampler library
+  absl_periodic_sampler
+
+  # Abseil poison library
+  absl_poison
+
+  # Abseil prefetch library
+  absl_prefetch
+
+  # Abseil pretty_function library
+  absl_pretty_function
+
+  # Abseil random_bit_gen_ref library
+  absl_random_bit_gen_ref
+
+  # Abseil random_distributions library
+  absl_random_distributions
+
+  # Abseil random_internal_distribution_caller library
+  absl_random_internal_distribution_caller
+
+  # Abseil random_internal_distribution_test_util library
+  absl_random_internal_distribution_test_util
+
+  # Abseil random_internal_fast_uniform_bits library
+  absl_random_internal_fast_uniform_bits
+
+  # Abseil random_internal_fastmath library
+  absl_random_internal_fastmath
+
+  # Abseil random_internal_generate_real library
+  absl_random_internal_generate_real
+
+  # Abseil random_internal_iostream_state_saver library
+  absl_random_internal_iostream_state_saver
+
+  # Abseil random_internal_mock_helpers library
+  absl_random_internal_mock_helpers
+
+  # Abseil random_internal_nonsecure_base library
+  absl_random_internal_nonsecure_base
+
+  # Abseil random_internal_pcg_engine library
+  absl_random_internal_pcg_engine
+
+  # Abseil random_internal_platform library
+  absl_random_internal_platform
+
+  # Abseil random_internal_pool_urbg library
+  absl_random_internal_pool_urbg
+
+  # Abseil random_internal_randen library
+  absl_random_internal_randen
+
+  # Abseil random_internal_randen_engine library
+  absl_random_internal_randen_engine
+
+  # Abseil random_internal_randen_hwaes library
+  absl_random_internal_randen_hwaes
+
+  # Abseil random_internal_randen_hwaes_impl library
+  absl_random_internal_randen_hwaes_impl
+
+  # Abseil random_internal_randen_slow library
+  absl_random_internal_randen_slow
+
+  # Abseil random_internal_salted_seed_seq library
+  absl_random_internal_salted_seed_seq
+
+  # Abseil random_internal_seed_material library
+  absl_random_internal_seed_material
+
+  # Abseil random_internal_traits library
+  absl_random_internal_traits
+
+  # Abseil random_internal_uniform_helper library
+  absl_random_internal_uniform_helper
+
+  # Abseil random_internal_wide_multiply library
+  absl_random_internal_wide_multiply
+
+  # Abseil random_random library
+  absl_random_random
+
+  # Abseil random_seed_gen_exception library
+  absl_random_seed_gen_exception
+
+  # Abseil random_seed_sequences library
+  absl_random_seed_sequences
+
+  # Abseil raw_hash_map library
+  absl_raw_hash_map
+
+  # Abseil raw_hash_set library
+  absl_raw_hash_set
+
+  # Abseil raw_logging_internal library
+  absl_raw_logging_internal
+
+  # Abseil sample_recorder library
+  absl_sample_recorder
+
+  # Abseil scoped_set_env library
+  absl_scoped_set_env
+
+  # Abseil span library
+  absl_span
+
+  # Abseil spinlock_wait library
+  absl_spinlock_wait
+
+  # Abseil stacktrace library
+  absl_stacktrace
+
+  # Abseil status library
+  absl_status
+
+  # Abseil statusor library
+  absl_statusor
+
+  # Abseil str_format library
+  absl_str_format
+
+  # Abseil str_format_internal library
+  absl_str_format_internal
+
+  # Abseil strerror library
+  absl_strerror
+
+  # Abseil string_view library
+  absl_string_view
+
+  # Abseil strings library
+  absl_strings
+
+  # Abseil strings_internal library
+  absl_strings_internal
+
+  # Abseil symbolize library
+  absl_symbolize
+
+  # Abseil synchronization library
+  absl_synchronization
+
+  # Abseil throw_delegate library
+  absl_throw_delegate
+
+  # Abseil time library
+  absl_time
+
+  # Abseil time_zone library
+  absl_time_zone
+
+  # Abseil type_traits library
+  absl_type_traits
+
+  # Abseil utf8_for_code_point library
+  absl_utf8_for_code_point
+
+  # Abseil utility library
+  absl_utility
+
+  # Abseil variant library
+  absl_variant
+
+  # Abseil vlog_config_internal library
+  absl_vlog_config_internal
+
+  # Abseil vlog_is_on library
+  absl_vlog_is_on
+
+benchmark provides CMake targets:
+
+  # this is heuristically generated, and may not be correct
+  find_package(benchmark CONFIG REQUIRED)
+  target_link_libraries(main PRIVATE benchmark::benchmark benchmark::benchmark_main)
+
+benchmark provides pkg-config modules:
+
+  # Google microbenchmark framework
+  benchmark
+
+  # Google microbenchmark framework (with main() function)
+  benchmark_main
+
+The package boost-config is compatible with built-in CMake targets of FindBoost.cmake:
+
+    find_package(Boost REQUIRED COMPONENTS config)
+    target_link_libraries(main PRIVATE Boost::config)
+
+or the generated cmake configs via:
+
+    find_package(boost_config REQUIRED CONFIG)
+    target_link_libraries(main PRIVATE Boost::config)
+
+The package boost-mp11 is compatible with built-in CMake targets of FindBoost.cmake:
+
+    find_package(Boost REQUIRED COMPONENTS mp11)
+    target_link_libraries(main PRIVATE Boost::mp11)
+
+or the generated cmake configs via:
+
+    find_package(boost_mp11 REQUIRED CONFIG)
+    target_link_libraries(main PRIVATE Boost::mp11)
+
+cpuinfo provides CMake targets:
+
+  # this is heuristically generated, and may not be correct
+  find_package(cpuinfo CONFIG REQUIRED)
+  target_link_libraries(main PRIVATE cpuinfo::cpuinfo)
+
+cpuinfo provides pkg-config modules:
+
+  # Library to detect essential performance optimization information about host CPU.
+  libcpuinfo
+
+cxxopts provides CMake targets:
+
+  # this is heuristically generated, and may not be correct
+  find_package(cxxopts CONFIG REQUIRED)
+  target_link_libraries(main PRIVATE cxxopts::cxxopts)
+
+date provides CMake targets:
+
+    find_package(date CONFIG REQUIRED)
+    target_link_libraries(main PRIVATE date::date date::date-tz)
+
+dlpack provides CMake targets:
+
+    find_package(dlpack CONFIG REQUIRED)
+    target_link_libraries(main PRIVATE dlpack::dlpack)
+
+eigen3 provides CMake targets:
+
+  # this is heuristically generated, and may not be correct
+  find_package(Eigen3 CONFIG REQUIRED)
+  target_link_libraries(main PRIVATE Eigen3::Eigen)
+
+eigen3 provides pkg-config modules:
+
+  # A C++ template library for linear algebra: vectors, matrices, and related algorithms
+  eigen3
+
+flatbuffers provides CMake targets:
+
+  # this is heuristically generated, and may not be correct
+  find_package(flatbuffers CONFIG REQUIRED)
+  target_link_libraries(main PRIVATE flatbuffers::flatbuffers)
+
+flatbuffers provides pkg-config modules:
+
+  # Memory Efficient Serialization Library
+  flatbuffers
+
+ms-gsl provides CMake targets:
+
+  # this is heuristically generated, and may not be correct
+  find_package(Microsoft.GSL CONFIG REQUIRED)
+  target_link_libraries(main PRIVATE Microsoft.GSL::GSL)
+
+The package nlohmann-json provides CMake targets:
+
+    find_package(nlohmann_json CONFIG REQUIRED)
+    target_link_libraries(main PRIVATE nlohmann_json::nlohmann_json)
+
+The package nlohmann-json can be configured to not provide implicit conversions via a custom triplet file:
+
+    set(nlohmann-json_IMPLICIT_CONVERSIONS OFF)
+
+For more information, see the docs here:
+    
+    https://json.nlohmann.me/api/macros/json_use_implicit_conversions/
+
+protobuf provides CMake targets:
+
+  # this is heuristically generated, and may not be correct
+  find_package(protobuf CONFIG REQUIRED)
+  target_link_libraries(main PRIVATE protobuf::libprotoc protobuf::libprotobuf protobuf::libprotobuf-lite)
+
+protobuf provides pkg-config modules:
+
+  # Google's Data Interchange Format
+  protobuf-lite
+
+  # Google's Data Interchange Format
+  protobuf
+
+onnx provides CMake targets:
+
+  # this is heuristically generated, and may not be correct
+  find_package(ONNX CONFIG REQUIRED)
+  target_link_libraries(main PRIVATE ONNX::onnx ONNX::onnx_proto)
+
+optional-lite provides CMake targets:
+
+  # this is heuristically generated, and may not be correct
+  find_package(optional-lite CONFIG REQUIRED)
+  target_link_libraries(main PRIVATE nonstd::optional-lite)
+
+pybind11 provides CMake targets. There are two modes provided; classic, which is built on the old Python
+discovery packages in CMake, or the new FindPython mode, which uses FindPython
+from 3.12+ forward (3.15+ _highly_ recommended).
+
+New FindPython mode:
+
+    find_package(Python COMPONENTS Interpreter Development)
+    find_package(pybind11 CONFIG)
+
+    # pybind11 method:
+    pybind11_add_module(MyModule1 src1.cpp)
+
+    # Python method:
+    Python_add_library(MyModule2 src2.cpp)
+    target_link_libraries(MyModule2 pybind11::headers)
+    set_target_properties(MyModule2 PROPERTIES
+        INTERPROCEDURAL_OPTIMIZATION ON
+        CXX_VISIBILITY_PRESET ON
+        VISIBILITY_INLINES_HIDDEN ON
+    )
+
+For more information see here:
+    https://pybind11.readthedocs.io/en/latest/compiling.html#building-with-cmake
+re2 provides CMake targets:
+
+  # this is heuristically generated, and may not be correct
+  find_package(re2 CONFIG REQUIRED)
+  target_link_libraries(main PRIVATE re2::re2)
+
+re2 provides pkg-config modules:
+
+  # RE2 is a fast, safe, thread-friendly regular expression engine.
+  re2
+
+safeint is header-only and can be used from CMake via:
+
+  find_path(SAFEINT_INCLUDE_DIRS "SafeInt.hpp")
+  target_include_directories(main PRIVATE ${SAFEINT_INCLUDE_DIRS})
+
+utf8-range provides CMake targets:
+
+  # this is heuristically generated, and may not be correct
+  find_package(utf8_range CONFIG REQUIRED)
+  target_link_libraries(main PRIVATE utf8_range::utf8_range utf8_range::utf8_validity)
+
+utf8-range provides pkg-config modules:
+
+  # Google's UTF8 Library
+  utf8_range
+
+The package gtest is compatible with built-in CMake targets:
+
+    enable_testing()
+    
+    find_package(GTest CONFIG REQUIRED)
+    target_link_libraries(main PRIVATE GTest::gtest GTest::gtest_main GTest::gmock GTest::gmock_main)
+    
+    add_test(AllTestsInMain main)
+
+-- Running vcpkg install - done
+-- The C compiler identification is GNU 13.3.0
+-- The CXX compiler identification is GNU 13.3.0
+-- The ASM compiler identification is GNU
+-- Found assembler: /usr/bin/cc
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Check for working C compiler: /usr/bin/cc - skipped
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: /usr/bin/c++ - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- Performing Test COMPILER_SUPPORT_MF16C
+-- Performing Test COMPILER_SUPPORT_MF16C - Success
+-- Performing Test COMPILER_SUPPORT_FMA
+-- Performing Test COMPILER_SUPPORT_FMA - Success
+-- Performing Test COMPILER_SUPPORT_AVX
+-- Performing Test COMPILER_SUPPORT_AVX - Success
+Building ONNX Runtime for x86_64 CPU ARCH
+-- Performing Test onnxruntime_HAVE_BUILTIN_ATOMICS
+-- Performing Test onnxruntime_HAVE_BUILTIN_ATOMICS - Success
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Success
+-- Found Threads: TRUE
+-- Performing Test Iconv_IS_BUILT_IN
+-- Performing Test Iconv_IS_BUILT_IN - Success
+-- Found Iconv: built in to C library
+-- Found Patch: /usr/bin/patch
+Patch found: /usr/bin/patch
+-- Loading Dependencies URLs ...
+-- Loading Dependencies ...
+-- Abseil source dir:
+-- Abseil version:20240722
+-- Using protobuf from find_package(or vcpkg). Protobuf version: 3.21.12.0
+CMake Warning (dev) at /tmp/issue55-build/native-P-prime/Release/vcpkg_installed/x64-linux/share/boost/vcpkg-cmake-wrapper.cmake:3 (_find_package):
+  Policy CMP0167 is not set: The FindBoost module is removed.  Run "cmake
+  --help-policy CMP0167" for policy details.  Use the cmake_policy command to
+  set the policy and suppress this warning.
+
+Call Stack (most recent call first):
+  /tmp/issue55-build/vcpkg/scripts/buildsystems/vcpkg.cmake:847 (include)
+  external/onnxruntime_external_deps.cmake:280 (find_package)
+  CMakeLists.txt:696 (include)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+-- Found Boost: /tmp/issue55-build/native-P-prime/Release/vcpkg_installed/x64-linux/share/boost/BoostConfig.cmake (found version "1.86.0")
+-- Aliasing Boost::headers to Boost::mp11
+-- Aliasing cpuinfo::cpuinfo to cpuinfo
+CMake Warning (dev) at /tmp/issue55-build/tools/cmake-3.31.6-linux-x86_64/share/cmake-3.31/Modules/FindPackageHandleStandardArgs.cmake:441 (message):
+  The package name passed to `find_package_handle_standard_args` (Protobuf)
+  does not match the name of the calling package (protobuf).  This can lead
+  to problems in calling code that expects `find_package` result variables
+  (e.g., `_FOUND`) to follow a certain pattern.
+Call Stack (most recent call first):
+  /tmp/issue55-build/native-P-prime/Release/vcpkg_installed/x64-linux/share/protobuf/protobuf-module.cmake:162 (FIND_PACKAGE_HANDLE_STANDARD_ARGS)
+  /tmp/issue55-build/native-P-prime/Release/vcpkg_installed/x64-linux/share/protobuf/protobuf-config.cmake:168 (include)
+  /tmp/issue55-build/native-P-prime/Release/vcpkg_installed/x64-linux/share/protobuf/vcpkg-cmake-wrapper.cmake:16 (_find_package)
+  /tmp/issue55-build/vcpkg/scripts/buildsystems/vcpkg.cmake:847 (include)
+  /tmp/issue55-build/tools/cmake-3.31.6-linux-x86_64/share/cmake-3.31/Modules/CMakeFindDependencyMacro.cmake:76 (find_package)
+  /tmp/issue55-build/native-P-prime/Release/vcpkg_installed/x64-linux/share/ONNX/ONNXConfig.cmake:10 (find_dependency)
+  /tmp/issue55-build/vcpkg/scripts/buildsystems/vcpkg.cmake:893 (_find_package)
+  /tmp/issue55-build/tools/cmake-3.31.6-linux-x86_64/share/cmake-3.31/Modules/FetchContent.cmake:2472 (find_package)
+  /tmp/issue55-build/tools/cmake-3.31.6-linux-x86_64/share/cmake-3.31/Modules/FetchContent.cmake:2362 (__FetchContent_MakeAvailable_find_package)
+  external/helper_functions.cmake:22 (FetchContent_MakeAvailable)
+  external/onnxruntime_external_deps.cmake:520 (onnxruntime_fetchcontent_makeavailable)
+  CMakeLists.txt:696 (include)
+This warning is for project developers.  Use -Wno-dev to suppress it.
+
+-- Found Protobuf: /tmp/issue55-build/native-P-prime/Release/vcpkg_installed/x64-linux/tools/protobuf/protoc (found version "3.21.12.0")
+-- Aliasing ONNX::onnx to onnx
+-- Aliasing ONNX::onnx_proto to onnx_proto
+-- Finished fetching external dependencies
+-- Performing Test HAS_AMBIGUOUS_REVERSED_OPERATOR
+-- Performing Test HAS_AMBIGUOUS_REVERSED_OPERATOR - Failed
+-- Performing Test HAS_INTERFERENCE_SIZE
+-- Performing Test HAS_INTERFERENCE_SIZE - Success
+-- Performing Test HAS_BITWISE_INSTEAD_OF_LOGICAL
+-- Performing Test HAS_BITWISE_INSTEAD_OF_LOGICAL - Failed
+-- Performing Test HAS_CAST_FUNCTION_TYPE
+-- Performing Test HAS_CAST_FUNCTION_TYPE - Success
+-- Performing Test HAS_CATCH_VALUE
+-- Performing Test HAS_CATCH_VALUE - Success
+-- Performing Test HAS_CLASS_MEMACCESS
+-- Performing Test HAS_CLASS_MEMACCESS - Success
+-- Performing Test HAS_DANGLING_REFERENCE
+-- Performing Test HAS_DANGLING_REFERENCE - Success
+-- Performing Test HAS_DEPRECATED_ANON_ENUM_ENUM_CONVERSION
+-- Performing Test HAS_DEPRECATED_ANON_ENUM_ENUM_CONVERSION - Failed
+-- Performing Test HAS_DEPRECATED_BUILTINS
+-- Performing Test HAS_DEPRECATED_BUILTINS - Failed
+-- Performing Test HAS_DEPRECATED_COPY
+-- Performing Test HAS_DEPRECATED_COPY - Success
+-- Performing Test HAS_DEPRECATED_DECLARATIONS
+-- Performing Test HAS_DEPRECATED_DECLARATIONS - Success
+-- Performing Test HAS_DEPRECATED_LITERAL_OPERATOR
+-- Performing Test HAS_DEPRECATED_LITERAL_OPERATOR - Failed
+-- Performing Test HAS_DEPRECATED_THIS_CAPTURE
+-- Performing Test HAS_DEPRECATED_THIS_CAPTURE - Failed
+-- Performing Test HAS_ENUM_CONSTEXPR_CONVERSION
+-- Performing Test HAS_ENUM_CONSTEXPR_CONVERSION - Failed
+-- Performing Test HAS_FORMAT_TRUNCATION
+-- Performing Test HAS_FORMAT_TRUNCATION - Success
+-- Performing Test HAS_IGNORED_ATTRIBUTES
+-- Performing Test HAS_IGNORED_ATTRIBUTES - Success
+-- Performing Test HAS_MAYBE_UNINITIALIZED
+-- Performing Test HAS_MAYBE_UNINITIALIZED - Success
+-- Performing Test HAS_MISSING_BRACES
+-- Performing Test HAS_MISSING_BRACES - Success
+-- Performing Test HAS_NONNULL_COMPARE
+-- Performing Test HAS_NONNULL_COMPARE - Success
+-- Performing Test HAS_PARENTHESES
+-- Performing Test HAS_PARENTHESES - Success
+-- Performing Test HAS_SHORTEN_64_TO_32
+-- Performing Test HAS_SHORTEN_64_TO_32 - Failed
+-- Performing Test HAS_STRICT_ALIASING
+-- Performing Test HAS_STRICT_ALIASING - Success
+NVCC_ERROR = 
+NVCC_OUT = no such file or directory
+-- Performing Test HAS_STRINGOP_OVERFLOW
+-- Performing Test HAS_STRINGOP_OVERFLOW - Success
+-- Performing Test HAS_TAUTOLOGICAL_POINTER_COMPARE
+-- Performing Test HAS_TAUTOLOGICAL_POINTER_COMPARE - Failed
+-- Performing Test HAS_UNDEFINED_VAR_TEMPLATE
+-- Performing Test HAS_UNDEFINED_VAR_TEMPLATE - Failed
+-- Performing Test HAS_UNUSED_BUT_SET_PARAMETER
+-- Performing Test HAS_UNUSED_BUT_SET_PARAMETER - Success
+-- Performing Test HAS_UNUSED_BUT_SET_VARIABLE
+-- Performing Test HAS_UNUSED_BUT_SET_VARIABLE - Success
+-- Performing Test HAS_UNUSED_VARIABLE
+-- Performing Test HAS_UNUSED_VARIABLE - Success
+-- Performing Test HAS_USELESS_CAST
+-- Performing Test HAS_USELESS_CAST - Success
+-- Looking for reallocarray
+-- Looking for reallocarray - found
+-- Found Git: /usr/bin/git (found version "2.43.0")
+-- Looking for clock_gettime in rt
+-- Looking for clock_gettime in rt - found
+-- CMAKE_CXX_COMPILER_ID: GNU
+-- CMAKE_CXX_COMPILER_VERSION: 13.3.0
+-- Using -mavx2 -mfma -mavxvnni flags
+-- Configuring done (2.1s)
+-- Generating done (0.1s)
+-- Build files have been written to: /tmp/issue55-build/native-P-prime/Release
+2026-08-09 16:27:02,958 build [INFO] - Building targets for Release configuration
+2026-08-09 16:27:02,958 build [INFO] - /tmp/issue55-build/tools/cmake-3.31.6-linux-x86_64/bin/cmake --build /tmp/issue55-build/native-P-prime/Release --config Release --target onnxruntime_test_all -- -j32
+[0/2] Re-checking globbed directories...
+[1/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/debug_node_inputs_outputs_utils.cc.o
+[2/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/empty.cc.o
+[3/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/callback.cc.o
+[4/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/memory_info.cc.o
+[5/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/endian_utils.cc.o
+[6/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/error_code.cc.o
+[7/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/murmurhash3.cc.o
+[8/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/ex_lib_loader.cc.o
+[9/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/allocator_utils.cc.o
+[10/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/copy.cc.o
+[11/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/library_handles.cc.o
+[12/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/config_options.cc.o
+[13/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/external_data_loader_manager.cc.o
+[14/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/external_data_loader.cc.o
+[15/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/data_transfer.cc.o
+[16/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/fuse_nodes_funcs.cc.o
+[17/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/kernel_def_builder.cc.o
+[18/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/data_transfer_manager.cc.o
+[19/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/partial_graph_execution_state.cc.o
+[20/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/onnxruntime_optional_type_info.cc.o
+[21/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/onnxruntime_sequence_type_info.cc.o
+[22/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/random_generator.cc.o
+[23/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/random_seed.cc.o
+[24/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/onnxruntime_map_type_info.cc.o
+[25/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/bfc_arena.cc.o
+[26/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/prepacked_weights.cc.o
+[27/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/model_metadef_id_generator.cc.o
+[28/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/mldata_type_utils.cc.o
+[29/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/onnxruntime_typeinfo.cc.o
+[30/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/kernel_type_str_resolver_utils.cc.o
+[31/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/run_options.cc.o
+[32/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/customregistry.cc.o
+[33/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/kernel_registry_manager.cc.o
+[34/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/allocator.cc.o
+[35/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/memcpy.cc.o
+[36/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/ort_value_tensor_slicer.cc.o
+[37/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/data_types.cc.o
+[38/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/execution_steps.cc.o
+[39/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/execution_provider.cc.o
+[40/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/node_unit.cc.o
+[41/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/node_index_info.cc.o
+[42/890] Running cpp protocol buffer compiler (lite) on /tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/proto/tml.proto
+[43/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/device_stream_collection.cc.o
+[44/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/kernel_registry.cc.o
+[45/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/func_kernel.cc.o
+[46/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/op_kernel_info.cc.o
+[47/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/ort_value_pattern_planner.cc.o
+[48/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/fallback_cpu_capability.cc.o
+[49/890] Building CXX object CMakeFiles/onnxruntime_common.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/common/cpuid_uarch.cc.o
+[50/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/feeds_fetches_manager.cc.o
+[51/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/tensor_shape.cc.o
+[52/890] Building CXX object CMakeFiles/onnxruntime_common.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/common/cpuid_info.cc.o
+[53/890] Building CXX object CMakeFiles/onnxruntime_common.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/common/helper.cc.o
+[54/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/op_kernel.cc.o
+[55/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/session_options.cc.o
+[56/890] Building CXX object CMakeFiles/onnxruntime_common.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/common/logging/capture.cc.o
+[57/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/kernel_type_str_resolver.cc.o
+[58/890] Building CXX object CMakeFiles/onnxruntime_common.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/common/denormal.cc.o
+[59/890] Building CXX object CMakeFiles/onnxruntime_common.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/platform/env_time.cc.o
+[60/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/prepacked_weights_container.cc.o
+[61/890] Building CXX object CMakeFiles/onnxruntime_common.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/common/profiler_common.cc.o
+[62/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/tensor_type_and_shape.cc.o
+[63/890] Building CXX object CMakeFiles/onnxruntime_common.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/platform/posix/env_time.cc.o
+[64/890] Building CXX object CMakeFiles/onnxruntime_common.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/common/logging/logging.cc.o
+[65/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/execution_frame.cc.o
+[66/890] Building CXX object CMakeFiles/onnxruntime_common.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/platform/path_lib.cc.o
+[67/890] Building CXX object CMakeFiles/onnxruntime_common.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/platform/logging/make_platform_default_log_sink.cc.o
+[68/890] Building CXX object CMakeFiles/onnxruntime_common.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/common/status.cc.o
+[69/890] Building CXX object CMakeFiles/onnxruntime_common.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/platform/env.cc.o
+[70/890] Building CXX object CMakeFiles/onnxruntime_common.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/common/logging/sinks/ostream_sink.cc.o
+[71/890] Building CXX object CMakeFiles/onnxruntime_common.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/platform/posix/stacktrace.cc.o
+[72/890] Building CXX object CMakeFiles/onnxruntime_common.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/common/profiler.cc.o
+[73/890] Building CXX object CMakeFiles/onnxruntime_common.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/platform/telemetry.cc.o
+[74/890] Building CXX object CMakeFiles/onnxruntime_flatbuffers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/flatbuffers/flatbuffers_utils.cc.o
+[75/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/op_node_proto_helper.cc.o
+[76/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/graph_partitioner.cc.o
+[77/890] Building CXX object CMakeFiles/onnxruntime_lora.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/lora/adapter_format_utils.cc.o
+[78/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/resource_accountant.cc.o
+[79/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/tensor_external_data_info.cc.o
+[80/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/sparse_utils.cc.o
+[81/890] Building CXX object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/platform.cpp.o
+[82/890] Building CXX object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/threading.cpp.o
+[83/890] Building CXX object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/convsym.cpp.o
+[84/890] Building CXX object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/qdwconv.cpp.o
+[85/890] Building CXX object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/sgemm.cpp.o
+[86/890] Building CXX object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/qgemm.cpp.o
+[87/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/simple_tensor_allocator.cc.o
+[88/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/tensor.cc.o
+[89/890] Building CXX object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/logistic.cpp.o
+[90/890] Building CXX object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/tanh.cpp.o
+[91/890] Building CXX object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/pooling.cpp.o
+[92/890] Building CXX object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/convolve.cpp.o
+[93/890] Building CXX object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/transpose.cpp.o
+[94/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/stream_execution_context.cc.o
+[95/890] Building CXX object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/snchwc.cpp.o
+[96/890] Building CXX object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/activate.cpp.o
+[97/890] Building CXX object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/halfgemm.cpp.o
+[98/890] Building CXX object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/reorder.cpp.o
+[99/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/sequential_executor.cc.o
+[100/890] Building CXX object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/erf.cpp.o
+[101/890] Building CXX object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/compute.cpp.o
+[102/890] Building ASM object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/x86_64/DgemmKernelSse2.S.o
+[103/890] Building ASM object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/x86_64/SgemmKernelSse2.S.o
+[104/890] Building ASM object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/x86_64/SgemmTransposePackB16x4Sse2.S.o
+[105/890] Building CXX object CMakeFiles/onnxruntime_common.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/common/threadpool.cc.o
+[106/890] Building ASM object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/x86_64/SconvKernelSse2.S.o
+[107/890] Building ASM object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/x86_64/SpoolKernelSse2.S.o
+[108/890] Building ASM object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/x86_64/cvtfp16a.S.o
+[109/890] Building CXX object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/eltwise.cpp.o
+[110/890] Building CXX object CMakeFiles/onnxruntime_common.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/platform/posix/env.cc.o
+[111/890] Building ASM object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/x86_64/DgemmKernelAvx.S.o
+[112/890] Building ASM object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/x86_64/SgemmKernelAvx.S.o
+[113/890] Building ASM object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/x86_64/SgemmKernelM1Avx.S.o
+[114/890] Building ASM object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/x86_64/SgemmKernelM1TransposeBAvx.S.o
+[115/890] Building ASM object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/x86_64/SgemmTransposePackB16x4Avx.S.o
+[116/890] Building ASM object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/x86_64/SoftmaxKernelAvx.S.o
+[117/890] Building ASM object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/x86_64/SpoolKernelAvx.S.o
+[118/890] Building ASM object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/x86_64/QgemvU8S8KernelAvx2.S.o
+[119/890] Building ASM object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/x86_64/QgemmU8S8KernelAvx2.S.o
+[120/890] Building ASM object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/x86_64/SconvKernelAvx.S.o
+[121/890] Building ASM object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/x86_64/QgemmU8U8KernelAvx2.S.o
+[122/890] Building ASM object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/x86_64/QgemvU8S8KernelAvxVnni.S.o
+[123/890] Building ASM object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/x86_64/DgemmKernelFma3.S.o
+[124/890] Building ASM object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/x86_64/ConvSymKernelAvx2.S.o
+[125/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/tensor_allocator.cc.o
+[126/890] Building ASM object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/x86_64/SgemmKernelFma3.S.o
+[127/890] Building ASM object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/x86_64/TransKernelFma3.S.o
+[128/890] Building ASM object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/x86_64/SconvKernelFma3.S.o
+[129/890] Building ASM object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/x86_64/LogisticKernelFma3.S.o
+[130/890] Building ASM object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/x86_64/TanhKernelFma3.S.o
+[131/890] Building ASM object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/x86_64/ErfKernelFma3.S.o
+[132/890] Building ASM object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/x86_64/QgemmU8X8KernelAvx2.S.o
+[133/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/sparse_tensor.cc.o
+[134/890] Building ASM object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/x86_64/cvtfp16Avx.S.o
+[135/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/transpose_helper.cc.o
+[136/890] Building ASM object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/x86_64/DgemmKernelAvx512F.S.o
+[137/890] Building ASM object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/x86_64/SgemmKernelAvx512F.S.o
+[138/890] Building ASM object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/x86_64/SoftmaxKernelAvx512F.S.o
+[139/890] Building ASM object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/x86_64/SpoolKernelAvx512F.S.o
+[140/890] Building ASM object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/x86_64/TransKernelAvx512F.S.o
+[141/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/session_state_utils.cc.o
+[142/890] Building ASM object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/x86_64/QgemvU8S8KernelAvx512Core.S.o
+[143/890] Building CXX object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/quantize.cpp.o
+[144/890] Building ASM object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/x86_64/QgemvU8S8KernelAvx512Vnni.S.o
+[145/890] Building CXX object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/qladd.cpp.o
+[146/890] Building ASM object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/x86_64/SconvKernelAvx512F.S.o
+[147/890] Building ASM object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/x86_64/ConvSymKernelAvx512Core.S.o
+[148/890] Building CXX object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/qpostprocessor.cpp.o
+[149/890] Building ASM object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/x86_64/QgemmU8S8KernelAmxCommon.S.o
+[150/890] Building ASM object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/x86_64/QgemmU8X8KernelAvx512Core.S.o
+[151/890] Building ASM object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/x86_64/QgemmU8S8KernelAmx.S.o
+[152/890] Building CXX object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/qlmul.cpp.o
+[153/890] Building CXX object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/flashattn.cpp.o
+[154/890] Building CXX object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/qdwconv_kernelsize.cpp.o
+[155/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/tensorprotoutils.cc.o
+[156/890] Building CXX object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/qgemm_kernel_default.cpp.o
+[157/890] Building CXX object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/cast.cpp.o
+[158/890] Building CXX object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/qlgavgpool.cpp.o
+[159/890] Building CXX object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/activate_fp16.cpp.o
+[160/890] Building CXX object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/rotary_embedding.cpp.o
+[161/890] Building CXX object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/q4gemm.cpp.o
+[162/890] Building CXX object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/pooling_fp16.cpp.o
+[163/890] Building CXX object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/dwconv.cpp.o
+[164/890] Building CXX object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/qgemm_kernel_sse.cpp.o
+[165/890] Building CXX object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/rotary_embedding_kernel_avx2.cpp.o
+[166/890] Building CXX object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/dgemm.cpp.o
+[167/890] Building CXX object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/qnbitgemm.cpp.o
+[168/890] Building CXX object CMakeFiles/onnx_test_data_proto.dir/tml.pb.cc.o
+[169/890] Building CXX object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/intrinsics/avx/min_max_elements.cpp.o
+[170/890] Building CXX object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/intrinsics/avx512/quantize_avx512f.cpp.o
+[171/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/utils.cc.o
+[172/890] Building CXX object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/qgemm_kernel_avx2.cpp.o
+[173/890] Building CXX object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/intrinsics/avx2/qladd_avx2.cpp.o
+[174/890] Building CXX object CMakeFiles/onnxruntime_graph.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/graph/contrib_ops/attn_lstm_schema_defs.cc.o
+[175/890] Building CXX object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/intrinsics/avx2/qdwconv_avx2.cpp.o
+[176/890] Building CXX object CMakeFiles/onnxruntime_graph.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/graph/contrib_ops/onnx_function_util.cc.o
+[177/890] Building CXX object CMakeFiles/onnxruntime_graph.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/graph/contrib_ops/internal_nhwc_onnx_schemas.cc.o
+[178/890] Building CXX object CMakeFiles/onnxruntime_graph.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/graph/contrib_ops/diffusion_defs.cc.o
+[179/890] Building CXX object CMakeFiles/onnxruntime_graph.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/graph/contrib_ops/shape_inference_functions.cc.o
+[180/890] Building CXX object CMakeFiles/onnxruntime_graph.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/graph/contrib_ops/nhwc_schema_defs.cc.o
+[181/890] Building CXX object CMakeFiles/onnxruntime_graph.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/graph/op.cc.o
+[182/890] Building CXX object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/sqnbitgemm_kernel_avx512.cpp.o
+[183/890] Building CXX object CMakeFiles/onnxruntime_graph.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/graph/contrib_ops/range_schema_defs.cc.o
+[184/890] Building CXX object CMakeFiles/onnxruntime_graph.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/graph/contrib_ops/collective_defs.cc.o
+[185/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/get_execution_providers.cc.o
+[186/890] Building CXX object CMakeFiles/onnxruntime_graph.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/graph/contrib_ops/bert_defs.cc.o
+[187/890] Building CXX object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/sqnbitgemm_kernel_avx512vnni.cpp.o
+[188/890] Building CXX object CMakeFiles/onnxruntime_graph.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/graph/contrib_ops/onnx_deprecated_operators.cc.o
+[189/890] Building CXX object CMakeFiles/onnxruntime_graph.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/graph/graph_proto_serializer.cc.o
+[190/890] Building CXX object CMakeFiles/onnxruntime_graph.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/graph/node_attr_utils.cc.o
+[191/890] Building CXX object CMakeFiles/onnxruntime_graph.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/graph/contrib_ops/nchwc_schema_defs.cc.o
+[192/890] Building CXX object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/qgemm_kernel_amx.cpp.o
+[193/890] Building CXX object CMakeFiles/onnxruntime_graph.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/graph/contrib_ops/quantization_defs.cc.o
+[194/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/fp16/fp16_conv.cc.o
+[195/890] Building CXX object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/q4gemm_avx512.cpp.o
+[196/890] Building CXX object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/q4_dq.cpp.o
+[197/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/fp16/fp16_pool.cc.o
+[198/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/session_state.cc.o
+[199/890] Building CXX object CMakeFiles/onnxruntime_graph.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/graph/function.cc.o
+[200/890] Building CXX object CMakeFiles/onnxruntime_util.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/util/thread_utils.cc.o
+[201/890] Building CXX object CMakeFiles/onnxruntime_graph.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/graph/schema_registry.cc.o
+[202/890] Building CXX object CMakeFiles/onnxruntime_mlas.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/mlas/lib/sqnbitgemm_kernel_avx2.cpp.o
+[203/890] Building CXX object CMakeFiles/onnxruntime_graph.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/graph/graph_viewer.cc.o
+[204/890] Building CXX object CMakeFiles/onnxruntime_graph.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/graph/op_identifier_utils.cc.o
+[205/890] Building CXX object CMakeFiles/onnxruntime_graph.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/graph/model.cc.o
+[206/890] Building CXX object CMakeFiles/onnxruntime_graph.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/graph/graph_utils.cc.o
+[207/890] Building CXX object CMakeFiles/onnxruntime_graph.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/graph/runtime_optimization_record_container.cc.o
+[208/890] Building CXX object CMakeFiles/onnxruntime_graph.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/graph/graph_flatbuffers_utils.cc.o
+[209/890] Building CXX object CMakeFiles/onnxruntime_framework.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/framework/allocation_planner.cc.o
+[210/890] Linking CXX static library libonnxruntime_framework.a
+[211/890] Linking CXX static library libonnxruntime_lora.a
+[212/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/cpu_provider_factory.cc.o
+[213/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/utils.cc.o
+[214/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/cpu_execution_provider.cc.o
+[215/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/generator/constant_of_shape.cc.o
+[216/890] Building CXX object CMakeFiles/onnxruntime_graph.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/graph/function_utils.cc.o
+[217/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/controlflow/utils.cc.o
+[218/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/generator/range.cc.o
+[219/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/partitioning_utils.cc.o
+[220/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/math/softmax_shared.cc.o
+[221/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/controlflow/if.cc.o
+[222/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/controlflow/scan_9.cc.o
+[223/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/math/einsum_utils/einsum_auxiliary_ops.cc.o
+[224/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/math/cumsum.cc.o
+[225/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/controlflow/scan_8.cc.o
+[226/890] Building CXX object CMakeFiles/onnxruntime_graph.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/graph/contrib_ops/contrib_defs.cc.o
+[227/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/controlflow/scan_utils.cc.o
+[228/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/math/einsum.cc.o
+[229/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/controlflow/loop.cc.o
+[230/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/math/softmax.cc.o
+[231/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/generator/random.cc.o
+[232/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/cpu_provider_shared.cc.o
+[233/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/math/hardmax.cc.o
+[234/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/math/einsum_utils/einsum_compute_preprocessor.cc.o
+[235/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/math/clip.cc.o
+[236/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/math/det.cc.o
+[237/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/math/gemm.cc.o
+[238/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/math/round.cc.o
+[239/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/ml/binarizer.cc.o
+[240/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/activation/activations.cc.o
+[241/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/ml/dictvectorizer.cc.o
+[242/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/ml/imputer.cc.o
+[243/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/ml/category_mapper.cc.o
+[244/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/ml/array_feature_extractor.cc.o
+[245/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/math/matmul.cc.o
+[246/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/math/sign.cc.o
+[247/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/ml/feature_vectorizer.cc.o
+[248/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/ml/cast_map.cc.o
+[249/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/ml/scaler.cc.o
+[250/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/ml/onehotencoder.cc.o
+[251/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/math/einsum_utils/einsum_typed_compute_processor.cc.o
+[252/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/ml/normalizer.cc.o
+[253/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/ml/tree_ensemble_helper.cc.o
+[254/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/math/top_k.cc.o
+[255/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/ml/linearclassifier.cc.o
+[256/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/ml/linearregressor.cc.o
+[257/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/ml/svmregressor.cc.o
+[258/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/nn/layer_norm.cc.o
+[259/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/nn/Unpool.cc.o
+[260/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/ml/zipmap.cc.o
+[261/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/ml/svmclassifier.cc.o
+[262/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/nn/conv.cc.o
+[263/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/nn/roi_pool.cc.o
+[264/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/nn/lp_norm.cc.o
+[265/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/nn/dropout_op.cc.o
+[266/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/nn/flatten.cc.o
+[267/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/object_detection/non_max_suppression.cc.o
+[268/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/nn/instance_norm.cc.o
+[269/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/nn/layer_norm_impl.cc.o
+[270/890] Building CXX object CMakeFiles/onnxruntime_graph.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/graph/graph.cc.o
+[271/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/nn/conv_transpose.cc.o
+[272/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/nn/batch_norm.cc.o
+[273/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/nn/lrn.cc.o
+[274/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/nn/tfidfvectorizer.cc.o
+[275/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/quantization/dynamicquantizelinear.cc.o
+[276/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/nn/pool.cc.o
+[277/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/nn/shrink.cc.o
+[278/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/optional/optional_ops.cc.o
+[279/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/quantization/matmul_integer.cc.o
+[280/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/object_detection/roialign.cc.o
+[281/890] Building CXX object CMakeFiles/onnxruntime_util.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/util/math_cpu.cc.o
+[282/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/quantization/conv_integer.cc.o
+[283/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/rnn/deep_cpu_lstm.cc.o
+[284/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/rnn/rnn_helpers.cc.o
+[285/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/ml/label_encoder.cc.o
+[286/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/quantization/qlinearconv.cc.o
+[287/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/sequence/concat_from_sequence.cc.o
+[288/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/rnn/lstm_base.cc.o
+[289/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/rnn/deep_cpu_gru.cc.o
+[290/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/signal/window_functions.cc.o
+[291/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/tensor/gather.cc.o
+[292/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/tensor/compress.cc.o
+[293/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/rnn/rnn.cc.o
+[294/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/quantization/quantize_linear_matmul.cc.o
+[295/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/tensor/col2im.cc.o
+[296/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/rnn/uni_directional_lstm.cc.o
+[297/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/tensor/gather_nd.cc.o
+[298/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/ml/treeregressor.cc.o
+[299/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/tensor/concat.cc.o
+[300/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/sequence/sequence_ops.cc.o
+[301/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/ml/tree_ensemble.cc.o
+[302/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/tensor/expand.cc.o
+[303/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/signal/dft.cc.o
+[304/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/tensor/gelu.cc.o
+[305/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/tensor/eye_like.cc.o
+[306/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/tensor/affine_grid.cc.o
+[307/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/quantization/quantize_linear.cc.o
+[308/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/tensor/gather_elements.cc.o
+[309/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/tensor/grid_sample.cc.o
+[310/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/tensor/identity_op.cc.o
+[311/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/tensor/size.cc.o
+[312/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/tensor/shape_op.cc.o
+[313/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/tensor/resize.cc.o
+[314/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/tensor/isinf.cc.o
+[315/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/tensor/nonzero_op.cc.o
+[316/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/tensor/reshape.cc.o
+[317/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/tensor/isnan.cc.o
+[318/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/tensor/mean_variance_normalization.cc.o
+[319/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/tensor/reverse_sequence.cc.o
+[320/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/text/regex_full_match.cc.o
+[321/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/tensor/split.cc.o
+[322/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/tensor/onehot.cc.o
+[323/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/tensor/space_depth_ops.cc.o
+[324/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/tensor/squeeze.cc.o
+[325/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/tensor/scatter.cc.o
+[326/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/text/string_split.cc.o
+[327/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/tensor/scatter_nd.cc.o
+[328/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/text/string_concat.cc.o
+[329/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/tensor/trilu.cc.o
+[330/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/attnlstm/attention_wrapper.cc.o
+[331/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/attnlstm/bahdanau_attention.cc.o
+[332/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/tensor/tile.cc.o
+[333/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/tensor/pad.cc.o
+[334/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/tensor/unsqueeze.cc.o
+[335/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/tensor/transpose.cc.o
+[336/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/text/string_normalizer.cc.o
+[337/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/attnlstm/uni_dir_attn_lstm.cc.o
+[338/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/tensor/unique.cc.o
+[339/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/bert/attention_base.cc.o
+[340/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/tensor/slice.cc.o
+[341/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/bert/bias_gelu_helper.cc.o
+[342/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/bert/fast_gelu.cc.o
+[343/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/activations.cc.o
+[344/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/tensor/where_op.cc.o
+[345/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/ml/tree_ensemble_classifier.cc.o
+[346/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/bert/embed_layer_norm_helper.cc.o
+[347/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/bert/bias_gelu.cc.o
+[348/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/attnlstm/deep_cpu_attn_lstm.cc.o
+[349/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/bert/bifurcation_detector.cc.o
+[350/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/bert/attention.cc.o
+[351/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/bert/attention_utils.cc.o
+[352/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/bert/longformer_attention_base.cc.o
+[353/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/bert/ngram_repeat_block.cc.o
+[354/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/cpu_contrib_kernels.cc.o
+[355/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/crop.cc.o
+[356/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/conv_transpose_with_dynamic_pads.cc.o
+[357/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/bert/rotary_embedding.cc.o
+[358/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/bert/embed_layer_norm.cc.o
+[359/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/dynamicslice.cc.o
+[360/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/cdist.cc.o
+[361/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/fused_activation.cc.o
+[362/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/fused_conv.cc.o
+[363/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/bert/decoder_masked_multihead_attention.cc.o
+[364/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/element_wise_ops.cc.o
+[365/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/crop_and_resize.cc.o
+[366/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/fused_matmul.cc.o
+[367/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/bert/multihead_attention.cc.o
+[368/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/quantization/matmul_nbits_impl.cc.o
+[369/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/layer_norm.cc.o
+[370/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/tensor/upsample.cc.o
+[371/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/fused_gemm.cc.o
+[372/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/mean_variance_normalization_exp.cc.o
+[373/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/murmur_hash3.cc.o
+[374/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/expand_dims.cc.o
+[375/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/tensor/cast_op.cc.o
+[376/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/bert/group_query_attention.cc.o
+[377/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/tensor/shrunken_gather.cc.o
+[378/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/matmul_fpq4.cc.o
+[379/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/maxpool_with_mask.cc.o
+[380/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/grid_sample.cc.o
+[381/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/quantization/qlinear_lookup_table.cc.o
+[382/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/nchwc_ops.cc.o
+[383/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/image_scaler.cc.o
+[384/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/quantization/dynamic_quantize_lstm.cc.o
+[385/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/quantization/attention_quant.cc.o
+[386/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/quantization/nhwc_max_pool.cc.o
+[387/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/sample.cc.o
+[388/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/quantization/gather_block_quantized.cc.o
+[389/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/quantization/qlinear_activations.cc.o
+[390/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/quantization/qembed_layer_norm.cc.o
+[391/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/quantization/matmul_nbits.cc.o
+[392/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/quantization/qlinear_concat.cc.o
+[393/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/quantization/matmul_bnb4.cc.o
+[394/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/quantization/qlinear_softmax.cc.o
+[395/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/quantization/matmul_integer16.cc.o
+[396/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/math/sparse_dense_matmul.cc.o
+[397/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/math/element_wise_ops.cc.o
+[398/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/quantization/dynamic_quantize_matmul.cc.o
+[399/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/quantization/qlinear_binary_op.cc.o
+[400/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/quantization/qlinear_global_average_pool.cc.o
+[401/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/tokenizer.cc.o
+[402/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/transformers/sequences.cc.o
+[403/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/quantization/quant_gemm.cc.o
+[404/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/tensor/unfold.cc.o
+[405/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/compute_optimizer/shared_utils.cc.o
+[406/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/compute_optimizer/upstream_gather.cc.o
+[407/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/compute_optimizer/upstream_gather_actors.cc.o
+[408/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/compute_optimizer/upstream_reshape.cc.o
+[409/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/compute_optimizer/upstream_reshape_actors.cc.o
+[410/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/compute_optimizer/upstream_transformer_base.cc.o
+[411/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/quantization/qlinear_where.cc.o
+[412/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/transformers/logits_processor.cc.o
+[413/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/transformers/beam_search_parameters.cc.o
+[414/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/transformers/greedy_search_parameters.cc.o
+[415/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/utils/dump_tensor.cc.o
+[416/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/tensor/dynamic_time_warping.cc.o
+[417/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/skip_layer_norm.cc.o
+[418/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/transformers/sampling_parameters.cc.o
+[419/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/quantization/qlinear_pool.cc.o
+[420/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/transformers/beam_search_scorer.cc.o
+[421/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/unique.cc.o
+[422/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/sparse/sparse_attention.cc.o
+[423/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/cast_elimination.cc.o
+[424/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/bias_gelu_fusion.cc.o
+[425/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/providers/cpu/reduction/reduction_ops.cc.o
+[426/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/transformers/subgraph_gpt.cc.o
+[427/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/transformers/generation_device_helper.cc.o
+[428/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/bias_dropout_fusion.cc.o
+[429/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/transformers/greedy_search.cc.o
+[430/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/transformers/subgraph_whisper_decoder.cc.o
+[431/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/transformers/sampling.cc.o
+[432/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/concat_slice_elimination.cc.o
+[433/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/transformers/subgraph_base.cc.o
+[434/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/bias_softmax_fusion.cc.o
+[435/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/transformers/subgraph_whisper_encoder.cc.o
+[436/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/transformers/subgraph_t5_encoder.cc.o
+[437/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/common_subexpression_elimination.cc.o
+[438/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/transformers/subgraph_t5_decoder.cc.o
+[439/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/transformers/beam_search.cc.o
+[440/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/word_conv_embedding.cc.o
+[441/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/conv_add_act_fusion.cc.o
+[442/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/conv_add_fusion.cc.o
+[443/890] Building CXX object CMakeFiles/onnxruntime_providers.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/contrib_ops/cpu/inverse.cc.o
+[444/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/div_mul_fusion.cc.o
+[445/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/conv_bn_fusion.cc.o
+[446/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/conv_mul_fusion.cc.o
+[447/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/conv_activation_fusion.cc.o
+[448/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/constant_sharing.cc.o
+[449/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/expand_elimination.cc.o
+[450/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/dropout_elimination.cc.o
+[451/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/constant_folding.cc.o
+[452/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/fast_gelu_fusion.cc.o
+[453/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/embed_layer_norm_fusion.cc.o
+[454/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/double_qdq_pairs_remover.cc.o
+[455/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/graph_transformer.cc.o
+[456/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/dynamic_quantize_matmul_fusion.cc.o
+[457/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/gelu_approximation.cc.o
+[458/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/identity_elimination.cc.o
+[459/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/free_dim_override_transformer.cc.o
+[460/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/gelu_fusion.cc.o
+[461/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/attention_fusion.cc.o
+[462/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/gemm_transpose_fusion.cc.o
+[463/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/gemm_sum_fusion.cc.o
+[464/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/gemm_activation_fusion.cc.o
+[465/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/graph_transformer_mgr.cc.o
+[466/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/matmul_activation_fusion.cc.o
+[467/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/gather_fusion.cc.o
+[468/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/identical_children_consolidation.cc.o
+[469/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/graph_optimizer_registry.cc.o
+[470/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/initializer.cc.o
+[471/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/matmul_bn_fusion.cc.o
+[472/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/isinf_reducesum_fusion.cc.o
+[473/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/layout_transformation/layout_transformation.cc.o
+[474/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/layer_norm_fusion.cc.o
+[475/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/matmul_nbits_fusion.cc.o
+[476/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/label_encoder_fusion.cc.o
+[477/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/matmul_integer_to_float.cc.o
+[478/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/not_where_fusion.cc.o
+[479/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/matmul_add_fusion.cc.o
+[480/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/nhwc_transformer.cc.o
+[481/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/matmul_transpose_fusion.cc.o
+[482/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/pre_shape_node_elimination.cc.o
+[483/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/noop_elimination.cc.o
+[484/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/pad_fusion.cc.o
+[485/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/qdq_transformer/avx2_weight_s8_to_u8.cc.o
+[486/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/matmul_scale_fusion.cc.o
+[487/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/qdq_transformer/ensure_unique_dq_for_node_unit.cc.o
+[488/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/insert_cast_transformer.cc.o
+[489/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/qdq_transformer/qdq_util.cc.o
+[490/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/qdq_transformer/constant_folding_dq_node.cc.o
+[491/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/qdq_transformer/qdq_s8_to_u8.cc.o
+[492/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/qdq_transformer/s8_to_u8.cc.o
+[493/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/nchwc_transformer.cc.o
+[494/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/qdq_transformer/clip_quantizelinear.cc.o
+[495/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/optimizer_execution_frame.cc.o
+[496/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/qdq_transformer/qdq_final_cleanup.cc.o
+[497/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/qdq_transformer/relu_quantizelinear.cc.o
+[498/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/graph_transformer_utils.cc.o
+[499/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/rocm_blas_alt_impl.cc.o
+[500/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/qdq_transformer/selectors_actions/qdq_actions.cc.o
+[501/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/qdq_transformer/qdq_propagation.cc.o
+[502/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/relu_clip_fusion.cc.o
+[503/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/qdq_transformer/weight_bias_quantization.cc.o
+[504/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/quick_gelu_fusion.cc.o
+[505/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/reshape_fusion.cc.o
+[506/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/unsqueeze_elimination.cc.o
+[507/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/rule_based_graph_transformer.cc.o
+[508/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/skip_layer_norm_fusion.cc.o
+[509/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/slice_elimination.cc.o
+[510/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/selectors_actions/helpers.cc.o
+[511/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/qdq_transformer/selectors_actions/qdq_selectors.cc.o
+[512/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/selectors_actions/actions.cc.o
+[513/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/propagate_cast_ops.cc.o
+[514/890] Building CXX object CMakeFiles/onnxruntime_session.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/session/ort_env.cc.o
+[515/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/selection_and_optimization_func.cc.o
+[516/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/qdq_transformer/selectors_actions/qdq_selector_action_transformer.cc.o
+[517/890] Building CXX object CMakeFiles/onnxruntime_test_utils.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/util/scoped_env_vars.cc.o
+[518/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/transpose_optimization/onnx_transpose_optimization.cc.o
+[519/890] Building CXX object CMakeFiles/onnxruntime_test_utils.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/util/file_util.cc.o
+[520/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/transpose_optimizer.cc.o
+[521/890] Building CXX object CMakeFiles/onnxruntime_test_utils.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/util/tensors_from_file.cc.o
+[522/890] Building CXX object CMakeFiles/onnxruntime_test_utils.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/util/temp_dir.cc.o
+[523/890] Building CXX object CMakeFiles/onnx_test_runner_common.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/onnx/callback.cc.o
+[524/890] Building CXX object CMakeFiles/onnxruntime_test_utils.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/util/test_allocator.cc.o
+[525/890] Building CXX object CMakeFiles/onnxruntime_test_utils.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/util/test_environment.cc.o
+[526/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/selectors_actions/selector_action_transformer.cc.o
+[527/890] Building CXX object CMakeFiles/onnx_test_runner_common.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/onnx/heap_buffer.cc.o
+[528/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/qdq_transformer/selectors_actions/shared/utils.cc.o
+[529/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/stft_decomposition.cc.o
+[530/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/transformer_memcpy.cc.o
+[531/890] Building CXX object CMakeFiles/onnx_test_runner_common.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/onnx/TestCaseResult.cc.o
+[532/890] Linking CXX static library libonnx_test_data_proto.a
+[533/890] Linking CXX static library libonnxruntime_flatbuffers.a
+[534/890] Linking CXX static library libonnxruntime_common.a
+[535/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/utils.cc.o
+[536/890] Linking CXX static library libonnxruntime_mlas.a
+[537/890] Linking CXX static library libonnxruntime_graph.a
+[538/890] Linking CXX static library libonnxruntime_util.a
+[539/890] Building CXX object CMakeFiles/onnxruntime_test_utils.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/util/test_random_seed.cc.o
+[540/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/common/cuda_op_test_utils.cc.o
+[541/890] Linking CXX static library libonnxruntime_providers.a
+[542/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/transpose_optimization/ort_transpose_optimization.cc.o
+[543/890] Building CXX object CMakeFiles/onnxruntime_session.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/session/lora_adapters.cc.o
+[544/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/common/dnnl_op_test_utils.cc.o
+[545/890] Building CXX object CMakeFiles/onnxruntime_session.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/session/provider_registration.cc.o
+[546/890] Building CXX object CMakeFiles/onnx_test_runner_common.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/onnx/TestResultStat.cc.o
+[547/890] Building CXX object CMakeFiles/onnxruntime_session.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/session/default_cpu_allocator_c_api.cc.o
+[548/890] Building CXX object CMakeFiles/onnx_test_runner_common.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/onnx/pb_helper.cc.o
+[549/890] Building CXX object CMakeFiles/onnxruntime_session.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/session/IOBinding.cc.o
+[550/890] Building CXX object CMakeFiles/onnxruntime_session.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/session/allocator_adapters.cc.o
+[551/890] Building CXX object CMakeFiles/onnx_test_runner_common.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/onnx/testcase_driver.cc.o
+[552/890] Building CXX object CMakeFiles/onnxruntime_session.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/session/abi_session_options.cc.o
+[553/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/common/utf8_util_test.cc.o
+[554/890] Building CXX object CMakeFiles/onnxruntime_test_utils.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/util/default_providers.cc.o
+[555/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/common/denormal_test.cc.o
+[556/890] Building CXX object CMakeFiles/onnxruntime_session.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/session/environment.cc.o
+[557/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/common/narrow_test.cc.o
+[558/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/optimizer/compute_optimizer_test.cc.o
+[559/890] Building CXX object CMakeFiles/onnx_test_runner_common.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/onnx/testenv.cc.o
+[560/890] Building CXX object CMakeFiles/onnx_test_runner_common.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/onnx/tensorprotoutils.cc.o
+[561/890] Building CXX object CMakeFiles/onnx_test_runner_common.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/onnx/testcase_request.cc.o
+[562/890] Building CXX object CMakeFiles/onnxruntime_optimizer.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/optimizer/transpose_optimization/ort_optimizer_api_impl.cc.o
+[563/890] Linking CXX static library libonnxruntime_optimizer.a
+[564/890] Building CXX object CMakeFiles/onnx_test_runner_common.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/onnx/dataitem_request.cc.o
+[565/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/common/span_utils_test.cc.o
+[566/890] Building CXX object CMakeFiles/onnx_test_runner_common.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/onnx/onnx_model_info.cc.o
+[567/890] Building CXX object CMakeFiles/onnxruntime_session.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/session/model_editor_c_api.cc.o
+[568/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/ir/common_data_structure_test.cc.o
+[569/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/common/tensor_op_test_utils.cc.o
+[570/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/common/logging/logging_test.cc.o
+[571/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/common/logging/sinks_test.cc.o
+[572/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/common/random_generator_test.cc.o
+[573/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/common/string_utils_test.cc.o
+[574/890] Building CXX object CMakeFiles/onnxruntime_session.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/session/utils.cc.o
+[575/890] Building CXX object CMakeFiles/onnxruntime_session.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/session/standalone_op_invoker.cc.o
+[576/890] Building CXX object CMakeFiles/onnxruntime_session.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/session/custom_ops.cc.o
+[577/890] Building CXX object CMakeFiles/onnxruntime_session.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/session/inference_session_utils.cc.o
+[578/890] Building CXX object CMakeFiles/onnxruntime_test_utils.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/util/test_utils.cc.o
+[579/890] Building CXX object CMakeFiles/onnxruntime_test_utils.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/util/compare_ortvalue.cc.o
+[580/890] Linking CXX static library libonnxruntime_test_utils.a
+[581/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/optimizer/layout_transformation_potentially_added_ops_test.cc.o
+[582/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/ir/op_test.cc.o
+[583/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/ir/graph_viewer_test.cc.o
+[584/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/ir/schema_registry_manager_test.cc.o
+[585/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/ir/utils_test.cc.o
+[586/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/framework/TestAllocatorManager.cc.o
+[587/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/optimizer/cse_test.cc.o
+[588/890] Building CXX object CMakeFiles/onnxruntime_session.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/session/provider_bridge_ort.cc.o
+[589/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/optimizer/optimizer_test.cc.o
+[590/890] Building CXX object CMakeFiles/onnx_test_runner_common.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/onnx/TestCase.cc.o
+[591/890] Linking CXX static library libonnx_test_runner_common.a
+[592/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/optimizer/conv_add_act_test.cc.o
+[593/890] Building CXX object CMakeFiles/onnxruntime_session.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/session/onnxruntime_c_api.cc.o
+[594/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/ir/onnx_model_test.cc.o
+[595/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/framework/dummy_allocator.cc.o
+[596/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/optimizer/free_dimension_override_test.cc.o
+[597/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/optimizer/qdq_transformer_fastmath_test.cc.o
+[598/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/optimizer/initializer_test.cc.o
+[599/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/framework/endian_test.cc.o
+[600/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/optimizer/ensure_unique_dq_for_node_unit_test.cc.o
+[601/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/optimizer/rule_based_graph_transformer_test.cc.o
+[602/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/optimizer/graph_transform_utils_test.cc.o
+[603/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/optimizer/nhwc_transformer_test.cc.o
+[604/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/optimizer/resnet50_fusion_test.cc.o
+[605/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/optimizer/graph_transform_test_builder.cc.o
+[606/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/optimizer/qdq_test_utils.cc.o
+[607/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/framework/distance_test.cc.o
+[608/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/framework/bfc_arena_test.cc.o
+[609/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/framework/allocator_test.cc.o
+[610/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/framework/copy_test.cc.o
+[611/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/framework/dummy_provider.cc.o
+[612/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/optimizer/test_optimizer_utils.cc.o
+[613/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/framework/random_test.cc.o
+[614/890] Building CXX object CMakeFiles/onnxruntime_session.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/core/session/inference_session.cc.o
+[615/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/framework/float_8_test.cc.o
+[616/890] Linking CXX static library libonnxruntime_session.a
+[617/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/optimizer/nchwc_optimizer_test.cc.o
+[618/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/framework/provider_options_utils_test.cc.o
+[619/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/framework/math_test.cc.o
+[620/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/framework/run_options_test.cc.o
+[621/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/framework/execution_provider_test.cc.o
+[622/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/framework/data_types_test.cc.o
+[623/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/framework/kernel_registry_test.cc.o
+[624/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/framework/memcpy_transformer_test.cc.o
+[625/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/ir/graph_test.cc.o
+[626/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/framework/tensor_shape_test.cc.o
+[627/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/optimizer/graph_transform_test_layernorm.cc.o
+[628/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/optimizer/qdq_matmulnbits_transformer_test.cc.o
+[629/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/optimizer/runtime_optimization/graph_runtime_optimization_test.cc.o
+[630/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/framework/mem_pattern_planner_test.cc.o
+[631/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/framework/kernel_type_str_resolver_utils_test.cc.o
+[632/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/platform/barrier_test.cc.o
+[633/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/platform/env_test.cc.o
+[634/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/platform/scoped_resource_test.cc.o
+[635/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/platform/file_io_test.cc.o
+[636/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/framework/float_16_test.cc.o
+[637/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/optimizer/avx2_weight_s8_to_u8_test.cc.o
+[638/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/bias_dropout_op_test.cc.o
+[639/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/framework/function_test.cc.o
+[640/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/framework/transpose_test.cc.o
+[641/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/framework/save_model_with_external_initializers.cc.o
+[642/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/bitmask_dropout_op_test.cc.o
+[643/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/platform/path_lib_test.cc.o
+[644/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/framework/test_tensor_loader.cc.o
+[645/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/framework/insert_cast_transformer_test.cc.o
+[646/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/framework/test_utils.cc.o
+[647/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/framework/local_kernel_registry_test.cc.o
+[648/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/framework/tensor_test.cc.o
+[649/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/attention_op_test_helper.cc.o
+[650/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/framework/allocation_planner_test.cc.o
+[651/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/framework/shape_inference_test.cc.o
+[652/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/platform/threadpool_test.cc.o
+[653/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/framework/opaque_kernels_test.cc.o
+[654/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/framework/type_info_test.cc.o
+[655/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/framework/tensorutils_test.cc.o
+[656/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/framework/parallel_executor_test.cc.o
+[657/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/framework/execution_frame_test.cc.o
+[658/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/activation_op_test.cc.o
+[659/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/framework/tunable_op_test.cc.o
+[660/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/bias_add_op_test.cc.o
+[661/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/framework/ort_model_only_test.cc.o
+[662/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/bias_split_gelu_op_test.cc.o
+[663/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/attention_lstm_op_test.cc.o
+[664/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/cdist_op_test.cc.o
+[665/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/bias_softmax_op_test.cc.o
+[666/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/conv_transpose_with_dynamic_pads_test.cc.o
+[667/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/bifurcation_detector_op_test.cc.o
+[668/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/crop_and_resize_op_test.cc.o
+[669/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/beam_search_test.cc.o
+[670/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/decoder_attention_op_test.cc.o
+[671/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/dynamic_time_warping_op_test.cc.o
+[672/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/dynamic_slice_op_test.cc.o
+[673/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/decoder_masked_multihead_attention_op_test.cc.o
+[674/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/crop_op_test.cc.o
+[675/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/attention_op_test.cc.o
+[676/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/expand_dims_test.cc.o
+[677/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/greedy_search_test.cc.o
+[678/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/element_wise_ops_test.cc.o
+[679/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/framework/session_state_test.cc.o
+[680/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/fft_op_test.cc.o
+[681/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/fastgelu_op_test.cc.o
+[682/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/gemm_float8_test.cc.o
+[683/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/dynamic_quantize_matmul_test.cc.o
+[684/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/embed_layer_norm_op_test.cc.o
+[685/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/gemm_fastgelu_op_test.cc.o
+[686/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/function_ops_test.cc.o
+[687/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/function_test_util.cc.o
+[688/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/fused_matmul_op_test.cc.o
+[689/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/framework/inference_session_test.cc.o
+[690/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/layer_norm_test.cc.o
+[691/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/inverse_test.cc.o
+[692/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/fused_conv_test.cc.o
+[693/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/group_norm_op_test.cc.o
+[694/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/gemma_rotary_emb_test.cc.o
+[695/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/gridsample_test.cc.o
+[696/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/longformer_attention_op_format0_test.cc.o
+[697/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/longformer_attention_op_test.cc.o
+[698/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/gather_block_quantized_op_test.cc.o
+[699/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/math/matmul_sparse_test.cc.o
+[700/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/op_reg_test.cc.o
+[701/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/matmul_integer16_test.cc.o
+[702/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/layer_norm_op_test.cc.o
+[703/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/ngram_repeat_block_op_test.cc.o
+[704/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/maxpool_mask_test.cc.o
+[705/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/framework/sparse_kernels_test.cc.o
+[706/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/nhwc_conv_op_test.cc.o
+[707/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/moe_test.cc.o
+[708/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/murmur_hash3_test.cc.o
+[709/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/nhwc_pool_in_op_test.cc.o
+[710/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/multihead_attention_op_test.cc.o
+[711/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/nhwc_maxpool_op_test.cc.o
+[712/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/matmul_fpq4_test.cc.o
+[713/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/packed_multihead_attention_op_test.cc.o
+[714/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/packed_attention_op_test.cc.o
+[715/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/optimizer/transpose_optimizer_test.cc.o
+[716/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/snpe_op_test.cc.o
+[717/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/qembed_layer_norm_op_test.cc.o
+[718/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/matmul_4bits_test.cc.o
+[719/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/qordered_attention_test.cc.o
+[720/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/matmul_bnb4_test.cc.o
+[721/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/qordered_gelu_op_test.cc.o
+[722/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/qordered_layer_norm_op_test.cc.o
+[723/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/qlinear_concat_test.cc.o
+[724/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/qlinear_lookup_table_test.cc.o
+[725/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/matmul_integer_to_float_test.cc.o
+[726/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/qordered_longformer_attention_op_test.cc.o
+[727/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/qlinear_binary_op_test.cc.o
+[728/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/kernel_compute_test_utils.cc.o
+[729/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/optimizer/qdq_transformer_test.cc.o
+[730/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/qordered_matmul_op_test.cc.o
+[731/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/get_execution_providers_test.cc.o
+[732/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/qlinear_where_test.cc.o
+[733/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/qlinear_global_average_pool_test.cc.o
+[734/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/qordered_qdq_op_test.cc.o
+[735/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/sampling_test.cc.o
+[736/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/op_kernel_type_control_test.cc.o
+[737/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/quantize_bfp_test.cc.o
+[738/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/quantize_ops_test.cc.o
+[739/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/remove_padding_op_test.cc.o
+[740/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/relative_attention_bias_test.cc.o
+[741/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/qlinear_pool_test.cc.o
+[742/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/restore_padding_op_test.cc.o
+[743/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/rotary_embedding_op_test.cc.o
+[744/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/cpu_execution_provider_test.cc.o
+[745/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/sample_op_test.cc.o
+[746/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/quantize_attention_op_test.cc.o
+[747/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/quantize_lstm_op_test.cc.o
+[748/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/trilu_test.cc.o
+[749/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/torch_embedding_shape_inference_test.cc.o
+[750/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/skip_group_norm_op_test.cc.o
+[751/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/skiplayernorm_op_test.cc.o
+[752/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/optimizer/graph_transform_test.cc.o
+[753/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/tensor_op_test.cc.o
+[754/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/tokenizer_test.cc.o
+[755/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/word_conv_embedding_test.cc.o
+[756/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/op_tester.cc.o
+[757/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/unique_op_test.cc.o
+[758/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/activation/activation_op_test.cc.o
+[759/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/opaque_api/test_opaque_api.cc.o
+[760/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/contrib_ops/quant_gemm_test.cc.o
+[761/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/memcpy_test.cc.o
+[762/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/compare_provider_test_utils.cc.o
+[763/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/checkers.cc.o
+[764/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/partitioning_utils_test.cc.o
+[765/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/math/matmul_fastmath_test.cc.o
+[766/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/generator/range_test.cc.o
+[767/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/math/clip_test.cc.o
+[768/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/generator/constant_of_shape_test.cc.o
+[769/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/math/cumsum_test.cc.o
+[770/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/generator/random_test.cc.o
+[771/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/math/det_op_test.cc.o
+[772/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/base_tester.cc.o
+[773/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/math/hardmax_test.cc.o
+[774/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/controlflow/if_test.cc.o
+[775/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/math/logsoftmax_test.cc.o
+[776/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/math/round_test.cc.o
+[777/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/math/quantize_linear_matmul_test.cc.o
+[778/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/ml/array_feature_extractor_test.cc.o
+[779/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/controlflow/scan_test.cc.o
+[780/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/math/gemm_test.cc.o
+[781/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/controlflow/loop_test.cc.o
+[782/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/nn/conv_fp16_test.cc.o
+[783/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/math/sign_test.cc.o
+[784/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/math/softmax_test.cc.o
+[785/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/ml/binarizer_test.cc.o
+[786/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/ml/feature_vectorizer_test.cc.o
+[787/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/ml/category_mapper_test.cc.o
+[788/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/math/matmul_integer_test.cc.o
+[789/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/ml/write_scores_test.cc.o
+[790/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/math/einsum_test.cc.o
+[791/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/nn/pool_fp16_op_test.cc.o
+[792/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/ml/linearregressor_test.cc.o
+[793/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/ml/dictvectorizer_test.cc.o
+[794/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/ml/imputer_test.cc.o
+[795/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/ml/cast_map_test.cc.o
+[796/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/ml/normalizer_test.cc.o
+[797/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/math/matmul_test.cc.o
+[798/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/math/topk_op_test.cc.o
+[799/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/ml/svmclassifier_test.cc.o
+[800/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/ml/svmregressor_test.cc.o
+[801/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/ml/linearclassifer_test.cc.o
+[802/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/ml/scaler_test.cc.o
+[803/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/ml/onehotencoder_test.cc.o
+[804/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/ml/label_encoder_test.cc.o
+[805/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/ml/tree_ensembler_test.cc.o
+[806/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/nn/group_norm_op_test.cc.o
+[807/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/ml/zipmap_test.cc.o
+[808/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/ml/tree_ensembler_classifier_test.cc.o
+[809/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/ml/treeregressor_test.cc.o
+[810/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/nn/lrn_op_test.cc.o
+[811/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/nn/dropout_op_test.cc.o
+[812/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/nn/instance_norm_op_test.cc.o
+[813/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/model_tests.cc.o
+[814/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/nn/conv_integer_test.cc.o
+[815/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/nn/lp_norm_op_test.cc.o
+[816/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/nn/flatten_op_test.cc.o
+[817/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/nn/max_roi_pool_op_test.cc.o
+[818/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/object_detection/roialign_test.cc.o
+[819/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/object_detection/non_max_suppression_test.cc.o
+[820/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/nn/conv_op_test.cc.o
+[821/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/nn/unpool_op_test.cc.o
+[822/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/optional/optional_ops_test.cc.o
+[823/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/nn/tfidfvectorizer_test.cc.o
+[824/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/nn/shrink_test.cc.o
+[825/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/nn/pool_op_test.cc.o
+[826/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/nn/qlinearconv_op_test.cc.o
+[827/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/nn/batch_norm_op_test.cc.o
+[828/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/rnn/deep_cpu_gru_op_test.cc.o
+[829/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/rnn/deep_cpu_lstm_op_test.cc.o
+[830/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/tensor/affine_grid_test.cc.o
+[831/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/rnn/rnn_op_test.cc.o
+[832/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/sequence/concat_from_sequence_op_test.cc.o
+[833/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/math/element_wise_ops_test.cc.o
+[834/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/tensor/col2im_test.cc.o
+[835/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/nn/conv_transpose_op_test.cc.o
+[836/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/sequence/sequence_ops_test.cc.o
+[837/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/tensor/compress_op.test.cc.o
+[838/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/signal/signal_ops_test.cc.o
+[839/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/tensor/eyelike_op_test.cc.o
+[840/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/tensor/constant_test.cc.o
+[841/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/tensor/expand_test.cc.o
+[842/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/tensor/dynamic_quantize_linear_test.cc.o
+[843/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/tensor/concat_op_test.cc.o
+[844/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/tensor/identity_op_test.cc.o
+[845/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/tensor/isnan_test.cc.o
+[846/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/tensor/gather_op_test.cc.o
+[847/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/tensor/mean_variance_normalization_test.cc.o
+[848/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/tensor/gather_nd_op_test.cc.o
+[849/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/tensor/nonzero_op_test.cc.o
+[850/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/tensor/onehot_op_test.cc.o
+[851/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/tensor/isinf_test.cc.o
+[852/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/tensor/shape_op_test.cc.o
+[853/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/tensor/reverse_sequence_test.cc.o
+[854/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/tensor/size_test.cc.o
+[855/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/tensor/space_depth_ops_test.cc.o
+[856/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/tensor/scatter_nd_op_test.cc.o
+[857/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/tensor/tensor_op_test.cc.o
+[858/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/tensor/squeeze_op_test.cc.o
+[859/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/tensor/trilu_shape_inference_test.cc.o
+[860/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/tensor/trilu_op_test.cc.o
+[861/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/tensor/gather_elements_op_test.cc.o
+[862/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/tensor/transpose_test.cc.o
+[863/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/tensor/slice_op.test.cc.o
+[864/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/unittest_main/test_main.cc.o
+[865/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/tensor/unsqueeze_op_test.cc.o
+[866/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/quantization/quantization_test.cc.o
+[867/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/tensor/tile_op_test.cc.o
+[868/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/tensor/where_op_test.cc.o
+[869/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/internal_testing/internal_testing_ep_static_kernels.cc.o
+[870/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/text/string_concat_test.cc.o
+[871/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/tensor/grid_sample_test.cc.o
+[872/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/tensor/upsample_op_test.cc.o
+[873/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/tensor/unique_op_test.cc.o
+[874/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/tensor/scatter_op_test.cc.o
+[875/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/flatbuffers/flatbuffer_utils_test.cc.o
+[876/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/text/regex_full_match_test.cc.o
+[877/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/internal_testing/internal_testing_execution_provider.cc.o
+[878/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/text/string_split_test.cc.o
+[879/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/tensor/split_op_test.cc.o
+[880/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/lora/lora_test.cc.o
+[881/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/text/string_normalizer_test.cc.o
+[882/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/tensor/cast_op_test.cc.o
+[883/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/tensor/resize_op_test.cc.o
+[884/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/internal_testing/internal_testing_partitioning_tests.cc.o
+[885/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/internal_testing/internal_testing_tests.cc.o
+[886/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/reduction/reduction_ops_test.cc.o
+[887/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/tensor/quantize_linear_test.cc.o
+[888/890] Building CXX object CMakeFiles/onnxruntime_test_all.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/test/providers/cpu/tensor/pad_test.cc.o
+[889/890] Linking CXX executable onnxruntime_test_all
+/usr/bin/ld: warning: QgemmU8S8KernelAmx.S.o: missing .note.GNU-stack section implies executable stack
+/usr/bin/ld: NOTE: This behaviour is deprecated and will be removed in a future version of the linker
+2026-08-09 16:33:46,347 build [INFO] - Build complete
+Namespace(build_dir='/tmp/issue55-build/native-P-prime', config=['Release'], update=True, build=True, clean=False, parallel=32, target='onnxruntime_test_all', compile_no_warning_as_error=False, build_shared_lib=False, build_apple_framework=False, enable_lto=False, use_cache=False, use_binskim_compliant_compile_flags=False, cmake_extra_defines=None, cmake_path='cmake', cmake_generator='Ninja', use_vcpkg=True, use_vcpkg_ms_internal_asset_cache=False, skip_submodule_sync=True, test=False, skip_tests=False, ctest_path='ctest', enable_onnx_tests=False, path_to_protoc_exe=None, fuzz_testing=False, enable_symbolic_shape_infer_tests=False, skip_onnx_tests=False, skip_winml_tests=False, skip_nodejs_tests=False, test_all_timeout='10800', enable_transformers_tool_test=False, build_micro_benchmarks=False, code_coverage=False, enable_training=False, enable_training_apis=False, enable_training_ops=False, enable_nccl=False, nccl_home=None, enable_memory_profile=False, enable_address_sanitizer=False, gen_doc=None, rv64=False, riscv_toolchain_root='', riscv_qemu_path='', android=False, android_abi='arm64-v8a', android_api=27, android_sdk_path='', android_ndk_path='', android_cpp_shared=False, android_run_emulator=False, build_wasm=False, build_wasm_static_lib=False, emsdk_version='4.0.4', enable_wasm_simd=False, enable_wasm_relaxed_simd=False, enable_wasm_threads=False, enable_wasm_memory64=False, disable_wasm_exception_catching=False, enable_wasm_api_exception_catching=False, enable_wasm_exception_throwing_override=True, wasm_run_tests_in_browser=False, enable_wasm_profiling=False, enable_wasm_debug_info=False, wasm_malloc=None, emscripten_settings=None, use_full_protobuf=False, use_mimalloc=False, external_graph_transformer_path=None, use_extensions=False, extensions_overridden_path=None, minimal_build=None, include_ops_by_config=None, enable_reduced_operator_type_support=False, disable_contrib_ops=False, disable_ml_ops=False, disable_rtti=False, disable_types=[], disable_exceptions=False, enable_pybind=False, build_wheel=False, wheel_name_suffix=None, skip_keras_test=False, build_csharp=False, build_nuget=False, msbuild_extra_options=None, build_java=False, build_nodejs=False, build_objc=False, use_cuda=False, cuda_version=None, cuda_home=None, cudnn_home=None, enable_cuda_line_info=False, enable_cuda_nhwc_ops=False, disable_cuda_nhwc_ops=False, enable_cuda_minimal_build=False, nvcc_threads=-1, enable_nvtx_profile=False, enable_cuda_profiling=False, use_rocm=False, rocm_version=None, rocm_home=None, enable_rocm_profiling=False, use_dnnl=False, dnnl_gpu_runtime='', dnnl_opencl_root='', dnnl_aarch64_runtime='', dnnl_acl_root='', use_openvino=None, use_tensorrt=False, use_tensorrt_builtin_parser=True, use_tensorrt_oss_parser=False, tensorrt_home=None, use_dml=False, dml_path='', dml_external_project=False, use_nnapi=False, nnapi_min_api=None, use_coreml=False, use_qnn=None, qnn_home=None, use_snpe=False, snpe_root=None, use_vitisai=False, use_armnn=False, armnn_relu=False, armnn_bn=False, armnn_home=None, armnn_libs=None, use_acl=False, acl_home=None, acl_libs=None, no_kleidiai=False, use_rknpu=False, use_cann=False, cann_home=None, use_migraphx=False, migraphx_home=None, use_webnn=False, use_jsep=False, use_webgpu=False, use_external_dawn=False, use_xnnpack=False, use_vsinpu=False, use_azure=False, enable_lazy_tensor=False, ms_experimental=False, enable_msinternal=False, use_triton_kernel=False, use_lock_free_queue=False, enable_generic_interface=False, allow_running_as_root=False, enable_external_custom_op_schemas=False)

@@ -148,7 +148,44 @@ test("pause cancels speculative work and resume retries from that chunk", async 
   queue.dispose();
 });
 
-test("pause can retain one active lookahead for a warm resume", async () => {
+test("pause retains ready lookahead audio for a warm resume", async () => {
+  const preparations = [];
+  const discarded = [];
+  const queue = createSpeechPrefetchQueue({
+    startIndex: 0,
+    endIndex: 3,
+    lookahead: 1,
+    buildChunk: (index) => ({ startIndex: index, nextIndex: index + 1 }),
+    getNextIndex: (chunk) => chunk.nextIndex,
+    prepareChunk: (chunk, { signal, speculative }) => {
+      const pending = deferred();
+      preparations.push({ chunk, pending, signal, speculative });
+      return pending.promise;
+    },
+    discardPrepared: (prepared) => discarded.push(prepared),
+  });
+
+  await Promise.resolve();
+  const current = queue.take();
+  preparations[0].pending.resolve("audio-0");
+  await current;
+  await Promise.resolve();
+
+  preparations[1].pending.resolve("audio-1");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(queue.peekStatus(), "ready");
+  assert.equal(queue.pause(), 0);
+  assert.equal(preparations[1].signal.aborted, false);
+  assert.deepEqual(discarded, []);
+  queue.resume();
+  assert.equal(preparations.length, 2);
+  const retained = await queue.take();
+  assert.equal(retained.prepared, "audio-1");
+  assert.deepEqual(discarded, []);
+  queue.dispose();
+});
+
+test("fallback pause retains pending lookahead when inference is not cooperatively cancellable", async () => {
   const preparations = [];
   const queue = createSpeechPrefetchQueue({
     startIndex: 0,
@@ -172,7 +209,7 @@ test("pause can retain one active lookahead for a warm resume", async () => {
   assert.equal(queue.pause({ cancelPending: false }), 0);
   assert.equal(preparations[1].signal.aborted, false);
   preparations[1].pending.resolve("audio-1");
-  await Promise.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
   queue.resume();
   const retained = await queue.take();
   assert.equal(retained.prepared, "audio-1");
@@ -237,6 +274,10 @@ test("the page waits for playing before it resumes speculative narration", async
     1,
   );
   assert.match(pageSource, /audio\.onplaying = null;/u);
+  assert.match(
+    pageSource,
+    /runtime\.device === "wasm"[\s\S]*\(runtime\.wasmThreads \?\? 1\) > 1[\s\S]*cancelPending: canCancelActiveInference/u,
+  );
 });
 
 test("a stored offline model loads after the reader paints and Play reuses it", async () => {
@@ -291,14 +332,18 @@ test("natural narration primes audio output and cleans it at every exit", async 
   assert.match(pageSource, /audio\.loop = true/u);
 });
 
-test("discarding speculative narration preserves the loaded offline model", async () => {
+test("discarding speculative narration cooperatively cancels without replacing the warm model", async () => {
   const pageSource = await readFile("app/page.tsx", "utf8");
   const speechSource = await readFile("app/offline-speech.ts", "utf8");
 
   assert.match(pageSource, /preserveWorkerOnAbort: speculative/u);
   assert.match(
     speechSource,
-    /if \(preserveWorkerOnAbort\)[\s\S]*Ignore its eventual result/u,
+    /if \(preserveWorkerOnAbort\)[\s\S]*runCancellationController\.request\(id, pending\.workerEpoch\)[\s\S]*worker\.postMessage\(\{ id, type: "cancel" \}/u,
+  );
+  assert.doesNotMatch(
+    speechSource,
+    /if \(preserveWorkerOnAbort\)[\s\S]{0,500}terminateWorker\(/u,
   );
 });
 

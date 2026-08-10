@@ -7,7 +7,12 @@ import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 
-import { validateHighlightScopeEvidence } from "../scripts/run-highlight-scope-browser-regression.mjs";
+import {
+  captureWhenVisualStateStable,
+  validateHighlightScopeEvidence,
+  visualStateFingerprintExpression,
+  waitForVisualStateStable,
+} from "../scripts/run-highlight-scope-browser-regression.mjs";
 
 const execFileAsync = promisify(execFile);
 const repositoryRoot = path.resolve(".");
@@ -88,6 +93,120 @@ test("rejects a word box, shell reconciliation, or interaction Long Task", () =>
   assert.match(failures, /visible exact-word box/iu);
   assert.match(failures, /stable shell list/iu);
   assert.match(failures, /Long Task/iu);
+});
+
+test("visual fingerprints cover every source of screenshot movement without reader text", () => {
+  const expression = visualStateFingerprintExpression(
+    ".pdf-sentence-overlay.scope-active",
+  );
+  for (const expected of [
+    ".reader-scroll",
+    "scrollTop",
+    "scrollHeight",
+    "clientHeight",
+    "[data-active-token=\"true\"]",
+    ".pdf-sentence-overlay.scope-active",
+    "getClientRects",
+    "document.fonts?.status",
+    ".pdf-page-loading",
+    ".position-action-stack",
+  ]) {
+    assert.match(
+      expression,
+      new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "u"),
+    );
+  }
+  assert.doesNotMatch(expression, /(?:innerText|outerHTML|textContent)/u);
+});
+
+test("waits for four ready, identical visual fingerprints", async () => {
+  const fingerprint = (scrollTop, ready = true) =>
+    JSON.stringify({ ready, reader: { scrollTop } });
+  const responses = [
+    fingerprint(0, false),
+    fingerprint(10),
+    fingerprint(20),
+    fingerprint(20),
+    fingerprint(20),
+    fingerprint(20),
+  ];
+  let calls = 0;
+  const cdp = {
+    async send(method) {
+      assert.equal(method, "Runtime.evaluate");
+      const value = responses[Math.min(calls, responses.length - 1)];
+      calls += 1;
+      return { result: { value } };
+    },
+  };
+  const result = await waitForVisualStateStable(cdp, ".scope-active", {
+    sampleDelayMs: 0,
+    stableSamples: 4,
+    timeoutMs: 1_000,
+  });
+  assert.equal(result, fingerprint(20));
+  assert.equal(calls, 6);
+});
+
+test("retries a capture whose post-collect fingerprint changed", async () => {
+  const events = [];
+  const before = ["first-stable", "second-stable"];
+  const after = ["moved", "second-stable"];
+  const result = await captureWhenVisualStateStable({
+    maxAttempts: 2,
+    waitForStable: async () => {
+      events.push("wait");
+      return before.shift();
+    },
+    collect: async () => {
+      events.push("collect");
+      return { attempt: events.filter((event) => event === "collect").length };
+    },
+    capture: async () => {
+      events.push("capture");
+    },
+    fingerprint: async () => {
+      events.push("fingerprint");
+      return after.shift();
+    },
+    discard: async () => {
+      events.push("discard");
+    },
+  });
+  assert.deepEqual(result, { attempt: 2 });
+  assert.deepEqual(events, [
+    "wait",
+    "collect",
+    "capture",
+    "fingerprint",
+    "discard",
+    "wait",
+    "collect",
+    "capture",
+    "fingerprint",
+  ]);
+});
+
+test("discards every unstable capture and fails after the bounded attempts", async () => {
+  let captures = 0;
+  let discards = 0;
+  await assert.rejects(
+    captureWhenVisualStateStable({
+      maxAttempts: 3,
+      waitForStable: async () => "before",
+      collect: async () => ({ ignored: true }),
+      capture: async () => {
+        captures += 1;
+      },
+      fingerprint: async () => "after",
+      discard: async () => {
+        discards += 1;
+      },
+    }),
+    /changed while its screenshot was captured/iu,
+  );
+  assert.equal(captures, 3);
+  assert.equal(discards, 3);
 });
 
 test("keeps committed headed-Brave evidence tied to the exact sources and screenshots", async () => {

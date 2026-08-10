@@ -5,7 +5,8 @@
  * result is ready, which lets callers update their chunk sizing from measured
  * synthesis speed before speculative work is built. Every preparation gets an
  * independent AbortSignal so Pause can cancel future CPU work without
- * discarding the audio that is already playing.
+ * discarding the audio that is already playing or a lookahead result that has
+ * already finished preparing.
  *
  * @template TChunk
  * @template TPrepared
@@ -143,7 +144,9 @@ export function createSpeechPrefetchQueue({
 
   const cancelPending = () => {
     if (disposed) return 0;
-    const canceledEntries = entries.filter((entry) => entry.speculative);
+    const canceledEntries = entries.filter(
+      (entry) => entry.speculative && entry.status === "pending",
+    );
     if (!canceledEntries.length) return 0;
 
     const canceledSet = new Set(canceledEntries);

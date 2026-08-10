@@ -35,6 +35,7 @@ import {
   assessOfflineModelAvailability,
   mapOfflineInstallProgress,
 } from "./offline-preparation.mjs";
+import { createOfflineRunCancellationController } from "./offline-run-cancellation.mjs";
 import { describeWorkerStartupFailure } from "./worker-startup-diagnostics.mjs";
 import offlineSpeechWorkerUrl from "./offline-speech.worker.ts?worker&url";
 
@@ -168,6 +169,38 @@ type WorkerErrorMessage = {
   backend?: WorkerBackend;
 };
 
+type WorkerWasmRunStartMessage = {
+  id: number;
+  type: "wasm-run-start";
+  generation: number;
+  sharedBuffer: SharedArrayBuffer;
+  activeGenerationIndex: number;
+  cancellationGenerationIndex: number;
+  sessionGeneration: number;
+};
+
+type WorkerWasmRunEndMessage = {
+  id: number;
+  type: "wasm-run-end";
+  generation: number;
+  sessionGeneration: number;
+};
+
+type WorkerCanceledMessage = {
+  id: number;
+  type: "canceled";
+  cooperative: boolean;
+  sessionGeneration: number;
+};
+
+type WorkerResponseMessage =
+  | WorkerProgressMessage
+  | WorkerSuccessMessage
+  | WorkerErrorMessage
+  | WorkerWasmRunStartMessage
+  | WorkerWasmRunEndMessage
+  | WorkerCanceledMessage;
+
 type PendingRequest = {
   resolve: (value: unknown) => void;
   reject: (reason?: unknown) => void;
@@ -176,6 +209,7 @@ type PendingRequest = {
   message: WorkerRequestPayload;
   attemptedBackends: Set<string>;
   lastProgress: number;
+  workerEpoch: number;
 };
 
 export class OfflineSpeechError extends Error {
@@ -186,6 +220,8 @@ export class OfflineSpeechError extends Error {
 }
 
 let worker: Worker | null = null;
+let activeWorkerEpoch = 0;
+let nextWorkerEpoch = 1;
 let nextRequestId = 1;
 // A runtime failure can indicate a transient device-loss or driver event. Keep
 // the current page on the proven WASM fallback, but let a later page load probe
@@ -209,6 +245,9 @@ let readiness: OfflineSpeechReadiness = {
 };
 let initializedVoice: OfflineVoiceId | null = null;
 const OFFLINE_PACK_LOCK_NAME = "linelight-offline-voice-pack-v1";
+const runCancellationController = createOfflineRunCancellationController({
+  onTimeout: recoverWorkerAfterCancellationTimeout,
+});
 
 async function withOfflinePackLock<T>(
   operation: () => Promise<T>,
@@ -286,9 +325,12 @@ function reportProgress(
 }
 
 function terminateWorker(reason = "Offline narration was stopped.") {
+  const terminatedEpoch = activeWorkerEpoch;
   worker?.terminate();
   worker = null;
+  activeWorkerEpoch = 0;
   initializedVoice = null;
+  if (terminatedEpoch) runCancellationController.resetEpoch(terminatedEpoch);
 
   for (const pending of pendingRequests.values()) {
     pending.removeAbortListener?.();
@@ -307,9 +349,12 @@ function terminateWorker(reason = "Offline narration was stopped.") {
 
 function failWorker(target: Worker, message: string) {
   if (worker !== target) return;
+  const failedEpoch = activeWorkerEpoch;
   target.terminate();
   worker = null;
+  activeWorkerEpoch = 0;
   initializedVoice = null;
+  if (failedEpoch) runCancellationController.resetEpoch(failedEpoch);
   const error = new OfflineSpeechError(message);
 
   for (const pending of pendingRequests.values()) {
@@ -322,6 +367,52 @@ function failWorker(target: Worker, message: string) {
     timings: null,
     error: message,
   });
+}
+
+function recoverWorkerAfterCancellationTimeout({
+  workerEpoch,
+}: {
+  id: number;
+  workerEpoch: number;
+}) {
+  if (!worker || activeWorkerEpoch !== workerEpoch) return;
+
+  const timedOutWorker = worker;
+  const retryRequests = Array.from(pendingRequests.entries());
+  timedOutWorker.terminate();
+  worker = null;
+  activeWorkerEpoch = 0;
+  initializedVoice = null;
+  runCancellationController.resetEpoch(workerEpoch);
+
+  if (!retryRequests.length) {
+    updateReadiness({
+      state: "idle",
+      device: null,
+      modelDtype: null,
+      wasmThreads: null,
+      timings: null,
+      error: null,
+    });
+    return;
+  }
+
+  updateReadiness({
+    state: "initializing",
+    timings: null,
+    error: null,
+  });
+  const recoveryWorker = getWorker();
+  const recoveryEpoch = activeWorkerEpoch;
+  for (const [id, pending] of retryRequests) {
+    pending.workerEpoch = recoveryEpoch;
+    runCancellationController.register(id, recoveryEpoch);
+    recoveryWorker.postMessage({
+      ...pending.message,
+      ...effectiveBackendPreference(),
+      id,
+    } satisfies WorkerRequest);
+  }
 }
 
 export async function getOfflineVoicePackBytes() {
@@ -391,21 +482,45 @@ function getWorker() {
     type: "module",
     name: "linelight-offline-voice",
   });
+  const createdWorkerEpoch = nextWorkerEpoch;
+  nextWorkerEpoch += 1;
   worker = createdWorker;
+  activeWorkerEpoch = createdWorkerEpoch;
 
   createdWorker.addEventListener(
     "message",
     (
-      event: MessageEvent<
-        WorkerProgressMessage | WorkerSuccessMessage | WorkerErrorMessage
-      >,
+      event: MessageEvent<WorkerResponseMessage>,
     ) => {
       if (worker !== createdWorker) return;
       const message = event.data;
-      const pending = pendingRequests.get(message.id);
-      if (!pending) return;
+      if (message.type === "wasm-run-start") {
+        runCancellationController.observeStart(
+          message,
+          createdWorkerEpoch,
+        );
+        return;
+      }
+      if (message.type === "wasm-run-end") {
+        runCancellationController.observeEnd(message, createdWorkerEpoch);
+        return;
+      }
+      if (message.type === "canceled") {
+        runCancellationController.complete(message.id, createdWorkerEpoch);
+        const canceledPending = pendingRequests.get(message.id);
+        if (canceledPending) {
+          pendingRequests.delete(message.id);
+          canceledPending.removeAbortListener?.();
+          canceledPending.reject(
+            new DOMException("Offline narration was canceled.", "AbortError"),
+          );
+        }
+        return;
+      }
 
       if (message.type === "progress") {
+        const pending = pendingRequests.get(message.id);
+        if (!pending) return;
         reportProgress(pending, {
           progress: message.progress,
           label: message.label,
@@ -417,6 +532,15 @@ function getWorker() {
         });
         return;
       }
+
+      // Success or error is terminal even when an aborted page request has
+      // already been removed from pendingRequests. A run can finish just before
+      // its cancel message is delivered; acknowledging that terminal response
+      // prevents the cancellation watchdog from replacing a healthy warm
+      // worker after the fact.
+      runCancellationController.complete(message.id, createdWorkerEpoch);
+      const pending = pendingRequests.get(message.id);
+      if (!pending) return;
 
       if (
         message.type === "error" &&
@@ -462,9 +586,16 @@ function getWorker() {
             });
           }
           createdWorker.terminate();
-          if (worker === createdWorker) worker = null;
+          runCancellationController.resetEpoch(createdWorkerEpoch);
+          if (worker === createdWorker) {
+            worker = null;
+            activeWorkerEpoch = 0;
+          }
           const fallbackWorker = getWorker();
+          const fallbackWorkerEpoch = activeWorkerEpoch;
           for (const [id, retryPending] of retryRequests) {
+            retryPending.workerEpoch = fallbackWorkerEpoch;
+            runCancellationController.register(id, fallbackWorkerEpoch);
             fallbackWorker.postMessage({
               ...retryPending.message,
               ...effectiveBackendPreference(),
@@ -564,18 +695,18 @@ function requestWorker<T>(
       pendingRequests.delete(id);
       pending.removeAbortListener?.();
       if (preserveWorkerOnAbort) {
-        // A speculative inference may already be inside synchronous ONNX WASM,
-        // where Worker.terminate() cannot preempt the runtime promptly anyway.
-        // Ignore its eventual result and keep the loaded model for the seek or
-        // restart request queued behind it.
+        runCancellationController.request(id, pending.workerEpoch);
+        if (worker && activeWorkerEpoch === pending.workerEpoch) {
+          worker.postMessage({ id, type: "cancel" } satisfies WorkerRequest);
+        }
         reject(
           new DOMException("Offline narration was canceled.", "AbortError"),
         );
         return;
       }
-      // Model loading, warm-up, and ONNX inference are not cooperatively
-      // abortable. Completed download ranges are durable, so replacing the
-      // worker promptly stops every stage without throwing progress away.
+      // Installation and model-loading phases remain replaceable operations.
+      // Completed download ranges are durable, so replacing their worker stops
+      // promptly without throwing verified progress away.
       terminateWorker("Offline narration was canceled.");
       reject(
         new DOMException("Offline narration was canceled.", "AbortError"),
@@ -589,6 +720,7 @@ function requestWorker<T>(
       message,
       attemptedBackends: new Set(),
       lastProgress: 0,
+      workerEpoch: 0,
       removeAbortListener: signal
         ? () => signal.removeEventListener("abort", handleAbort)
         : undefined,
@@ -596,7 +728,10 @@ function requestWorker<T>(
     pendingRequests.set(id, pending);
     signal?.addEventListener("abort", handleAbort, { once: true });
 
-    getWorker().postMessage({
+    const targetWorker = getWorker();
+    pending.workerEpoch = activeWorkerEpoch;
+    runCancellationController.register(id, activeWorkerEpoch);
+    targetWorker.postMessage({
       ...message,
       ...effectiveBackendPreference(),
       id,

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -139,7 +140,7 @@ test("production ships the device-specific voice ladder and local ORT runtime", 
   const clientWasm = files.find(
     (path) =>
       path.startsWith(join("dist", "client")) &&
-      /^ort-wasm-.*\.wasm$/u.test(basename(path)),
+      /^ort-wasm-simd-threaded\.jsep-.*\.wasm$/u.test(basename(path)),
   );
   const clientWorker = files.find(
     (path) =>
@@ -150,7 +151,14 @@ test("production ships the device-specific voice ladder and local ORT runtime", 
   assert.ok(clientWasm);
   assert.ok(clientWorker);
 
-  const workerSource = await readFile(clientWorker, "utf8");
+  const [wasmBytes, workerSource] = await Promise.all([
+    readFile(clientWasm),
+    readFile(clientWorker, "utf8"),
+  ]);
+  assert.equal(
+    createHash("sha256").update(wasmBytes).digest("hex"),
+    "1e5a323ca41d859f324694c7b5ba2052bf8c1a96ff9721bc62e94f874d379fe1",
+  );
   assert.match(workerSource, /Downloading the included neural voice model/u);
   assert.match(workerSource, new RegExp(basename(clientWasm)));
   assert.match(workerSource, /model_fp16/u);
@@ -159,6 +167,10 @@ test("production ships the device-specific voice ladder and local ORT runtime", 
   assert.match(workerSource, /hardwareConcurrency/u);
   assert.match(workerSource, /Warming the offline voice/u);
   assert.match(workerSource, /backend_failed/u);
+  assert.match(workerSource, /ERR_ORT_WASM_RUN_CANCELED/u);
+  assert.match(workerSource, /wasm-run-start/u);
+  assert.match(workerSource, /wasm-run-end/u);
+  assert.match(workerSource, /sessionGeneration/u);
   assert.match(workerSource, /\.numThreads\s*=\s*1/u);
   assert.match(workerSource, /\.proxy\s*=\s*!1/u);
 });

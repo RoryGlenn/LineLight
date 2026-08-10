@@ -1,0 +1,66 @@
++ cmake --build /tmp/issue55-build/onnxruntime-final-ack/build/wasm_inferencing/Release --parallel --target onnxruntime_webassembly
+[  0%] Built target onnxruntime_flatbuffers
+[  1%] Built target onnxruntime_util
+[  5%] Built target onnxruntime_common
+[ 10%] Built target onnxruntime_graph
+[ 17%] Built target onnxruntime_mlas
+[ 32%] Built target onnxruntime_framework
+[ 32%] Built target onnxruntime_lora
+[ 51%] Built target onnxruntime_optimizer
+[ 54%] Built target onnxruntime_session
+[ 98%] Built target onnxruntime_providers
+[ 98%] Building CXX object CMakeFiles/onnxruntime_webassembly.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/wasm/api.cc.o
+[100%] Linking CXX executable ort-wasm-simd-threaded.mjs
+wasm-ld: warning: function signature mismatch: _ZNSt3__215basic_streambufIcNS_11char_traitsIcEEE7seekposENS_4fposI11__mbstate_tEEj
+>>> defined as () -> void in /tmp/issue55-build/onnxruntime-final-ack/cmake/external/emsdk/upstream/emscripten/cache/sysroot/lib/wasm32-emscripten/lto/libc++-mt-noexcept.a(ios.instantiations.o)
+>>> defined as (i32, i32, i32, i32) -> void in lto.tmp
+
+wasm-ld: warning: function signature mismatch: _ZNSt3__215basic_streambufIcNS_11char_traitsIcEEE7seekoffExNS_8ios_base7seekdirEj
+>>> defined as () -> void in /tmp/issue55-build/onnxruntime-final-ack/cmake/external/emsdk/upstream/emscripten/cache/sysroot/lib/wasm32-emscripten/lto/libc++-mt-noexcept.a(ios.instantiations.o)
+>>> defined as (i32, i32, i64, i32, i32) -> void in lto.tmp
+Performing post-process for ort-wasm-simd-threaded.mjs
+[100%] Built target onnxruntime_webassembly
++ cmake --build /tmp/issue55-build/onnxruntime-final-ack/build/wasm_inferencing_jsep/Release --parallel --target onnxruntime_webassembly
+[  0%] Built target onnxruntime_flatbuffers
+[  0%] Built target onnxruntime_util
+[  3%] Built target onnxruntime_common
+[  7%] Built target onnxruntime_graph
+[ 12%] Built target onnxruntime_mlas
+[ 21%] Built target onnxruntime_providers_webnn
+[ 33%] Built target onnxruntime_framework
+[ 43%] Built target onnxruntime_providers_js
+[ 44%] Built target onnxruntime_lora
+[ 59%] Built target onnxruntime_optimizer
+[ 62%] Built target onnxruntime_session
+[ 98%] Built target onnxruntime_providers
+[ 98%] Building CXX object CMakeFiles/onnxruntime_webassembly.dir/tmp/issue55-build/onnxruntime-final-ack/onnxruntime/wasm/api.cc.o
+[100%] Linking CXX executable ort-wasm-simd-threaded.jsep.mjs
+wasm-ld: warning: function signature mismatch: _ZNSt3__215basic_streambufIcNS_11char_traitsIcEEE7seekposENS_4fposI11__mbstate_tEEj
+>>> defined as () -> void in /tmp/issue55-build/onnxruntime-final-ack/cmake/external/emsdk/upstream/emscripten/cache/sysroot/lib/wasm32-emscripten/lto/libc++-mt-noexcept.a(ios.instantiations.o)
+>>> defined as (i32, i32, i32, i32) -> void in lto.tmp
+
+wasm-ld: warning: function signature mismatch: _ZNSt3__215basic_streambufIcNS_11char_traitsIcEEE7seekoffExNS_8ios_base7seekdirEj
+>>> defined as () -> void in /tmp/issue55-build/onnxruntime-final-ack/cmake/external/emsdk/upstream/emscripten/cache/sysroot/lib/wasm32-emscripten/lto/libc++-mt-noexcept.a(ios.instantiations.o)
+>>> defined as (i32, i32, i64, i32, i32) -> void in lto.tmp
+Performing post-process for ort-wasm-simd-threaded.jsep.mjs
+[100%] Built target onnxruntime_webassembly
++ install -m 0644 /tmp/issue55-build/onnxruntime-final-ack/build/wasm_inferencing/Release/ort-wasm-simd-threaded.wasm /tmp/issue55-build/onnxruntime-final-ack/build/wasm_inferencing/Release/ort-wasm-simd-threaded.mjs /tmp/issue55-build/onnxruntime-final-ack/build/wasm_inferencing_jsep/Release/ort-wasm-simd-threaded.jsep.wasm /tmp/issue55-build/onnxruntime-final-ack/build/wasm_inferencing_jsep/Release/ort-wasm-simd-threaded.jsep.mjs /tmp/issue55-build/onnxruntime-final-ack/js/web/dist/
++ npm --prefix /tmp/issue55-build/onnxruntime-final-ack/js/web run prebuild
+
+> onnxruntime-web@1.22.0-dev.20250409-89f8206ba4 prebuild
+> tsc -p . --noEmit && tsc -p lib/wasm/proxy-worker --noEmit
+
++ npm --prefix /tmp/issue55-build/onnxruntime-final-ack/js run lint
+
+> lint
+> eslint .
+
++ cd /tmp/issue55-build/onnxruntime-final-ack/js
++ npx prettier --check .eslintrc.js web/lib/index.ts web/lib/wasm/run-cancellation.ts web/lib/wasm/wasm-core-impl.ts web/lib/wasm/wasm-types.ts web/test/unittests/backends/wasm/test-run-cancellation.ts web/test/unittests/index.ts web/types.d.ts
+Checking formatting...
+All matched files use Prettier code style!
++ sha256sum web/dist/ort-wasm-simd-threaded.wasm web/dist/ort-wasm-simd-threaded.mjs web/dist/ort-wasm-simd-threaded.jsep.wasm web/dist/ort-wasm-simd-threaded.jsep.mjs
+db1fa2012c98f8806f5641558635261a9b09aaff8827e01a38ffdcb4d73f7a22  web/dist/ort-wasm-simd-threaded.wasm
+87a120859ceba8870536ab6684a47b5cdb2515a33a0ab80c4520ec84fbe3df85  web/dist/ort-wasm-simd-threaded.mjs
+1e5a323ca41d859f324694c7b5ba2052bf8c1a96ff9721bc62e94f874d379fe1  web/dist/ort-wasm-simd-threaded.jsep.wasm
+c1458b19e63c7b104a38fc4dd44a0993b58c961a2c7884b347d2abce74556a22  web/dist/ort-wasm-simd-threaded.jsep.mjs

@@ -1,0 +1,18 @@
+✔ the reviewed Transformers browser files contain the recovering chain (8.513206ms)
+✔ a rejected run reaches its caller but cannot poison the next warm run (1.092486ms)
+✔ ordinary inference errors remain rejected while later work recovers (0.168464ms)
+[linelight] applied reviewed Transformers 3.8.1 inference-chain recovery
+[linelight] applied reviewed Transformers 3.8.1 inference-chain recovery
+✔ the exact dependency patch is idempotent and rejects changed preimages (41.832132ms)
+✔ the reviewed ORT package contains the exact runtime and legal inventory (2951.310221ms)
+✔ the root lock binds the exact local ORT artifact and integrity (41.665569ms)
+✔ the clean install has one custom ORT and one patched Transformers instance (831.123161ms)
+✔ an initialized threaded module calls all four cancellation wrappers (87.362212ms)
+ℹ tests 8
+ℹ suites 0
+ℹ pass 8
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 3960.758121

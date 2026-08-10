@@ -1,0 +1,12 @@
+✔ a controller on another agent cancels the active generation (22.013426ms)
+✔ a delayed controller cannot cancel a later generation (0.163948ms)
+✔ the controller cannot redirect the write to another Wasm cell (0.107879ms)
+✔ an ArrayBuffer cannot be forged into a cancellation mailbox (0.104543ms)
+ℹ tests 4
+ℹ suites 0
+ℹ pass 4
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 65.961709

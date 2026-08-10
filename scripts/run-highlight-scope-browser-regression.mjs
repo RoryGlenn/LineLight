@@ -35,6 +35,10 @@ const FOCUS_FIXTURE = path.join(
   "tests/fixtures/highlight-scope/issue-62-focus.txt",
 );
 const MAX_LONG_TASK_MS = 50;
+const VISUAL_CAPTURE_ATTEMPTS = 3;
+const VISUAL_STABILITY_SAMPLES = 4;
+const VISUAL_STABILITY_SAMPLE_MS = 100;
+const VISUAL_STABILITY_TIMEOUT_MS = 10_000;
 
 function parseArguments(argv) {
   const options = {
@@ -375,52 +379,179 @@ async function captureScreenshot(cdp, outputPath) {
   await writeFile(outputPath, Buffer.from(result.data, "base64"));
 }
 
+export function visualStateFingerprintExpression(regionSelector) {
+  return `(() => {
+    const rounded = (value) => Math.round(Number(value) * 1000) / 1000;
+    const rectangle = (element) => {
+      if (!element) return null;
+      const bounds = element.getBoundingClientRect();
+      return {
+        left: rounded(bounds.left),
+        top: rounded(bounds.top),
+        right: rounded(bounds.right),
+        bottom: rounded(bounds.bottom),
+        width: rounded(bounds.width),
+        height: rounded(bounds.height)
+      };
+    };
+    const reader = document.querySelector('.reader-scroll');
+    const active = document.querySelector('[data-active-token="true"]');
+    const positionActionStack = document.querySelector('.position-action-stack');
+    const regions = Array.from(document.querySelectorAll(${JSON.stringify(regionSelector)}))
+      .flatMap((region) => Array.from(region.getClientRects()).map((bounds) => ({
+        left: rounded(bounds.left),
+        top: rounded(bounds.top),
+        right: rounded(bounds.right),
+        bottom: rounded(bounds.bottom),
+        width: rounded(bounds.width),
+        height: rounded(bounds.height)
+    })))
+      .sort((left, right) =>
+        left.top - right.top || left.left - right.left ||
+        left.bottom - right.bottom || left.right - right.right
+      );
+    const fontsStatus = document.fonts?.status ?? 'unsupported';
+    const pdfLoadingCount = document.querySelectorAll('.pdf-page-loading').length;
+    const hasReadyGeometry = Boolean(reader && active && regions.length > 0);
+    return JSON.stringify({
+      ready: hasReadyGeometry &&
+        (fontsStatus === 'loaded' || fontsStatus === 'unsupported') &&
+        pdfLoadingCount === 0,
+      reader: reader ? {
+        scrollTop: rounded(reader.scrollTop),
+        scrollLeft: rounded(reader.scrollLeft),
+        scrollHeight: reader.scrollHeight,
+        scrollWidth: reader.scrollWidth,
+        clientHeight: reader.clientHeight,
+        clientWidth: reader.clientWidth
+      } : null,
+      active: {
+        present: Boolean(active),
+        rectangle: rectangle(active)
+      },
+      regions,
+      fontsStatus,
+      pdfLoadingCount,
+      positionActionStack: {
+        present: Boolean(positionActionStack),
+        rectangle: rectangle(positionActionStack)
+      }
+    });
+  })()`;
+}
+
+async function readVisualStateFingerprint(cdp, regionSelector) {
+  return evaluate(cdp, visualStateFingerprintExpression(regionSelector));
+}
+
+export async function waitForVisualStateStable(
+  cdp,
+  regionSelector,
+  {
+    sampleDelayMs = VISUAL_STABILITY_SAMPLE_MS,
+    stableSamples = VISUAL_STABILITY_SAMPLES,
+    timeoutMs = VISUAL_STABILITY_TIMEOUT_MS,
+  } = {},
+) {
+  const startedAt = Date.now();
+  let previous = null;
+  let matchingSamples = 0;
+  while (Date.now() - startedAt < timeoutMs) {
+    const fingerprint = await readVisualStateFingerprint(cdp, regionSelector);
+    let ready = false;
+    try {
+      ready = JSON.parse(fingerprint).ready === true;
+    } catch {
+      ready = false;
+    }
+    if (!ready) {
+      previous = null;
+      matchingSamples = 0;
+    } else if (fingerprint === previous) {
+      matchingSamples += 1;
+    } else {
+      previous = fingerprint;
+      matchingSamples = 1;
+    }
+    if (matchingSamples >= stableSamples) return fingerprint;
+    await delay(sampleDelayMs);
+  }
+  throw new Error("The highlight evidence viewport did not reach a stable state.");
+}
+
+export async function captureWhenVisualStateStable({
+  capture,
+  collect,
+  discard,
+  fingerprint,
+  maxAttempts = VISUAL_CAPTURE_ATTEMPTS,
+  waitForStable,
+}) {
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const before = await waitForStable();
+    const result = await collect();
+    await capture();
+    const after = await fingerprint();
+    if (after === before) return result;
+    await discard();
+  }
+  throw new Error(
+    "The highlight evidence viewport changed while its screenshot was captured.",
+  );
+}
+
 async function collectVisual(cdp, view, scope, outputDirectory) {
   const regionSelector =
     view === "focus"
       ? `.focus-${scope}-region.scope-active`
       : `.pdf-${scope}-overlay.scope-active`;
   const screenshot = `${view}-${scope}.png`;
-  const result = await evaluate(
-    cdp,
-    `(() => {
-      const regions = Array.from(document.querySelectorAll(${JSON.stringify(regionSelector)}));
-      const fragments = regions.flatMap((region) =>
-        Array.from(region.getClientRects()).map((rectangle) => ({
-          left: rectangle.left,
-          top: rectangle.top,
-          right: rectangle.right,
-          bottom: rectangle.bottom,
-          width: rectangle.width,
-          height: rectangle.height
-        }))
-      ).filter((rectangle) => rectangle.width > 0 && rectangle.height > 0)
-       .sort((left, right) => left.top - right.top || left.left - right.left);
-      const exact = document.querySelector('[data-active-token="true"]');
-      const exactStyle = exact ? getComputedStyle(exact) : null;
-      return {
-        regionCount: regions.length,
-        fragmentCount: fragments.length,
-        fragments,
-        activeRegionIndices: regions.map((region) =>
-          region.dataset.focusSentence ?? region.dataset.focusParagraph ??
-          region.dataset.pdfSentence ?? region.dataset.pdfParagraph ?? null
-        ),
-        exactToken: exact?.textContent || exact?.getAttribute('aria-label') || null,
-        exactTokenCount: document.querySelectorAll('[data-active-token="true"]').length,
-        exactTokenVisual: exactStyle ? {
-          backgroundColor: exactStyle.backgroundColor,
-          boxShadow: exactStyle.boxShadow,
-          transparent: exactStyle.backgroundColor === 'rgba(0, 0, 0, 0)' && exactStyle.boxShadow === 'none'
-        } : null,
-        overlayAriaHidden: ${view === "page"}
-          ? Array.from(document.querySelectorAll('.pdf-highlight-layer > span')).every((element) => element.getAttribute('aria-hidden') === 'true')
-          : null
-      };
-    })()`,
-  );
   const screenshotPath = path.join(outputDirectory, screenshot);
-  await captureScreenshot(cdp, screenshotPath);
+  const result = await captureWhenVisualStateStable({
+    waitForStable: () => waitForVisualStateStable(cdp, regionSelector),
+    collect: () =>
+      evaluate(
+        cdp,
+        `(() => {
+          const regions = Array.from(document.querySelectorAll(${JSON.stringify(regionSelector)}));
+          const fragments = regions.flatMap((region) =>
+            Array.from(region.getClientRects()).map((rectangle) => ({
+              left: rectangle.left,
+              top: rectangle.top,
+              right: rectangle.right,
+              bottom: rectangle.bottom,
+              width: rectangle.width,
+              height: rectangle.height
+            }))
+          ).filter((rectangle) => rectangle.width > 0 && rectangle.height > 0)
+           .sort((left, right) => left.top - right.top || left.left - right.left);
+          const exact = document.querySelector('[data-active-token="true"]');
+          const exactStyle = exact ? getComputedStyle(exact) : null;
+          return {
+            regionCount: regions.length,
+            fragmentCount: fragments.length,
+            fragments,
+            activeRegionIndices: regions.map((region) =>
+              region.dataset.focusSentence ?? region.dataset.focusParagraph ??
+              region.dataset.pdfSentence ?? region.dataset.pdfParagraph ?? null
+            ),
+            exactToken: exact?.textContent || exact?.getAttribute('aria-label') || null,
+            exactTokenCount: document.querySelectorAll('[data-active-token="true"]').length,
+            exactTokenVisual: exactStyle ? {
+              backgroundColor: exactStyle.backgroundColor,
+              boxShadow: exactStyle.boxShadow,
+              transparent: exactStyle.backgroundColor === 'rgba(0, 0, 0, 0)' && exactStyle.boxShadow === 'none'
+            } : null,
+            overlayAriaHidden: ${view === "page"}
+              ? Array.from(document.querySelectorAll('.pdf-highlight-layer > span')).every((element) => element.getAttribute('aria-hidden') === 'true')
+              : null
+          };
+        })()`,
+      ),
+    capture: () => captureScreenshot(cdp, screenshotPath),
+    fingerprint: () => readVisualStateFingerprint(cdp, regionSelector),
+    discard: () => rm(screenshotPath, { force: true }),
+  });
   return {
     ...result,
     screenshot,

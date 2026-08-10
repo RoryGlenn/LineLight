@@ -1,0 +1,18 @@
+--- /tmp/issue55-build/onnxruntime-final-ack/onnxruntime/wasm/api.h	2026-08-09 15:30:18.779630149 -0400
++++ /tmp/issue55-build/onnxruntime-repro-final/onnxruntime/wasm/api.h	2026-08-09 15:55:03.407041688 -0400
+@@ -226,10 +226,11 @@
+ 
+ /**
+  * get the address of the process-lifetime cancellation mailbox.
+- * The mailbox contains two aligned uint32_t cells: active generation followed
+- * by cancellation generation. In a threaded Wasm build the backing memory is a
+- * SharedArrayBuffer and another JavaScript agent may update the cancellation
+- * generation with Atomics.store().
++ * The mailbox contains three aligned uint32_t cells: active generation,
++ * requested cancellation generation, and executor-observed generation. Only
++ * the first two cells form the public cross-agent cancellation pair. In a
++ * threaded Wasm build the backing memory is a SharedArrayBuffer and another
++ * JavaScript agent may update the requested generation with Atomics.store().
+  */
+ void* EMSCRIPTEN_KEEPALIVE OrtGetRunCancellationMailbox();
+ 

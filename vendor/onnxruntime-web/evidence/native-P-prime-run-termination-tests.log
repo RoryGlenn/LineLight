@@ -1,0 +1,28 @@
++zsh:4> git rev-parse HEAD
+89f8206ba4f1c22c39e0297fb55272e8ce8cd7d0
++zsh:5> sha256sum /tmp/linelight-issue55-prep/onnxruntime-89f8206-live-cancellation.patch
+4b368d00b9c4fc11cf5183caeed13d858e93b842cba26df27bde1b653d9372f2  /tmp/linelight-issue55-prep/onnxruntime-89f8206-live-cancellation.patch
++zsh:6> /tmp/issue55-build/native-P-prime/Release/onnxruntime_test_all '--gtest_filter=RunTerminationFlagTest.*' '--gtest_color=no'
+Note: Google Test filter = RunTerminationFlagTest.*
+[==========] Running 7 tests from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 7 tests from RunTerminationFlagTest
+[ RUN      ] RunTerminationFlagTest.ObservesConcurrentLocalRequestAndReset
+[       OK ] RunTerminationFlagTest.ObservesConcurrentLocalRequestAndReset (0 ms)
+[ RUN      ] RunTerminationFlagTest.MatchesOnlyTheBoundExternalGeneration
+[       OK ] RunTerminationFlagTest.MatchesOnlyTheBoundExternalGeneration (0 ms)
+[ RUN      ] RunTerminationFlagTest.DoesNotAcknowledgeARequestThatExecutionNeverObserved
+[       OK ] RunTerminationFlagTest.DoesNotAcknowledgeARequestThatExecutionNeverObserved (0 ms)
+[ RUN      ] RunTerminationFlagTest.ObservedRequestStillNeedsTheCancellationStatusToWin
+[       OK ] RunTerminationFlagTest.ObservedRequestStillNeedsTheCancellationStatusToWin (0 ms)
+[ RUN      ] RunTerminationFlagTest.CopiesLocalStateWithoutLeakingActiveGeneration
+[       OK ] RunTerminationFlagTest.CopiesLocalStateWithoutLeakingActiveGeneration (0 ms)
+[ RUN      ] RunTerminationFlagTest.AssignmentDropsPreviousExternalBinding
+[       OK ] RunTerminationFlagTest.AssignmentDropsPreviousExternalBinding (0 ms)
+[ RUN      ] RunTerminationFlagTest.MovePreservesLocalStateWithoutMovingExternalBinding
+[       OK ] RunTerminationFlagTest.MovePreservesLocalStateWithoutMovingExternalBinding (0 ms)
+[----------] 7 tests from RunTerminationFlagTest (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 7 tests from 1 test suite ran. (0 ms total)
+[  PASSED  ] 7 tests.

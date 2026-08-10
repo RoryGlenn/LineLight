@@ -1,5 +1,9 @@
 import { env as transformersEnv } from "@huggingface/transformers";
 import { KokoroTTS } from "kokoro-js";
+import {
+  setWasmRunCancellationObserver,
+  type WasmRunCancellationEvent,
+} from "onnxruntime-web";
 import ortWasmUrl from "../node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.jsep.wasm?url";
 import {
   KOKORO_VOICE_CACHE_NAME,
@@ -91,6 +95,11 @@ type WorkerScope = {
     listener: (event: MessageEvent<RequestMessage>) => void,
   ): void;
   postMessage(message: unknown, transfer?: Transferable[]): void;
+};
+
+type ActiveCancellationOwner = {
+  id: number;
+  sessionGeneration: number;
 };
 
 type KokoroDevice = "webgpu" | "wasm";
@@ -190,7 +199,9 @@ if (wasmBackend) {
   wasmBackend.proxy = OFFLINE_WASM_PROXY;
 }
 const canceledRequests = new Set<number>();
+const queuedRequests = new Set<number>();
 const requestAbortControllers = new Map<number, AbortController>();
+const cancellationOwners = new Map<number, ActiveCancellationOwner>();
 const lastProgressByRequest = new Map<
   number,
   { label: string; progress: number }
@@ -204,8 +215,73 @@ let activeBackend: OfflineBackend = {
 let modelIsWarm = false;
 const warmedOfflineVoices = new Set<OfflineVoiceId>();
 let operationQueue = Promise.resolve();
+let activeRequestId: number | null = null;
+let modelSessionGeneration = 0;
 const verifiedOfflineAssets = new Set<string>();
 let webGpuAdapterAvailablePromise: Promise<boolean> | null = null;
+
+function supportsCooperativeCancellation() {
+  return (
+    activeBackend.device === "wasm" &&
+    (activeBackend.wasmThreads ?? 1) > 1
+  );
+}
+
+setWasmRunCancellationObserver((event: WasmRunCancellationEvent) => {
+  if (event.type === "start") {
+    if (
+      activeRequestId === null ||
+      !supportsCooperativeCancellation() ||
+      !event.sharedBuffer ||
+      event.activeGenerationIndex === undefined ||
+      event.cancellationGenerationIndex === undefined
+    ) {
+      return;
+    }
+    cancellationOwners.set(event.generation, {
+      id: activeRequestId,
+      sessionGeneration: modelSessionGeneration,
+    });
+    workerScope.postMessage({
+      id: activeRequestId,
+      type: "wasm-run-start",
+      generation: event.generation,
+      sharedBuffer: event.sharedBuffer,
+      activeGenerationIndex: event.activeGenerationIndex,
+      cancellationGenerationIndex: event.cancellationGenerationIndex,
+      sessionGeneration: modelSessionGeneration,
+    });
+    return;
+  }
+
+  const owner = cancellationOwners.get(event.generation);
+  if (!owner) return;
+  cancellationOwners.delete(event.generation);
+  workerScope.postMessage({
+    id: owner.id,
+    type: "wasm-run-end",
+    generation: event.generation,
+    sessionGeneration: owner.sessionGeneration,
+  });
+});
+
+function isCooperativeCancellationError(error: unknown) {
+  return (
+    error instanceof Error &&
+    error.name === "AbortError" &&
+    "code" in error &&
+    error.code === "ERR_ORT_WASM_RUN_CANCELED"
+  );
+}
+
+function postCanceled(id: number, cooperative: boolean) {
+  workerScope.postMessage({
+    id,
+    type: "canceled",
+    cooperative,
+    sessionGeneration: modelSessionGeneration,
+  });
+}
 
 function hasWebGpuAdapter() {
   if (webGpuAdapterAvailablePromise) return webGpuAdapterAvailablePromise;
@@ -591,6 +667,7 @@ async function loadModel(
   try {
     tts = await createModel(selectedBackend);
     activeBackend = selectedBackend;
+    modelSessionGeneration += 1;
   } catch (error) {
     await disposeModel().catch(() => undefined);
     if (
@@ -920,6 +997,7 @@ async function initializeSpeech(
           }),
       );
     } catch (error) {
+      if (isCooperativeCancellationError(error)) throw error;
       if (shouldRetryOfflineSpeechBackend(error, activeBackend.device)) {
         await disposeModel().catch(() => undefined);
         throw new BackendUnavailableError(activeBackend, error);
@@ -1003,6 +1081,7 @@ async function generateSpeech(
       }),
     );
   } catch (error) {
+    if (isCooperativeCancellationError(error)) throw error;
     if (shouldRetryOfflineSpeechBackend(error, activeBackend.device)) {
       await disposeModel().catch(() => undefined);
       throw new BackendUnavailableError(activeBackend, error);
@@ -1067,11 +1146,13 @@ async function handleRequest(
   const { id } = message;
   if (canceledRequests.delete(id)) {
     lastProgressByRequest.delete(id);
+    postCanceled(id, false);
     return;
   }
 
   const abortController = new AbortController();
   requestAbortControllers.set(id, abortController);
+  activeRequestId = id;
   try {
     let result: unknown;
     if (message.type === "install") {
@@ -1157,7 +1238,10 @@ async function handleRequest(
       await removeUnusedModelArtifact().catch(() => undefined);
     }
 
-    if (canceledRequests.delete(id)) return;
+    if (canceledRequests.delete(id) || abortController.signal.aborted) {
+      postCanceled(id, false);
+      return;
+    }
     if (
       typeof result === "object" &&
       result &&
@@ -1172,7 +1256,15 @@ async function handleRequest(
       workerScope.postMessage({ id, type: "success", result });
     }
   } catch (error) {
-    if (canceledRequests.delete(id)) return;
+    if (isCooperativeCancellationError(error)) {
+      canceledRequests.delete(id);
+      postCanceled(id, true);
+      return;
+    }
+    if (canceledRequests.delete(id) || abortController.signal.aborted) {
+      postCanceled(id, false);
+      return;
+    }
     workerScope.postMessage({
       id,
       type: "error",
@@ -1190,6 +1282,7 @@ async function handleRequest(
           : "The offline voice could not continue.",
     });
   } finally {
+    if (activeRequestId === id) activeRequestId = null;
     requestAbortControllers.delete(id);
     lastProgressByRequest.delete(id);
   }
@@ -1198,9 +1291,16 @@ async function handleRequest(
 workerScope.addEventListener("message", (event) => {
   const message = event.data;
   if (message.type === "cancel") {
-    canceledRequests.add(message.id);
-    requestAbortControllers.get(message.id)?.abort();
+    const abortController = requestAbortControllers.get(message.id);
+    if (queuedRequests.has(message.id) || abortController) {
+      canceledRequests.add(message.id);
+      abortController?.abort();
+    }
     return;
   }
-  operationQueue = operationQueue.then(() => handleRequest(message));
+  queuedRequests.add(message.id);
+  operationQueue = operationQueue.then(async () => {
+    queuedRequests.delete(message.id);
+    await handleRequest(message);
+  });
 });
