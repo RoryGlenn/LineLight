@@ -75,9 +75,13 @@ The offline model is
 The model and
 [kokoro-js](https://github.com/hexgrad/kokoro) are
 available under the Apache 2.0 license. LineLight's hash-guarded Transformers.js
-queue-tail modification remains under Apache 2.0. The bundled modified ONNX
-Runtime Web is provided under the MIT License. LineLight stores the fp16 model
-in the browser's Cache Storage and asks the browser to make that storage
+web queue-tail and cancellation-diagnostic modifications remain under Apache
+2.0. The queue recovers after any rejected run while preserving that rejection
+for its caller. The exact reviewed cooperative-cancellation error is rethrown
+before Transformers formats or logs model inputs; ordinary inference errors
+retain the upstream diagnostics and rejection behavior. The bundled modified
+ONNX Runtime Web is provided under the MIT License. LineLight stores the fp16
+model in the browser's Cache Storage and asks the browser to make that storage
 persistent. Browser storage can still be cleared or evicted; the settings panel
 prepares the included voice again if any required file is missing. A fresh
 preparation checks for up to roughly 216 MB of free site storage so the model,

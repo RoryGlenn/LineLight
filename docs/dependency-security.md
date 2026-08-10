@@ -62,7 +62,7 @@ still installed for Node-side development imports, so the adapter compatibility
 test remains necessary until Kokoro accepts a Transformers release whose Sharp
 range includes the patched line.
 
-## Transformers inference-queue patch
+## Transformers inference-queue and cancellation-diagnostic patch
 
 LineLight applies a narrow compatibility patch to
 `@huggingface/transformers` 3.8.1 during installation. In the browser inference
@@ -71,18 +71,41 @@ chain retained that rejection as the queue tail, which made every later run
 reject before it could start. The LineLight patch keeps the current run promise
 for its caller, preserving the original fulfillment or rejection, while a
 private continuation normalizes both outcomes before that promise becomes the
-tail used to schedule the next run.
+tail used to schedule the next run. That queue-tail change is applied to
+`src/backends/onnx.js` and the equivalent code in
+`dist/transformers.web.js`.
+
+The same install step modifies the model wrapper in `src/models.js` and the
+equivalent code in `dist/transformers.web.js`. It rethrows only an error whose
+name is exactly `AbortError` and whose code is exactly
+`ERR_ORT_WASM_RUN_CANCELED`, before the upstream catch path formats tensor or
+model inputs or writes its error diagnostic. This expected cooperative
+cancellation still rejects the current caller, but it cannot serialize private
+model input through the browser console. Ordinary failures and similar-looking
+errors continue through Transformers' unchanged diagnostic, rejection, and
+queue-recovery behavior.
+
+The reviewed whole-file SHA-256 boundaries are:
+
+| Installed Transformers 3.8.1 file | Upstream preimage                                                  | LineLight result                                                   |
+| --------------------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------ |
+| `src/backends/onnx.js`            | `3265edafb24d321eb4b214f45684fa1d498407e2e0eca5fea9e720958f1635f3` | `3d026ce1714db9aee4e5b6d2aead761d006ae9dea2a8e9d05800878ac881acd8` |
+| `src/models.js`                   | `6ba3e066c05b5a4ae35281b0cafff0504e13a6b18d7e2e3799eb9f243a610108` | `4152078945cce8defb4807e8f17b30211f7621555f6223c2ff2c34a2bffb1530` |
+| `dist/transformers.web.js`        | `1b41438d839ca3ea1346031472edee8cb3eefbf0bad48945f969559e2eb03394` | `56528ad2d27d93dfc5326346298ef47bc75fe83ac8e284d6811909c14467abe7` |
 
 [`scripts/apply-dependency-patches.mjs`](../scripts/apply-dependency-patches.mjs)
-is deliberately fail closed. Before writing either file, it checks the exact
-package version, the lockfile integrity, and the complete SHA-256 preimage or
-already-patched digest of both the source module and the distributed browser
-bundle. A partial match or an unexpected dependency update aborts installation;
-a fully patched installation is accepted idempotently. Both representations are
-covered because development and production bundling can resolve different
-package entry points. The modification and the upstream package remain under
-Apache-2.0, with the distributed notice in
+is deliberately fail closed. Before writing any file, it checks the exact
+package version, lockfile integrity, and every complete SHA-256 preimage or
+already-patched digest. A partial match or unexpected dependency update aborts
+installation; a fully patched installation is accepted idempotently. The
+source and distributed browser representations are both covered because
+development and production bundling can resolve different package entry
+points. The modification and upstream package remain under Apache-2.0, with
+the distributed notice in
 [`public/offline-voice-license.txt`](../public/offline-voice-license.txt).
+This install-time Transformers patch does not modify the repository-bundled
+ONNX Runtime package, so the focused ONNX Runtime SBOM and checksum manifest
+remain unchanged.
 
 ## Modified ONNX Runtime Web
 
@@ -140,8 +163,9 @@ When Kokoro, Transformers, or ONNX Runtime Web changes:
 
 1. remove or update the corresponding override or guarded patch in a dedicated
    dependency update;
-2. regenerate a modified runtime only from the pinned source and reproduction
-   procedure, then refresh its checksums, SBOM, and notices;
+2. when ONNX Runtime Web changes, regenerate the modified runtime only from the
+   pinned source and reproduction procedure, then refresh its checksums, SBOM,
+   and notices;
 3. regenerate the lockfile from a clean install and confirm that only the
    intended ONNX Runtime Web package is installed;
 4. rerun the audit, Drizzle check, type check, lint, production build, tests,

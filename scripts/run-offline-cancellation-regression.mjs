@@ -52,6 +52,11 @@ const WEBGPU_COVERAGE_SHA256 =
   "4f48ed467068c74080e7b8cfd215338da80b6b70d27fafb6fbbd709581ea9370";
 const EXPECTED_JSEP_WASM_SHA256 =
   "1e5a323ca41d859f324694c7b5ba2052bf8c1a96ff9721bc62e94f874d379fe1";
+const EXPECTED_MODEL_CACHE_ENTRIES = 24;
+const EXPECTED_VOICE_CACHE_ENTRIES = 5;
+const MODEL_CACHE_NAME = "transformers-cache";
+const RUNTIME_CACHE_NAME = "linelight-assets-v1";
+const VOICE_CACHE_NAME = "kokoro-voices";
 const REQUIRED_ACTIVE_CANCELLATIONS = 5;
 const CPU_SAMPLE_INTERVAL_MS = 50;
 const MAX_CPU_SAMPLE_INTERVAL_MS = 100;
@@ -67,6 +72,40 @@ const FAR_SEEK_RESET_ANCHOR_ORDINAL = 0;
 const PREPARED_PROFILE_ORIGIN_PORT = 5212;
 const EXTERNAL_MODEL_REQUEST_PATTERN =
   /(?:huggingface\.co|cdn\.jsdelivr\.net|raw\.githubusercontent\.com|kokoro|onnx\/model.*\.onnx|voices\/.*\.bin)/iu;
+const PROTOCOL_WORKER_EVENT_KEYS = Object.freeze(
+  [
+    "atMs",
+    "backendDevice",
+    "cooperative",
+    "direction",
+    "elapsedMilliseconds",
+    "epoch",
+    "generation",
+    "id",
+    "progress",
+    "sequence",
+    "sessionGeneration",
+    "stage",
+    "type",
+    "wallTimeMs",
+    "wasmThreads",
+  ].sort(),
+);
+const CONTROL_WORKER_EVENT_KEYS = Object.freeze(
+  ["atMs", "direction", "epoch", "id", "sequence", "type", "wallTimeMs"].sort(),
+);
+const FORCED_START_EVENT_KEYS = Object.freeze(
+  [...CONTROL_WORKER_EVENT_KEYS, "generation", "sessionGeneration"].sort(),
+);
+const WORKER_PROGRESS_STAGES = new Set([
+  "downloading",
+  "initializing",
+  "loaded",
+  "ready",
+  "synthesizing",
+  "verifying",
+  "warming",
+]);
 const SOURCE_EVIDENCE_FILES = Object.freeze([
   "app/offline-run-cancellation.mjs",
   "app/offline-speech.ts",
@@ -76,6 +115,8 @@ const SOURCE_EVIDENCE_FILES = Object.freeze([
   "app/speech-prefetch.mjs",
   "package-lock.json",
   "package.json",
+  "public/favicon.ico",
+  "public/manifest.webmanifest",
   "scripts/apply-dependency-patches.mjs",
   "scripts/run-offline-cancellation-regression.mjs",
   "tests/offline-cancellation-harness.test.mjs",
@@ -274,6 +315,153 @@ function pushFailure(failures, condition, message) {
   if (!condition) failures.push(message);
 }
 
+function validDetachedSessionHashSet(
+  before,
+  detached,
+  { minimum = 1 } = {},
+) {
+  return (
+    Array.isArray(before) &&
+    before.length >= minimum &&
+    Array.isArray(detached) &&
+    detached.length === before.length &&
+    before.every((value) => /^[a-f\d]{64}$/u.test(value)) &&
+    detached.every((value) => /^[a-f\d]{64}$/u.test(value)) &&
+    new Set(before).size === before.length &&
+    new Set(detached).size === detached.length &&
+    JSON.stringify([...before].sort()) ===
+      JSON.stringify([...detached].sort())
+  );
+}
+
+function exactObjectKeys(value, expected) {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    JSON.stringify(Object.keys(value).sort()) === JSON.stringify(expected)
+  );
+}
+
+function nullable(value, predicate) {
+  return value === null || predicate(value);
+}
+
+function uint32(value) {
+  return Number.isInteger(value) && value >= 0 && value <= 0xffffffff;
+}
+
+function validProtocolWorkerEvent(event) {
+  const validDirectionAndType =
+    (event.direction === "out" &&
+      ["cancel", "initialize", "install", "synthesize"].includes(
+        event.type,
+      )) ||
+    (event.direction === "in" &&
+      [
+        "canceled",
+        "error",
+        "progress",
+        "success",
+        "wasm-run-end",
+        "wasm-run-start",
+      ].includes(event.type));
+  return (
+    exactObjectKeys(event, PROTOCOL_WORKER_EVENT_KEYS) &&
+    validDirectionAndType &&
+    finiteNumber(event.atMs) &&
+    event.atMs >= 0 &&
+    finiteNumber(event.wallTimeMs) &&
+    event.wallTimeMs >= 0 &&
+    Number.isInteger(event.sequence) &&
+    event.sequence >= 1 &&
+    Number.isInteger(event.epoch) &&
+    event.epoch >= 1 &&
+    Number.isInteger(event.id) &&
+    event.id >= 1 &&
+    nullable(
+      event.backendDevice,
+      (value) => typeof value === "string" && ["wasm", "webgpu"].includes(value),
+    ) &&
+    nullable(event.cooperative, (value) => typeof value === "boolean") &&
+    nullable(
+      event.elapsedMilliseconds,
+      (value) => finiteNumber(value) && value >= 0,
+    ) &&
+    nullable(event.generation, uint32) &&
+    nullable(
+      event.progress,
+      (value) => Number.isInteger(value) && value >= 0 && value <= 100,
+    ) &&
+    nullable(event.sessionGeneration, uint32) &&
+    nullable(
+      event.stage,
+      (value) => typeof value === "string" && WORKER_PROGRESS_STAGES.has(value),
+    ) &&
+    nullable(
+      event.wasmThreads,
+      (value) => Number.isInteger(value) && value >= 1 && value <= 1_024,
+    )
+  );
+}
+
+function validControlWorkerEvent(event) {
+  if (
+    !["forced-cancel-swallowed", "forced-fake-run-start", "worker-terminated"].includes(
+      event?.type,
+    ) ||
+    event?.direction !== "control" ||
+    !finiteNumber(event.atMs) ||
+    event.atMs < 0 ||
+    !finiteNumber(event.wallTimeMs) ||
+    event.wallTimeMs < 0 ||
+    !Number.isInteger(event.sequence) ||
+    event.sequence < 1 ||
+    !Number.isInteger(event.epoch) ||
+    event.epoch < 1
+  ) {
+    return false;
+  }
+  if (event.type === "forced-fake-run-start") {
+    return (
+      exactObjectKeys(event, FORCED_START_EVENT_KEYS) &&
+      Number.isInteger(event.id) &&
+      event.id >= 1 &&
+      uint32(event.generation) &&
+      uint32(event.sessionGeneration)
+    );
+  }
+  return (
+    exactObjectKeys(event, CONTROL_WORKER_EVENT_KEYS) &&
+    (event.type === "worker-terminated"
+      ? event.id === null
+      : Number.isInteger(event.id) && event.id >= 1)
+  );
+}
+
+function validWorkerEventTimeline(events) {
+  if (!Array.isArray(events) || events.length < 1 || events.length > 100_000) {
+    return false;
+  }
+  let previousSequence = 0;
+  let previousAtMs = -Infinity;
+  let previousWallTimeMs = -Infinity;
+  for (const event of events) {
+    if (
+      (!validProtocolWorkerEvent(event) && !validControlWorkerEvent(event)) ||
+      event.sequence <= previousSequence ||
+      event.atMs < previousAtMs ||
+      event.wallTimeMs < previousWallTimeMs
+    ) {
+      return false;
+    }
+    previousSequence = event.sequence;
+    previousAtMs = event.atMs;
+    previousWallTimeMs = event.wallTimeMs;
+  }
+  return true;
+}
+
 function validateCpuRecord(record, index, failures, idleThresholdPercent) {
   const prefix = `cancellation ${index + 1}`;
   const samples = record.cpu?.samples ?? [];
@@ -407,6 +595,11 @@ export function validateOfflineCancellationEvidence(evidence) {
   const cpuBaseline = evidence?.threadedWasm?.cpuBaseline;
   pushFailure(
     failures,
+    validWorkerEventTimeline(evidence?.threadedWasm?.events),
+    "worker event evidence contains unknown, out-of-order, or privacy-unsafe fields",
+  );
+  pushFailure(
+    failures,
     (cpuBaseline?.samples?.length ?? 0) >= 3 &&
       (cpuBaseline?.intervals?.length ?? 0) >= 2 &&
       cpuBaseline.intervals.every(
@@ -504,11 +697,89 @@ export function validateOfflineCancellationEvidence(evidence) {
   const prepared = evidence?.threadedWasm?.preparedResume;
   pushFailure(
     failures,
-    prepared?.success === true &&
-      prepared?.audioCreatedBeforePause === true &&
-      prepared?.newSynthesisRequests === 0 &&
-      prepared?.discarded === false &&
-      Number.isInteger(prepared?.snapshotSequence),
+    (() => {
+      const events = evidence?.threadedWasm?.events;
+      if (!Array.isArray(events)) return false;
+      const preparedRequest = events.find(
+        (entry) =>
+          entry.direction === "out" &&
+          entry.type === "synthesize" &&
+          entry.id === prepared?.requestId &&
+          entry.epoch === prepared?.requestWorkerEpoch &&
+          entry.sequence === prepared?.requestSequence &&
+          entry.atMs === prepared?.requestAtMs,
+      );
+      const preparedSuccess = events.find(
+        (entry) =>
+          entry.direction === "in" &&
+          entry.type === "success" &&
+          entry.id === prepared?.requestId &&
+          entry.epoch === prepared?.requestWorkerEpoch &&
+          entry.sessionGeneration === prepared?.requestSessionGeneration &&
+          entry.sequence === prepared?.requestSuccessSequence &&
+          entry.atMs === prepared?.requestSucceededAtMs,
+      );
+      const synthesisBeforePreparedPlayback = events
+        .filter(
+          (entry) =>
+            entry.direction === "out" &&
+            entry.type === "synthesize" &&
+            entry.atMs > prepared?.pauseAtMs &&
+            entry.atMs < prepared?.playedAtMs,
+        )
+        .sort((left, right) => left.sequence - right.sequence);
+      const duplicatePreparedSynthesisRequests = events.filter(
+        (entry) =>
+          entry.direction === "out" &&
+          entry.type === "synthesize" &&
+          entry.id === prepared?.requestId &&
+          entry.epoch === prepared?.requestWorkerEpoch &&
+          entry.sequence > prepared?.requestSequence,
+      );
+      const interveningDistinctRequestIds = synthesisBeforePreparedPlayback
+        .filter(
+          (entry) =>
+            entry.id !== prepared?.requestId ||
+            entry.epoch !== prepared?.requestWorkerEpoch,
+        )
+        .map((entry) => entry.id);
+      return (
+        prepared?.success === true &&
+        prepared?.audioCreatedBeforePause === true &&
+        prepared?.discarded === false &&
+        prepared?.sameAudioPlayed === true &&
+        prepared?.duplicatePreparedSynthesisRequests === 0 &&
+        duplicatePreparedSynthesisRequests.length === 0 &&
+        Number.isInteger(prepared?.audioId) &&
+        Number.isInteger(prepared?.requestId) &&
+        Number.isInteger(prepared?.requestSequence) &&
+        Number.isInteger(prepared?.requestSuccessSequence) &&
+        prepared.requestSequence < prepared.requestSuccessSequence &&
+        prepared?.requestWorkerEpoch === first?.workerEpoch &&
+        prepared?.requestSessionGeneration === first?.sessionGeneration &&
+        finiteNumber(prepared?.requestAtMs) &&
+        finiteNumber(prepared?.requestSucceededAtMs) &&
+        finiteNumber(prepared?.audioCreatedAtMs) &&
+        finiteNumber(prepared?.pauseAtMs) &&
+        finiteNumber(prepared?.resumedCurrentAtMs) &&
+        finiteNumber(prepared?.playedAtMs) &&
+        prepared.requestAtMs <= prepared.requestSucceededAtMs &&
+        prepared.requestSucceededAtMs <= prepared.audioCreatedAtMs &&
+        prepared.audioCreatedAtMs < prepared.pauseAtMs &&
+        prepared.pauseAtMs <= prepared.resumedCurrentAtMs &&
+        prepared.resumedCurrentAtMs <= prepared.playedAtMs &&
+        Array.isArray(prepared?.interveningDistinctRequestIds) &&
+        JSON.stringify(prepared.interveningDistinctRequestIds) ===
+          JSON.stringify(interveningDistinctRequestIds) &&
+        prepared.interveningDistinctRequestIds.every(
+          (requestId) =>
+            Number.isInteger(requestId) && requestId !== prepared.requestId,
+        ) &&
+        Number.isInteger(prepared?.snapshotSequence) &&
+        Boolean(preparedRequest) &&
+        Boolean(preparedSuccess)
+      );
+    })(),
     "Resume did not reuse already prepared audio unchanged",
   );
 
@@ -599,6 +870,11 @@ export function validateOfflineCancellationEvidence(evidence) {
       finiteNumber(farSeek?.targetAudioLatencyMs) &&
       finiteNumber(farSeek?.targetRunStartAtMs) &&
       farSeek.targetAudioPlayingAtMs >= farSeek.targetRunStartAtMs &&
+      Number.isInteger(farSeek?.targetAudioId) &&
+      farSeek?.targetAudioSourceRequestId === farSeek?.targetRequestId &&
+      farSeek?.targetAudioSourceWorkerEpoch === farSeek?.targetWorkerEpoch &&
+      farSeek?.targetAudioSourceSessionGeneration ===
+        farSeek?.targetSessionGeneration &&
       farSeek.targetRunStartLatencyMs ===
         farSeek.targetRunStartAtMs - farSeek.actionAtMs &&
       farSeek.targetAudioLatencyMs ===
@@ -617,7 +893,17 @@ export function validateOfflineCancellationEvidence(evidence) {
       timeout?.canceledRequestReplayed === false &&
       timeout?.staleMessagesIgnored === true &&
       timeout?.modelRequests === 0 &&
-      timeout?.cacheUnchanged === true &&
+      timeout?.requiredCacheSubsetUnchanged === true &&
+      validRequiredOfflineCacheSnapshot(
+        timeout?.requiredCacheBefore,
+        evidence?.artifact?.loadedJsepWasmPath,
+      ) &&
+      validRequiredOfflineCacheSnapshot(
+        timeout?.requiredCacheAfter,
+        evidence?.artifact?.loadedJsepWasmPath,
+      ) &&
+      timeout.requiredCacheBefore.sha256 ===
+        timeout.requiredCacheAfter.sha256 &&
       finiteNumber(timeout?.watchdogDelayMs) &&
       timeout.watchdogDelayMs >=
         CANCELLATION_TIMEOUT_MS - CANCELLATION_TIMEOUT_TOLERANCE_MS &&
@@ -687,13 +973,45 @@ export function validateOfflineCancellationEvidence(evidence) {
   );
   pushFailure(
     failures,
-    evidence?.network?.attachFailures?.length === 0 &&
+    evidence?.network?.unexplainedAttachFailures?.length === 0 &&
+      Array.isArray(evidence?.network?.attachFailures) &&
+      Array.isArray(
+        evidence?.network?.intentionalServiceWorkerUnregisterRaces,
+      ) &&
+      evidence.network.attachFailures.length ===
+        evidence.network.intentionalServiceWorkerUnregisterRaces.length &&
+      JSON.stringify(evidence.network.attachFailures) ===
+        JSON.stringify(
+          evidence.network.intentionalServiceWorkerUnregisterRaces,
+        ) &&
+      evidence.network.intentionalServiceWorkerUnregisterRaces.every(
+        (failure) =>
+          failure.targetType === "service_worker" &&
+          failure.phase === "service-worker-unregister" &&
+          failure.detached === true &&
+          ["target-attach-failed", "target-resume-failed"].includes(
+            failure.code,
+          ) &&
+          /^[a-f\d]{64}$/u.test(failure.sha256) &&
+          /^[a-f\d]{64}$/u.test(failure.targetIdSha256),
+      ) &&
+      evidence?.network?.serviceWorkerBypassed === true &&
+      evidence?.network?.serviceWorkerLifecycle
+        ?.attachFixedPointBeforeUnregister === true &&
+      evidence.network.serviceWorkerLifecycle.phase ===
+        "service-worker-unregister" &&
+      Number.isInteger(evidence.network.serviceWorkerLifecycle.registrations) &&
+      evidence.network.serviceWorkerLifecycle.registrations >= 0 &&
+      evidence.network.serviceWorkerLifecycle.unregistered ===
+        evidence.network.serviceWorkerLifecycle.registrations &&
       evidence?.network?.loadingFailures?.length === 0 &&
       evidence?.network?.responseFailures?.length === 0 &&
       evidence?.network?.outstandingRequests === 0 &&
       evidence?.network?.outstandingAttachPromises === 0 &&
       evidence?.network?.offlineSpeechWorkerAttached === true &&
       (evidence?.network?.nestedPthreadWorkersAttached ?? 0) >= 1 &&
+      (evidence?.network?.sameUrlNestedPthreadWorkersAttached ?? 0) >= 1 &&
+      evidence?.network?.orphanedOfflineWorkerTargets === 0 &&
       Array.isArray(evidence?.network?.targetBootstrapSettlements) &&
       evidence.network.targetBootstrapSettlements.length >= 1 &&
       evidence.network.targetBootstrapSettlements.every(
@@ -711,21 +1029,124 @@ export function validateOfflineCancellationEvidence(evidence) {
   );
   pushFailure(
     failures,
-    evidence?.cache?.unchanged === true,
-    "offline model/voice cache inventory changed during the matrix",
+    (() => {
+      const manifest = evidence?.cache?.currentRuntimeManifest;
+      const transition = analyzeOfflineCacheTransition(
+        evidence?.cache?.before,
+        evidence?.cache?.after,
+        {
+          currentJsepPath: evidence?.artifact?.loadedJsepWasmPath,
+          currentRuntimeAssetPaths: manifest?.assetPaths,
+        },
+      );
+      return (
+        validCacheInventory(evidence?.cache?.before) &&
+        validCacheInventory(evidence?.cache?.after) &&
+        Array.isArray(manifest?.assetPaths) &&
+        manifest.assetPaths.length >= 1 &&
+        manifest.assetPaths.includes(evidence?.artifact?.loadedJsepWasmPath) &&
+        manifest.sha256 ===
+          hashDiagnostic(JSON.stringify([...manifest.assetPaths].sort())) &&
+        validRequiredOfflineCacheSnapshot(
+          transition.requiredBefore,
+          evidence?.artifact?.loadedJsepWasmPath,
+        ) &&
+        validRequiredOfflineCacheSnapshot(
+          transition.requiredAfter,
+          evidence?.artifact?.loadedJsepWasmPath,
+        ) &&
+        transition.requiredSubsetUnchanged &&
+        transition.added.length === 0 &&
+        transition.unexplainedRemovals.length === 0 &&
+        JSON.stringify(evidence?.cache?.transition) ===
+          JSON.stringify(transition)
+      );
+    })(),
+    "required offline model, voice, or current runtime cache data changed",
   );
   pushFailure(
     failures,
     evidence?.browserDiagnostics?.errors?.length === 0 &&
-      evidence?.browserDiagnostics?.consoleErrors?.length === 0,
+      evidence?.browserDiagnostics?.consoleErrors?.length === 0 &&
+      evidence?.browserDiagnostics?.runtimeExceptions?.length === 0 &&
+      Array.isArray(evidence?.browserDiagnostics?.consoleDiagnostics) &&
+      evidence.browserDiagnostics.consoleDiagnostics.every(
+        (entry) =>
+          [
+            "runtime-console",
+            "runtime-exception",
+            "network-log",
+            "browser-log",
+          ].includes(entry.category) &&
+          [
+            "app-load",
+            "service-worker-unregister",
+            "threaded-wasm",
+            "single-thread-wasm",
+            "webgpu",
+            "webgpu-fallback",
+            "final-quiesce",
+          ].includes(entry.phase) &&
+          [
+            "page",
+            "unknown-target",
+            "service-worker",
+            "other-target",
+            "offline-pthread",
+            "offline-speech",
+            "pdf-worker",
+            "other-worker",
+          ].includes(entry.sessionClass) &&
+          typeof entry.severity === "string" &&
+          Number.isInteger(entry.count) &&
+          entry.count >= 1 &&
+          /^[a-f\d]{64}$/u.test(entry.sha256) &&
+          JSON.stringify(Object.keys(entry).sort()) ===
+            JSON.stringify(
+              [
+                "category",
+                "count",
+                "phase",
+                "sessionClass",
+                "severity",
+                "sha256",
+              ].sort(),
+            ),
+      ),
     "browser diagnostics contain an error",
   );
   pushFailure(
     failures,
     evidence?.finalIsolation?.narrationStopped === true &&
       evidence?.finalIsolation?.speechWorkersDetached >= 1 &&
+      Number.isInteger(evidence?.finalIsolation?.pthreadWorkersDetached) &&
+      evidence.finalIsolation.pthreadWorkersDetached >= 0 &&
       evidence?.finalIsolation?.activeSpeechWorkers === 0 &&
-      evidence?.finalIsolation?.networkSettled === true,
+      evidence?.finalIsolation?.activePthreadWorkers === 0 &&
+      Number.isInteger(evidence?.finalIsolation?.speechWorkersObserved) &&
+      evidence.finalIsolation.speechWorkersObserved >= 1 &&
+      evidence?.finalIsolation?.speechWorkersDetachedTotal ===
+        evidence.finalIsolation.speechWorkersObserved &&
+      Number.isInteger(evidence?.finalIsolation?.pthreadWorkersObserved) &&
+      evidence.finalIsolation.pthreadWorkersObserved >= 1 &&
+      evidence?.finalIsolation?.pthreadWorkersDetachedTotal ===
+        evidence.finalIsolation.pthreadWorkersObserved &&
+      validDetachedSessionHashSet(
+        evidence?.finalIsolation?.rootSessionHashesBefore,
+        evidence?.finalIsolation?.rootSessionHashesDetached,
+      ) &&
+      validDetachedSessionHashSet(
+        evidence?.finalIsolation?.pthreadAncestryHashesBefore,
+        evidence?.finalIsolation?.pthreadAncestryHashesDetached,
+        { minimum: 0 },
+      ) &&
+      evidence.finalIsolation.speechWorkersDetached >=
+        evidence.finalIsolation.rootSessionHashesBefore.length &&
+      evidence.finalIsolation.pthreadWorkersDetached >=
+        evidence.finalIsolation.pthreadAncestryHashesBefore.length &&
+      evidence?.finalIsolation?.networkSettled === true &&
+      evidence?.finalIsolation?.teardownPath ===
+        "/offline-voice-license.txt",
     "final fallback narration or worker/network activity was not explicitly quiesced",
   );
   pushFailure(
@@ -785,6 +1206,7 @@ export function findEvidencePrivacyViolations(value) {
     "profilePath",
     "requestText",
     "stack",
+    "text",
     "textLength",
     "values",
   ]);
@@ -1450,7 +1872,33 @@ async function hashSourceFiles(fixture) {
   };
 }
 
-function installBrowserInstrumentation() {
+export function correlateWorkerMessageSessionGeneration(
+  message,
+  sessionGenerationByRequest,
+) {
+  const id = message?.id;
+  let sessionGeneration = Number.isInteger(message?.sessionGeneration)
+    ? message.sessionGeneration
+    : Number.isInteger(id)
+      ? (sessionGenerationByRequest.get(id) ?? null)
+      : null;
+  if (
+    message?.type === "wasm-run-start" &&
+    Number.isInteger(id) &&
+    Number.isInteger(sessionGeneration)
+  ) {
+    sessionGenerationByRequest.set(id, sessionGeneration);
+  }
+  if (
+    Number.isInteger(id) &&
+    ["canceled", "error", "success"].includes(message?.type)
+  ) {
+    sessionGenerationByRequest.delete(id);
+  }
+  return sessionGeneration;
+}
+
+function installBrowserInstrumentation(correlateSessionGeneration) {
   globalThis.localStorage.setItem(
     "guided-reader-settings",
     JSON.stringify({
@@ -1481,8 +1929,11 @@ function installBrowserInstrumentation() {
   const audioByElement = new WeakMap();
   const audioElements = new Map();
   const blobByUrl = new Map();
+  const requestByAudioData = new WeakMap();
+  const requestByBlob = new WeakMap();
   const native = {
     Audio: globalThis.Audio,
+    Blob: globalThis.Blob,
     Worker: globalThis.Worker,
     createObjectURL: globalThis.URL.createObjectURL,
     mediaPause: globalThis.HTMLMediaElement.prototype.pause,
@@ -1541,6 +1992,9 @@ function installBrowserInstrumentation() {
       events: [],
       id: state.nextAudioId,
       sourceBlobId: null,
+      sourceRequestId: null,
+      sourceSessionGeneration: null,
+      sourceWorkerEpoch: null,
     };
     state.nextAudioId += 1;
     state.audio.push(record);
@@ -1579,13 +2033,31 @@ function installBrowserInstrumentation() {
   WrappedAudio.prototype = native.Audio.prototype;
   globalThis.Audio = WrappedAudio;
 
+  const WrappedBlob = function (parts, options) {
+    const blob = new native.Blob(parts, options);
+    const successfulRequest = Array.from(parts ?? [])
+      .map((part) =>
+        part && typeof part === "object" ? requestByAudioData.get(part) : null,
+      )
+      .find(Boolean);
+    if (successfulRequest) requestByBlob.set(blob, successfulRequest);
+    return blob;
+  };
+  Object.setPrototypeOf(WrappedBlob, native.Blob);
+  WrappedBlob.prototype = native.Blob.prototype;
+  globalThis.Blob = WrappedBlob;
+
   globalThis.URL.createObjectURL = function (object) {
     const url = native.createObjectURL.call(this, object);
+    const successfulRequest = requestByBlob.get(object) ?? null;
     blobByUrl.set(url, {
       createdAtMs: globalThis.performance.now(),
       id: state.nextBlobId,
+      requestId: successfulRequest?.id ?? null,
+      sessionGeneration: successfulRequest?.sessionGeneration ?? null,
       size: object?.size ?? null,
       type: object?.type ?? null,
+      workerEpoch: successfulRequest?.workerEpoch ?? null,
     });
     state.nextBlobId += 1;
     return url;
@@ -1596,7 +2068,11 @@ function installBrowserInstrumentation() {
       ...native.mediaSrc,
       set(value) {
         const record = ensureAudio(this);
-        record.sourceBlobId = blobByUrl.get(value)?.id ?? null;
+        const blob = blobByUrl.get(value);
+        record.sourceBlobId = blob?.id ?? null;
+        record.sourceRequestId = blob?.requestId ?? null;
+        record.sourceSessionGeneration = blob?.sessionGeneration ?? null;
+        record.sourceWorkerEpoch = blob?.workerEpoch ?? null;
         return native.mediaSrc.set.call(this, value);
       },
     });
@@ -1621,6 +2097,7 @@ function installBrowserInstrumentation() {
       this.__issue55Offline = options?.name === "linelight-offline-voice";
       this.__issue55Epoch = this.__issue55Offline ? state.nextWorkerEpoch : 0;
       this.__issue55ListenerMap = new Map();
+      this.__issue55SessionGenerationByRequest = new Map();
       if (this.__issue55Offline) {
         state.nextWorkerEpoch += 1;
         state.workers.push({
@@ -1631,7 +2108,26 @@ function installBrowserInstrumentation() {
         });
         super.addEventListener("message", (messageEvent) => {
           const message = messageEvent.data;
-          event(sanitizeWorkerMessage(message, "in", this.__issue55Epoch));
+          const sanitized = sanitizeWorkerMessage(
+            message,
+            "in",
+            this.__issue55Epoch,
+          );
+          sanitized.sessionGeneration = correlateSessionGeneration(
+            message,
+            this.__issue55SessionGenerationByRequest,
+          );
+          event(sanitized);
+          if (
+            message?.type === "success" &&
+            message?.result?.audioData instanceof ArrayBuffer
+          ) {
+            requestByAudioData.set(message.result.audioData, {
+              id: message.id,
+              sessionGeneration: sanitized.sessionGeneration,
+              workerEpoch: this.__issue55Epoch,
+            });
+          }
         });
       }
     }
@@ -1890,7 +2386,7 @@ function installBrowserInstrumentation() {
   };
 }
 
-const INSTRUMENTATION_SOURCE = `(${installBrowserInstrumentation.toString()})();`;
+const INSTRUMENTATION_SOURCE = `(${installBrowserInstrumentation.toString()})(${correlateWorkerMessageSessionGeneration.toString()});`;
 
 async function walkFiles(directory) {
   const files = [];
@@ -1999,10 +2495,28 @@ async function assertCleanTargetBaseline(cdp) {
   return validateCleanTargetBaseline(targetInfos);
 }
 
-export async function attachCdpChildTarget(cdp, entry, attachFailures) {
+export async function attachCdpChildTarget(
+  cdp,
+  entry,
+  attachFailures,
+  { phase = "unknown" } = {},
+) {
   const { sessionId, targetInfo, waitingForDebugger } = entry;
   let attached = true;
   let resumed = !waitingForDebugger;
+  const failureRecords = [];
+  const recordFailure = (code, error) => {
+    const record = {
+      code,
+      detached: false,
+      phase,
+      sha256: hashDiagnostic(error),
+      targetIdSha256: hashDiagnostic(targetInfo.targetId ?? "unknown-target"),
+      targetType: targetInfo.type,
+    };
+    failureRecords.push(record);
+    attachFailures.push(record);
+  };
   try {
     await Promise.all([
       cdp.send("Network.enable", {}, sessionId),
@@ -2019,11 +2533,7 @@ export async function attachCdpChildTarget(cdp, entry, attachFailures) {
     );
   } catch (error) {
     attached = false;
-    attachFailures.push({
-      code: "target-attach-failed",
-      sha256: hashDiagnostic(error),
-      targetType: targetInfo.type,
-    });
+    recordFailure("target-attach-failed", error);
   } finally {
     if (waitingForDebugger) {
       await cdp
@@ -2032,55 +2542,99 @@ export async function attachCdpChildTarget(cdp, entry, attachFailures) {
           resumed = true;
         })
         .catch((error) => {
-          attachFailures.push({
-            code: "target-resume-failed",
-            sha256: hashDiagnostic(error),
-            targetType: targetInfo.type,
-          });
+          recordFailure("target-resume-failed", error);
         });
     }
   }
-  return { attached, resumed };
+  return { attached, failureRecords, resumed };
+}
+
+export function classifyTargetAttachFailures(attachFailures) {
+  const intentionalServiceWorkerUnregisterRaces = attachFailures.filter(
+    (failure) =>
+      failure.targetType === "service_worker" &&
+      failure.phase === "service-worker-unregister" &&
+      failure.detached === true &&
+      ["target-attach-failed", "target-resume-failed"].includes(failure.code),
+  );
+  return {
+    intentionalServiceWorkerUnregisterRaces,
+    unexplained: attachFailures.filter(
+      (failure) => !intentionalServiceWorkerUnregisterRaces.includes(failure),
+    ),
+  };
 }
 
 export function summarizeAttachedTargetCoverage(targets, expectedWorkerUrl) {
   const targetsBySession = new Map(
     targets.map((target) => [target.sessionId, target]),
   );
-  const offlineWorkers = targets.filter(
+  const exactWorkerTargets = targets.filter(
     (target) =>
       target.type === "worker" &&
       target.url === expectedWorkerUrl &&
       target.attachComplete,
   );
-  const offlineSessions = new Set(
-    offlineWorkers.map((target) => target.sessionId),
-  );
-  const descendsFromOfflineWorker = (target) => {
+  const matchingAncestorSession = (target, sessionIds) => {
     const visited = new Set();
     let parentSessionId = target.parentSessionId;
     while (parentSessionId && !visited.has(parentSessionId)) {
-      if (offlineSessions.has(parentSessionId)) return true;
+      if (sessionIds.has(parentSessionId)) return parentSessionId;
       visited.add(parentSessionId);
       parentSessionId = targetsBySession.get(parentSessionId)?.parentSessionId;
     }
-    return false;
+    return null;
   };
+  const offlineWorkers = exactWorkerTargets.filter(
+    (target) => target.parentSessionId === null,
+  );
+  const offlineSessions = new Set(
+    offlineWorkers.map((target) => target.sessionId),
+  );
   const pthreadWorkers = targets.filter(
     (target) =>
       target.type === "worker" &&
       target.attachComplete &&
       !offlineSessions.has(target.sessionId) &&
-      descendsFromOfflineWorker(target),
+      matchingAncestorSession(target, offlineSessions),
+  );
+  const pthreadWorkerAncestry = pthreadWorkers.map((target) => ({
+    rootSessionId: matchingAncestorSession(target, offlineSessions),
+    sessionId: target.sessionId,
+  }));
+  const orphanedOfflineWorkers = exactWorkerTargets.filter(
+    (target) =>
+      !offlineSessions.has(target.sessionId) &&
+      !matchingAncestorSession(target, offlineSessions),
   );
   const activeOfflineWorkers = offlineWorkers.filter(
     (target) => !target.detached,
   );
+  const activePthreadWorkerAncestry = pthreadWorkerAncestry.filter(
+    ({ sessionId }) => !targetsBySession.get(sessionId)?.detached,
+  );
+  const detachedPthreadWorkerAncestry = pthreadWorkerAncestry.filter(
+    ({ sessionId }) => targetsBySession.get(sessionId)?.detached,
+  );
   return {
+    activeNestedPthreadWorkerAncestry: activePthreadWorkerAncestry,
+    activeNestedPthreadWorkers: activePthreadWorkerAncestry.length,
     activeOfflineSpeechWorkers: activeOfflineWorkers.length,
+    activeOfflineSpeechWorkerSessionIds: activeOfflineWorkers.map(
+      (target) => target.sessionId,
+    ),
+    detachedNestedPthreadWorkerAncestry: detachedPthreadWorkerAncestry,
+    detachedOfflineSpeechWorkerSessionIds: offlineWorkers
+      .filter((target) => target.detached)
+      .map((target) => target.sessionId),
     nestedPthreadWorkersAttached: pthreadWorkers.length,
+    nestedPthreadWorkersDetached: detachedPthreadWorkerAncestry.length,
     offlineSpeechWorkerAttached: offlineWorkers.length >= 1,
     offlineSpeechWorkersAttached: offlineWorkers.length,
+    orphanedOfflineWorkerTargets: orphanedOfflineWorkers.length,
+    sameUrlNestedPthreadWorkersAttached: pthreadWorkers.filter(
+      (target) => target.url === expectedWorkerUrl,
+    ).length,
     speechWorkersDetached: offlineWorkers.filter((target) => target.detached)
       .length,
   };
@@ -2097,8 +2651,51 @@ export function isAttachedTargetBootstrapRequest(request, target) {
   );
 }
 
+function targetSessionClass(sessionId, targetsBySession, expectedWorkerUrl) {
+  if (!sessionId) return "page";
+  const target = targetsBySession.get(sessionId);
+  if (!target) return "unknown-target";
+  if (target.type === "service_worker") return "service-worker";
+  if (target.type !== "worker") return "other-target";
+  const visited = new Set();
+  let parentSessionId = target.parentSessionId;
+  while (parentSessionId && !visited.has(parentSessionId)) {
+    const parent = targetsBySession.get(parentSessionId);
+    if (parent?.type === "worker" && parent.url === expectedWorkerUrl) {
+      return "offline-pthread";
+    }
+    visited.add(parentSessionId);
+    parentSessionId = parent?.parentSessionId;
+  }
+  if (target.url === expectedWorkerUrl) return "offline-speech";
+  if (/pdf-(?:document|parser)\.worker/iu.test(target.url)) {
+    return "pdf-worker";
+  }
+  return "other-worker";
+}
+
+export function summarizeConsoleDiagnostics(entries) {
+  const grouped = new Map();
+  for (const entry of entries) {
+    const key = JSON.stringify([
+      entry.category,
+      entry.phase,
+      entry.sessionClass,
+      entry.severity,
+      entry.sha256,
+    ]);
+    const current = grouped.get(key) ?? { ...entry, count: 0 };
+    current.count += 1;
+    grouped.set(key, current);
+  }
+  return [...grouped.values()].sort((left, right) =>
+    JSON.stringify(left).localeCompare(JSON.stringify(right)),
+  );
+}
+
 async function configurePage(cdp, appUrl, expectedWorkerPath) {
   const consoleEntries = [];
+  const runtimeExceptionEntries = [];
   const networkRequests = [];
   const networkFailures = [];
   const responseFailures = [];
@@ -2109,9 +2706,38 @@ async function configurePage(cdp, appUrl, expectedWorkerPath) {
   const attachPromises = new Set();
   const outstandingRequests = new Set();
   const targetBootstrapSettlements = [];
+  const allowedObservationPhases = new Set([
+    "app-load",
+    "service-worker-unregister",
+    "threaded-wasm",
+    "single-thread-wasm",
+    "webgpu",
+    "webgpu-fallback",
+    "final-quiesce",
+  ]);
   let lastActivityAtMs = performance.now();
+  let observationPhase = "app-load";
   const markActivity = () => {
     lastActivityAtMs = performance.now();
+  };
+  const settle = async ({ quietMs = 250, timeoutMs = 30_000 } = {}) => {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeoutMs) {
+      if (attachPromises.size) {
+        await Promise.allSettled([...attachPromises]);
+        continue;
+      }
+      if (
+        outstandingRequests.size === 0 &&
+        performance.now() - lastActivityAtMs >= quietMs
+      ) {
+        return true;
+      }
+      await delay(25);
+    }
+    throw new Error(
+      `CDP observation did not settle (${attachPromises.size} attaches, ${outstandingRequests.size} requests).`,
+    );
   };
   const reconcileTargetBootstrapRequests = () => {
     for (const target of targets) {
@@ -2136,12 +2762,57 @@ async function configurePage(cdp, appUrl, expectedWorkerPath) {
   };
   cdp.on("Runtime.consoleAPICalled", (entry, sessionId) => {
     consoleEntries.push({
-      sessionId,
-      type: entry.type,
+      category: "runtime-console",
+      phase: observationPhase,
+      sessionClass: targetSessionClass(
+        sessionId,
+        targetsBySession,
+        expectedWorkerPath,
+      ),
+      severity: entry.type,
+      sha256: hashDiagnostic(
+        JSON.stringify({
+          arguments: entry.args ?? [],
+          stackTrace: entry.stackTrace ?? null,
+          type: entry.type,
+        }),
+      ),
     });
   });
-  cdp.on("Log.entryAdded", ({ entry }) => {
-    consoleEntries.push({ sessionId: null, type: entry.level });
+  cdp.on("Runtime.exceptionThrown", ({ exceptionDetails }, sessionId) => {
+    const diagnostic = {
+      category: "runtime-exception",
+      phase: observationPhase,
+      sessionClass: targetSessionClass(
+        sessionId,
+        targetsBySession,
+        expectedWorkerPath,
+      ),
+      severity: "error",
+      sha256: hashDiagnostic(JSON.stringify(exceptionDetails ?? null)),
+    };
+    consoleEntries.push(diagnostic);
+    runtimeExceptionEntries.push(diagnostic);
+  });
+  cdp.on("Log.entryAdded", ({ entry }, sessionId) => {
+    consoleEntries.push({
+      category: entry.source === "network" ? "network-log" : "browser-log",
+      phase: observationPhase,
+      sessionClass: targetSessionClass(
+        sessionId,
+        targetsBySession,
+        expectedWorkerPath,
+      ),
+      severity: entry.level,
+      sha256: hashDiagnostic(
+        JSON.stringify({
+          level: entry.level,
+          source: entry.source,
+          text: entry.text,
+          url: safeNetworkUrl(entry.url ?? ""),
+        }),
+      ),
+    });
   });
   cdp.on("Network.requestWillBeSent", (entry, sessionId) => {
     markActivity();
@@ -2183,8 +2854,13 @@ async function configurePage(cdp, appUrl, expectedWorkerPath) {
   });
   cdp.on("Network.responseReceived", (entry, sessionId) => {
     if (entry.response.status < 400) return;
+    const request = requestsByKey.get(
+      `${sessionId ?? "page"}:${entry.requestId}`,
+    );
     responseFailures.push({
+      method: request?.method ?? null,
       requestId: entry.requestId,
+      resourceType: request?.resourceType ?? null,
       sessionId,
       status: entry.response.status,
       url: safeNetworkUrl(entry.response.url),
@@ -2197,7 +2873,9 @@ async function configurePage(cdp, appUrl, expectedWorkerPath) {
       attachComplete: false,
       bootstrapRequestKey: null,
       detached: false,
+      failureRecords: [],
       parentSessionId,
+      phase: observationPhase,
       sessionId,
       targetId: targetInfo.targetId,
       type: targetInfo.type,
@@ -2209,9 +2887,14 @@ async function configurePage(cdp, appUrl, expectedWorkerPath) {
       cdp,
       { sessionId, targetInfo, waitingForDebugger },
       attachFailures,
+      { phase: observationPhase },
     )
       .then((result) => {
         target.attachComplete = result.attached && result.resumed;
+        target.failureRecords = result.failureRecords;
+        for (const failure of target.failureRecords) {
+          failure.detached = target.detached;
+        }
         reconcileTargetBootstrapRequests();
       })
       .finally(() => {
@@ -2223,7 +2906,10 @@ async function configurePage(cdp, appUrl, expectedWorkerPath) {
   cdp.on("Target.detachedFromTarget", (entry) => {
     markActivity();
     const target = targetsBySession.get(entry.sessionId);
-    if (target) target.detached = true;
+    if (target) {
+      target.detached = true;
+      for (const failure of target.failureRecords) failure.detached = true;
+    }
   });
   await Promise.all([
     cdp.send("Page.enable"),
@@ -2250,7 +2936,11 @@ async function configurePage(cdp, appUrl, expectedWorkerPath) {
     "the instrumented LineLight production shell",
     60_000,
   );
-  await evaluate(
+  await settle();
+  const attachFixedPointBeforeUnregister =
+    attachPromises.size === 0 && outstandingRequests.size === 0;
+  observationPhase = "service-worker-unregister";
+  const unregisterResult = await evaluate(
     cdp,
     `(async () => {
       const registrations = await navigator.serviceWorker?.getRegistrations?.() ?? [];
@@ -2258,28 +2948,13 @@ async function configurePage(cdp, appUrl, expectedWorkerPath) {
       return { registrations: registrations.length, unregistered: results.filter(Boolean).length };
     })()`,
   );
-  const settle = async ({ quietMs = 250, timeoutMs = 30_000 } = {}) => {
-    const startedAt = Date.now();
-    while (Date.now() - startedAt < timeoutMs) {
-      if (attachPromises.size) {
-        await Promise.allSettled([...attachPromises]);
-        continue;
-      }
-      if (
-        outstandingRequests.size === 0 &&
-        performance.now() - lastActivityAtMs >= quietMs
-      ) {
-        return true;
-      }
-      await delay(25);
-    }
-    throw new Error(
-      `CDP observation did not settle (${attachPromises.size} attaches, ${outstandingRequests.size} requests).`,
-    );
-  };
+  await settle();
+  observationPhase = "app-load";
   const targetCoverage = () =>
     summarizeAttachedTargetCoverage(targets, expectedWorkerPath);
   return {
+    attachFailureClassification: () =>
+      classifyTargetAttachFailures(attachFailures),
     attachFailures,
     attachPromises,
     consoleEntries,
@@ -2287,7 +2962,20 @@ async function configurePage(cdp, appUrl, expectedWorkerPath) {
     networkRequests,
     outstandingRequests,
     responseFailures,
+    runtimeExceptionEntries,
     serviceWorkerBypassed: true,
+    serviceWorkerLifecycle: {
+      attachFixedPointBeforeUnregister,
+      phase: "service-worker-unregister",
+      registrations: unregisterResult.registrations,
+      unregistered: unregisterResult.unregistered,
+    },
+    setObservationPhase(phase) {
+      if (!allowedObservationPhases.has(phase)) {
+        throw new Error(`Unknown CDP observation phase: ${phase}.`);
+      }
+      observationPhase = phase;
+    },
     settle,
     targetBootstrapSettlements,
     targetCoverage,
@@ -2437,6 +3125,30 @@ function latestNarrationAudioPlaying(state, afterMs = -Infinity) {
   return null;
 }
 
+function latestNarrationAudioPlayingForSource(
+  state,
+  { requestId, sessionGeneration, workerEpoch },
+  afterMs = -Infinity,
+) {
+  for (const audio of [...state.audio].reverse()) {
+    if (
+      audio.sourceRequestId !== requestId ||
+      audio.sourceSessionGeneration !== sessionGeneration ||
+      audio.sourceWorkerEpoch !== workerEpoch
+    ) {
+      continue;
+    }
+    const playing = [...audio.events]
+      .reverse()
+      .find(
+        (entry) =>
+          entry.name === "playing" && !entry.loop && entry.atMs >= afterMs,
+      );
+    if (playing) return { audio, event: playing };
+  }
+  return null;
+}
+
 function workerEventsAfter(state, afterSequence = 0) {
   return state.workerEvents.filter((entry) => entry.sequence > afterSequence);
 }
@@ -2520,10 +3232,19 @@ async function cacheInventory(cdp) {
           const response = await cache.match(request);
           if (!response) continue;
           const bytes = await response.clone().arrayBuffer();
-          const digest = await crypto.subtle.digest("SHA-256", bytes);
+          const [digest, requestDigest] = await Promise.all([
+            crypto.subtle.digest("SHA-256", bytes),
+            crypto.subtle.digest(
+              "SHA-256",
+              new TextEncoder().encode(request.url)
+            )
+          ]);
           entries.push({
             byteLength: bytes.byteLength,
             cacheName,
+            requestSha256: Array.from(new Uint8Array(requestDigest), (value) =>
+              value.toString(16).padStart(2, "0")
+            ).join(""),
             sha256: Array.from(new Uint8Array(digest), (value) =>
               value.toString(16).padStart(2, "0")
             ).join(""),
@@ -2532,7 +3253,9 @@ async function cacheInventory(cdp) {
         }
       }
       entries.sort((left, right) =>
-        (left.cacheName + left.url).localeCompare(right.cacheName + right.url)
+        (left.cacheName + left.url + left.requestSha256).localeCompare(
+          right.cacheName + right.url + right.requestSha256
+        )
       );
       const encoded = new TextEncoder().encode(JSON.stringify(entries));
       const inventoryDigest = await crypto.subtle.digest("SHA-256", encoded);
@@ -2544,6 +3267,265 @@ async function cacheInventory(cdp) {
       };
     })()`,
   );
+}
+
+function cacheEntryKey(entry) {
+  return JSON.stringify([
+    entry.cacheName,
+    entry.url,
+    entry.requestSha256,
+    entry.sha256,
+    entry.byteLength,
+  ]);
+}
+
+function cacheEntryIdentity(entry) {
+  return `${entry.cacheName}\0${entry.url}\0${entry.requestSha256}`;
+}
+
+function isCanonicalCachePathname(value) {
+  if (
+    typeof value !== "string" ||
+    !value.startsWith("/") ||
+    value.includes("?") ||
+    value.includes("#")
+  ) {
+    return false;
+  }
+  try {
+    const parsed = new URL(value, "https://cache.invalid");
+    return (
+      parsed.origin === "https://cache.invalid" &&
+      parsed.pathname === value &&
+      parsed.search === "" &&
+      parsed.hash === ""
+    );
+  } catch {
+    return false;
+  }
+}
+
+function validCacheInventory(inventory) {
+  if (
+    !inventory ||
+    !Array.isArray(inventory.entries) ||
+    inventory.entries.length === 0 ||
+    inventory.entries.length > 2_048 ||
+    !/^[a-f\d]{64}$/u.test(inventory.sha256 ?? "")
+  ) {
+    return false;
+  }
+  const identities = new Set();
+  for (const entry of inventory.entries) {
+    if (
+      !entry ||
+      Object.keys(entry).sort().join(",") !==
+        "byteLength,cacheName,requestSha256,sha256,url" ||
+      !Number.isInteger(entry.byteLength) ||
+      entry.byteLength <= 0 ||
+      typeof entry.cacheName !== "string" ||
+      entry.cacheName.length === 0 ||
+      entry.cacheName.length > 128 ||
+      !isCanonicalCachePathname(entry.url) ||
+      !/^[a-f\d]{64}$/u.test(entry.requestSha256) ||
+      !/^[a-f\d]{64}$/u.test(entry.sha256)
+    ) {
+      return false;
+    }
+    const identity = cacheEntryIdentity(entry);
+    if (identities.has(identity)) return false;
+    identities.add(identity);
+  }
+  const sorted = [...inventory.entries].sort((left, right) =>
+    cacheEntryIdentity(left).localeCompare(cacheEntryIdentity(right)),
+  );
+  return (
+    JSON.stringify(inventory.entries) === JSON.stringify(sorted) &&
+    inventory.sha256 === hashDiagnostic(JSON.stringify(inventory.entries))
+  );
+}
+
+function sortedCacheEntries(entries) {
+  return [...entries].sort((left, right) =>
+    cacheEntryKey(left).localeCompare(cacheEntryKey(right)),
+  );
+}
+
+export function requiredOfflineCacheSnapshot(inventory, currentJsepPath) {
+  const entries = sortedCacheEntries(
+    (inventory?.entries ?? []).filter(
+      (entry) =>
+        entry.cacheName === MODEL_CACHE_NAME ||
+        entry.cacheName === VOICE_CACHE_NAME ||
+        (entry.cacheName === RUNTIME_CACHE_NAME &&
+          entry.url === currentJsepPath),
+    ),
+  );
+  return {
+    currentJsepEntries: entries.filter(
+      (entry) =>
+        entry.cacheName === RUNTIME_CACHE_NAME &&
+        entry.url === currentJsepPath &&
+        entry.sha256 === EXPECTED_JSEP_WASM_SHA256,
+    ).length,
+    entries,
+    modelEntries: entries.filter(
+      (entry) => entry.cacheName === MODEL_CACHE_NAME,
+    ).length,
+    sha256: hashDiagnostic(JSON.stringify(entries)),
+    voiceEntries: entries.filter(
+      (entry) => entry.cacheName === VOICE_CACHE_NAME,
+    ).length,
+  };
+}
+
+function cacheEntryMultisetDifference(leftEntries, rightEntries) {
+  const remaining = new Map();
+  for (const entry of rightEntries) {
+    const key = cacheEntryKey(entry);
+    const values = remaining.get(key) ?? [];
+    values.push(entry);
+    remaining.set(key, values);
+  }
+  const difference = [];
+  for (const entry of leftEntries) {
+    const key = cacheEntryKey(entry);
+    const values = remaining.get(key);
+    if (values?.length) {
+      values.pop();
+      if (!values.length) remaining.delete(key);
+    } else {
+      difference.push(entry);
+    }
+  }
+  return sortedCacheEntries(difference);
+}
+
+export function analyzeOfflineCacheTransition(
+  before,
+  after,
+  { currentJsepPath, currentRuntimeAssetPaths },
+) {
+  const requiredBefore = requiredOfflineCacheSnapshot(before, currentJsepPath);
+  const requiredAfter = requiredOfflineCacheSnapshot(after, currentJsepPath);
+  const removed = cacheEntryMultisetDifference(
+    before?.entries ?? [],
+    after?.entries ?? [],
+  );
+  const added = cacheEntryMultisetDifference(
+    after?.entries ?? [],
+    before?.entries ?? [],
+  );
+  const currentRuntimeAssets = new Set(currentRuntimeAssetPaths ?? []);
+  const retiredRuntimeDeletions = removed.filter(
+    (entry) =>
+      /^linelight-(?:assets-v1|v\d+)$/u.test(entry.cacheName) &&
+      entry.url.startsWith("/assets/") &&
+      !currentRuntimeAssets.has(entry.url),
+  );
+  const unexplainedRemovals = cacheEntryMultisetDifference(
+    removed,
+    retiredRuntimeDeletions,
+  );
+  return {
+    added,
+    requiredAfter,
+    requiredBefore,
+    requiredSubsetUnchanged: requiredBefore.sha256 === requiredAfter.sha256,
+    retiredRuntimeDeletions,
+    unexplainedRemovals,
+  };
+}
+
+function validRequiredOfflineCacheSnapshot(snapshot, currentJsepPath) {
+  if (
+    !snapshot ||
+    !Array.isArray(snapshot.entries) ||
+    typeof currentJsepPath !== "string" ||
+    !currentJsepPath.startsWith("/assets/") ||
+    snapshot.entries.length !==
+      EXPECTED_MODEL_CACHE_ENTRIES + EXPECTED_VOICE_CACHE_ENTRIES + 1
+  ) {
+    return false;
+  }
+  const entryIdentities = new Set();
+  for (const entry of snapshot.entries) {
+    if (
+      !entry ||
+      Object.keys(entry).sort().join(",") !==
+        "byteLength,cacheName,requestSha256,sha256,url" ||
+      !Number.isInteger(entry.byteLength) ||
+      entry.byteLength <= 0 ||
+      ![MODEL_CACHE_NAME, RUNTIME_CACHE_NAME, VOICE_CACHE_NAME].includes(
+        entry.cacheName,
+      ) ||
+      !isCanonicalCachePathname(entry.url) ||
+      !/^[a-f\d]{64}$/u.test(entry.requestSha256) ||
+      !/^[a-f\d]{64}$/u.test(entry.sha256)
+    ) {
+      return false;
+    }
+    const identity = cacheEntryIdentity(entry);
+    if (entryIdentities.has(identity)) return false;
+    entryIdentities.add(identity);
+  }
+  const recomputed = requiredOfflineCacheSnapshot(
+    { entries: snapshot.entries },
+    currentJsepPath,
+  );
+  return (
+    snapshot.modelEntries === EXPECTED_MODEL_CACHE_ENTRIES &&
+    snapshot.voiceEntries === EXPECTED_VOICE_CACHE_ENTRIES &&
+    snapshot.currentJsepEntries === 1 &&
+    snapshot.sha256 === recomputed.sha256 &&
+    JSON.stringify(snapshot.entries) === JSON.stringify(recomputed.entries) &&
+    snapshot.modelEntries === recomputed.modelEntries &&
+    snapshot.voiceEntries === recomputed.voiceEntries &&
+    snapshot.currentJsepEntries === recomputed.currentJsepEntries
+  );
+}
+
+async function runtimeAssetManifest(cdp, appOrigin) {
+  const manifest = await evaluate(
+    cdp,
+    `(async () => {
+      const response = await fetch("/runtime-assets.json", { cache: "no-store" });
+      if (!response.ok) return null;
+      return response.json();
+    })()`,
+  );
+  if (
+    !manifest ||
+    typeof manifest.deploymentId !== "string" ||
+    !Array.isArray(manifest.assets) ||
+    manifest.assets.length === 0 ||
+    manifest.assets.length > 512
+  ) {
+    throw new Error("The production runtime-asset manifest is invalid.");
+  }
+  const assetPaths = manifest.assets.map((asset) => {
+    const parsed = new URL(asset, appOrigin);
+    if (
+      parsed.origin !== appOrigin ||
+      !parsed.pathname.startsWith("/assets/")
+    ) {
+      throw new Error(
+        "The production runtime-asset manifest is not same-origin.",
+      );
+    }
+    return parsed.pathname;
+  });
+  const normalized = [...new Set(assetPaths)].sort();
+  if (normalized.length !== assetPaths.length) {
+    throw new Error(
+      "The production runtime-asset manifest has duplicate assets.",
+    );
+  }
+  return {
+    assetPaths: normalized,
+    deploymentId: manifest.deploymentId,
+    sha256: hashDiagnostic(JSON.stringify(normalized)),
+  };
 }
 
 async function stableCacheInventory(cdp, timeoutMs = 15_000) {
@@ -2592,6 +3574,12 @@ async function probeWebGpu(cdp) {
 
 async function quiesceFinalNarration(cdp, appUrl, observation) {
   const before = observation.targetCoverage();
+  const rootsBefore = new Set(before.activeOfflineSpeechWorkerSessionIds);
+  const pthreadsBefore = new Set(
+    before.activeNestedPthreadWorkerAncestry.map(
+      ({ rootSessionId, sessionId }) => `${rootSessionId}\0${sessionId}`,
+    ),
+  );
   await cdp.send("Page.navigate", {
     url: new URL("/offline-voice-license.txt", appUrl).href,
   });
@@ -2604,24 +3592,78 @@ async function quiesceFinalNarration(cdp, appUrl, observation) {
   );
   const startedAt = Date.now();
   let after = observation.targetCoverage();
+  const relevantSessionsDetached = () => {
+    const detachedRoots = new Set(
+      after.detachedOfflineSpeechWorkerSessionIds,
+    );
+    const detachedPthreads = new Set(
+      after.detachedNestedPthreadWorkerAncestry.map(
+        ({ rootSessionId, sessionId }) => `${rootSessionId}\0${sessionId}`,
+      ),
+    );
+    return {
+      pthreads: [...pthreadsBefore].every((entry) =>
+        detachedPthreads.has(entry),
+      ),
+      roots: [...rootsBefore].every((entry) => detachedRoots.has(entry)),
+    };
+  };
+  let detached = relevantSessionsDetached();
   while (
     Date.now() - startedAt < 30_000 &&
     (after.activeOfflineSpeechWorkers !== 0 ||
-      after.speechWorkersDetached <= before.speechWorkersDetached)
+      after.activeNestedPthreadWorkers !== 0 ||
+      !detached.roots ||
+      !detached.pthreads)
   ) {
     await delay(25);
     after = observation.targetCoverage();
+    detached = relevantSessionsDetached();
   }
   await observation.settle({ quietMs: 400, timeoutMs: 30_000 });
   after = observation.targetCoverage();
+  detached = relevantSessionsDetached();
+  const detachedRootHashes = [...rootsBefore]
+    .filter((entry) =>
+      after.detachedOfflineSpeechWorkerSessionIds.includes(entry),
+    )
+    .map(hashDiagnostic)
+    .sort();
+  const detachedPthreadHashes = [...pthreadsBefore]
+    .filter((entry) =>
+      after.detachedNestedPthreadWorkerAncestry.some(
+        ({ rootSessionId, sessionId }) =>
+          entry === `${rootSessionId}\0${sessionId}`,
+      ),
+    )
+    .map(hashDiagnostic)
+    .sort();
   return {
+    activePthreadWorkers: after.activeNestedPthreadWorkers,
     activeSpeechWorkers: after.activeOfflineSpeechWorkers,
-    narrationStopped: after.activeOfflineSpeechWorkers === 0,
+    narrationStopped:
+      after.activeOfflineSpeechWorkers === 0 &&
+      after.activeNestedPthreadWorkers === 0 &&
+      detached.roots &&
+      detached.pthreads,
     networkSettled:
       observation.outstandingRequests.size === 0 &&
       observation.attachPromises.size === 0,
+    pthreadAncestryHashesBefore: [...pthreadsBefore]
+      .map(hashDiagnostic)
+      .sort(),
+    pthreadAncestryHashesDetached: detachedPthreadHashes,
+    pthreadWorkersDetached:
+      after.nestedPthreadWorkersDetached -
+      before.nestedPthreadWorkersDetached,
+    pthreadWorkersDetachedTotal: after.nestedPthreadWorkersDetached,
+    pthreadWorkersObserved: after.nestedPthreadWorkersAttached,
+    rootSessionHashesBefore: [...rootsBefore].map(hashDiagnostic).sort(),
+    rootSessionHashesDetached: detachedRootHashes,
     speechWorkersDetached:
       after.speechWorkersDetached - before.speechWorkersDetached,
+    speechWorkersDetachedTotal: after.speechWorkersDetached,
+    speechWorkersObserved: after.offlineSpeechWorkersAttached,
     teardownPath: "/offline-voice-license.txt",
   };
 }
@@ -2939,6 +3981,7 @@ async function runThreadedWasmScenario({
   cdp,
   cpuSampler,
   clockTicksPerSecond,
+  currentJsepPath,
   networkRequests,
   timeoutMs,
 }) {
@@ -3043,13 +4086,34 @@ async function runThreadedWasmScenario({
   const currentAudioId = initial.audio.audio.id;
   const preparedAudio = await waitForBrowserState(
     cdp,
-    (state) =>
-      state.audio.find(
+    (state) => {
+      const audio = state.audio.find(
         (audio) =>
           audio.id !== currentAudioId &&
           audio.sourceBlobId &&
+          Number.isInteger(audio.sourceRequestId) &&
           audio.createdAtMs >= followupSuccess.result.atMs,
-      ),
+      );
+      if (!audio) return null;
+      const request = state.workerEvents.find(
+        (entry) =>
+          entry.direction === "out" &&
+          entry.type === "synthesize" &&
+          entry.id === audio.sourceRequestId &&
+          entry.epoch === audio.sourceWorkerEpoch,
+      );
+      const success = state.workerEvents.find(
+        (entry) =>
+          entry.direction === "in" &&
+          entry.type === "success" &&
+          entry.id === audio.sourceRequestId &&
+          entry.epoch === audio.sourceWorkerEpoch &&
+          entry.sessionGeneration === audio.sourceSessionGeneration,
+      );
+      return request && success && success.atMs <= audio.createdAtMs
+        ? { audio, request, success }
+        : null;
+    },
     "the completed lookahead audio to become prepared",
     timeoutMs,
   );
@@ -3087,7 +4151,7 @@ async function runThreadedWasmScenario({
     cdp,
     (state) => {
       const audio = state.audio.find(
-        (candidate) => candidate.id === preparedAudio.result.id,
+        (candidate) => candidate.id === preparedAudio.result.audio.id,
       );
       const playing = audio?.events.find(
         (entry) => entry.name === "playing" && entry.atMs > boundaryAction.atMs,
@@ -3097,24 +4161,58 @@ async function runThreadedWasmScenario({
     "the exact pre-Pause lookahead audio to play",
     timeoutMs,
   );
-  const synthesisBeforeBoundaryAdvance =
+  const synthesisBeforePreparedPlayback =
     preparedPlayed.state.workerEvents.filter(
       (entry) =>
         entry.direction === "out" &&
         entry.type === "synthesize" &&
         entry.atMs > preparedPause.atMs &&
-        entry.atMs < boundaryAction.atMs,
+        entry.atMs < preparedPlayed.result.playing.atMs,
     );
+  const duplicatePreparedSynthesisRequests =
+    preparedPlayed.state.workerEvents.filter(
+      (entry) =>
+        entry.direction === "out" &&
+        entry.type === "synthesize" &&
+        entry.id === preparedAudio.result.request.id &&
+        entry.epoch === preparedAudio.result.request.epoch &&
+        entry.sequence > preparedAudio.result.request.sequence,
+    );
+  const preparedTerminalAfterSuccess = preparedPlayed.state.workerEvents.find(
+    (entry) =>
+      entry.direction === "in" &&
+      entry.id === preparedAudio.result.request.id &&
+      entry.epoch === preparedAudio.result.request.epoch &&
+      entry.sequence > preparedAudio.result.success.sequence &&
+      ["canceled", "error"].includes(entry.type),
+  );
   const preparedResumeEvidence = {
-    audioCreatedAtMs: preparedAudio.result.createdAtMs,
+    audioCreatedAtMs: preparedAudio.result.audio.createdAtMs,
     audioCreatedBeforePause:
-      preparedAudio.result.createdAtMs < preparedPause.atMs,
-    audioId: preparedAudio.result.id,
-    discarded: false,
-    newSynthesisRequests: synthesisBeforeBoundaryAdvance.length,
+      preparedAudio.result.audio.createdAtMs < preparedPause.atMs,
+    audioId: preparedAudio.result.audio.id,
+    discarded: Boolean(preparedTerminalAfterSuccess),
+    duplicatePreparedSynthesisRequests:
+      duplicatePreparedSynthesisRequests.length,
+    interveningDistinctRequestIds: synthesisBeforePreparedPlayback
+      .filter(
+        (entry) =>
+          entry.id !== preparedAudio.result.request.id ||
+          entry.epoch !== preparedAudio.result.request.epoch,
+      )
+      .map((entry) => entry.id),
+    pauseAtMs: preparedPause.atMs,
     playedAtMs: preparedPlayed.result.playing.atMs,
-    requestId: followupActive.request.id,
+    requestAtMs: preparedAudio.result.request.atMs,
+    requestId: preparedAudio.result.request.id,
+    requestSequence: preparedAudio.result.request.sequence,
+    requestSessionGeneration: preparedAudio.result.success.sessionGeneration,
+    requestSucceededAtMs: preparedAudio.result.success.atMs,
+    requestSuccessSequence: preparedAudio.result.success.sequence,
+    requestWorkerEpoch: preparedAudio.result.request.epoch,
     resumedCurrentAtMs: preparedResume.event.atMs,
+    sameAudioPlayed:
+      preparedPlayed.result.audio.id === preparedAudio.result.audio.id,
     snapshotSequence: nextEventSequence(preparedPlayed.state),
     success: true,
   };
@@ -3210,18 +4308,38 @@ async function runThreadedWasmScenario({
         (entry) =>
           entry.direction === "in" &&
           entry.type === "success" &&
-          entry.id === crossing.targetRequest.id,
+          entry.id === crossing.targetRequest.id &&
+          entry.epoch === farSeekState.result.targetStart.epoch &&
+          entry.sessionGeneration ===
+            farSeekState.result.targetStart.sessionGeneration,
       ),
     "far-seek target synthesis success",
     timeoutMs,
   );
   const targetPlaying = await waitForBrowserState(
     cdp,
-    (state) => latestNarrationAudioPlaying(state, targetSuccess.result.atMs),
+    (state) =>
+      latestNarrationAudioPlayingForSource(
+        state,
+        {
+          requestId: crossing.targetRequest.id,
+          sessionGeneration:
+            farSeekState.result.targetStart.sessionGeneration,
+          workerEpoch: farSeekState.result.targetStart.epoch,
+        },
+        targetSuccess.result.atMs,
+      ),
     "far-seek target audio to reach playing",
     timeoutMs,
   );
+  farSeek.targetAudioId = targetPlaying.result.audio.id;
   farSeek.targetAudioPlayingAtMs = targetPlaying.result.event.atMs;
+  farSeek.targetAudioSourceRequestId =
+    targetPlaying.result.audio.sourceRequestId;
+  farSeek.targetAudioSourceSessionGeneration =
+    targetPlaying.result.audio.sourceSessionGeneration;
+  farSeek.targetAudioSourceWorkerEpoch =
+    targetPlaying.result.audio.sourceWorkerEpoch;
   farSeek.targetAudioLatencyMs =
     targetPlaying.result.event.atMs - crossing.action.atMs;
   const resetPhaseEvents = targetPlaying.state.workerEvents.filter(
@@ -3263,6 +4381,10 @@ async function runThreadedWasmScenario({
     clockTicksPerSecond,
     timeoutMs,
   });
+  const timeoutCacheBefore = requiredOfflineCacheSnapshot(
+    await cacheInventory(cdp),
+    currentJsepPath,
+  );
   await evaluate(cdp, `globalThis.__lineLightIssue55.armForcedTimeout()`);
   const forcedResume = await resumeNarration(
     cdp,
@@ -3343,10 +4465,13 @@ async function runThreadedWasmScenario({
     "worker replacement and pending-request replay after watchdog timeout",
     timeoutMs,
   );
+  const timeoutCacheAfter = requiredOfflineCacheSnapshot(
+    await cacheInventory(cdp),
+    currentJsepPath,
+  );
   const finalTimeoutState = recovery.state;
   const forcedState = finalTimeoutState.forcedTimeout;
   const timeoutRecovery = {
-    cacheUnchanged: null,
     canceledRequestReplayed: finalTimeoutState.workerEvents.some(
       (entry) =>
         entry.direction === "out" &&
@@ -3365,6 +4490,10 @@ async function runThreadedWasmScenario({
     pendingRequestId: pendingOld.result.id,
     pendingRequestReplayed: true,
     pendingRequestSucceeded: true,
+    requiredCacheAfter: timeoutCacheAfter,
+    requiredCacheBefore: timeoutCacheBefore,
+    requiredCacheSubsetUnchanged:
+      timeoutCacheBefore.sha256 === timeoutCacheAfter.sha256,
     staleMessagesIgnored:
       finiteNumber(forcedState?.staleInjectedAtMs) &&
       !finalTimeoutState.errors.some((error) =>
@@ -3588,13 +4717,32 @@ async function run(options) {
       `/${artifact.workerPath.replace(/^dist\/client\//u, "")}`,
       appUrl,
     ).href;
+    const expectedJsepWasmPath = `/${artifact.jsepWasmPath.replace(
+      /^dist\/client\//u,
+      "",
+    )}`;
     const page = await configurePage(cdp, appUrl, expectedWorkerUrl);
     await page.settle();
+    const currentRuntimeManifest = await runtimeAssetManifest(
+      cdp,
+      new URL(appUrl).origin,
+    );
+    if (
+      !currentRuntimeManifest.assetPaths.includes(expectedJsepWasmPath) ||
+      !currentRuntimeManifest.assetPaths.includes(
+        new URL(expectedWorkerUrl).pathname,
+      )
+    ) {
+      throw new Error(
+        "The production runtime manifest does not bind the reviewed worker and JSEP Wasm.",
+      );
+    }
     cpuSampler = startCpuSampler(browser.processGroupId);
     const isolation = {
       ...targetBaseline,
       sessionRestorePurged: profileClone.sessionRestorePurged,
     };
+    page.setObservationPhase("threaded-wasm");
     await prepareScenario(cdp, appUrl, options.fixture, "threaded");
     const webGpuProbe = await probeWebGpu(cdp);
     const clockTicksPerSecond = Number(
@@ -3608,6 +4756,7 @@ async function run(options) {
       cdp,
       clockTicksPerSecond,
       cpuSampler,
+      currentJsepPath: expectedJsepWasmPath,
       networkRequests: page.networkRequests,
       timeoutMs: options.timeoutMs,
     });
@@ -3615,6 +4764,7 @@ async function run(options) {
     await page.settle();
     await assertBrowserStateHealthy(cdp, "the completed threaded-WASM matrix");
 
+    page.setObservationPhase("single-thread-wasm");
     await prepareScenario(cdp, appUrl, options.fixture, "w1");
     const wasmSingleThread = await runNonCooperativePauseScenario({
       cdp,
@@ -3630,6 +4780,7 @@ async function run(options) {
     const webGpuAvailable =
       webGpuProbe.adapterAvailable === true && webGpuProbe.shaderF16 === true;
     if (webGpuAvailable) {
+      page.setObservationPhase("webgpu");
       await prepareScenario(cdp, appUrl, options.fixture, "webgpu");
       webgpu = {
         ...(await runNonCooperativePauseScenario({
@@ -3646,6 +4797,7 @@ async function run(options) {
         unsafeFeatureFlags: false,
       };
     } else {
+      page.setObservationPhase("webgpu-fallback");
       await prepareScenario(cdp, appUrl, options.fixture, "auto");
       const graceful = await startNarration(cdp, options.timeoutMs);
       webgpu = {
@@ -3666,7 +4818,9 @@ async function run(options) {
       };
     }
 
-    const finalBrowserState = await browserSnapshot(cdp);
+    await assertBrowserStateHealthy(cdp, "the completed WebGPU matrix");
+
+    page.setObservationPhase("final-quiesce");
     const browserVersion = await cdp.send("Browser.getVersion");
     const environment = await evaluate(
       cdp,
@@ -3678,10 +4832,17 @@ async function run(options) {
       })`,
     );
     const finalIsolation = await quiesceFinalNarration(cdp, appUrl, page);
-    const cacheAfter = await cacheInventory(cdp);
     await page.settle({ quietMs: 400, timeoutMs: 30_000 });
-    const cacheUnchanged = cacheBefore.sha256 === cacheAfter.sha256;
-    threadedWasm.timeoutRecovery.cacheUnchanged = cacheUnchanged;
+    const finalBrowserState = await browserSnapshot(cdp);
+    const cacheAfter = await stableCacheInventory(cdp);
+    const cacheTransition = analyzeOfflineCacheTransition(
+      cacheBefore,
+      cacheAfter,
+      {
+        currentJsepPath: expectedJsepWasmPath,
+        currentRuntimeAssetPaths: currentRuntimeManifest.assetPaths,
+      },
+    );
     const appOrigin = new URL(appUrl).origin;
     const nonLoopbackRequests = page.networkRequests
       .filter((request) => {
@@ -3706,7 +4867,6 @@ async function run(options) {
     const loadedPaths = new Set(
       page.networkRequests.map((request) => new URL(request.url).pathname),
     );
-    const expectedJsepWasmPath = `/${artifact.jsepWasmPath.replace(/^dist\/client\//u, "")}`;
     const expectedWorkerPath = `/${artifact.workerPath.replace(/^dist\/client\//u, "")}`;
     artifact.loadedJsepWasmPath = loadedPaths.has(expectedJsepWasmPath)
       ? expectedJsepWasmPath
@@ -3717,21 +4877,29 @@ async function run(options) {
     artifact.loadedJsepWasm = artifact.loadedJsepWasmPath !== null;
     artifact.loadedWorker = artifact.loadedWorkerPath !== null;
     const targetCoverage = page.targetCoverage();
+    const attachFailureClassification = page.attachFailureClassification();
     execution = {
       artifact,
       browserDiagnostics: {
-        consoleErrors: page.consoleEntries
-          .filter((entry) => ["error", "assert"].includes(entry.type))
-          .map((entry) => ({ severity: entry.type })),
+        consoleDiagnostics: summarizeConsoleDiagnostics(page.consoleEntries),
+        consoleErrors: summarizeConsoleDiagnostics(
+          page.consoleEntries.filter((entry) =>
+            ["error", "assert"].includes(entry.severity),
+          ),
+        ),
         errors: finalBrowserState.errors.map((error) => ({
           code: "browser-runtime-error",
           sha256: hashDiagnostic(error),
         })),
+        runtimeExceptions: summarizeConsoleDiagnostics(
+          page.runtimeExceptionEntries,
+        ),
       },
       cache: {
         after: cacheAfter,
         before: cacheBefore,
-        unchanged: cacheUnchanged,
+        currentRuntimeManifest,
+        transition: cacheTransition,
       },
       environment: {
         appOrigin,
@@ -3748,18 +4916,23 @@ async function run(options) {
       network: {
         attachFailures: page.attachFailures,
         externalModelRequests,
-        loadingFailures: page.networkFailures.filter(
-          (failure) => !failure.canceled,
-        ),
+        loadingFailures: page.networkFailures,
         nonLoopbackRequests,
         observedRequestCount: page.networkRequests.length,
         offlineSpeechWorkerAttached: targetCoverage.offlineSpeechWorkerAttached,
         nestedPthreadWorkersAttached:
           targetCoverage.nestedPthreadWorkersAttached,
+        orphanedOfflineWorkerTargets:
+          targetCoverage.orphanedOfflineWorkerTargets,
         outstandingAttachPromises: page.attachPromises.size,
         outstandingRequests: page.outstandingRequests.size,
         responseFailures: page.responseFailures,
         serviceWorkerBypassed: page.serviceWorkerBypassed,
+        serviceWorkerLifecycle: page.serviceWorkerLifecycle,
+        intentionalServiceWorkerUnregisterRaces:
+          attachFailureClassification.intentionalServiceWorkerUnregisterRaces,
+        sameUrlNestedPthreadWorkersAttached:
+          targetCoverage.sameUrlNestedPthreadWorkersAttached,
         targetBootstrapSettlements: page.targetBootstrapSettlements,
         targetCounts: Object.fromEntries(
           [...new Set(page.targets.map((target) => target.type))]
@@ -3769,6 +4942,7 @@ async function run(options) {
               page.targets.filter((target) => target.type === type).length,
             ]),
         ),
+        unexplainedAttachFailures: attachFailureClassification.unexplained,
       },
       threadedWasm,
     };

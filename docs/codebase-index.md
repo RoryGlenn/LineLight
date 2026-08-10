@@ -401,9 +401,13 @@ failure advances through the applicable fresh WASM tiers: isolated, capable
 contexts try threaded WASM before single-thread, while other contexts go
 directly to single-thread WASM. Changes to active-run cancellation must keep the
 page mailbox, worker protocol, bundled ONNX Runtime patch, and Transformers
-browser inference queue compatible. Cancellation applies only when the selected
-backend is multi-threaded WebAssembly; WebGPU and single-thread WebAssembly keep
-their request-boundary behavior even if shared memory happens to be available.
+browser inference queue compatible. The guarded Transformers 3.8.1 patch
+recovers the serialized web queue after every rejected run and rethrows only
+the exact reviewed cooperative-cancellation error before tensor or model-input
+formatting and console diagnostics; ordinary failures retain upstream
+diagnostics. Cancellation applies only when the selected backend is
+multi-threaded WebAssembly; WebGPU and single-thread WebAssembly keep their
+request-boundary behavior even if shared memory happens to be available.
 
 **State and I/O:** Model and setup assets use browser Cache Storage through the
 Transformers cache adapter; voices use their dedicated cache; resumable ranges
@@ -440,7 +444,24 @@ topology, cancellation exports, and initialized shared-memory protocol.
 [`tests/offline-cancellation-harness.test.mjs`](../tests/offline-cancellation-harness.test.mjs)
 keeps the headed evidence validator fail-closed across active-run identity,
 Pause and CPU timing, far seek, timeout replay, fallback, network, artifact,
-cleanup, and private-text gates. The matching production runner is
+cleanup, and private-text gates. It binds prepared reuse to the exact completed
+request and audio object while allowing only distinct later refills; preserves
+the required model, voice, and current JSEP runtime cache subset while allowing
+only manifest-retired runtime assets to disappear; distinguishes range-cache
+keys with SHA-256 identities while retaining only their canonical,
+query-free path; binds far-seek playback to the target request, worker, and
+session by correlating the session-bearing run start with its otherwise
+session-less success message; classifies the speech worker and same-URL
+pthreads by exact target ancestry; and accepts only hashed, detached
+service-worker attach races during
+the deliberate unregister phase. Its worker-event schema rejects unknown or
+raw-text fields. Final teardown proves the exact active speech roots and all
+recursive pthread descendants detached through privacy-safe session-ancestry
+hashes. Persisted console and uncaught-exception evidence contains only
+privacy-safe category, phase, target class, severity, count, and digest fields
+rather than raw arguments, and the gate requires zero console errors, runtime
+exceptions, network failures (including canceled loads), or 4xx responses. The
+matching production runner is
 [`scripts/run-offline-cancellation-regression.mjs`](../scripts/run-offline-cancellation-regression.mjs);
 it rebuilds a clean source commit, clones a prepared local profile, owns its
 headed browser and server process groups, auto-attaches network inspection to
@@ -476,7 +497,11 @@ same-origin non-document assets. It deliberately leaves document navigations to
 the browser and network. [`build/sites-vite-plugin.ts`](../build/sites-vite-plugin.ts)
 emits the complete content-hashed asset manifest used by those leases.
 [`public/manifest.webmanifest`](../public/manifest.webmanifest)
-owns install metadata. [`worker/index.ts`](../worker/index.ts) owns production
+owns install metadata and the installed icon declarations.
+[`public/favicon.ico`](../public/favicon.ico) is the real 32-by-32 legacy icon
+served at the conventional `/favicon.ico` route, while
+[`public/favicon.svg`](../public/favicon.svg) is its scalable manifest peer.
+[`worker/index.ts`](../worker/index.ts) owns production
 COOP/COEP/CORP and WebAssembly content-type headers and serves the generated,
 unversioned runtime manifest through the deployment asset binding, while
 [`public/_headers`](../public/_headers) owns the complementary static-asset
@@ -526,7 +551,9 @@ worker headers; and
 retention and worker-diagnostic contracts. Complete offline readiness still
 requires a first-visit, restart, and network-disabled browser check; development
 worker-header changes also require a fresh-profile browser smoke covering both
-offline narration and PDF.js.
+offline narration and PDF.js. The Issue #55 headed harness binds the web
+manifest and ICO file to its source commit and rejects any observed 4xx,
+including a missing `/favicon.ico`.
 
 ## Edge routes and deployment assembly
 
@@ -632,10 +659,12 @@ worker/artifact assertions. [`scripts/audit-dependencies.mjs`](../scripts/audit-
 owns the narrow advisory allowlist enforced by CI.
 [`scripts/apply-dependency-patches.mjs`](../scripts/apply-dependency-patches.mjs)
 owns fail-closed, version-, integrity-, and digest-guarded patching of the
-installed Transformers source and browser distribution. The modified ONNX
-Runtime Web package, source patch, pinned reproduction procedure, checksums,
-deterministic SBOM generator and evidence plan, and upstream and modification
-notices live under
+installed Transformers 3.8.1 files: queue-tail recovery in
+`src/backends/onnx.js` and `dist/transformers.web.js`, plus exact cooperative
+cancellation rethrow before input formatting or logging in `src/models.js` and
+`dist/transformers.web.js`. The modified ONNX Runtime Web package, source patch,
+pinned reproduction procedure, checksums, deterministic SBOM generator and
+evidence plan, and upstream and modification notices live under
 [`vendor/onnxruntime-web/`](../vendor/onnxruntime-web/README.md).
 [`docs/dependency-security.md`](dependency-security.md) explains the reviewed
 dependency posture. [`.github/workflows/ci.yml`](../.github/workflows/ci.yml)
@@ -650,8 +679,10 @@ audits, lints, type-checks, builds, tests, and validates the current change.
 **Change together:** Dependency updates require lockfile,
 override, audit-policy, compatibility, production-exposure, and artifact review.
 Updates to Transformers or ONNX Runtime Web must also revalidate the guarded
-patch inputs, regenerate the bundled runtime from its pinned source, refresh
-its checksums and SBOM, and review the distributed license notices.
+patch inputs and review the distributed license notices. An ONNX Runtime Web
+update additionally requires regenerating the bundled runtime from its pinned
+source and refreshing its focused checksums and SBOM; a Transformers-only
+install patch does not change those ONNX records.
 Build-output changes require synchronized Sites staging and artifact validation.
 Repository workflow belongs in [`CONTRIBUTING.md`](../CONTRIBUTING.md); developer
 orientation belongs in [`README.md`](../README.md), this index, and
@@ -667,11 +698,12 @@ small explicit development-only allowance rather than accepted wholesale.
 and real-adapter compatibility by
 [`tests/dependency-hardening.test.mjs`](../tests/dependency-hardening.test.mjs).
 [`tests/dependency-patches.test.mjs`](../tests/dependency-patches.test.mjs)
-covers the exact Transformers transformation, queue rejection isolation,
-idempotence, and fail-closed tamper behavior. Bundled-runtime review must
-additionally check its recorded checksums, package dependency shape, generated
-WebAssembly wrappers, and the runtime behavior described by the offline
-narration gate.
+covers the exact Transformers transformations, queue rejection isolation,
+cancel-only early rethrow without input diagnostics, preservation of ordinary
+error diagnostics and recovery, idempotence, and fail-closed tamper behavior.
+Bundled-runtime review must additionally check its recorded checksums, package
+dependency shape, generated WebAssembly wrappers, and the runtime behavior
+described by the offline narration gate.
 The semantic-index contract itself is covered by
 [`tests/codebase-index.test.mjs`](../tests/codebase-index.test.mjs), which checks
 the domain schema, relative links, and tracked first-party path coverage.
@@ -725,8 +757,9 @@ or presentation-only artifacts rather than behavior-bearing modules:
   assigning it independent semantic ownership.
 - [`.vinext/fonts`](../.vinext/fonts) contains generated framework font files;
   edit the font/build configuration that produces them instead.
-- [`public/favicon.svg`](../public/favicon.svg) is a generic static image asset
-  with no runtime contract beyond the manifest that references it.
+- [`public/favicon.ico`](../public/favicon.ico) and
+  [`public/favicon.svg`](../public/favicon.svg) are presentation-only image
+  assets; the PWA domain above owns their route and manifest contracts.
 - [`public/file.svg`](../public/file.svg) is unused template artwork rather than
   a behavior-bearing module.
 - [`public/globe.svg`](../public/globe.svg) is unused template artwork rather

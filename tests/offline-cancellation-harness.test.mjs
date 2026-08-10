@@ -1,18 +1,24 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
   AttachedCdpSession,
+  analyzeOfflineCacheTransition,
   attachCdpChildTarget,
+  classifyTargetAttachFailures,
+  correlateWorkerMessageSessionGeneration,
   countTrackedProcessSurvivors,
   evaluateBrowserStatePredicate,
   findEvidencePrivacyViolations,
   findUnterminatedSynthesisRequests,
   isAttachedTargetBootstrapRequest,
   parseArguments,
+  requiredOfflineCacheSnapshot,
   selectOwnedProcessTree,
   summarizeAttachedTargetCoverage,
+  summarizeConsoleDiagnostics,
   validateCleanTargetBaseline,
   validateOfflineCancellationEvidence,
 } from "../scripts/run-offline-cancellation-regression.mjs";
@@ -34,6 +40,8 @@ const SOURCE_FILES = [
   "app/speech-prefetch.mjs",
   "package-lock.json",
   "package.json",
+  "public/favicon.ico",
+  "public/manifest.webmanifest",
   "scripts/apply-dependency-patches.mjs",
   "scripts/run-offline-cancellation-regression.mjs",
   "tests/offline-cancellation-harness.test.mjs",
@@ -44,9 +52,42 @@ const SOURCE_FILES = [
 ];
 const HASH = "a".repeat(64);
 const COMMIT = "b".repeat(40);
+const JSEP_PATH = "/assets/ort-wasm-simd-threaded.jsep-test.wasm";
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function passingCacheInventory() {
+  const entries = [
+    ...Array.from({ length: 24 }, (_, index) => ({
+      byteLength: 1_000 + index,
+      cacheName: "transformers-cache",
+      requestSha256: sha256(`model-request-${index}`),
+      sha256: sha256(`model-${index}`),
+      url: `/offline-model/reviewed/model-${index}`,
+    })),
+    ...Array.from({ length: 5 }, (_, index) => ({
+      byteLength: 500 + index,
+      cacheName: "kokoro-voices",
+      requestSha256: sha256(`voice-request-${index}`),
+      sha256: sha256(`voice-${index}`),
+      url: `/onnx-community/Kokoro-82M-v1.0-ONNX/voices/voice-${index}.bin`,
+    })),
+    {
+      byteLength: 24_113_968,
+      cacheName: "linelight-assets-v1",
+      requestSha256: sha256("jsep-request"),
+      sha256: JSEP_SHA256,
+      url: JSEP_PATH,
+    },
+  ];
+  entries.sort((left, right) =>
+    (left.cacheName + left.url + left.requestSha256).localeCompare(
+      right.cacheName + right.url + right.requestSha256,
+    ),
+  );
+  return { entries, sha256: sha256(JSON.stringify(entries)) };
 }
 
 function cancellation(index) {
@@ -92,6 +133,27 @@ function cancellation(index) {
   };
 }
 
+function protocolEvent(overrides) {
+  return {
+    atMs: overrides.atMs,
+    backendDevice: null,
+    cooperative: null,
+    direction: overrides.direction,
+    elapsedMilliseconds: null,
+    epoch: overrides.epoch,
+    generation: null,
+    id: overrides.id,
+    progress: null,
+    sequence: overrides.sequence,
+    sessionGeneration: null,
+    stage: null,
+    type: overrides.type,
+    wallTimeMs: 1_000_000 + overrides.atMs,
+    wasmThreads: null,
+    ...overrides,
+  };
+}
+
 function passingEvidence() {
   const sourceFiles = Object.fromEntries(
     SOURCE_FILES.map((file) => [file, HASH]),
@@ -99,19 +161,40 @@ function passingEvidence() {
   const jsepWasmPath =
     "dist/client/assets/ort-wasm-simd-threaded.jsep-test.wasm";
   const workerPath = "dist/client/assets/offline-speech.worker-test.js";
+  const cacheBefore = passingCacheInventory();
+  const cacheAfter = structuredClone(cacheBefore);
+  const runtimeManifest = {
+    assetPaths: [JSEP_PATH, "/assets/offline-speech.worker-test.js"].sort(),
+    deploymentId: "reviewed-test-build",
+  };
+  runtimeManifest.sha256 = sha256(JSON.stringify(runtimeManifest.assetPaths));
+  const cacheTransition = analyzeOfflineCacheTransition(
+    cacheBefore,
+    cacheAfter,
+    {
+      currentJsepPath: JSEP_PATH,
+      currentRuntimeAssetPaths: runtimeManifest.assetPaths,
+    },
+  );
+  const timeoutCache = requiredOfflineCacheSnapshot(cacheBefore, JSEP_PATH);
   return {
     artifact: {
       jsepWasmPath,
       jsepWasmSha256: JSEP_SHA256,
       loadedJsepWasm: true,
-      loadedJsepWasmPath: "/assets/ort-wasm-simd-threaded.jsep-test.wasm",
+      loadedJsepWasmPath: JSEP_PATH,
       loadedWorker: true,
       loadedWorkerPath: "/assets/offline-speech.worker-test.js",
       workerCancellationIdentity: true,
       workerPath,
       workerSha256: HASH,
     },
-    browserDiagnostics: { consoleErrors: [], errors: [] },
+    browserDiagnostics: {
+      consoleDiagnostics: [],
+      consoleErrors: [],
+      errors: [],
+      runtimeExceptions: [],
+    },
     build: {
       exactCleanSource: true,
       exitCode: 0,
@@ -119,7 +202,12 @@ function passingEvidence() {
       sourceCommit: COMMIT,
       sourceFilesSha256: sha256(JSON.stringify(sourceFiles)),
     },
-    cache: { unchanged: true },
+    cache: {
+      after: cacheAfter,
+      before: cacheBefore,
+      currentRuntimeManifest: runtimeManifest,
+      transition: cacheTransition,
+    },
     cleanup: {
       browserProfileMatchesAfterStop: 0,
       browserProcessGroupId: 4_001,
@@ -162,10 +250,26 @@ function passingEvidence() {
       },
     },
     finalIsolation: {
+      activePthreadWorkers: 0,
       activeSpeechWorkers: 0,
       narrationStopped: true,
       networkSettled: true,
+      pthreadAncestryHashesBefore: [
+        sha256("speech-root\0pthread-1"),
+        sha256("speech-root\0pthread-2"),
+      ].sort(),
+      pthreadAncestryHashesDetached: [
+        sha256("speech-root\0pthread-1"),
+        sha256("speech-root\0pthread-2"),
+      ].sort(),
+      pthreadWorkersDetached: 2,
+      pthreadWorkersDetachedTotal: 2,
+      pthreadWorkersObserved: 2,
+      rootSessionHashesBefore: [sha256("speech-root")],
+      rootSessionHashesDetached: [sha256("speech-root")],
       speechWorkersDetached: 1,
+      speechWorkersDetachedTotal: 1,
+      speechWorkersObserved: 1,
       teardownPath: "/offline-voice-license.txt",
     },
     fixture: {
@@ -184,14 +288,23 @@ function passingEvidence() {
     network: {
       attachFailures: [],
       externalModelRequests: [],
+      intentionalServiceWorkerUnregisterRaces: [],
       loadingFailures: [],
       nestedPthreadWorkersAttached: 2,
       nonLoopbackRequests: [],
       offlineSpeechWorkerAttached: true,
+      orphanedOfflineWorkerTargets: 0,
       outstandingAttachPromises: 0,
       outstandingRequests: 0,
       responseFailures: [],
       serviceWorkerBypassed: true,
+      serviceWorkerLifecycle: {
+        attachFixedPointBeforeUnregister: true,
+        phase: "service-worker-unregister",
+        registrations: 1,
+        unregistered: 1,
+      },
+      sameUrlNestedPthreadWorkersAttached: 2,
       targetBootstrapSettlements: [
         {
           method: "GET",
@@ -201,6 +314,7 @@ function passingEvidence() {
           url: "http://127.0.0.1:5212/assets/offline-speech.worker-test.js",
         },
       ],
+      unexplainedAttachFailures: [],
     },
     privacy: { narrationTextRecorded: false },
     run: {
@@ -229,6 +343,33 @@ function passingEvidence() {
           { monotonicMs: 200, processes: [] },
         ],
       },
+      events: [
+        protocolEvent({
+          atMs: 13_000,
+          direction: "out",
+          epoch: 1,
+          id: 40,
+          sequence: 180,
+          type: "synthesize",
+        }),
+        protocolEvent({
+          atMs: 13_900,
+          direction: "in",
+          epoch: 1,
+          id: 40,
+          sequence: 190,
+          sessionGeneration: 3,
+          type: "success",
+        }),
+        protocolEvent({
+          atMs: 14_500,
+          direction: "out",
+          epoch: 1,
+          id: 41,
+          sequence: 191,
+          type: "synthesize",
+        }),
+      ],
       farSeek: {
         actionAtMs: 20_000,
         discardedRequestId: 41,
@@ -276,8 +417,12 @@ function passingEvidence() {
           sessionIdentityChanges: 0,
           workerTerminations: 0,
         },
+        targetAudioId: 9,
         targetAudioLatencyMs: 100,
         targetAudioPlayingAtMs: 20_100,
+        targetAudioSourceRequestId: 42,
+        targetAudioSourceSessionGeneration: 3,
+        targetAudioSourceWorkerEpoch: 1,
         targetRequestId: 42,
         targetRunStartAtMs: 20_030,
         targetRunStartLatencyMs: 30,
@@ -286,10 +431,23 @@ function passingEvidence() {
         targetWorkerEpoch: 1,
       },
       preparedResume: {
+        audioCreatedAtMs: 14_000,
         audioCreatedBeforePause: true,
+        audioId: 7,
         discarded: false,
-        newSynthesisRequests: 0,
+        duplicatePreparedSynthesisRequests: 0,
+        interveningDistinctRequestIds: [41],
+        pauseAtMs: 14_100,
         playedAtMs: 15_000,
+        requestAtMs: 13_000,
+        requestId: 40,
+        requestSequence: 180,
+        requestSessionGeneration: 3,
+        requestSucceededAtMs: 13_900,
+        requestSuccessSequence: 190,
+        requestWorkerEpoch: 1,
+        resumedCurrentAtMs: 14_200,
+        sameAudioPlayed: true,
         snapshotSequence: 200,
         success: true,
       },
@@ -301,7 +459,6 @@ function passingEvidence() {
         workerTerminations: 0,
       },
       timeoutRecovery: {
-        cacheUnchanged: true,
         canceledRequestReplayed: false,
         forced: true,
         modelRequests: 0,
@@ -310,6 +467,9 @@ function passingEvidence() {
         oldWorkerTerminated: true,
         pendingRequestReplayed: true,
         pendingRequestSucceeded: true,
+        requiredCacheAfter: structuredClone(timeoutCache),
+        requiredCacheBefore: structuredClone(timeoutCache),
+        requiredCacheSubsetUnchanged: true,
         staleMessagesIgnored: true,
         watchdogDelayMs: 760,
       },
@@ -355,6 +515,14 @@ test("accepts a real unflagged WebGPU fallback when an adapter is available", ()
     wasmThreads: null,
     workerTerminations: 0,
   };
+  assert.deepEqual(validateOfflineCancellationEvidence(evidence), []);
+});
+
+test("final quiescence allows no active pthreads before WebGPU teardown", () => {
+  const evidence = passingEvidence();
+  evidence.finalIsolation.pthreadAncestryHashesBefore = [];
+  evidence.finalIsolation.pthreadAncestryHashesDetached = [];
+  evidence.finalIsolation.pthreadWorkersDetached = 0;
   assert.deepEqual(validateOfflineCancellationEvidence(evidence), []);
 });
 
@@ -422,6 +590,13 @@ test("fails closed on every source, timing, lifecycle, and fallback gate", () =>
       "near-idle CPU",
     ],
     [
+      "worker event private text",
+      (evidence) => {
+        evidence.threadedWasm.events[0].text = "private excerpt";
+      },
+      "worker event evidence",
+    ],
+    [
       "CPU cadence",
       (evidence) => {
         evidence.threadedWasm.cancellations[0].cpu.intervals[0].elapsedMs = 101;
@@ -467,6 +642,29 @@ test("fails closed on every source, timing, lifecycle, and fallback gate", () =>
       "prepared audio discarded",
       (evidence) => {
         evidence.threadedWasm.preparedResume.discarded = true;
+      },
+      "already prepared audio",
+    ],
+    [
+      "prepared audio replaced",
+      (evidence) => {
+        evidence.threadedWasm.preparedResume.sameAudioPlayed = false;
+      },
+      "already prepared audio",
+    ],
+    [
+      "prepared request duplicated",
+      (evidence) => {
+        evidence.threadedWasm.preparedResume.duplicatePreparedSynthesisRequests = 1;
+      },
+      "already prepared audio",
+    ],
+    [
+      "prepared refill reused its request",
+      (evidence) => {
+        evidence.threadedWasm.preparedResume.interveningDistinctRequestIds = [
+          evidence.threadedWasm.preparedResume.requestId,
+        ];
       },
       "already prepared audio",
     ],
@@ -604,9 +802,47 @@ test("fails closed on every source, timing, lifecycle, and fallback gate", () =>
       "far-seek target",
     ],
     [
+      "far seek audio source identity",
+      (evidence) => {
+        evidence.threadedWasm.farSeek.targetAudioSourceRequestId = 41;
+      },
+      "far-seek target",
+    ],
+    [
       "timeout replay",
       (evidence) => {
         evidence.threadedWasm.timeoutRecovery.pendingRequestReplayed = false;
+      },
+      "forced timeout",
+    ],
+    [
+      "timeout cache subset",
+      (evidence) => {
+        evidence.threadedWasm.timeoutRecovery.requiredCacheSubsetUnchanged = false;
+      },
+      "forced timeout",
+    ],
+    [
+      "timeout cache runtime substitution",
+      (evidence) => {
+        const forgedJsepPath = "/assets/forged-threaded-jsep.wasm";
+        const forgedInventory = {
+          entries:
+            evidence.threadedWasm.timeoutRecovery.requiredCacheBefore.entries.map(
+              (entry) =>
+                entry.cacheName === "linelight-assets-v1"
+                  ? { ...entry, url: forgedJsepPath }
+                  : entry,
+            ),
+        };
+        const forgedSnapshot = requiredOfflineCacheSnapshot(
+          forgedInventory,
+          forgedJsepPath,
+        );
+        evidence.threadedWasm.timeoutRecovery.requiredCacheBefore =
+          forgedSnapshot;
+        evidence.threadedWasm.timeoutRecovery.requiredCacheAfter =
+          structuredClone(forgedSnapshot);
       },
       "forced timeout",
     ],
@@ -646,6 +882,57 @@ test("fails closed on every source, timing, lifecycle, and fallback gate", () =>
       "network instrumentation was incomplete",
     ],
     [
+      "same-url pthread coverage",
+      (evidence) => {
+        evidence.network.sameUrlNestedPthreadWorkersAttached = 0;
+      },
+      "network instrumentation was incomplete",
+    ],
+    [
+      "orphaned offline target",
+      (evidence) => {
+        evidence.network.orphanedOfflineWorkerTargets = 1;
+      },
+      "network instrumentation was incomplete",
+    ],
+    [
+      "service-worker attach fixed point",
+      (evidence) => {
+        evidence.network.serviceWorkerLifecycle.attachFixedPointBeforeUnregister = false;
+      },
+      "network instrumentation was incomplete",
+    ],
+    [
+      "unexplained attach failure",
+      (evidence) => {
+        const failure = {
+          code: "target-attach-failed",
+          detached: true,
+          phase: "threaded-wasm",
+          sha256: HASH,
+          targetIdSha256: HASH,
+          targetType: "worker",
+        };
+        evidence.network.attachFailures.push(failure);
+        evidence.network.unexplainedAttachFailures.push(failure);
+      },
+      "network instrumentation was incomplete",
+    ],
+    [
+      "favicon response failure",
+      (evidence) => {
+        evidence.network.responseFailures.push({
+          method: "GET",
+          requestId: "favicon",
+          resourceType: "Other",
+          sessionId: null,
+          status: 404,
+          url: "http://127.0.0.1:5212/favicon.ico",
+        });
+      },
+      "network instrumentation was incomplete",
+    ],
+    [
       "worker bootstrap overmatch",
       (evidence) => {
         evidence.network.targetBootstrapSettlements[0].method = "POST";
@@ -667,6 +954,19 @@ test("fails closed on every source, timing, lifecycle, and fallback gate", () =>
       "network instrumentation was incomplete",
     ],
     [
+      "canceled network failure",
+      (evidence) => {
+        evidence.network.loadingFailures.push({
+          canceled: true,
+          code: "net::ERR_ABORTED",
+          requestId: "reviewed-request",
+          sessionId: null,
+          url: "http://127.0.0.1:5212/assets/reviewed.js",
+        });
+      },
+      "network instrumentation was incomplete",
+    ],
+    [
       "non-loopback privacy",
       (evidence) => {
         evidence.network.nonLoopbackRequests.push({
@@ -684,11 +984,69 @@ test("fails closed on every source, timing, lifecycle, and fallback gate", () =>
       "not explicitly quiesced",
     ],
     [
+      "final pthread quiescence",
+      (evidence) => {
+        evidence.finalIsolation.activePthreadWorkers = 1;
+      },
+      "not explicitly quiesced",
+    ],
+    [
+      "final pthread identity",
+      (evidence) => {
+        evidence.finalIsolation.pthreadAncestryHashesDetached.pop();
+      },
+      "not explicitly quiesced",
+    ],
+    [
+      "final cumulative pthread detach",
+      (evidence) => {
+        evidence.finalIsolation.pthreadWorkersDetachedTotal = 1;
+      },
+      "not explicitly quiesced",
+    ],
+    [
       "browser scenario error",
       (evidence) => {
         evidence.browserDiagnostics.errors.push({ code: "scenario-error" });
       },
       "browser diagnostics contain an error",
+    ],
+    [
+      "runtime exception",
+      (evidence) => {
+        evidence.browserDiagnostics.runtimeExceptions.push({
+          category: "runtime-exception",
+          count: 1,
+          phase: "webgpu-fallback",
+          sessionClass: "offline-pthread",
+          severity: "error",
+          sha256: HASH,
+        });
+      },
+      "browser diagnostics contain an error",
+    ],
+    [
+      "console error group",
+      (evidence) => {
+        const diagnostic = {
+          category: "runtime-console",
+          count: 1,
+          phase: "threaded-wasm",
+          sessionClass: "offline-speech",
+          severity: "error",
+          sha256: HASH,
+        };
+        evidence.browserDiagnostics.consoleDiagnostics.push(diagnostic);
+        evidence.browserDiagnostics.consoleErrors.push(diagnostic);
+      },
+      "browser diagnostics contain an error",
+    ],
+    [
+      "required model cache mutation",
+      (evidence) => {
+        evidence.cache.after.entries[0].sha256 = HASH;
+      },
+      "required offline model",
     ],
     [
       "escaped browser survivor",
@@ -760,18 +1118,55 @@ test("browser errors win over a simultaneously satisfied predicate", () => {
   );
 });
 
+test("success audio inherits its same-worker run session identity", () => {
+  const sessions = new Map();
+  assert.equal(
+    correlateWorkerMessageSessionGeneration(
+      { id: 17, sessionGeneration: 4, type: "wasm-run-start" },
+      sessions,
+    ),
+    4,
+  );
+  assert.equal(sessions.get(17), 4);
+  assert.equal(
+    correlateWorkerMessageSessionGeneration(
+      { id: 17, type: "wasm-run-end" },
+      sessions,
+    ),
+    4,
+  );
+  assert.equal(sessions.get(17), 4);
+  assert.equal(
+    correlateWorkerMessageSessionGeneration(
+      { id: 17, result: { audioData: new ArrayBuffer(0) }, type: "success" },
+      sessions,
+    ),
+    4,
+  );
+  assert.equal(sessions.has(17), false);
+  assert.equal(
+    correlateWorkerMessageSessionGeneration(
+      { id: 17, type: "progress" },
+      sessions,
+    ),
+    null,
+  );
+});
+
 test("rejects private prose, absolute paths, raw payloads, and textLength", () => {
   const evidence = passingEvidence();
   evidence.debug = {
     payload: { id: 12 },
     profile: "/tmp/linelight-private-profile",
     prose: "I like my friend Tiarnan and regretted attrition",
+    text: "private excerpt",
     textLength: 12,
   };
   const violations = findEvidencePrivacyViolations(evidence);
   assert.ok(violations.includes("$evidence.debug.payload"));
   assert.ok(violations.includes("$evidence.debug.profile"));
   assert.ok(violations.includes("$evidence.debug.prose"));
+  assert.ok(violations.includes("$evidence.debug.text"));
   assert.ok(violations.includes("$evidence.debug.textLength"));
   assert.ok(
     validateOfflineCancellationEvidence(evidence).some((failure) =>
@@ -864,7 +1259,7 @@ test("target coverage counts only the exact offline worker ancestry", () => {
       parentSessionId: "speech",
       sessionId: "pthread-1",
       type: "worker",
-      url: "blob:http://127.0.0.1:5212/pthread-1",
+      url: workerUrl,
     },
     {
       attachComplete: true,
@@ -872,7 +1267,7 @@ test("target coverage counts only the exact offline worker ancestry", () => {
       parentSessionId: "pthread-1",
       sessionId: "pthread-2",
       type: "worker",
-      url: "blob:http://127.0.0.1:5212/pthread-2",
+      url: workerUrl,
     },
     {
       attachComplete: true,
@@ -892,10 +1287,21 @@ test("target coverage counts only the exact offline worker ancestry", () => {
     },
   ];
   assert.deepEqual(summarizeAttachedTargetCoverage(targets, workerUrl), {
+    activeNestedPthreadWorkerAncestry: [
+      { rootSessionId: "speech", sessionId: "pthread-1" },
+      { rootSessionId: "speech", sessionId: "pthread-2" },
+    ],
+    activeNestedPthreadWorkers: 2,
     activeOfflineSpeechWorkers: 1,
+    activeOfflineSpeechWorkerSessionIds: ["speech"],
+    detachedNestedPthreadWorkerAncestry: [],
+    detachedOfflineSpeechWorkerSessionIds: [],
     nestedPthreadWorkersAttached: 2,
+    nestedPthreadWorkersDetached: 0,
     offlineSpeechWorkerAttached: true,
     offlineSpeechWorkersAttached: 1,
+    orphanedOfflineWorkerTargets: 0,
+    sameUrlNestedPthreadWorkersAttached: 2,
     speechWorkersDetached: 0,
   });
   targets[0].detached = true;
@@ -908,6 +1314,298 @@ test("target coverage counts only the exact offline worker ancestry", () => {
     summarizeAttachedTargetCoverage(targets, workerUrl).speechWorkersDetached,
     1,
   );
+  assert.equal(
+    summarizeAttachedTargetCoverage(targets, workerUrl)
+      .activeNestedPthreadWorkers,
+    2,
+  );
+  targets[1].detached = true;
+  targets[2].detached = true;
+  assert.equal(
+    summarizeAttachedTargetCoverage(targets, workerUrl)
+      .activeNestedPthreadWorkers,
+    0,
+  );
+  assert.equal(
+    summarizeAttachedTargetCoverage(targets, workerUrl)
+      .nestedPthreadWorkersDetached,
+    2,
+  );
+  targets.push({
+    attachComplete: true,
+    detached: false,
+    parentSessionId: "missing-parent-session",
+    sessionId: "orphaned-same-url-worker",
+    type: "worker",
+    url: workerUrl,
+  });
+  assert.equal(
+    summarizeAttachedTargetCoverage(targets, workerUrl)
+      .orphanedOfflineWorkerTargets,
+    1,
+  );
+});
+
+test("cache evidence preserves required local data while allowing only retired runtime deletion", () => {
+  const before = passingCacheInventory();
+  before.entries.push({
+    byteLength: 1_024,
+    cacheName: "linelight-assets-v1",
+    requestSha256: sha256("retired-runtime-request"),
+    sha256: sha256("retired-runtime"),
+    url: "/assets/ort-wasm-simd-threaded.jsep-retired.wasm",
+  });
+  const after = structuredClone(before);
+  after.entries.pop();
+  const transition = analyzeOfflineCacheTransition(before, after, {
+    currentJsepPath: JSEP_PATH,
+    currentRuntimeAssetPaths: [JSEP_PATH],
+  });
+  assert.equal(transition.requiredSubsetUnchanged, true);
+  assert.equal(transition.retiredRuntimeDeletions.length, 1);
+  assert.deepEqual(transition.added, []);
+  assert.deepEqual(transition.unexplainedRemovals, []);
+
+  const requiredMutation = structuredClone(after);
+  requiredMutation.entries[0].sha256 = HASH;
+  const rejected = analyzeOfflineCacheTransition(after, requiredMutation, {
+    currentJsepPath: JSEP_PATH,
+    currentRuntimeAssetPaths: [JSEP_PATH],
+  });
+  assert.equal(rejected.requiredSubsetUnchanged, false);
+  assert.equal(rejected.added.length, 1);
+  assert.equal(rejected.unexplainedRemovals.length, 1);
+});
+
+test("range cache keys stay distinct without exposing their query strings", () => {
+  const evidence = passingEvidence();
+  for (const inventory of [evidence.cache.before, evidence.cache.after]) {
+    for (const entry of inventory.entries.filter(
+      (candidate) => candidate.cacheName === "transformers-cache",
+    )) {
+      entry.url = "/offline-model/reviewed/model_fp16.onnx";
+    }
+    inventory.entries.sort((left, right) =>
+      (left.cacheName + left.url + left.requestSha256).localeCompare(
+        right.cacheName + right.url + right.requestSha256,
+      ),
+    );
+    inventory.sha256 = sha256(JSON.stringify(inventory.entries));
+  }
+  evidence.cache.transition = analyzeOfflineCacheTransition(
+    evidence.cache.before,
+    evidence.cache.after,
+    {
+      currentJsepPath: JSEP_PATH,
+      currentRuntimeAssetPaths:
+        evidence.cache.currentRuntimeManifest.assetPaths,
+    },
+  );
+  const timeoutSnapshot = requiredOfflineCacheSnapshot(
+    evidence.cache.before,
+    JSEP_PATH,
+  );
+  evidence.threadedWasm.timeoutRecovery.requiredCacheBefore = timeoutSnapshot;
+  evidence.threadedWasm.timeoutRecovery.requiredCacheAfter = structuredClone(
+    timeoutSnapshot,
+  );
+  assert.deepEqual(validateOfflineCancellationEvidence(evidence), []);
+
+  const modelEntries = evidence.cache.after.entries.filter(
+    (entry) => entry.cacheName === "transformers-cache",
+  );
+  modelEntries[1].requestSha256 = modelEntries[0].requestSha256;
+  evidence.cache.after.entries.sort((left, right) =>
+    (left.cacheName + left.url + left.requestSha256).localeCompare(
+      right.cacheName + right.url + right.requestSha256,
+    ),
+  );
+  evidence.cache.after.sha256 = sha256(
+    JSON.stringify(evidence.cache.after.entries),
+  );
+  evidence.cache.transition = analyzeOfflineCacheTransition(
+    evidence.cache.before,
+    evidence.cache.after,
+    {
+      currentJsepPath: JSEP_PATH,
+      currentRuntimeAssetPaths:
+        evidence.cache.currentRuntimeManifest.assetPaths,
+    },
+  );
+  assert.ok(
+    validateOfflineCancellationEvidence(evidence).includes(
+      "required offline model, voice, or current runtime cache data changed",
+    ),
+  );
+});
+
+test("cache evidence rejects query strings and fragments in retained paths", () => {
+  for (const suffix of ["?private=query", "#private-fragment"]) {
+    const evidence = passingEvidence();
+    for (const inventory of [evidence.cache.before, evidence.cache.after]) {
+      inventory.entries[0].url += suffix;
+      inventory.entries.sort((left, right) =>
+        (left.cacheName + left.url + left.requestSha256).localeCompare(
+          right.cacheName + right.url + right.requestSha256,
+        ),
+      );
+      inventory.sha256 = sha256(JSON.stringify(inventory.entries));
+    }
+    evidence.cache.transition = analyzeOfflineCacheTransition(
+      evidence.cache.before,
+      evidence.cache.after,
+      {
+        currentJsepPath: JSEP_PATH,
+        currentRuntimeAssetPaths:
+          evidence.cache.currentRuntimeManifest.assetPaths,
+      },
+    );
+    const timeoutSnapshot = requiredOfflineCacheSnapshot(
+      evidence.cache.before,
+      JSEP_PATH,
+    );
+    evidence.threadedWasm.timeoutRecovery.requiredCacheBefore =
+      timeoutSnapshot;
+    evidence.threadedWasm.timeoutRecovery.requiredCacheAfter = structuredClone(
+      timeoutSnapshot,
+    );
+    assert.ok(
+      validateOfflineCancellationEvidence(evidence).includes(
+        "required offline model, voice, or current runtime cache data changed",
+      ),
+      suffix,
+    );
+  }
+});
+
+test("the evidence validator accepts only a manifest-retired runtime cache deletion", () => {
+  const evidence = passingEvidence();
+  evidence.cache.before.entries.push({
+    byteLength: 1_024,
+    cacheName: "linelight-assets-v1",
+    requestSha256: sha256("retired-runtime-request"),
+    sha256: sha256("retired-runtime"),
+    url: "/assets/ort-wasm-simd-threaded.jsep-retired.wasm",
+  });
+  evidence.cache.before.entries.sort((left, right) =>
+    (left.cacheName + left.url + left.requestSha256).localeCompare(
+      right.cacheName + right.url + right.requestSha256,
+    ),
+  );
+  evidence.cache.before.sha256 = sha256(
+    JSON.stringify(evidence.cache.before.entries),
+  );
+  evidence.cache.transition = analyzeOfflineCacheTransition(
+    evidence.cache.before,
+    evidence.cache.after,
+    {
+      currentJsepPath: JSEP_PATH,
+      currentRuntimeAssetPaths:
+        evidence.cache.currentRuntimeManifest.assetPaths,
+    },
+  );
+  assert.deepEqual(validateOfflineCancellationEvidence(evidence), []);
+
+  evidence.cache.before.entries.find(
+    (entry) => entry.sha256 === sha256("retired-runtime"),
+  ).url = "/private/unreviewed-entry";
+  evidence.cache.before.entries.sort((left, right) =>
+    (left.cacheName + left.url + left.requestSha256).localeCompare(
+      right.cacheName + right.url + right.requestSha256,
+    ),
+  );
+  evidence.cache.before.sha256 = sha256(
+    JSON.stringify(evidence.cache.before.entries),
+  );
+  evidence.cache.transition = analyzeOfflineCacheTransition(
+    evidence.cache.before,
+    evidence.cache.after,
+    {
+      currentJsepPath: JSEP_PATH,
+      currentRuntimeAssetPaths:
+        evidence.cache.currentRuntimeManifest.assetPaths,
+    },
+  );
+  assert.ok(
+    validateOfflineCancellationEvidence(evidence).some((failure) =>
+      failure.includes("required offline model"),
+    ),
+  );
+});
+
+test("the installed favicon is a real ICO referenced by the manifest", async () => {
+  const [favicon, manifestText] = await Promise.all([
+    readFile(new URL("../public/favicon.ico", import.meta.url)),
+    readFile(
+      new URL("../public/manifest.webmanifest", import.meta.url),
+      "utf8",
+    ),
+  ]);
+  assert.deepEqual([...favicon.subarray(0, 4)], [0, 0, 1, 0]);
+  assert.ok(favicon.readUInt16LE(4) >= 1);
+  const manifest = JSON.parse(manifestText);
+  assert.ok(
+    manifest.icons.some(
+      (icon) =>
+        icon.src === "/favicon.ico" &&
+        icon.type === "image/x-icon" &&
+        icon.sizes === "32x32",
+    ),
+  );
+});
+
+test("attach failure classification accepts only a detached unregister race", () => {
+  const intentional = {
+    code: "target-attach-failed",
+    detached: true,
+    phase: "service-worker-unregister",
+    sha256: HASH,
+    targetIdSha256: HASH,
+    targetType: "service_worker",
+  };
+  const unrelated = {
+    ...intentional,
+    phase: "threaded-wasm",
+    targetType: "worker",
+  };
+  assert.deepEqual(classifyTargetAttachFailures([intentional]), {
+    intentionalServiceWorkerUnregisterRaces: [intentional],
+    unexplained: [],
+  });
+  assert.deepEqual(classifyTargetAttachFailures([intentional, unrelated]), {
+    intentionalServiceWorkerUnregisterRaces: [intentional],
+    unexplained: [unrelated],
+  });
+});
+
+test("console evidence groups only privacy-safe phase and session metadata", () => {
+  const groups = summarizeConsoleDiagnostics([
+    {
+      category: "runtime-console",
+      phase: "threaded-wasm",
+      sessionClass: "offline-pthread",
+      severity: "warning",
+      sha256: HASH,
+    },
+    {
+      category: "runtime-console",
+      phase: "threaded-wasm",
+      sessionClass: "offline-pthread",
+      severity: "warning",
+      sha256: HASH,
+    },
+  ]);
+  assert.deepEqual(groups, [
+    {
+      category: "runtime-console",
+      count: 2,
+      phase: "threaded-wasm",
+      sessionClass: "offline-pthread",
+      severity: "warning",
+      sha256: HASH,
+    },
+  ]);
+  assert.deepEqual(findEvidencePrivacyViolations({ groups }), []);
 });
 
 test("unterminated synthesis detection respects request epoch and boundary", () => {
@@ -1127,7 +1825,9 @@ test("records child-target attach failures and still attempts debugger resume", 
     },
     attachFailures,
   );
-  assert.deepEqual(result, { attached: false, resumed: false });
+  assert.equal(result.attached, false);
+  assert.equal(result.resumed, false);
+  assert.equal(result.failureRecords.length, 2);
   assert.ok(calls.some((entry) => entry.method === "Network.enable"));
   assert.ok(
     calls.some((entry) => entry.method === "Runtime.runIfWaitingForDebugger"),
@@ -1138,5 +1838,10 @@ test("records child-target attach failures and still attempts debugger resume", 
   );
   assert.ok(
     attachFailures.every((entry) => /^[a-f\d]{64}$/u.test(entry.sha256)),
+  );
+  assert.ok(
+    attachFailures.every((entry) =>
+      /^[a-f\d]{64}$/u.test(entry.targetIdSha256),
+    ),
   );
 });

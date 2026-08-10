@@ -22,6 +22,17 @@ export const TRANSFORMERS_CHAIN_REPLACEMENT = `    const currentRun = IS_WEB_ENV
     }
     const output = await currentRun;`;
 
+export const TRANSFORMERS_ERROR_DIAGNOSTIC_ORIGINAL = `    } catch (e) {
+        // Error messages can be long (nested) and uninformative. For this reason,`;
+
+export const TRANSFORMERS_ERROR_DIAGNOSTIC_REPLACEMENT = `    } catch (e) {
+        // Modified by LineLight for Issue #55: expected cooperative cancellation must not log model inputs.
+        if (e?.name === 'AbortError' && e?.code === 'ERR_ORT_WASM_RUN_CANCELED') {
+            throw e;
+        }
+
+        // Error messages can be long (nested) and uninformative. For this reason,`;
+
 const PATCHES = Object.freeze([
   {
     path: "src/backends/onnx.js",
@@ -29,13 +40,36 @@ const PATCHES = Object.freeze([
       "3265edafb24d321eb4b214f45684fa1d498407e2e0eca5fea9e720958f1635f3",
     patchedSha256:
       "3d026ce1714db9aee4e5b6d2aead761d006ae9dea2a8e9d05800878ac881acd8",
+    replacements: [
+      [TRANSFORMERS_CHAIN_ORIGINAL, TRANSFORMERS_CHAIN_REPLACEMENT],
+    ],
+  },
+  {
+    path: "src/models.js",
+    originalSha256:
+      "6ba3e066c05b5a4ae35281b0cafff0504e13a6b18d7e2e3799eb9f243a610108",
+    patchedSha256:
+      "4152078945cce8defb4807e8f17b30211f7621555f6223c2ff2c34a2bffb1530",
+    replacements: [
+      [
+        TRANSFORMERS_ERROR_DIAGNOSTIC_ORIGINAL,
+        TRANSFORMERS_ERROR_DIAGNOSTIC_REPLACEMENT,
+      ],
+    ],
   },
   {
     path: "dist/transformers.web.js",
     originalSha256:
       "1b41438d839ca3ea1346031472edee8cb3eefbf0bad48945f969559e2eb03394",
     patchedSha256:
-      "8739f6d1c40afca6b1e53b78cf9b3ce7473245a2fdd361b61ae4715d2818e7a0",
+      "56528ad2d27d93dfc5326346298ef47bc75fe83ac8e284d6811909c14467abe7",
+    replacements: [
+      [TRANSFORMERS_CHAIN_ORIGINAL, TRANSFORMERS_CHAIN_REPLACEMENT],
+      [
+        TRANSFORMERS_ERROR_DIAGNOSTIC_ORIGINAL,
+        TRANSFORMERS_ERROR_DIAGNOSTIC_REPLACEMENT,
+      ],
+    ],
   },
 ]);
 
@@ -58,6 +92,26 @@ export function createRecoveringSerializedInferenceAdapter() {
     );
     return currentRun;
   };
+}
+
+export function isReviewedCooperativeCancellation(error) {
+  return (
+    error !== null &&
+    (typeof error === "object" || typeof error === "function") &&
+    error.name === "AbortError" &&
+    error.code === "ERR_ORT_WASM_RUN_CANCELED"
+  );
+}
+
+/**
+ * Model the exact early-rethrow policy installed in Transformers' model
+ * wrapper. Expected cancellation reaches the caller without touching model
+ * inputs or error logging; every other failure retains upstream diagnostics.
+ */
+export function rethrowTransformersInferenceError(error, reportOrdinaryError) {
+  if (isReviewedCooperativeCancellation(error)) throw error;
+  reportOrdinaryError();
+  throw error;
 }
 
 export async function applyDependencyPatches(projectRoot = process.cwd()) {
@@ -99,16 +153,16 @@ export async function applyDependencyPatches(projectRoot = process.cwd()) {
         `Refusing to patch unreviewed ${patch.path} (${sourceSha256}).`,
       );
     }
-    const occurrences = source.split(TRANSFORMERS_CHAIN_ORIGINAL).length - 1;
-    if (occurrences !== 1) {
-      throw new Error(
-        `Expected one serialized inference chain in ${patch.path}, found ${occurrences}.`,
-      );
+    let patched = source;
+    for (const [original, replacement] of patch.replacements) {
+      const occurrences = patched.split(original).length - 1;
+      if (occurrences !== 1) {
+        throw new Error(
+          `Expected one reviewed patch site in ${patch.path}, found ${occurrences}.`,
+        );
+      }
+      patched = patched.replace(original, replacement);
     }
-    const patched = source.replace(
-      TRANSFORMERS_CHAIN_ORIGINAL,
-      TRANSFORMERS_CHAIN_REPLACEMENT,
-    );
     const patchedSha256 = sha256(patched);
     if (patchedSha256 !== patch.patchedSha256) {
       throw new Error(
@@ -127,7 +181,7 @@ export async function applyDependencyPatches(projectRoot = process.cwd()) {
   }
 
   console.log(
-    `[linelight] applied reviewed Transformers ${TRANSFORMERS_VERSION} inference-chain recovery`,
+    `[linelight] applied reviewed Transformers ${TRANSFORMERS_VERSION} cancellation integration`,
   );
 }
 
