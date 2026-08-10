@@ -702,6 +702,8 @@ export function validatePdfSharpnessEvidence(evidence) {
         (page) => Number.isInteger(page) && page >= 1 && page <= 6,
       ) &&
       new Set(priorityVisiblePages).size === priorityVisiblePages.length &&
+      Array.isArray(priority?.targetRenderRequests) &&
+      Array.isArray(priority?.targetBitmaps) &&
       priority?.firstPostScrollCompositionPage === priorityTarget &&
       emptyArray(priority?.staleNonVisibleCompositions) &&
       emptyArray(priority?.staleWorkerBitmaps);
@@ -915,22 +917,42 @@ export function validatePdfSharpnessEvidence(evidence) {
       event?.renderAttemptId === renderAttemptId,
   );
   const continuationResumeEvent = continuationResumeEvents[0];
+  const cancelBoundaryEvent = stagingEvents.find(
+    (event) =>
+      event?.type === "cancel-request" &&
+      event?.renderAttemptId === renderAttemptId,
+  );
   const lateComposeBoundaryAt = Math.min(
     Number(viewportExitRequestEvents[0]?.at ?? Number.POSITIVE_INFINITY),
-    Number(
-      stagingEvents.find(
-        (event) =>
-          event?.type === "cancel-request" &&
-          event?.renderAttemptId === renderAttemptId,
-      )?.at ?? Number.POSITIVE_INFINITY,
-    ),
+    Number(cancelBoundaryEvent?.at ?? Number.POSITIVE_INFINITY),
   );
-  const lateComposesForAttempt = stagingEvents.filter(
+  const lateComposeBoundaryIndex = Math.min(
+    ...[viewportExitRequestEvents[0], cancelBoundaryEvent]
+      .map((event) => stagingEvents.indexOf(event))
+      .filter((index) => index >= 0),
+    Number.POSITIVE_INFINITY,
+  );
+  const sameAttemptComposes = stagingEvents.filter(
     (event) =>
       event?.type === "visible-compose" &&
-      event?.renderAttemptId === renderAttemptId &&
-      finite(lateComposeBoundaryAt) &&
-      event?.at >= lateComposeBoundaryAt,
+      event?.renderAttemptId === renderAttemptId,
+  );
+  const sameAttemptComposeTimesMonotonic = sameAttemptComposes.every(
+    (event, index) =>
+      finite(event?.at) &&
+      (
+        index === 0 ||
+        event.at >= sameAttemptComposes[index - 1].at
+      ),
+  );
+  const lateComposesForAttempt = sameAttemptComposes.filter(
+    (event) =>
+      !finite(event?.at) ||
+      (
+        finite(lateComposeBoundaryAt) &&
+        event.at >= lateComposeBoundaryAt
+      ) ||
+      stagingEvents.indexOf(event) >= lateComposeBoundaryIndex,
   );
   const uniqueStagingIdentities =
     stagingStartEvents.length > 0 &&
@@ -1249,6 +1271,7 @@ export function validatePdfSharpnessEvidence(evidence) {
     invisibleCancellation.exitRequestedAt > invisibleCancellation.exitedAt ||
     invisibleCancellation.exitedAt > invisibleCancellation.continuationResumeAt ||
     !emptyArray(invisibleCancellation?.lateComposes) ||
+    !sameAttemptComposeTimesMonotonic ||
     lateComposesForAttempt.length !== 0 ||
     invisibleCancellation?.textOverlayRetainedAfterExit !== true ||
     !emptyArray(fallback?.runtimeErrors) ||

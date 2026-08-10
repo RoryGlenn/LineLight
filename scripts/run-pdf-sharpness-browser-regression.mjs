@@ -6713,13 +6713,27 @@ async function collectFallbackEvidence(
   const pageOneDraws = snapshot.draws
     .slice(scenario.drawStart)
     .filter((draw) => draw.page === 1);
+  const cancellationBoundaryIndex = Math.min(
+    ...stagingEvents.map((event, index) =>
+      (
+        event.renderAttemptId === renderAttemptId &&
+        ["viewport-exit-request", "cancel-request"].includes(event.type)
+      )
+        ? index
+        : Number.POSITIVE_INFINITY
+    ),
+  );
   const cancelledAttemptLateComposes = stagingEvents.filter(
-    (event) =>
+    (event, index) =>
       event.type === "visible-compose" &&
       event.renderAttemptId === renderAttemptId &&
-      event.at >= Math.min(
-        viewportExitRequest.at,
-        cancellationTerminal.cancelRequestedAt,
+      (
+        !Number.isFinite(event.at) ||
+        event.at >= Math.min(
+          viewportExitRequest.at,
+          cancellationTerminal.cancelRequestedAt,
+        ) ||
+        index >= cancellationBoundaryIndex
       ),
   );
   const releasedCancelledPage = await evaluate(

@@ -4457,6 +4457,12 @@ test("rejects each material Issue 68 acceptance regression", async (t) => {
         rendered.targetBitmapAfterVisibleRequest,
       )];
     }, /current viewport first/u],
+    ["cached priority missing request array", (value) => {
+      delete value.matrix[0].visibleFirst.targetRenderRequests;
+    }, /current viewport first/u],
+    ["cached priority missing bitmap array", (value) => {
+      delete value.matrix[0].visibleFirst.targetBitmaps;
+    }, /current viewport first/u],
     ["render priority wrong first visible request", (value) => {
       value.matrix[2].visibleFirst.firstPostScrollVisibleRequestPage = 5;
     }, /current viewport first/u],
@@ -4786,6 +4792,65 @@ test("rejects each material Issue 68 acceptance regression", async (t) => {
         sourcePage: cancellation.page,
         type: "visible-compose",
       });
+    }, /fallback cancellation\/retry/u],
+    ["fallback compose missing timestamp", (value) => {
+      const cancellation = value.fallback.invisibleCancellation;
+      const exitRequestIndex = value.fallback.stagingEvents.findIndex(
+        (event) => event.type === "viewport-exit-request",
+      );
+      value.fallback.stagingEvents.splice(exitRequestIndex, 0, {
+        abortSignalId: cancellation.abortSignalId,
+        documentKey: cancellation.documentKey,
+        page: cancellation.page,
+        pageDerivation: cancellation.pageDerivation,
+        pageMatchesAttempt: true,
+        renderAttemptId: cancellation.renderAttemptId,
+        revision: cancellation.revision,
+        sourcePage: cancellation.page,
+        type: "visible-compose",
+      });
+    }, /fallback cancellation\/retry/u],
+    ["fallback compose sequenced after boundary with earlier time", (value) => {
+      const cancellation = value.fallback.invisibleCancellation;
+      const exitRequestIndex = value.fallback.stagingEvents.findIndex(
+        (event) => event.type === "viewport-exit-request",
+      );
+      value.fallback.stagingEvents.splice(exitRequestIndex + 1, 0, {
+        abortSignalId: cancellation.abortSignalId,
+        at: 120,
+        documentKey: cancellation.documentKey,
+        page: cancellation.page,
+        pageDerivation: cancellation.pageDerivation,
+        pageMatchesAttempt: true,
+        renderAttemptId: cancellation.renderAttemptId,
+        revision: cancellation.revision,
+        sourcePage: cancellation.page,
+        type: "visible-compose",
+      });
+    }, /fallback cancellation\/retry/u],
+    ["fallback compose timestamps are nonmonotonic", (value) => {
+      const cancellation = value.fallback.invisibleCancellation;
+      const exitRequestIndex = value.fallback.stagingEvents.findIndex(
+        (event) => event.type === "viewport-exit-request",
+      );
+      const compose = (at) => ({
+        abortSignalId: cancellation.abortSignalId,
+        at,
+        documentKey: cancellation.documentKey,
+        page: cancellation.page,
+        pageDerivation: cancellation.pageDerivation,
+        pageMatchesAttempt: true,
+        renderAttemptId: cancellation.renderAttemptId,
+        revision: cancellation.revision,
+        sourcePage: cancellation.page,
+        type: "visible-compose",
+      });
+      value.fallback.stagingEvents.splice(
+        exitRequestIndex,
+        0,
+        compose(125),
+        compose(124),
+      );
     }, /fallback cancellation\/retry/u],
     ["fallback continuation resume", (value) => {
       value.fallback.invisibleCancellation.continuationResumeObserved = false;
