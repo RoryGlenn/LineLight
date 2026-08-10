@@ -271,7 +271,9 @@ settlements. Fixed-point stability also requires zero attach errors and every
 observed target's exact command sequence, attachment, and resume to complete;
 it cannot become quiet merely because a timed-out command left no pending
 promise. The harness also requires exact source/screenshot manifests and
-owned-process teardown. Its
+owned-process teardown. Its first-scenario report independently binds that
+phase, stable-sample sequence, opaque request/target identities, and nested
+parser ancestry rather than trusting a self-reported fixed-point outcome. The
 bounded first-scenario diagnostic
 mode persists privacy-safe pending-attach, inflight-request, and target-ancestry
 metadata on fixed-point timeouts without running fallback/reference work.

@@ -579,9 +579,27 @@ export function isCdpFixedPointDiagnosticHealthy(networkDiagnostic) {
   const targets = Array.isArray(networkDiagnostic?.targets)
     ? networkDiagnostic.targets
     : [];
+  const targetSessions = targets.map((target) => target?.sessionId);
+  const targetIds = targets.map((target) => target?.targetId);
   const targetBySession = new Map(
     targets.map((target) => [target?.sessionId, target]),
   );
+  const nonEmptyString = (value) =>
+    typeof value === "string" && value.length > 0;
+  const validTargetIdentities =
+    targetSessions.every(nonEmptyString) &&
+    new Set(targetSessions).size === targetSessions.length &&
+    targetIds.every(nonEmptyString) &&
+    new Set(targetIds).size === targetIds.length &&
+    targets.every(
+      (target) =>
+        nonEmptyString(target?.phase) &&
+        nonEmptyString(target?.type) &&
+        target?.identityHash === cdpDiagnosticIdentity(
+          target.sessionId,
+          target.targetId,
+        ),
+    );
   const targetBootstrapSettlements = Array.isArray(
     networkDiagnostic?.targetBootstrapSettlements,
   )
@@ -598,6 +616,19 @@ export function isCdpFixedPointDiagnosticHealthy(networkDiagnostic) {
     (settlement) => {
       const target = targetBySession.get(settlement?.targetSessionId);
       return (
+        nonEmptyString(settlement?.requestId) &&
+        (settlement?.requestSessionId === null ||
+          nonEmptyString(settlement?.requestSessionId)) &&
+        nonEmptyString(settlement?.targetSessionId) &&
+        nonEmptyString(settlement?.targetId) &&
+        nonEmptyString(settlement?.phase) &&
+        nonEmptyString(settlement?.targetType) &&
+        settlement?.identityHash === cdpDiagnosticIdentity(
+          settlement.requestSessionId,
+          settlement.requestId,
+          settlement.targetSessionId,
+          settlement.targetId,
+        ) &&
         isCdpTargetSetupComplete(target) &&
         target?.targetId === settlement?.targetId &&
         target?.parentSessionId === settlement?.targetParentSessionId &&
@@ -635,6 +666,23 @@ export function isCdpFixedPointDiagnosticHealthy(networkDiagnostic) {
       )
     );
   });
+  const parserTargetsBoundToDocumentWorker = pdfTargets
+    .filter((target) => target.urlClass === "pdf-parser-worker")
+    .every((target) => {
+      const parent = targetBySession.get(target.parentSessionId);
+      const directAncestor = Array.isArray(target.ancestry)
+        ? target.ancestry[0]
+        : null;
+      return (
+        parent?.urlClass === "pdf-document-worker" &&
+        parent?.type === "worker" &&
+        parent?.phase === target.phase &&
+        directAncestor?.sessionId === parent.sessionId &&
+        directAncestor?.urlClass === parent.urlClass &&
+        directAncestor?.type === parent.type &&
+        directAncestor?.phase === parent.phase
+      );
+    });
   const recentSamples = Array.isArray(networkDiagnostic?.wait?.recentSamples)
     ? networkDiagnostic.wait.recentSamples
     : [];
@@ -656,7 +704,7 @@ export function isCdpFixedPointDiagnosticHealthy(networkDiagnostic) {
     counts?.targetBootstrapSettlementCount ===
       targetBootstrapSettlements.length &&
     Number.isInteger(counts?.attachPromiseCount) &&
-    counts.attachPromiseCount >= targets.length &&
+    counts.attachPromiseCount === targets.length &&
     Number.isInteger(counts?.completedRequestCount) &&
     counts.completedRequestCount > 0 &&
     Number.isInteger(counts?.requestCount) &&
@@ -666,6 +714,7 @@ export function isCdpFixedPointDiagnosticHealthy(networkDiagnostic) {
     counts.targetCount === targets.length &&
     targets.length > 0 &&
     targets.every(isCdpTargetSetupComplete) &&
+    validTargetIdentities &&
     validBootstrapSettlements &&
     targetBootstrapSettlements.length > 0 &&
     new Set(bootstrapTargetSessions).size ===
@@ -673,9 +722,10 @@ export function isCdpFixedPointDiagnosticHealthy(networkDiagnostic) {
     new Set(bootstrapRequestIdentities).size ===
       bootstrapRequestIdentities.length &&
     pdfBootstrapCoverage &&
+    parserTargetsBoundToDocumentWorker &&
     networkDiagnostic?.wait?.requiredStableSamples === requiredStableSamples &&
     Number.isInteger(networkDiagnostic?.wait?.stableSamples) &&
-    networkDiagnostic.wait.stableSamples >= requiredStableSamples &&
+    networkDiagnostic.wait.stableSamples === requiredStableSamples &&
     stableTail.length === requiredStableSamples &&
     stableTail.every((sample, index) =>
       sample?.attachmentReady === true &&
@@ -746,7 +796,7 @@ export function buildFirstNetworkDiagnosticReport({
     : null;
   const screenshotBound =
     outputIsExternal &&
-    scenario?.id === "desktop-dpr1-zoom100" &&
+    scenario?.id === PDF_SHARPNESS_MATRIX[0].id &&
     typeof screenshot?.path === "string" &&
     screenshot.path === expectedScreenshotPath &&
     Number.isInteger(screenshot?.bytes) &&
@@ -771,6 +821,8 @@ export function buildFirstNetworkDiagnosticReport({
     teardown?.serverClosed !== true ||
     teardown?.errors?.length > 0;
   const fixedPointHealthy =
+    networkDiagnostic?.label === PDF_SHARPNESS_MATRIX[0].id &&
+    scenario?.id === PDF_SHARPNESS_MATRIX[0].id &&
     isCdpFixedPointDiagnosticHealthy(networkDiagnostic);
   const summarizeBrowserShutdown = (shutdown) => ({
     cdpClosed: shutdown?.cdpClosed === true,

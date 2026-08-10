@@ -33,7 +33,10 @@ samples/activity, detached target ancestry, opaque request/session/target IDs,
 service-worker bypass state, and fixed URL classes. A reported fixed point is
 independently rejected when any attach error, incomplete target, failed or
 pending target command, pending request, or missing service-worker bypass is
-present, even if the recorded outcome says that the network became quiet. It
+present, even if the recorded outcome says that the network became quiet. The
+report also binds the exact first desktop phase, three real stable samples,
+one attach promise per target, unique opaque request/target identities, and a
+parser target parented to the same-phase document worker. It
 never records URL paths or queries, raw error text,
 request bodies or headers, document text, or browser-profile paths. It is a
 diagnosis aid, not Issue 68 acceptance evidence.

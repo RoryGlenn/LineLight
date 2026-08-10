@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm, symlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -46,6 +47,9 @@ const COMMIT = "a".repeat(40);
 const TREE = "b".repeat(40);
 const SHA = "c".repeat(64);
 const DEPLOYMENT = "issue-68-test-deployment";
+const diagnosticIdentity = (...parts) => createHash("sha256")
+  .update(JSON.stringify(parts))
+  .digest("hex");
 const DOCUMENT_KEY = "issue-68-document:issue-68-revision";
 const REVISION = "issue-68-revision";
 const FAILED_ABORT_SIGNAL_ID = 1;
@@ -1164,12 +1168,14 @@ test("records fixed-point diagnostics without private URL or payload data", () =
     resumed: true,
   }));
   healthyDiagnostic.targetBootstrapSettlements = [
+    healthyDiagnostic.targetBootstrapSettlements[0],
     {
-      ...healthyDiagnostic.targetBootstrapSettlements[0],
-      identityHash: SHA,
-    },
-    {
-      identityHash: "d".repeat(64),
+      identityHash: diagnosticIdentity(
+        "document-session",
+        "parser-bootstrap-request",
+        "worker-session",
+        "worker-target",
+      ),
       method: "GET",
       phase: "desktop-dpr1-zoom100",
       requestId: "parser-bootstrap-request",
@@ -1272,9 +1278,112 @@ test("records fixed-point diagnostics without private URL or payload data", () =
     ["unhealthy stable sample", (value) => {
       value.wait.recentSamples.at(-1).attachmentReady = false;
     }],
+    ["wrong first-scenario phase", (value) => {
+      const laterPhase = "mobile-dpr3-zoom100";
+      value.label = laterPhase;
+      for (const target of value.targets) {
+        target.phase = laterPhase;
+        for (const ancestor of target.ancestry) {
+          ancestor.phase = laterPhase;
+        }
+      }
+      for (const settlement of value.targetBootstrapSettlements) {
+        settlement.phase = laterPhase;
+      }
+    }],
+    ["missing bootstrap request ID", (value) => {
+      const settlement = value.targetBootstrapSettlements[0];
+      settlement.requestId = null;
+      settlement.identityHash = diagnosticIdentity(
+        settlement.requestSessionId,
+        settlement.requestId,
+        settlement.targetSessionId,
+        settlement.targetId,
+      );
+    }],
+    ["missing target ID", (value) => {
+      const target = value.targets[0];
+      const settlement = value.targetBootstrapSettlements[0];
+      target.targetId = null;
+      target.identityHash = diagnosticIdentity(target.sessionId, target.targetId);
+      settlement.targetId = null;
+      settlement.identityHash = diagnosticIdentity(
+        settlement.requestSessionId,
+        settlement.requestId,
+        settlement.targetSessionId,
+        settlement.targetId,
+      );
+    }],
+    ["missing target session ID", (value) => {
+      const target = value.targets[1];
+      const settlement = value.targetBootstrapSettlements[1];
+      target.sessionId = null;
+      target.identityHash = diagnosticIdentity(target.sessionId, target.targetId);
+      settlement.targetSessionId = null;
+      settlement.identityHash = diagnosticIdentity(
+        settlement.requestSessionId,
+        settlement.requestId,
+        settlement.targetSessionId,
+        settlement.targetId,
+      );
+    }],
+    ["duplicate target ID", (value) => {
+      const target = value.targets[1];
+      const settlement = value.targetBootstrapSettlements[1];
+      target.targetId = value.targets[0].targetId;
+      target.identityHash = diagnosticIdentity(target.sessionId, target.targetId);
+      settlement.targetId = target.targetId;
+      settlement.identityHash = diagnosticIdentity(
+        settlement.requestSessionId,
+        settlement.requestId,
+        settlement.targetSessionId,
+        settlement.targetId,
+      );
+    }],
+    ["substituted target identity hash", (value) => {
+      value.targets[0].identityHash = SHA;
+    }],
+    ["duplicate bootstrap settlement", (value) => {
+      value.targetBootstrapSettlements.push({
+        ...value.targetBootstrapSettlements[0],
+      });
+      value.counts.targetBootstrapSettlementCount += 1;
+    }],
+    ["unbound parser parent", (value) => {
+      const parser = value.targets.find(
+        (target) => target.urlClass === "pdf-parser-worker",
+      );
+      const settlement = value.targetBootstrapSettlements.find(
+        (entry) => entry.urlClass === "pdf-parser-worker",
+      );
+      parser.ancestry = [];
+      parser.parentSessionId = null;
+      settlement.requestSessionId = null;
+      settlement.targetParentSessionId = null;
+      settlement.identityHash = diagnosticIdentity(
+        settlement.requestSessionId,
+        settlement.requestId,
+        settlement.targetSessionId,
+        settlement.targetId,
+      );
+    }],
+    ["extra attach promise", (value) => {
+      value.counts.attachPromiseCount += 1;
+    }],
+    ["excessive stability counter", (value) => {
+      value.wait.stableSamples = 100;
+      value.wait.recentSamples.forEach((sample, index) => {
+        sample.stableSamples = 98 + index;
+      });
+    }],
   ]) {
     const unhealthyDiagnostic = structuredClone(healthyDiagnostic);
     mutate(unhealthyDiagnostic);
+    assert.equal(
+      isCdpFixedPointDiagnosticHealthy(unhealthyDiagnostic),
+      name === "wrong first-scenario phase",
+      `${name} helper result was unexpected`,
+    );
     const unhealthyReport = buildFirstNetworkDiagnosticReport({
       build: report.build,
       fixture: report.fixture,
@@ -1363,6 +1472,7 @@ test("records fixed-point diagnostics without private URL or payload data", () =
     teardown: cleanDiagnosticTeardown,
   });
   assert.equal(wrongScenario.completed, false);
+  assert.equal(wrongScenario.fixedPointReached, false);
   assert.equal(wrongScenario.scenario.screenshot, null);
 
   const repositoryOutput = buildFirstNetworkDiagnosticReport({
