@@ -1,4 +1,4 @@
-export const PDF_SHARPNESS_SCHEMA_VERSION = 2;
+export const PDF_SHARPNESS_SCHEMA_VERSION = 3;
 export const PDF_SHARPNESS_MAX_LONG_TASK_MS = 50;
 export const PDF_SHARPNESS_PREVIEW_SCALE = 1.25;
 export const PDF_SHARPNESS_RASTER_TRANSITIONS = Object.freeze([
@@ -140,6 +140,157 @@ function geometryIntersectsViewport(rect, viewport) {
     rect.top < viewport.bottom &&
     rect.right > viewport.left &&
     rect.left < viewport.right
+  );
+}
+
+function sameBounds(left, right) {
+  return (
+    left?.x === right?.x &&
+    left?.y === right?.y &&
+    left?.width === right?.width &&
+    left?.height === right?.height
+  );
+}
+
+function validRenderedReferenceAnalysis(analysis) {
+  const bounds = analysis?.pageBounds;
+  const runnerUpWhiteArea = analysis?.runnerUpWhiteArea;
+  const winnerWhiteArea = analysis?.winnerWhiteArea;
+  const minimumWidth = Number.isInteger(analysis?.width)
+    ? Math.max(120, Math.ceil(analysis.width * 0.25))
+    : Number.POSITIVE_INFINITY;
+  const minimumHeight = Number.isInteger(analysis?.height)
+    ? Math.max(80, Math.ceil(analysis.height * 0.25))
+    : Number.POSITIVE_INFINITY;
+  const dominanceValid = runnerUpWhiteArea === 0
+    ? analysis?.winnerDominanceRatio === null
+    : finite(analysis?.winnerDominanceRatio) &&
+      analysis.winnerDominanceRatio > 1 &&
+      closeTo(
+        analysis.winnerDominanceRatio,
+        winnerWhiteArea / runnerUpWhiteArea,
+        1e-9,
+      );
+  const insetX = Number.isInteger(bounds?.width)
+    ? Math.max(2, Math.floor(bounds.width * 0.01))
+    : 0;
+  const insetY = Number.isInteger(bounds?.height)
+    ? Math.max(2, Math.floor(bounds.height * 0.01))
+    : 0;
+  const expectedPagePixels = Number.isInteger(bounds?.width) &&
+      Number.isInteger(bounds?.height)
+    ? (bounds.width - insetX * 2) * (bounds.height - insetY * 2)
+    : 0;
+  return (
+    analysis?.renderedPage === true &&
+    analysis?.proof === "white-page-with-rendered-ink" &&
+    analysis?.segmentationVersion === 2 &&
+    Number.isInteger(analysis?.substantialComponentCount) &&
+    analysis.substantialComponentCount >= 1 &&
+    Number.isInteger(winnerWhiteArea) &&
+    winnerWhiteArea >= 1 &&
+    nonNegativeInteger(runnerUpWhiteArea) &&
+    winnerWhiteArea > runnerUpWhiteArea &&
+    dominanceValid &&
+    Number.isInteger(analysis?.width) &&
+    Number.isInteger(analysis?.height) &&
+    analysis.width >= 1 &&
+    analysis.height >= 1 &&
+    nonNegativeInteger(bounds?.x) &&
+    nonNegativeInteger(bounds?.y) &&
+    Number.isInteger(bounds?.width) &&
+    Number.isInteger(bounds?.height) &&
+    bounds.width >= minimumWidth &&
+    bounds.height >= minimumHeight &&
+    bounds.x + bounds.width <= analysis.width &&
+    bounds.y + bounds.height <= analysis.height &&
+    winnerWhiteArea <= bounds.width * bounds.height &&
+    runnerUpWhiteArea <= analysis.width * analysis.height &&
+    Number.isInteger(analysis?.pagePixels) &&
+    analysis.pagePixels === expectedPagePixels &&
+    analysis.pagePixels <= bounds.width * bounds.height &&
+    nonNegativeInteger(analysis?.pageWhitePixels) &&
+    analysis.pageWhitePixels <= analysis.pagePixels &&
+    analysis.pageWhitePixels <= winnerWhiteArea &&
+    finite(analysis?.pageWhiteRatio) &&
+    analysis.pageWhiteRatio >= PDF_SHARPNESS_REFERENCE_MIN_WHITE_RATIO &&
+    closeTo(
+      analysis.pageWhiteRatio,
+      analysis.pageWhitePixels / analysis.pagePixels,
+      1e-6,
+    ) &&
+    nonNegativeInteger(analysis?.inkPixels) &&
+    analysis.inkPixels >= PDF_SHARPNESS_REFERENCE_MIN_INK_PIXELS &&
+    analysis.inkPixels <= analysis.pagePixels &&
+    finite(analysis?.inkRatio) &&
+    analysis.inkRatio <= PDF_SHARPNESS_REFERENCE_MAX_INK_RATIO &&
+    closeTo(
+      analysis.inkRatio,
+      analysis.inkPixels / analysis.pagePixels,
+      1e-6,
+    ) &&
+    Number.isInteger(analysis?.inkRowBands) &&
+    analysis.inkRowBands >= PDF_SHARPNESS_REFERENCE_MIN_INK_ROW_BANDS &&
+    finite(analysis?.inkSpanRatio) &&
+    analysis.inkSpanRatio >= PDF_SHARPNESS_REFERENCE_MIN_INK_SPAN_RATIO &&
+    analysis.inkSpanRatio <= 1
+  );
+}
+
+function validNativeReferenceViewport(expected, configured, viewer) {
+  if (!configured || !viewer) return false;
+  const expectedDpr = expected.baseDevicePixelRatio * expected.browserZoom;
+  const expectedWidth = Math.round(expected.width / expected.browserZoom);
+  const expectedHeight = Math.round(expected.height / expected.browserZoom);
+  const tolerance = 1 / expectedDpr;
+  const screenBound = (viewport) =>
+    closeTo(viewport?.devicePixelRatio, expectedDpr) &&
+    closeTo(viewport?.screenWidth, expectedWidth) &&
+    closeTo(viewport?.screenHeight, expectedHeight);
+  const innerAspectBound = (viewport) =>
+    finite(viewport?.innerWidth) &&
+    finite(viewport?.innerHeight) &&
+    viewport.innerWidth > 0 &&
+    viewport.innerHeight > 0 &&
+    Math.abs(
+      viewport.innerHeight -
+        viewport.innerWidth * expectedHeight / expectedWidth,
+    ) <= 1;
+  const innerLayoutBound = (viewport) => expected.kind === "mobile"
+    ? viewport?.innerWidth >= expectedWidth &&
+      viewport?.innerHeight >= expectedHeight
+    : closeTo(viewport?.innerWidth, expectedWidth) &&
+      closeTo(viewport?.innerHeight, expectedHeight);
+  const visualMapsToScreen = (viewport) =>
+    finite(viewport?.visualViewportWidth) &&
+    finite(viewport?.visualViewportHeight) &&
+    finite(viewport?.visualViewportScale) &&
+    viewport.visualViewportWidth <= viewport.innerWidth &&
+    viewport.visualViewportHeight <= viewport.innerHeight &&
+    Math.abs(
+      viewport.visualViewportWidth * viewport.visualViewportScale -
+        expectedWidth,
+    ) <= tolerance &&
+    Math.abs(
+      viewport.visualViewportHeight * viewport.visualViewportScale -
+        expectedHeight,
+    ) <= tolerance;
+  return (
+    screenBound(configured) &&
+    screenBound(viewer) &&
+    closeTo(configured.innerWidth, viewer.innerWidth) &&
+    closeTo(configured.innerHeight, viewer.innerHeight) &&
+    innerLayoutBound(configured) &&
+    innerLayoutBound(viewer) &&
+    innerAspectBound(configured) &&
+    innerAspectBound(viewer) &&
+    visualMapsToScreen(configured) &&
+    visualMapsToScreen(viewer) &&
+    closeTo(configured.visualViewportScale, expected.pinchZoom) &&
+    closeTo(
+      viewer.visualViewportScale,
+      expected.pinchZoom * expectedWidth / viewer.innerWidth,
+    )
   );
 }
 
@@ -571,6 +722,198 @@ export function validatePdfSharpnessEvidence(evidence) {
       referenceReadiness.inkSpanRatio > 1
     ) {
       fail(`${expected.id} original PDF reference lacks rendered-page pixel proof`);
+    }
+
+    const expectedPhysicalWidth =
+      expected.width * expected.baseDevicePixelRatio;
+    const expectedPhysicalHeight =
+      expected.height * expected.baseDevicePixelRatio;
+    const substantialComponents = referenceReadiness?.substantialComponents;
+    const referenceTarget = comparison?.referenceTarget;
+    const targetComponents = referenceTarget?.components;
+    const anchorLimit = Math.max(
+      80,
+      Math.ceil(expectedPhysicalHeight * 0.25),
+    );
+    const componentValid = (component) => {
+      const bounds = component?.pageBounds;
+      return (
+        nonNegativeInteger(bounds?.x) &&
+        nonNegativeInteger(bounds?.y) &&
+        Number.isInteger(bounds?.width) &&
+        Number.isInteger(bounds?.height) &&
+        bounds.width >= minimumReferencePageWidth &&
+        bounds.height >= minimumReferencePageHeight &&
+        bounds.x + bounds.width <= expectedPhysicalWidth &&
+        bounds.y + bounds.height <= expectedPhysicalHeight &&
+        Number.isInteger(component?.whiteArea) &&
+        component.whiteArea >= 1 &&
+        component.whiteArea <= bounds.width * bounds.height
+      );
+    };
+    const componentOrderValid = (components) => components.every(
+      (component, index) => {
+        if (index === 0) return true;
+        const previous = components[index - 1];
+        const left = previous.pageBounds;
+        const right = component.pageBounds;
+        return (
+          left.y < right.y ||
+          (left.y === right.y && left.x < right.x) ||
+          (left.y === right.y && left.x === right.x &&
+            left.height < right.height) ||
+          (left.y === right.y && left.x === right.x &&
+            left.height === right.height && left.width < right.width) ||
+          (left.y === right.y && left.x === right.x &&
+            left.height === right.height && left.width === right.width &&
+            previous.whiteArea > component.whiteArea)
+        );
+      },
+    );
+    const fullComponentsValid =
+      Array.isArray(substantialComponents) &&
+      substantialComponents.length ===
+        referenceReadiness?.substantialComponentCount &&
+      substantialComponents.length >= 1 &&
+      substantialComponents.every(componentValid) &&
+      componentOrderValid(substantialComponents) &&
+      new Set(substantialComponents.map((component) => JSON.stringify(
+        component.pageBounds,
+      ))).size === substantialComponents.length;
+    const targetComponentsMatch =
+      fullComponentsValid &&
+      Array.isArray(targetComponents) &&
+      targetComponents.length === substantialComponents.length &&
+      targetComponents.every((component, index) =>
+        sameBounds(component?.bounds, substantialComponents[index].pageBounds) &&
+        component?.whiteArea === substantialComponents[index].whiteArea
+      );
+    const anchoredComponents = Array.isArray(targetComponents)
+      ? targetComponents.filter((component) => component?.bounds?.y < anchorLimit)
+      : [];
+    const selectedComponent = targetComponents?.[0];
+    const maximumComponent = fullComponentsValid
+      ? substantialComponents.reduce((maximum, component) =>
+          component.whiteArea > maximum.whiteArea ? component : maximum
+        )
+      : null;
+    const maximumComponentUnique = fullComponentsValid &&
+      substantialComponents.filter(
+        (component) => component.whiteArea === maximumComponent.whiteArea,
+      ).length === 1;
+    const listedRunnerUpWhiteArea = fullComponentsValid
+      ? Math.max(
+          0,
+          ...substantialComponents
+            .filter((component) => component !== maximumComponent)
+            .map((component) => component.whiteArea),
+        )
+      : Number.POSITIVE_INFINITY;
+    const targetReadiness = referenceTarget?.readiness;
+    const targetCropBound =
+      referenceTarget?.selectionVersion === 1 &&
+      referenceTarget?.policy ===
+        "unique-top-anchored-substantial-component" &&
+      referenceTarget?.requestedPage === comparison?.targetPage &&
+      referenceReadiness?.width === expectedPhysicalWidth &&
+      referenceReadiness?.height === expectedPhysicalHeight &&
+      referenceTarget?.sourceWidth === expectedPhysicalWidth &&
+      referenceTarget?.sourceHeight === expectedPhysicalHeight &&
+      referenceTarget?.anchorLimit === anchorLimit &&
+      targetComponentsMatch &&
+      referenceTarget?.selectedComponentIndex === 0 &&
+      anchoredComponents.length === 1 &&
+      anchoredComponents[0] === selectedComponent &&
+      sameBounds(referenceTarget?.cropBounds, selectedComponent?.bounds) &&
+      maximumComponentUnique &&
+      maximumComponent?.whiteArea === referenceReadiness?.winnerWhiteArea &&
+      sameBounds(maximumComponent?.pageBounds, referenceReadiness?.pageBounds) &&
+      referenceReadiness?.runnerUpWhiteArea >= listedRunnerUpWhiteArea &&
+      validRenderedReferenceAnalysis(targetReadiness) &&
+      targetReadiness?.width === selectedComponent?.bounds?.width &&
+      targetReadiness?.height === selectedComponent?.bounds?.height &&
+      targetReadiness?.substantialComponentCount === 1 &&
+      targetReadiness?.winnerWhiteArea === selectedComponent?.whiteArea &&
+      sameBounds(targetReadiness?.pageBounds, {
+        height: selectedComponent?.bounds?.height,
+        width: selectedComponent?.bounds?.width,
+        x: 0,
+        y: 0,
+      }) &&
+      Array.isArray(targetReadiness?.substantialComponents) &&
+      targetReadiness.substantialComponents.length === 1 &&
+      targetReadiness.substantialComponents[0]?.whiteArea ===
+        selectedComponent?.whiteArea &&
+      sameBounds(targetReadiness.substantialComponents[0]?.pageBounds, {
+        height: selectedComponent?.bounds?.height,
+        width: selectedComponent?.bounds?.width,
+        x: 0,
+        y: 0,
+      });
+    if (!targetCropBound) {
+      fail(`${expected.id} original PDF reference is not bound to the requested top page`);
+    }
+
+    const lifecycle = referenceReadiness?.captureLifecycle;
+    const baseline = lifecycle?.baseline;
+    const navigation = lifecycle?.navigation;
+    const lifecycleSequences = [
+      navigation?.dispatchSequence,
+      navigation?.responseSequence,
+      navigation?.lifecycleLoadSequence,
+      navigation?.loadEventFiredSequence,
+    ];
+    const lifecycleBound =
+      lifecycle?.proof === "fresh-owned-reference-loader" &&
+      lifecycle?.viewportProof === "native-viewer-relational-v1" &&
+      lifecycle?.configurationId === expected.id &&
+      lifecycle?.requestedPage === comparison?.targetPage &&
+      SHA256_PATTERN.test(lifecycle?.sessionIdentityHash ?? "") &&
+      baseline?.checked === true &&
+      baseline?.targetCount === 1 &&
+      baseline?.pageCount === 1 &&
+      baseline?.workerCount === 0 &&
+      baseline?.pageUrlClass === "about" &&
+      baseline?.frameTreeMainOnly === true &&
+      baseline?.frameUrlClass === "about-blank" &&
+      baseline?.locationClass === "about-blank" &&
+      baseline?.readyStateComplete === true &&
+      SHA256_PATTERN.test(baseline?.frameIdentityHash ?? "") &&
+      lifecycleSequences.every(
+        (sequence) => Number.isInteger(sequence) && sequence > 0,
+      ) &&
+      new Set(lifecycleSequences).size === lifecycleSequences.length &&
+      navigation?.dispatchSequence === 1 &&
+      navigation?.responseSequence > navigation.dispatchSequence &&
+      navigation?.lifecycleLoadSequence > navigation.dispatchSequence &&
+      navigation?.loadEventFiredSequence > navigation.dispatchSequence &&
+      Number.isInteger(navigation?.finalSequence) &&
+      navigation.finalSequence >= Math.max(...lifecycleSequences) &&
+      navigation?.newDocument === true &&
+      navigation?.isDownload === false &&
+      navigation?.lifecycleName === "load" &&
+      SHA256_PATTERN.test(navigation?.frameIdentityHash ?? "") &&
+      SHA256_PATTERN.test(navigation?.loaderIdentityHash ?? "") &&
+      navigation.frameIdentityHash === baseline.frameIdentityHash &&
+      navigation.lifecycleFrameIdentityHash === navigation.frameIdentityHash &&
+      navigation.lifecycleLoaderIdentityHash === navigation.loaderIdentityHash &&
+      navigation.loaderIdentityHash !== navigation.frameIdentityHash &&
+      lifecycle?.viewer?.readyStateComplete === true &&
+      typeof lifecycle?.viewer?.pdfEmbedPresent === "boolean" &&
+      (
+        (lifecycle?.viewer?.protocolClass === "extension" &&
+          lifecycle?.viewer?.contentTypeClass === "html") ||
+        (lifecycle?.viewer?.protocolClass === "file" &&
+          (lifecycle?.viewer?.contentTypeClass === "pdf" ||
+            lifecycle?.viewer?.pdfEmbedPresent === true))
+      ) &&
+      validNativeReferenceViewport(
+        expected,
+        lifecycle?.configuredViewport,
+        lifecycle?.viewer?.viewport,
+      );
+    if (!lifecycleBound) {
+      fail(`${expected.id} original PDF reference lacks an isolated loader lifecycle`);
     }
 
     const preview = run?.raster?.preview;
@@ -2002,6 +2345,28 @@ export function validatePdfSharpnessEvidence(evidence) {
     if (!artifactIsBound(artifact)) fail("a screenshot artifact is not SHA-256-bound");
   }
   const teardown = evidence?.teardown;
+  const referenceSessions = teardown?.referenceSessions;
+  const referenceSessionsBound =
+    Array.isArray(referenceSessions) &&
+    referenceSessions.length === PDF_SHARPNESS_MATRIX.length &&
+    referenceSessions.every((session, index) => {
+      const expected = PDF_SHARPNESS_MATRIX[index];
+      const lifecycle = evidence?.matrix?.[index]?.comparison
+        ?.referenceReadiness?.captureLifecycle;
+      return (
+        session?.configurationId === expected.id &&
+        SHA256_PATTERN.test(session?.sessionIdentityHash ?? "") &&
+        session.sessionIdentityHash === lifecycle?.sessionIdentityHash &&
+        session?.present === true &&
+        session?.cdpPresent === true &&
+        session?.cdpClosed === true &&
+        session?.processClosed === true &&
+        session?.profileRemoved === true &&
+        session?.errorPresent === false
+      );
+    }) &&
+    new Set(referenceSessions.map((session) => session.sessionIdentityHash))
+      .size === PDF_SHARPNESS_MATRIX.length;
   if (
     !emptyArray(teardown?.errors) ||
     teardown?.app?.present !== true ||
@@ -2016,12 +2381,14 @@ export function validatePdfSharpnessEvidence(evidence) {
     teardown?.reference?.processClosed !== true ||
     teardown?.reference?.profileRemoved !== true ||
     teardown?.reference?.error !== null ||
+    !referenceSessionsBound ||
     teardown?.server?.present !== true ||
     teardown?.server?.processClosed !== true ||
     teardown?.server?.error !== null ||
     teardown?.cdpClosed !== true ||
     teardown?.browserClosed !== true ||
     teardown?.referenceBrowserClosed !== true ||
+    teardown?.referenceBrowsersClosed !== true ||
     teardown?.serverClosed !== true ||
     teardown?.profilesRemoved !== true
   ) {

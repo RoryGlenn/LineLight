@@ -1796,6 +1796,60 @@ function sanitizeReferenceDiagnosticAnalysis(analysis) {
     nonNegativeInteger(analysis?.substantialComponentCount) &&
     nonNegativeInteger(analysis?.winnerWhiteArea) &&
     nonNegativeInteger(analysis?.runnerUpWhiteArea);
+  const substantialComponents = Array.isArray(analysis?.substantialComponents)
+    ? analysis.substantialComponents
+    : null;
+  const componentValid = (component) => {
+    const componentBounds = component?.pageBounds;
+    return (
+      nonNegativeInteger(componentBounds?.x) &&
+      nonNegativeInteger(componentBounds?.y) &&
+      Number.isInteger(componentBounds?.width) &&
+      Number.isInteger(componentBounds?.height) &&
+      componentBounds.width >= Math.max(120, Math.ceil(analysis.width * 0.25)) &&
+      componentBounds.height >= Math.max(80, Math.ceil(analysis.height * 0.25)) &&
+      componentBounds.x + componentBounds.width <= analysis.width &&
+      componentBounds.y + componentBounds.height <= analysis.height &&
+      Number.isInteger(component?.whiteArea) &&
+      component.whiteArea >= 1 &&
+      component.whiteArea <= componentBounds.width * componentBounds.height
+    );
+  };
+  const componentOrderValid = (components) => components.every(
+    (component, index) => {
+      if (index === 0) return true;
+      const previous = components[index - 1];
+      const left = previous.pageBounds;
+      const right = component.pageBounds;
+      return (
+        left.y < right.y ||
+        (left.y === right.y && left.x < right.x) ||
+        (left.y === right.y && left.x === right.x &&
+          left.height < right.height) ||
+        (left.y === right.y && left.x === right.x &&
+          left.height === right.height && left.width < right.width) ||
+        (left.y === right.y && left.x === right.x &&
+          left.height === right.height && left.width === right.width &&
+          previous.whiteArea > component.whiteArea)
+      );
+    },
+  );
+  const substantialComponentsValid =
+    dimensionsValid &&
+    substantialComponents &&
+    substantialComponents.length === analysis?.substantialComponentCount &&
+    substantialComponents.every(componentValid) &&
+    componentOrderValid(substantialComponents) &&
+    new Set(substantialComponents.map((component) =>
+      JSON.stringify(component.pageBounds)
+    )).size === substantialComponents.length &&
+    (
+      substantialComponents.length === 0
+        ? analysis?.winnerWhiteArea === 0
+        : Math.max(...substantialComponents.map((component) =>
+            component.whiteArea
+          )) === analysis?.winnerWhiteArea
+    );
   const boundsValid = bounds &&
     nonNegativeInteger(bounds.height) &&
     nonNegativeInteger(bounds.width) &&
@@ -1850,6 +1904,13 @@ function sanitizeReferenceDiagnosticAnalysis(analysis) {
     boundsValid &&
     metricsValid &&
     analysis.winnerWhiteArea <= bounds.width * bounds.height &&
+    substantialComponents.some((component) =>
+      component.whiteArea === analysis.winnerWhiteArea &&
+      component.pageBounds.x === bounds.x &&
+      component.pageBounds.y === bounds.y &&
+      component.pageBounds.width === bounds.width &&
+      component.pageBounds.height === bounds.height
+    ) &&
     analysis.runnerUpWhiteArea <= analysis.width * analysis.height &&
     (analysis.substantialComponentCount === 1 ||
       analysis.runnerUpWhiteArea > 0) &&
@@ -1886,6 +1947,7 @@ function sanitizeReferenceDiagnosticAnalysis(analysis) {
     dimensionsValid &&
     metricsValid &&
     segmentationShapeValid &&
+    substantialComponentsValid &&
     (noWinnerStateValid || uniqueWinnerStateValid);
   if (
     analysis?.proof !== "white-page-with-rendered-ink" ||
@@ -1915,10 +1977,104 @@ function sanitizeReferenceDiagnosticAnalysis(analysis) {
     renderedPage: analysis.renderedPage,
     runnerUpWhiteArea: analysis.runnerUpWhiteArea,
     segmentationVersion: analysis.segmentationVersion,
+    substantialComponents: substantialComponents.map((component) => ({
+      pageBounds: { ...component.pageBounds },
+      whiteArea: component.whiteArea,
+    })),
     substantialComponentCount: analysis.substantialComponentCount,
     width: analysis.width,
     winnerDominanceRatio: analysis.winnerDominanceRatio,
     winnerWhiteArea: analysis.winnerWhiteArea,
+  };
+}
+
+function sanitizeReferenceDiagnosticTarget(target, analysis, requestedPage) {
+  if (
+    target?.selectionVersion !== 1 ||
+    target?.policy !== "unique-top-anchored-substantial-component" ||
+    target?.requestedPage !== requestedPage ||
+    target?.sourceWidth !== analysis?.width ||
+    target?.sourceHeight !== analysis?.height ||
+    target?.anchorLimit !== Math.max(80, Math.ceil(analysis.height * 0.25)) ||
+    !Array.isArray(target?.components) ||
+    target.components.length !== analysis?.substantialComponents?.length
+  ) {
+    return null;
+  }
+  const componentsMatch = target.components.every((component, index) => {
+    const expected = analysis.substantialComponents[index];
+    return (
+      component?.whiteArea === expected?.whiteArea &&
+      component?.bounds?.x === expected?.pageBounds?.x &&
+      component?.bounds?.y === expected?.pageBounds?.y &&
+      component?.bounds?.width === expected?.pageBounds?.width &&
+      component?.bounds?.height === expected?.pageBounds?.height
+    );
+  });
+  if (!componentsMatch) return null;
+  const anchored = target.components.filter(
+    (component) => component.bounds.y < target.anchorLimit,
+  );
+  if (target.selectedComponentIndex === null) {
+    if (
+      target.cropBounds !== null ||
+      target.readiness !== null ||
+      (anchored.length === 1 && anchored[0] === target.components[0])
+    ) {
+      return null;
+    }
+    return {
+      anchorLimit: target.anchorLimit,
+      components: target.components.map((component) => ({
+        bounds: { ...component.bounds },
+        whiteArea: component.whiteArea,
+      })),
+      cropBounds: null,
+      policy: target.policy,
+      readiness: null,
+      requestedPage,
+      selectedComponentIndex: null,
+      selectionVersion: 1,
+      sourceHeight: target.sourceHeight,
+      sourceWidth: target.sourceWidth,
+    };
+  }
+  const selected = target.components[0];
+  const readiness = sanitizeReferenceDiagnosticAnalysis(target.readiness);
+  if (
+    target.selectedComponentIndex !== 0 ||
+    anchored.length !== 1 ||
+    anchored[0] !== selected ||
+    !readiness ||
+    target.cropBounds?.x !== selected?.bounds?.x ||
+    target.cropBounds?.y !== selected?.bounds?.y ||
+    target.cropBounds?.width !== selected?.bounds?.width ||
+    target.cropBounds?.height !== selected?.bounds?.height ||
+    readiness.width !== selected.bounds.width ||
+    readiness.height !== selected.bounds.height ||
+    readiness.substantialComponentCount !== 1 ||
+    readiness.winnerWhiteArea !== selected.whiteArea ||
+    readiness.pageBounds?.x !== 0 ||
+    readiness.pageBounds?.y !== 0 ||
+    readiness.pageBounds?.width !== selected.bounds.width ||
+    readiness.pageBounds?.height !== selected.bounds.height
+  ) {
+    return null;
+  }
+  return {
+    anchorLimit: target.anchorLimit,
+    components: target.components.map((component) => ({
+      bounds: { ...component.bounds },
+      whiteArea: component.whiteArea,
+    })),
+    cropBounds: { ...target.cropBounds },
+    policy: target.policy,
+    readiness,
+    requestedPage,
+    selectedComponentIndex: 0,
+    selectionVersion: 1,
+    sourceHeight: target.sourceHeight,
+    sourceWidth: target.sourceWidth,
   };
 }
 
@@ -1972,6 +2128,61 @@ function sanitizeReferenceDiagnosticViewport(viewport) {
     visualViewportScale: viewport.visualViewportScale,
     visualViewportWidth: viewport.visualViewportWidth,
   };
+}
+
+export function referenceViewportContract(expected, configured, viewer) {
+  if (!expected || !configured || !viewer) return false;
+  const closeTo = (left, right, tolerance = 1e-7) =>
+    Number.isFinite(left) &&
+    Number.isFinite(right) &&
+    Math.abs(left - right) <= tolerance;
+  const dimensionTolerance = 1 / expected.devicePixelRatio;
+  const screenBound = (viewport) =>
+    closeTo(viewport.devicePixelRatio, expected.devicePixelRatio) &&
+    closeTo(viewport.screenWidth, expected.layoutWidth) &&
+    closeTo(viewport.screenHeight, expected.layoutHeight);
+  const innerAspectBound = (viewport) =>
+    Math.abs(
+      viewport.innerHeight -
+        viewport.innerWidth * expected.layoutHeight / expected.layoutWidth,
+    ) <= 1;
+  const innerLayoutBound = (viewport) => expected.mobile
+    ? viewport.innerWidth >= expected.layoutWidth &&
+      viewport.innerHeight >= expected.layoutHeight
+    : closeTo(viewport.innerWidth, expected.layoutWidth) &&
+      closeTo(viewport.innerHeight, expected.layoutHeight);
+  const visualMapsToScreen = (viewport) =>
+    viewport.visualViewportWidth <= viewport.innerWidth &&
+    viewport.visualViewportHeight <= viewport.innerHeight &&
+    Math.abs(
+      viewport.visualViewportWidth * viewport.visualViewportScale -
+        expected.layoutWidth,
+    ) <= dimensionTolerance &&
+    Math.abs(
+      viewport.visualViewportHeight * viewport.visualViewportScale -
+        expected.layoutHeight,
+    ) <= dimensionTolerance;
+  return (
+    screenBound(configured) &&
+    screenBound(viewer) &&
+    closeTo(configured.innerWidth, viewer.innerWidth) &&
+    closeTo(configured.innerHeight, viewer.innerHeight) &&
+    innerLayoutBound(configured) &&
+    innerLayoutBound(viewer) &&
+    innerAspectBound(configured) &&
+    innerAspectBound(viewer) &&
+    visualMapsToScreen(configured) &&
+    visualMapsToScreen(viewer) &&
+    closeTo(
+      configured.visualViewportScale,
+      expected.visualViewportScale,
+    ) &&
+    closeTo(
+      viewer.visualViewportScale,
+      expected.visualViewportScale *
+        expected.layoutWidth / viewer.innerWidth,
+    )
+  );
 }
 
 function referenceDiagnosticProtocolClass(protocol) {
@@ -2034,31 +2245,26 @@ export function buildReferenceCaptureDiagnosticReport({
   const viewerViewport = sanitizeReferenceDiagnosticViewport(
     capture?.viewer?.viewport,
   );
-  const closeTo = (left, right) =>
-    Number.isFinite(left) &&
-    Number.isFinite(right) &&
-    Math.abs(left - right) <= 1e-7;
   const configuredViewportBound = Boolean(expected && configuredViewport) &&
-    closeTo(configuredViewport.devicePixelRatio, expected.devicePixelRatio) &&
-    closeTo(configuredViewport.innerWidth, expected.layoutWidth) &&
-    closeTo(configuredViewport.innerHeight, expected.layoutHeight) &&
-    closeTo(configuredViewport.screenWidth, expected.layoutWidth) &&
-    closeTo(configuredViewport.screenHeight, expected.layoutHeight) &&
-    closeTo(configuredViewport.visualViewportWidth, expected.layoutWidth) &&
-    closeTo(configuredViewport.visualViewportHeight, expected.layoutHeight) &&
-    closeTo(
-      configuredViewport.visualViewportScale,
-      expected.visualViewportScale,
-    );
-  const viewerViewportBound = Boolean(expected && viewerViewport) &&
-    closeTo(viewerViewport.devicePixelRatio, expected.devicePixelRatio) &&
-    closeTo(viewerViewport.innerWidth, expected.layoutWidth) &&
-    closeTo(viewerViewport.innerHeight, expected.layoutHeight) &&
-    closeTo(viewerViewport.screenWidth, expected.layoutWidth) &&
-    closeTo(viewerViewport.screenHeight, expected.layoutHeight) &&
-    closeTo(viewerViewport.visualViewportWidth, expected.layoutWidth) &&
-    closeTo(viewerViewport.visualViewportHeight, expected.layoutHeight) &&
-    closeTo(viewerViewport.visualViewportScale, expected.visualViewportScale);
+    configuredViewport.devicePixelRatio === expected.devicePixelRatio &&
+    configuredViewport.screenWidth === expected.layoutWidth &&
+    configuredViewport.screenHeight === expected.layoutHeight &&
+    Math.abs(
+      configuredViewport.visualViewportWidth *
+        configuredViewport.visualViewportScale - expected.layoutWidth,
+    ) <= 1 / expected.devicePixelRatio &&
+    Math.abs(
+      configuredViewport.visualViewportHeight *
+        configuredViewport.visualViewportScale - expected.layoutHeight,
+    ) <= 1 / expected.devicePixelRatio &&
+    Math.abs(
+      configuredViewport.visualViewportScale - expected.visualViewportScale,
+    ) <= 1e-7;
+  const viewerViewportBound = referenceViewportContract(
+    expected,
+    configuredViewport,
+    viewerViewport,
+  );
 
   const navigation = capture?.navigation;
   const lifecycleLoad = navigation?.lifecycleLoad;
@@ -2121,6 +2327,13 @@ export function buildReferenceCaptureDiagnosticReport({
       )
       : null;
     const analysis = sanitizeReferenceDiagnosticAnalysis(candidate?.analysis);
+    const referenceTarget = analysis && expected
+      ? sanitizeReferenceDiagnosticTarget(
+          candidate?.referenceTarget,
+          analysis,
+          expected.targetPage,
+        )
+      : null;
     const bound =
       Boolean(expectedName) &&
       candidate?.path === expectedPath &&
@@ -2130,6 +2343,7 @@ export function buildReferenceCaptureDiagnosticReport({
       Number.isInteger(candidate?.attempt) &&
       candidate.attempt > 0 &&
       Boolean(analysis) &&
+      Boolean(referenceTarget) &&
       analysis.width === expected?.physicalWidth &&
       analysis.height === expected?.physicalHeight;
     return bound
@@ -2141,6 +2355,7 @@ export function buildReferenceCaptureDiagnosticReport({
             sha256: candidate.sha256,
           },
           attempt: candidate.attempt,
+          referenceTarget,
         }
       : null;
   });
@@ -2160,7 +2375,9 @@ export function buildReferenceCaptureDiagnosticReport({
     publicCandidates[0].artifact.sha256 ===
       publicCandidates[1].artifact.sha256 &&
     JSON.stringify(publicCandidates[0].analysis) ===
-      JSON.stringify(publicCandidates[1].analysis);
+      JSON.stringify(publicCandidates[1].analysis) &&
+    JSON.stringify(publicCandidates[0].referenceTarget) ===
+      JSON.stringify(publicCandidates[1].referenceTarget);
   const progressSummary = summarizeReferenceDiagnosticProgress(
     progress,
     runnerFailure,
@@ -3866,6 +4083,7 @@ export function analyzeReferencePixels({ height, pixels, width }) {
     renderedPage: false,
     runnerUpWhiteArea: 0,
     segmentationVersion: 2,
+    substantialComponents: [],
     substantialComponentCount: 0,
     width: Number(width) || 0,
     winnerDominanceRatio: null,
@@ -3960,6 +4178,25 @@ export function analyzeReferencePixels({ height, pixels, width }) {
     component.width >= minimumPageWidth &&
     component.height >= minimumPageHeight
   );
+  const orderedSubstantialComponents = [...substantialComponents].sort(
+    (left, right) =>
+      left.top - right.top ||
+      left.left - right.left ||
+      left.bottom - right.bottom ||
+      left.right - right.right ||
+      right.whiteArea - left.whiteArea,
+  );
+  const substantialComponentSummaries = orderedSubstantialComponents.map(
+    (component) => ({
+      pageBounds: {
+        height: component.height,
+        width: component.width,
+        x: component.left,
+        y: component.top,
+      },
+      whiteArea: component.whiteArea,
+    }),
+  );
   const winner = substantialComponents[0] ?? null;
   const runnerUp = winner
     ? components.find((component) => component !== winner) ?? null
@@ -3967,6 +4204,7 @@ export function analyzeReferencePixels({ height, pixels, width }) {
   const segmentation = {
     runnerUpWhiteArea: runnerUp?.whiteArea ?? 0,
     segmentationVersion: 2,
+    substantialComponents: substantialComponentSummaries,
     substantialComponentCount: substantialComponents.length,
     winnerDominanceRatio:
       winner && runnerUp
@@ -3974,90 +4212,145 @@ export function analyzeReferencePixels({ height, pixels, width }) {
         : null,
     winnerWhiteArea: winner?.whiteArea ?? 0,
   };
+
+  const analyzeComponent = (component) => {
+    if (!component) return null;
+    const pageLeft = component.left;
+    const pageRight = component.right;
+    const pageTop = component.top;
+    const pageBottom = component.bottom;
+    const pageWidth = component.width;
+    const pageHeight = component.height;
+    const insetX = Math.max(2, Math.floor(pageWidth * 0.01));
+    const insetY = Math.max(2, Math.floor(pageHeight * 0.01));
+    const interiorLeft = pageLeft + insetX;
+    const interiorRight = pageRight - insetX;
+    const interiorTop = pageTop + insetY;
+    const interiorBottom = pageBottom - insetY;
+    const interiorWidth = interiorRight - interiorLeft + 1;
+    const interiorHeight = interiorBottom - interiorTop + 1;
+    if (interiorWidth <= 0 || interiorHeight <= 0) return null;
+
+    let inkMaximumX = -1;
+    let inkMinimumX = width;
+    let inkPixels = 0;
+    let pageWhitePixels = 0;
+    const inkRows = [];
+    for (let y = interiorTop; y <= interiorBottom; y += 1) {
+      let rowInk = 0;
+      for (let x = interiorLeft; x <= interiorRight; x += 1) {
+        const offset = (y * width + x) * 4;
+        if (isWhite(offset)) pageWhitePixels += 1;
+        const luminance =
+          pixels[offset] * 0.2126 +
+          pixels[offset + 1] * 0.7152 +
+          pixels[offset + 2] * 0.0722;
+        if (pixels[offset + 3] < 200 || luminance > 200) continue;
+        inkPixels += 1;
+        rowInk += 1;
+        inkMinimumX = Math.min(inkMinimumX, x);
+        inkMaximumX = Math.max(inkMaximumX, x);
+      }
+      if (rowInk >= 3) inkRows.push(y);
+    }
+    let inkRowBands = 0;
+    let previousInkRow = Number.NEGATIVE_INFINITY;
+    for (const row of inkRows) {
+      if (row > previousInkRow + 2) inkRowBands += 1;
+      previousInkRow = row;
+    }
+
+    const pagePixels = interiorWidth * interiorHeight;
+    const pageWhiteRatio = pageWhitePixels / pagePixels;
+    const inkRatio = inkPixels / pagePixels;
+    const inkSpanRatio = inkMaximumX >= inkMinimumX
+      ? (inkMaximumX - inkMinimumX + 1) / interiorWidth
+      : 0;
+    return {
+      inkPixels,
+      inkRatio,
+      inkRowBands,
+      inkSpanRatio,
+      pageBounds: {
+        height: pageHeight,
+        width: pageWidth,
+        x: pageLeft,
+        y: pageTop,
+      },
+      pagePixels,
+      pageWhitePixels,
+      pageWhiteRatio,
+      proof: "white-page-with-rendered-ink",
+      renderedPage:
+        pageWhiteRatio >= PDF_SHARPNESS_REFERENCE_MIN_WHITE_RATIO &&
+        inkPixels >= PDF_SHARPNESS_REFERENCE_MIN_INK_PIXELS &&
+        inkRatio <= PDF_SHARPNESS_REFERENCE_MAX_INK_RATIO &&
+        inkRowBands >= PDF_SHARPNESS_REFERENCE_MIN_INK_ROW_BANDS &&
+        inkSpanRatio >= PDF_SHARPNESS_REFERENCE_MIN_INK_SPAN_RATIO,
+    };
+  };
   if (
     !winner ||
     (runnerUp && winner.whiteArea <= runnerUp.whiteArea)
   ) {
     return { ...empty, ...segmentation };
   }
-  const pageLeft = winner.left;
-  const pageRight = winner.right;
-  const pageTop = winner.top;
-  const pageBottom = winner.bottom;
-  const pageWidth = winner.width;
-  const pageHeight = winner.height;
-
-  const insetX = Math.max(2, Math.floor(pageWidth * 0.01));
-  const insetY = Math.max(2, Math.floor(pageHeight * 0.01));
-  const interiorLeft = pageLeft + insetX;
-  const interiorRight = pageRight - insetX;
-  const interiorTop = pageTop + insetY;
-  const interiorBottom = pageBottom - insetY;
-  const interiorWidth = interiorRight - interiorLeft + 1;
-  const interiorHeight = interiorBottom - interiorTop + 1;
-  if (interiorWidth <= 0 || interiorHeight <= 0) {
+  const winnerAnalysis = analyzeComponent(winner);
+  if (!winnerAnalysis) {
     return { ...empty, ...segmentation };
   }
-
-  let inkMaximumX = -1;
-  let inkMinimumX = width;
-  let inkPixels = 0;
-  let pageWhitePixels = 0;
-  const inkRows = [];
-  for (let y = interiorTop; y <= interiorBottom; y += 1) {
-    let rowInk = 0;
-    for (let x = interiorLeft; x <= interiorRight; x += 1) {
-      const offset = (y * width + x) * 4;
-      if (isWhite(offset)) pageWhitePixels += 1;
-      const luminance =
-        pixels[offset] * 0.2126 +
-        pixels[offset + 1] * 0.7152 +
-        pixels[offset + 2] * 0.0722;
-      if (pixels[offset + 3] < 200 || luminance > 200) continue;
-      inkPixels += 1;
-      rowInk += 1;
-      inkMinimumX = Math.min(inkMinimumX, x);
-      inkMaximumX = Math.max(inkMaximumX, x);
-    }
-    if (rowInk >= 3) inkRows.push(y);
-  }
-  let inkRowBands = 0;
-  let previousInkRow = Number.NEGATIVE_INFINITY;
-  for (const row of inkRows) {
-    if (row > previousInkRow + 2) inkRowBands += 1;
-    previousInkRow = row;
-  }
-
-  const pagePixels = interiorWidth * interiorHeight;
-  const pageWhiteRatio = pageWhitePixels / pagePixels;
-  const inkRatio = inkPixels / pagePixels;
-  const inkSpanRatio = inkMaximumX >= inkMinimumX
-    ? (inkMaximumX - inkMinimumX + 1) / interiorWidth
-    : 0;
   return {
     height,
-    inkPixels,
-    inkRatio,
-    inkRowBands,
-    inkSpanRatio,
-    pageBounds: {
-      height: pageHeight,
-      width: pageWidth,
-      x: pageLeft,
-      y: pageTop,
-    },
-    pagePixels,
-    pageWhitePixels,
-    pageWhiteRatio,
-    proof: "white-page-with-rendered-ink",
-    renderedPage:
-      pageWhiteRatio >= PDF_SHARPNESS_REFERENCE_MIN_WHITE_RATIO &&
-      inkPixels >= PDF_SHARPNESS_REFERENCE_MIN_INK_PIXELS &&
-      inkRatio <= PDF_SHARPNESS_REFERENCE_MAX_INK_RATIO &&
-      inkRowBands >= PDF_SHARPNESS_REFERENCE_MIN_INK_ROW_BANDS &&
-      inkSpanRatio >= PDF_SHARPNESS_REFERENCE_MIN_INK_SPAN_RATIO,
+    ...winnerAnalysis,
     ...segmentation,
     width,
+  };
+}
+
+function cropReferencePixels({ pixels, width }, bounds) {
+  const cropped = new Uint8ClampedArray(bounds.width * bounds.height * 4);
+  for (let row = 0; row < bounds.height; row += 1) {
+    const sourceStart = ((bounds.y + row) * width + bounds.x) * 4;
+    const sourceEnd = sourceStart + bounds.width * 4;
+    cropped.set(
+      pixels.subarray(sourceStart, sourceEnd),
+      row * bounds.width * 4,
+    );
+  }
+  return { height: bounds.height, pixels: cropped, width: bounds.width };
+}
+
+export function analyzeReferenceTarget(decoded, requestedPage, analysis) {
+  const sourceAnalysis = analysis ?? analyzeReferencePixels(decoded);
+  const components = Array.isArray(sourceAnalysis?.substantialComponents)
+    ? sourceAnalysis.substantialComponents.map((component) => ({
+        bounds: { ...component.pageBounds },
+        whiteArea: component.whiteArea,
+      }))
+    : [];
+  const sourceHeight = Number(decoded?.height) || 0;
+  const sourceWidth = Number(decoded?.width) || 0;
+  const anchorLimit = Math.max(80, Math.ceil(sourceHeight * 0.25));
+  const anchored = components.filter(
+    (component) => component.bounds.y < anchorLimit,
+  );
+  const selected = anchored.length === 1 && components[0] === anchored[0]
+    ? components[0]
+    : null;
+  const cropBounds = selected ? { ...selected.bounds } : null;
+  return {
+    anchorLimit,
+    components,
+    cropBounds,
+    policy: "unique-top-anchored-substantial-component",
+    readiness: cropBounds
+      ? analyzeReferencePixels(cropReferencePixels(decoded, cropBounds))
+      : null,
+    requestedPage: Number.isInteger(requestedPage) ? requestedPage : null,
+    selectedComponentIndex: selected ? 0 : null,
+    selectionVersion: 1,
+    sourceHeight,
+    sourceWidth,
   };
 }
 
@@ -6572,6 +6865,7 @@ async function waitForRenderedReferenceScreenshot(
   cdp,
   outputDirectory,
   fileName,
+  requestedPage,
 ) {
   const deadline = Date.now() + SCENARIO_TIMEOUT_MS;
   let attempts = 0;
@@ -6586,12 +6880,23 @@ async function waitForRenderedReferenceScreenshot(
         fromSurface: true,
       });
       const bytes = Buffer.from(screenshot.data, "base64");
-      lastAnalysis = analyzeReferencePixels(decodePngScreenshot(bytes));
-      if (lastAnalysis.renderedPage) {
+      const decoded = decodePngScreenshot(bytes);
+      lastAnalysis = analyzeReferencePixels(decoded);
+      const referenceTarget = analyzeReferenceTarget(
+        decoded,
+        requestedPage,
+        lastAnalysis,
+      );
+      if (
+        lastAnalysis.renderedPage &&
+        referenceTarget.selectedComponentIndex === 0 &&
+        referenceTarget.readiness?.renderedPage === true
+      ) {
         const filePath = path.join(outputDirectory, fileName);
         await writeFile(filePath, bytes);
         return {
           artifact: await fileArtifact(filePath),
+          referenceTarget,
           readiness: {
             ...lastAnalysis,
             attempts,
@@ -6615,6 +6920,7 @@ async function waitForRenderedReferenceScreenshot(
 async function captureStableReferenceDiagnosticCandidates(
   cdp,
   outputDirectory,
+  requestedPage,
 ) {
   const deadline = Date.now() + SCENARIO_TIMEOUT_MS;
   let attempts = 0;
@@ -6629,10 +6935,17 @@ async function captureStableReferenceDiagnosticCandidates(
         fromSurface: true,
       });
       const bytes = Buffer.from(screenshot.data, "base64");
+      const decoded = decodePngScreenshot(bytes);
+      const analysis = analyzeReferencePixels(decoded);
       const candidate = {
-        analysis: analyzeReferencePixels(decodePngScreenshot(bytes)),
+        analysis,
         attempt: attempts,
         bytes,
+        referenceTarget: analyzeReferenceTarget(
+          decoded,
+          requestedPage,
+          analysis,
+        ),
         sha256: await sha256Bytes(bytes),
       };
       if (
@@ -6651,6 +6964,7 @@ async function captureStableReferenceDiagnosticCandidates(
             ...(await fileArtifact(filePath)),
             analysis: stable.analysis,
             attempt: stable.attempt,
+            referenceTarget: stable.referenceTarget,
           });
         }
         return { attempts, candidates, captureErrorCount };
@@ -6668,36 +6982,183 @@ async function captureStableReferenceDiagnosticCandidates(
 }
 
 async function captureReferenceScreenshots(
-  cdp,
+  browserExecutable,
   fixture,
   outputDirectory,
   targetPages,
+  referenceShutdowns,
 ) {
   const screenshots = new Map();
   const requestedUrl = new URL(pathToFileURL(fixture));
+  let terminalError = null;
   for (const configuration of PDF_SHARPNESS_MATRIX) {
-    requestedUrl.hash = `page=${targetPages.get(configuration.id)}&zoom=page-width`;
-    await applyMatrixConfiguration(cdp, configuration, true);
-    await cdp.send("Page.navigate", { url: requestedUrl.href });
-    await waitForExpression(
-      cdp,
-      `document.readyState === 'complete' &&
-        (document.contentType === 'application/pdf' ||
-          Boolean(document.querySelector('embed[type="application/pdf"]')) ||
-          location.protocol === 'chrome-extension:')`,
-      `${configuration.id} original PDF viewer`,
-      SCENARIO_TIMEOUT_MS,
-    );
-    screenshots.set(
-      configuration.id,
-      await waitForRenderedReferenceScreenshot(
+    const targetPage = targetPages.get(configuration.id);
+    if (!Number.isInteger(targetPage) || targetPage < 1) {
+      throw new Error(`${configuration.id} has no exact reference target page.`);
+    }
+    let browser = null;
+    let cdp = null;
+    let operationError = null;
+    let sessionIdentityHash = null;
+    const lifecycle = {
+      baseline: null,
+      configurationId: configuration.id,
+      configuredViewport: null,
+      navigation: null,
+      proof: "fresh-owned-reference-loader",
+      requestedPage: targetPage,
+      sessionIdentityHash: null,
+      viewer: null,
+      viewportProof: "native-viewer-relational-v1",
+    };
+    try {
+      browser = await startBrowser(browserExecutable, true);
+      sessionIdentityHash = cdpDiagnosticIdentity(
+        "reference-session",
+        browser.profileDirectory,
+      );
+      lifecycle.sessionIdentityHash = sessionIdentityHash;
+      cdp = await CdpSession.connect(browser.webSocketDebuggerUrl);
+      const baseline = await readReferenceCaptureDiagnosticBaseline(cdp);
+      lifecycle.baseline = {
+        checked: baseline.checked === true,
+        frameIdentityHash: cdpDiagnosticIdentity(baseline.frameId),
+        frameTreeMainOnly: baseline.frameTreeMainOnly === true,
+        frameUrlClass: baseline.frameUrlClass,
+        locationClass: baseline.locationClass,
+        pageCount: baseline.pageCount,
+        pageUrlClass: baseline.pageUrlClass,
+        readyStateComplete: baseline.readyStateComplete === true,
+        targetCount: baseline.targetCount,
+        workerCount: baseline.workerCount,
+      };
+      await Promise.all([
+        cdp.send("Page.enable"),
+        cdp.send("Runtime.enable"),
+        cdp.send("Page.setLifecycleEventsEnabled", { enabled: true }),
+      ]);
+      await applyMatrixConfiguration(cdp, configuration, true);
+      const configuredViewport =
+        await readReferenceCaptureDiagnosticViewport(cdp);
+      requestedUrl.hash = `page=${targetPage}&zoom=page-width`;
+      const navigation = await navigateReferenceCaptureDiagnosticPage(
+        cdp,
+        requestedUrl.href,
+      );
+      const viewer = await waitForReferenceCaptureDiagnosticViewer(
+        cdp,
+        configuration.id,
+      );
+      const expected = {
+        devicePixelRatio:
+          configuration.baseDevicePixelRatio * configuration.browserZoom,
+        layoutHeight: Math.round(
+          configuration.height / configuration.browserZoom,
+        ),
+        layoutWidth: Math.round(
+          configuration.width / configuration.browserZoom,
+        ),
+        mobile: configuration.kind === "mobile",
+        visualViewportScale: configuration.pinchZoom,
+      };
+      const configured = sanitizeReferenceDiagnosticViewport(
+        configuredViewport,
+      );
+      lifecycle.configuredViewport = configured;
+      const viewerViewport = sanitizeReferenceDiagnosticViewport(
+        viewer?.viewport,
+      );
+      lifecycle.navigation = {
+        dispatchSequence: navigation.dispatchSequence,
+        finalSequence: navigation.finalSequence,
+        frameIdentityHash: cdpDiagnosticIdentity(navigation.frameId),
+        isDownload: navigation.isDownload === true,
+        lifecycleFrameIdentityHash: cdpDiagnosticIdentity(
+          navigation.lifecycleLoad.frameId,
+        ),
+        lifecycleLoadSequence: navigation.lifecycleLoad.sequence,
+        lifecycleLoaderIdentityHash: cdpDiagnosticIdentity(
+          navigation.lifecycleLoad.loaderId,
+        ),
+        lifecycleName: navigation.lifecycleLoad.name,
+        loaderIdentityHash: cdpDiagnosticIdentity(navigation.loaderId),
+        loadEventFiredSequence: navigation.loadEvent.sequence,
+        newDocument: navigation.newDocument === true,
+        responseSequence: navigation.responseSequence,
+      };
+      lifecycle.viewer = {
+        contentTypeClass: referenceDiagnosticContentTypeClass(
+          viewer?.contentType,
+        ),
+        pdfEmbedPresent: viewer?.pdfEmbedPresent === true,
+        protocolClass: referenceDiagnosticProtocolClass(viewer?.protocol),
+        readyStateComplete: viewer?.readyStateComplete === true,
+        viewport: viewerViewport,
+      };
+      if (!referenceViewportContract(expected, configured, viewerViewport)) {
+        throw new Error(
+          `${configuration.id} native reference viewport contract failed.`,
+        );
+      }
+      const capture = await waitForRenderedReferenceScreenshot(
         cdp,
         outputDirectory,
         `reference-${configuration.id}.png`,
-      ),
-    );
+        targetPage,
+      );
+      capture.readiness.captureLifecycle = lifecycle;
+      screenshots.set(configuration.id, capture);
+    } catch {
+      operationError = new Error(
+        `${configuration.id} fresh reference capture failed.`,
+      );
+    } finally {
+      const [cleanup] = await Promise.allSettled([
+        closeOwnedBrowser(cdp, browser),
+      ]);
+      const rawShutdown = cleanupResult(cleanup, "browser");
+      const shutdown = {
+        cdpClosed: rawShutdown.cdpClosed,
+        cdpPresent: rawShutdown.cdpPresent,
+        errorPresent: Boolean(rawShutdown.error),
+        present: rawShutdown.present,
+        processClosed: rawShutdown.processClosed,
+        profileRemoved: rawShutdown.profileRemoved,
+      };
+      referenceShutdowns.push({
+        configurationId: configuration.id,
+        sessionIdentityHash,
+        ...shutdown,
+      });
+      if (
+        !operationError &&
+        (
+          shutdown.cdpClosed !== true ||
+          shutdown.cdpPresent !== true ||
+          shutdown.processClosed !== true ||
+          shutdown.profileRemoved !== true ||
+          shutdown.errorPresent
+        )
+      ) {
+        operationError = new Error(
+          `${configuration.id} reference browser did not tear down cleanly.`,
+        );
+      }
+    }
+    if (operationError) {
+      if (!screenshots.has(configuration.id)) {
+        screenshots.set(configuration.id, {
+          artifact: null,
+          readiness: { captureLifecycle: lifecycle },
+          referenceTarget: null,
+        });
+      }
+      terminalError = operationError;
+      break;
+    }
   }
   return {
+    error: terminalError,
     requestedUrl: requestedUrl.href,
     scheme: requestedUrl.protocol,
     screenshots,
@@ -8172,6 +8633,39 @@ function cleanupResult(result, kind) {
   };
 }
 
+function aggregateReferenceShutdowns(referenceSessions) {
+  if (!referenceSessions.length) {
+    return {
+      cdpClosed: true,
+      cdpPresent: false,
+      error: null,
+      present: false,
+      processClosed: true,
+      profileRemoved: true,
+    };
+  }
+  const failed = referenceSessions.some(
+    (session) =>
+      session.cdpClosed !== true ||
+      session.cdpPresent !== true ||
+      session.processClosed !== true ||
+      session.profileRemoved !== true ||
+      session.errorPresent !== false,
+  );
+  return {
+    cdpClosed: referenceSessions.every((session) => session.cdpClosed === true),
+    cdpPresent: referenceSessions.every((session) => session.cdpPresent === true),
+    error: failed ? "reference-session-cleanup-failed" : null,
+    present: true,
+    processClosed: referenceSessions.every(
+      (session) => session.processClosed === true,
+    ),
+    profileRemoved: referenceSessions.every(
+      (session) => session.profileRemoved === true,
+    ),
+  };
+}
+
 function ensureCleanBoundSource(source) {
   if (source.preflightStatus.length) {
     throw new Error(
@@ -8291,6 +8785,7 @@ async function runReferenceCaptureDiagnostic(options, source) {
         () => captureStableReferenceDiagnosticCandidates(
           referenceCdp,
           options.outputDirectory,
+          selected.targetPage,
         ),
       );
       capture = {
@@ -8395,8 +8890,7 @@ async function run(options) {
   let server = null;
   let appBrowser = null;
   let appCdp = null;
-  let referenceBrowser = null;
-  let referenceCdp = null;
+  const referenceShutdowns = [];
   let runnerFailure = null;
   let fallbackDiagnosticCapture = null;
   let fallbackDiagnosticNetwork = null;
@@ -8619,19 +9113,12 @@ async function run(options) {
           "forced-main-fallback",
         );
 
-        referenceBrowser = await startBrowser(options.browser, true);
-        referenceCdp = await CdpSession.connect(
-          referenceBrowser.webSocketDebuggerUrl,
-        );
-        await Promise.all([
-          referenceCdp.send("Page.enable"),
-          referenceCdp.send("Runtime.enable"),
-        ]);
         const reference = await captureReferenceScreenshots(
-          referenceCdp,
+          options.browser,
           options.fixture,
           options.outputDirectory,
           targetPages,
+          referenceShutdowns,
         );
         for (const matrixRun of evidence.matrix) {
           const referenceCapture = reference.screenshots.get(matrixRun.id);
@@ -8639,8 +9126,11 @@ async function run(options) {
             referenceCapture?.artifact ?? null;
           matrixRun.comparison.referenceReadiness =
             referenceCapture?.readiness ?? null;
+          matrixRun.comparison.referenceTarget =
+            referenceCapture?.referenceTarget ?? null;
           matrixRun.comparison.paired = true;
         }
+        if (reference.error) throw reference.error;
         await waitForCdpNetworkFixedPoint(
           networkState,
           server.appUrl,
@@ -8677,13 +9167,12 @@ async function run(options) {
   } finally {
     networkState.phase = "teardown";
     const cleanup = await Promise.allSettled([
-      closeOwnedBrowser(referenceCdp, referenceBrowser),
       closeOwnedBrowser(appCdp, appBrowser),
       closeOwnedServer(server),
     ]);
-    referenceShutdown = cleanupResult(cleanup[0], "browser");
-    appShutdown = cleanupResult(cleanup[1], "browser");
-    serverShutdown = cleanupResult(cleanup[2], "server");
+    referenceShutdown = aggregateReferenceShutdowns(referenceShutdowns);
+    appShutdown = cleanupResult(cleanup[0], "browser");
+    serverShutdown = cleanupResult(cleanup[1], "server");
     const teardownErrors = [
       referenceShutdown.error,
       appShutdown.error,
@@ -8698,6 +9187,10 @@ async function run(options) {
         appShutdown.profileRemoved && referenceShutdown.profileRemoved,
       reference: referenceShutdown,
       referenceBrowserClosed: referenceShutdown.processClosed,
+      referenceBrowsersClosed:
+        referenceShutdowns.length === PDF_SHARPNESS_MATRIX.length &&
+        referenceShutdowns.every((session) => session.processClosed === true),
+      referenceSessions: referenceShutdowns,
       server: serverShutdown,
       serverClosed: serverShutdown.processClosed,
     };

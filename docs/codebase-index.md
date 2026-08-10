@@ -256,7 +256,13 @@ DevTools trace. Review records live in
 builds and serves one clean source commit, then uses headed Brave to pair the
 same local PDF page in the browser viewer and LineLight across desktop DPR,
 effective browser-zoom metrics, mobile DPR, and visual-viewport pinch. It
-requires decoded reference pixels to prove a rendered page, and records
+launches and tears down one fresh configured reference browser/profile per
+matrix entry, binds each about:blank-to-new-loader lifecycle to its ordered
+teardown row, and validates native mobile layout/visual behavior through
+screen/DPR-derived relations rather than fixed browser decimals. Decoded
+reference pixels retain the global version-2 component proof and separately
+crop the unique top-anchored substantial component for the requested page, so
+an adjacent global winner cannot substitute for the reviewed target. It records
 independently recomputed preview targets that either exactly satisfy the final
 backing without a redundant draw or upgrade through distinct bitmap/composition
 identities, current viewport priority after import-bound worker completion and

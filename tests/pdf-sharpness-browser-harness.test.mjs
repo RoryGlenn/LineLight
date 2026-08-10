@@ -26,6 +26,7 @@ import {
   REFERENCE_CAPTURE_DIAGNOSTIC_STAGES,
   REFERENCE_CAPTURE_DIAGNOSTIC_STEPS,
   analyzeReferencePixels,
+  analyzeReferenceTarget,
   asyncBrowserExpression,
   advanceCdpFixedPointStability,
   buildCdpNetworkFixedPointDiagnostic,
@@ -57,6 +58,7 @@ import {
   recordCdpNetworkRequest,
   reconcileCdpServiceWorkerBootstraps,
   reconcileCdpTargetBootstrapRequests,
+  referenceViewportContract,
   runBoundedDiagnosticOperation,
   selectPdfLongTasksForWindow,
   selectPdfFallbackAbortCandidate,
@@ -162,6 +164,10 @@ const passingReferenceAnalysis = () => ({
   renderedPage: true,
   runnerUpWhiteArea: 14_947,
   segmentationVersion: 2,
+  substantialComponents: [{
+    pageBounds: { height: 841, width: 774, x: 306, y: 59 },
+    whiteArea: 637_220,
+  }],
   substantialComponentCount: 1,
   width: 1_100,
   winnerDominanceRatio: 42.63196628085903,
@@ -182,10 +188,59 @@ const emptyReferenceAnalysis = (width, height) => ({
   renderedPage: false,
   runnerUpWhiteArea: 0,
   segmentationVersion: 2,
+  substantialComponents: [],
   substantialComponentCount: 0,
   width,
   winnerDominanceRatio: null,
   winnerWhiteArea: 0,
+});
+
+const passingReferenceTarget = (
+  analysis = passingReferenceAnalysis(),
+  requestedPage = 2,
+) => {
+  const selected = analysis.substantialComponents[0];
+  const cropWidth = selected.pageBounds.width;
+  const cropHeight = selected.pageBounds.height;
+  return {
+    anchorLimit: Math.max(80, Math.ceil(analysis.height * 0.25)),
+    components: analysis.substantialComponents.map((component) => ({
+      bounds: { ...component.pageBounds },
+      whiteArea: component.whiteArea,
+    })),
+    cropBounds: { ...selected.pageBounds },
+    policy: "unique-top-anchored-substantial-component",
+    readiness: {
+      ...analysis,
+      height: cropHeight,
+      pageBounds: { height: cropHeight, width: cropWidth, x: 0, y: 0 },
+      runnerUpWhiteArea: 0,
+      substantialComponents: [{
+        pageBounds: { height: cropHeight, width: cropWidth, x: 0, y: 0 },
+        whiteArea: selected.whiteArea,
+      }],
+      width: cropWidth,
+      winnerDominanceRatio: null,
+    },
+    requestedPage,
+    selectedComponentIndex: 0,
+    selectionVersion: 1,
+    sourceHeight: analysis.height,
+    sourceWidth: analysis.width,
+  };
+};
+
+const emptyReferenceTarget = (analysis, requestedPage) => ({
+  anchorLimit: Math.max(80, Math.ceil(analysis.height * 0.25)),
+  components: [],
+  cropBounds: null,
+  policy: "unique-top-anchored-substantial-component",
+  readiness: null,
+  requestedPage,
+  selectedComponentIndex: null,
+  selectionVersion: 1,
+  sourceHeight: analysis.height,
+  sourceWidth: analysis.width,
 });
 
 const referenceViewport = ({ dpr, height, width }) => ({
@@ -1432,13 +1487,17 @@ test("builds a noncanonical privacy-safe reference-capture diagnostic", () => {
     markReferenceCaptureDiagnosticStage(progress, stage);
   }
   const candidates = REFERENCE_CAPTURE_DIAGNOSTIC_CANDIDATES.map(
-    (name, index) => ({
-      analysis: passingReferenceAnalysis(),
-      attempt: index + 4,
-      bytes: 43_448,
-      path: path.relative(path.resolve("."), path.join(outputDirectory, name)),
-      sha256: "d".repeat(64),
-    }),
+    (name, index) => {
+      const analysis = passingReferenceAnalysis();
+      return {
+        analysis,
+        attempt: index + 4,
+        bytes: 43_448,
+        path: path.relative(path.resolve("."), path.join(outputDirectory, name)),
+        referenceTarget: passingReferenceTarget(analysis, 2),
+        sha256: "d".repeat(64),
+      };
+    },
   );
   const input = {
     capture: {
@@ -1529,6 +1588,22 @@ test("builds a noncanonical privacy-safe reference-capture diagnostic", () => {
     (value) => { value.capture.candidates[1].sha256 = "e".repeat(64); },
     (value) => { value.capture.candidates[1].analysis.inkPixels += 1; },
     (value) => {
+      value.capture.candidates[1].referenceTarget.requestedPage += 1;
+    },
+    (value) => {
+      value.capture.candidates[1].referenceTarget.components.push(
+        structuredClone(
+          value.capture.candidates[1].referenceTarget.components[0],
+        ),
+      );
+    },
+    (value) => {
+      value.capture.candidates[1].referenceTarget.cropBounds.x += 1;
+    },
+    (value) => {
+      value.capture.candidates[1].referenceTarget.readiness.inkPixels = 0;
+    },
+    (value) => {
       delete value.capture.candidates[1].analysis.segmentationVersion;
     },
     (value) => {
@@ -1552,8 +1627,29 @@ test("builds a noncanonical privacy-safe reference-capture diagnostic", () => {
     configurationId: "mobile-dpr3-zoom100",
     targetPage: 3,
   });
+  mobileObservation.capture.configuredViewport = {
+    devicePixelRatio: 3,
+    innerHeight: 2_121,
+    innerWidth: 980,
+    screenHeight: 844,
+    screenWidth: 390,
+    visualViewportHeight: 844,
+    visualViewportScale: 1,
+    visualViewportWidth: 390,
+  };
+  mobileObservation.capture.viewer.viewport = {
+    devicePixelRatio: 3,
+    innerHeight: 2_121,
+    innerWidth: 980,
+    screenHeight: 844,
+    screenWidth: 390,
+    visualViewportHeight: 844 * 980 / 390,
+    visualViewportScale: 390 / 980,
+    visualViewportWidth: 980,
+  };
   for (const candidate of mobileObservation.capture.candidates) {
     candidate.analysis = emptyReferenceAnalysis(1_170, 2_532);
+    candidate.referenceTarget = emptyReferenceTarget(candidate.analysis, 3);
   }
   const mobileReport = buildReferenceCaptureDiagnosticReport(
     mobileObservation,
@@ -1565,6 +1661,20 @@ test("builds a noncanonical privacy-safe reference-capture diagnostic", () => {
   assert.equal(
     mobileReport.artifacts.candidates[0].analysis.renderedPage,
     false,
+  );
+  assert.equal(
+    referenceViewportContract(
+      {
+        devicePixelRatio: 3,
+        layoutHeight: 844,
+        layoutWidth: 390,
+        mobile: true,
+        visualViewportScale: 1,
+      },
+      mobileObservation.capture.configuredViewport,
+      mobileObservation.capture.viewer.viewport,
+    ),
+    true,
   );
   for (const field of [
     "innerWidth",
@@ -1607,6 +1717,16 @@ test("builds a noncanonical privacy-safe reference-capture diagnostic", () => {
 
   const tiedObservation = structuredClone(input);
   for (const candidate of tiedObservation.capture.candidates) {
+    const components = [
+      {
+        pageBounds: { height: 300, width: 300, x: 100, y: 59 },
+        whiteArea: 36_000,
+      },
+      {
+        pageBounds: { height: 300, width: 300, x: 500, y: 100 },
+        whiteArea: 36_000,
+      },
+    ];
     Object.assign(candidate.analysis, {
       inkPixels: 0,
       inkRatio: 0,
@@ -1618,10 +1738,26 @@ test("builds a noncanonical privacy-safe reference-capture diagnostic", () => {
       pageWhiteRatio: 0,
       renderedPage: false,
       runnerUpWhiteArea: 36_000,
+      substantialComponents: components,
       substantialComponentCount: 2,
       winnerDominanceRatio: 1,
       winnerWhiteArea: 36_000,
     });
+    candidate.referenceTarget = {
+      anchorLimit: 225,
+      components: components.map((component) => ({
+        bounds: { ...component.pageBounds },
+        whiteArea: component.whiteArea,
+      })),
+      cropBounds: null,
+      policy: "unique-top-anchored-substantial-component",
+      readiness: null,
+      requestedPage: 2,
+      selectedComponentIndex: null,
+      selectionVersion: 1,
+      sourceHeight: 900,
+      sourceWidth: 1_100,
+    };
   }
   const tiedReport = buildReferenceCaptureDiagnosticReport(tiedObservation);
   assert.equal(tiedReport.completed, true);
@@ -1641,6 +1777,16 @@ test("builds a noncanonical privacy-safe reference-capture diagnostic", () => {
   );
   assert.equal(repositoryReport.completed, false);
   assert.ok(repositoryReport.failures.length > 0);
+
+  const privateProfile = structuredClone(input);
+  privateProfile.capture.profileDirectory =
+    "/tmp/private-profile-secret-token";
+  privateProfile.capture.candidates[0].referenceTarget.rawUrl =
+    "file:///tmp/private.pdf?secret=token";
+  const privateProfileBytes = JSON.stringify(
+    buildReferenceCaptureDiagnosticReport(privateProfile),
+  );
+  assert.doesNotMatch(privateProfileBytes, /private-profile|private\.pdf|secret/u);
 
   const firstFailure = structuredClone(input);
   firstFailure.runnerFailure = new Error(
@@ -1944,6 +2090,141 @@ test("tracks exact fallback diagnostic stages and preserves partial setup facts"
   });
 });
 
+function passingCanonicalReference(configuration, targetPage, index) {
+  const width = configuration.width * configuration.baseDevicePixelRatio;
+  const height = configuration.height * configuration.baseDevicePixelRatio;
+  const pageWidth = Math.floor(width * 0.6);
+  const pageHeight = Math.floor(height * 0.7);
+  const pageBounds = { height: pageHeight, width: pageWidth, x: 10, y: 10 };
+  const winnerWhiteArea = Math.floor(pageWidth * pageHeight * 0.9);
+  const insetX = Math.max(2, Math.floor(pageWidth * 0.01));
+  const insetY = Math.max(2, Math.floor(pageHeight * 0.01));
+  const pagePixels = (pageWidth - insetX * 2) * (pageHeight - insetY * 2);
+  const pageWhitePixels = Math.floor(pagePixels * 0.9);
+  const inkPixels = Math.max(100, Math.floor(pagePixels * 0.01));
+  const component = { pageBounds, whiteArea: winnerWhiteArea };
+  const readiness = {
+    attempts: 2,
+    height,
+    inkPixels,
+    inkRatio: inkPixels / pagePixels,
+    inkRowBands: 4,
+    inkSpanRatio: 0.65,
+    pageBounds,
+    pagePixels,
+    pageWhitePixels,
+    pageWhiteRatio: pageWhitePixels / pagePixels,
+    proof: "white-page-with-rendered-ink",
+    renderedPage: true,
+    runnerUpWhiteArea: 1_000,
+    segmentationVersion: 2,
+    substantialComponents: [component],
+    substantialComponentCount: 1,
+    width,
+    winnerDominanceRatio: winnerWhiteArea / 1_000,
+    winnerWhiteArea,
+  };
+  const layoutWidth = Math.round(
+    configuration.width / configuration.browserZoom,
+  );
+  const layoutHeight = Math.round(
+    configuration.height / configuration.browserZoom,
+  );
+  const dpr = configuration.baseDevicePixelRatio * configuration.browserZoom;
+  const innerWidth = configuration.kind === "mobile" ? 980 : layoutWidth;
+  const innerHeight = innerWidth * layoutHeight / layoutWidth;
+  const configuredScale = configuration.pinchZoom;
+  const viewerScale = configuredScale * layoutWidth / innerWidth;
+  const viewport = (scale) => ({
+    devicePixelRatio: dpr,
+    innerHeight,
+    innerWidth,
+    screenHeight: layoutHeight,
+    screenWidth: layoutWidth,
+    visualViewportHeight: layoutHeight / scale,
+    visualViewportScale: scale,
+    visualViewportWidth: layoutWidth / scale,
+  });
+  const sessionIdentityHash = diagnosticIdentity(
+    configuration.id,
+    "reference-session",
+    index,
+  );
+  const frameIdentityHash = diagnosticIdentity(configuration.id, "frame");
+  const loaderIdentityHash = diagnosticIdentity(configuration.id, "loader");
+  readiness.captureLifecycle = {
+    baseline: {
+      checked: true,
+      frameIdentityHash,
+      frameTreeMainOnly: true,
+      frameUrlClass: "about-blank",
+      locationClass: "about-blank",
+      pageCount: 1,
+      pageUrlClass: "about",
+      readyStateComplete: true,
+      targetCount: 1,
+      workerCount: 0,
+    },
+    configurationId: configuration.id,
+    configuredViewport: viewport(configuredScale),
+    navigation: {
+      dispatchSequence: 1,
+      finalSequence: 4,
+      frameIdentityHash,
+      isDownload: false,
+      lifecycleFrameIdentityHash: frameIdentityHash,
+      lifecycleLoadSequence: 3,
+      lifecycleLoaderIdentityHash: loaderIdentityHash,
+      lifecycleName: "load",
+      loaderIdentityHash,
+      loadEventFiredSequence: 4,
+      newDocument: true,
+      responseSequence: 2,
+    },
+    proof: "fresh-owned-reference-loader",
+    requestedPage: targetPage,
+    sessionIdentityHash,
+    viewer: {
+      contentTypeClass: "html",
+      pdfEmbedPresent: false,
+      protocolClass: "extension",
+      readyStateComplete: true,
+      viewport: viewport(viewerScale),
+    },
+    viewportProof: "native-viewer-relational-v1",
+  };
+  const targetReadiness = {
+    ...readiness,
+    attempts: undefined,
+    captureLifecycle: undefined,
+    height: pageHeight,
+    pageBounds: { height: pageHeight, width: pageWidth, x: 0, y: 0 },
+    runnerUpWhiteArea: 0,
+    substantialComponents: [{
+      pageBounds: { height: pageHeight, width: pageWidth, x: 0, y: 0 },
+      whiteArea: winnerWhiteArea,
+    }],
+    width: pageWidth,
+    winnerDominanceRatio: null,
+  };
+  return {
+    readiness,
+    referenceTarget: {
+      anchorLimit: Math.max(80, Math.ceil(height * 0.25)),
+      components: [{ bounds: pageBounds, whiteArea: winnerWhiteArea }],
+      cropBounds: pageBounds,
+      policy: "unique-top-anchored-substantial-component",
+      readiness: targetReadiness,
+      requestedPage: targetPage,
+      selectedComponentIndex: 0,
+      selectionVersion: 1,
+      sourceHeight: height,
+      sourceWidth: width,
+    },
+    sessionIdentityHash,
+  };
+}
+
 function passingEvidence() {
   const fixture = {
     bytes: 4096,
@@ -2018,6 +2299,7 @@ function passingEvidence() {
     const priorityTarget = 4;
     const priorityCached = previewSatisfiedTarget;
     const priorityBitmapEventId = priorityCached ? 80 : 102;
+    const reference = passingCanonicalReference(configuration, 2, index);
     const priorityRequest = priorityCached
       ? null
       : {
@@ -2068,27 +2350,9 @@ function passingEvidence() {
       comparison: {
         lineLightScreenshot,
         paired: true,
-        referenceReadiness: {
-          attempts: 2,
-          height: 1000,
-          inkPixels: 8_000,
-          inkRatio: 0.01,
-          inkRowBands: 4,
-          inkSpanRatio: 0.65,
-          pageBounds: { height: 800, width: 1000, x: 100, y: 100 },
-          pagePixels: 800_000,
-          pageWhitePixels: 720_000,
-          pageWhiteRatio: 0.9,
-          proof: "white-page-with-rendered-ink",
-          renderedPage: true,
-          runnerUpWhiteArea: 10_000,
-          segmentationVersion: 2,
-          substantialComponentCount: 1,
-          width: 1200,
-          winnerDominanceRatio: 72,
-          winnerWhiteArea: 720_000,
-        },
+        referenceReadiness: reference.readiness,
         referenceScreenshot,
+        referenceTarget: reference.referenceTarget,
         sourceSha256: SHA,
         targetPage: 2,
       },
@@ -2936,10 +3200,47 @@ function passingEvidence() {
         profileRemoved: true,
       },
       referenceBrowserClosed: true,
+      referenceBrowsersClosed: true,
+      referenceSessions: matrix.map((run) => ({
+        cdpClosed: true,
+        cdpPresent: true,
+        configurationId: run.id,
+        errorPresent: false,
+        present: true,
+        processClosed: true,
+        profileRemoved: true,
+        sessionIdentityHash:
+          run.comparison.referenceReadiness.captureLifecycle
+            .sessionIdentityHash,
+      })),
       server: { error: null, present: true, processClosed: true },
       serverClosed: true,
     },
   };
+}
+
+function makeAdjacentReferenceComponentTheGlobalWinner(run) {
+  const readiness = run.comparison.referenceReadiness;
+  const referenceTarget = run.comparison.referenceTarget;
+  const selected = readiness.substantialComponents[0];
+  const adjacentBounds = {
+    ...selected.pageBounds,
+    y: referenceTarget.anchorLimit + 1,
+  };
+  const adjacent = {
+    pageBounds: adjacentBounds,
+    whiteArea: selected.whiteArea + 1,
+  };
+  readiness.pageBounds = adjacentBounds;
+  readiness.runnerUpWhiteArea = selected.whiteArea;
+  readiness.substantialComponents = [selected, adjacent];
+  readiness.substantialComponentCount = 2;
+  readiness.winnerDominanceRatio = adjacent.whiteArea / selected.whiteArea;
+  readiness.winnerWhiteArea = adjacent.whiteArea;
+  referenceTarget.components = [
+    referenceTarget.components[0],
+    { bounds: adjacentBounds, whiteArea: adjacent.whiteArea },
+  ];
 }
 
 test("accepts complete Issue 68 sharpness evidence", () => {
@@ -2954,6 +3255,16 @@ test("accepts complete Issue 68 sharpness evidence", () => {
       "preview-to-sharp-upgrade",
       "preview-to-sharp-upgrade",
     ],
+  );
+  assert.deepEqual(validatePdfSharpnessEvidence(evidence), []);
+});
+
+test("binds the requested top page when an adjacent page is the global winner", () => {
+  const evidence = passingEvidence();
+  makeAdjacentReferenceComponentTheGlobalWinner(evidence.matrix[0]);
+  assert.notDeepEqual(
+    evidence.matrix[0].comparison.referenceReadiness.pageBounds,
+    evidence.matrix[0].comparison.referenceTarget.cropBounds,
   );
   assert.deepEqual(validatePdfSharpnessEvidence(evidence), []);
 });
@@ -4731,6 +5042,33 @@ test("marks priority in the same task as the final mounted target scroll", async
   );
 });
 
+test("owns and tears down one fresh reference session per matrix configuration", async () => {
+  const source = await readFile(
+    "scripts/run-pdf-sharpness-browser-regression.mjs",
+    "utf8",
+  );
+  const captureSource = source.slice(
+    source.indexOf("async function captureReferenceScreenshots("),
+    source.indexOf("function samplesForPage("),
+  );
+  assert.match(
+    captureSource,
+    /for \(const configuration of PDF_SHARPNESS_MATRIX\)[\s\S]*startBrowser\(browserExecutable, true\)[\s\S]*readReferenceCaptureDiagnosticBaseline\(cdp\)[\s\S]*Page\.setLifecycleEventsEnabled[\s\S]*applyMatrixConfiguration\(cdp, configuration, true\)[\s\S]*readReferenceCaptureDiagnosticViewport\(cdp\)[\s\S]*navigateReferenceCaptureDiagnosticPage[\s\S]*waitForReferenceCaptureDiagnosticViewer[\s\S]*waitForRenderedReferenceScreenshot/u,
+  );
+  assert.match(
+    captureSource,
+    /finally \{[\s\S]*closeOwnedBrowser\(cdp, browser\)[\s\S]*referenceShutdowns\.push/u,
+  );
+  assert.match(
+    captureSource,
+    /screenshots\.set\(configuration\.id, \{[\s\S]*captureLifecycle: lifecycle[\s\S]*terminalError = operationError/u,
+  );
+  assert.doesNotMatch(
+    captureSource,
+    /requestedUrl\.hash[\s\S]*startBrowser\(browserExecutable, true\)/u,
+  );
+});
+
 test("uses composition and bitmap sequence when timer samples tie", () => {
   const evidence = passingEvidence();
   const upgraded = evidence.matrix[2].raster;
@@ -4864,6 +5202,9 @@ test("requires at least one strict preview-to-sharp upgrade in the matrix", () =
 
 test("rejects each material Issue 68 acceptance regression", async (t) => {
   const cases = [
+    ["legacy evidence schema", (value) => {
+      value.schemaVersion = 2;
+    }, /schemaVersion must be 3/u],
     ["live zoom transition", (value) => {
       value.matrix[1].viewport.transition = "normal";
     }, /live zoom transition/u],
@@ -4960,6 +5301,91 @@ test("rejects each material Issue 68 acceptance regression", async (t) => {
     ["forged reference dominance", (value) => {
       value.matrix[0].comparison.referenceReadiness.winnerDominanceRatio += 1;
     }, /rendered-page pixel proof/u],
+    ["missing requested reference target", (value) => {
+      delete value.matrix[0].comparison.referenceTarget;
+    }, /requested top page/u],
+    ["adjacent reference winner substituted for target", (value) => {
+      makeAdjacentReferenceComponentTheGlobalWinner(value.matrix[0]);
+      const target = value.matrix[0].comparison.referenceTarget;
+      target.selectedComponentIndex = 1;
+      target.cropBounds = { ...target.components[1].bounds };
+    }, /requested top page/u],
+    ["reference target component order", (value) => {
+      makeAdjacentReferenceComponentTheGlobalWinner(value.matrix[0]);
+      value.matrix[0].comparison.referenceTarget.components.reverse();
+    }, /requested top page/u],
+    ["reference target phantom component", (value) => {
+      const target = value.matrix[0].comparison.referenceTarget;
+      target.components.push(structuredClone(target.components[0]));
+    }, /requested top page/u],
+    ["reference target anchor ambiguity", (value) => {
+      makeAdjacentReferenceComponentTheGlobalWinner(value.matrix[0]);
+      const run = value.matrix[0];
+      const target = run.comparison.referenceTarget;
+      target.components[1].bounds.y = target.components[0].bounds.y + 1;
+      run.comparison.referenceReadiness.substantialComponents[1]
+        .pageBounds.y = target.components[1].bounds.y;
+      run.comparison.referenceReadiness.pageBounds.y =
+        target.components[1].bounds.y;
+    }, /requested top page/u],
+    ["reference target crop metrics", (value) => {
+      value.matrix[0].comparison.referenceTarget.readiness.renderedPage = false;
+    }, /requested top page/u],
+    ["reference target crop inset pixels", (value) => {
+      value.matrix[0].comparison.referenceTarget.readiness.pagePixels += 1;
+    }, /requested top page/u],
+    ["reference target crop white ratio", (value) => {
+      value.matrix[0].comparison.referenceTarget.readiness.pageWhiteRatio +=
+        0.01;
+    }, /requested top page/u],
+    ["reference target crop ink gates", (value) => {
+      value.matrix[0].comparison.referenceTarget.readiness.inkRowBands = 1;
+    }, /requested top page/u],
+    ["reference target crop winner", (value) => {
+      value.matrix[0].comparison.referenceTarget.readiness.winnerWhiteArea -= 1;
+    }, /requested top page/u],
+    ["reference target requested page", (value) => {
+      value.matrix[0].comparison.referenceTarget.requestedPage = 3;
+    }, /requested top page/u],
+    ["reference lifecycle missing", (value) => {
+      delete value.matrix[0].comparison.referenceReadiness.captureLifecycle;
+    }, /isolated loader lifecycle/u],
+    ["reference lifecycle configuration", (value) => {
+      value.matrix[0].comparison.referenceReadiness.captureLifecycle
+        .configurationId = value.matrix[1].id;
+    }, /isolated loader lifecycle/u],
+    ["reference lifecycle baseline", (value) => {
+      value.matrix[0].comparison.referenceReadiness.captureLifecycle
+        .baseline.workerCount = 1;
+    }, /isolated loader lifecycle/u],
+    ["reference lifecycle stale loader", (value) => {
+      value.matrix[0].comparison.referenceReadiness.captureLifecycle
+        .navigation.lifecycleLoaderIdentityHash = "f".repeat(64);
+    }, /isolated loader lifecycle/u],
+    ["reference lifecycle stale frame", (value) => {
+      value.matrix[0].comparison.referenceReadiness.captureLifecycle
+        .navigation.frameIdentityHash = "f".repeat(64);
+    }, /isolated loader lifecycle/u],
+    ["reference lifecycle viewport relation", (value) => {
+      value.matrix[4].comparison.referenceReadiness.captureLifecycle
+        .viewer.viewport.visualViewportWidth += 1;
+    }, /isolated loader lifecycle/u],
+    ["reference lifecycle DPR", (value) => {
+      value.matrix[4].comparison.referenceReadiness.captureLifecycle
+        .viewer.viewport.devicePixelRatio = 2;
+    }, /isolated loader lifecycle/u],
+    ["reference lifecycle screen", (value) => {
+      value.matrix[4].comparison.referenceReadiness.captureLifecycle
+        .configuredViewport.screenWidth += 1;
+    }, /isolated loader lifecycle/u],
+    ["reference lifecycle pinch", (value) => {
+      value.matrix[5].comparison.referenceReadiness.captureLifecycle
+        .configuredViewport.visualViewportScale = 1;
+    }, /isolated loader lifecycle/u],
+    ["reference lifecycle layout stability", (value) => {
+      value.matrix[4].comparison.referenceReadiness.captureLifecycle
+        .viewer.viewport.innerWidth += 2;
+    }, /isolated loader lifecycle/u],
     ["stale priority", (value) => {
       value.matrix[0].visibleFirst.firstPostScrollCompositionPage = 3;
     }, /current viewport first/u],
@@ -5670,6 +6096,30 @@ test("rejects each material Issue 68 acceptance regression", async (t) => {
     ["reference teardown", (value) => {
       value.teardown.reference.processClosed = false;
     }, /tear down cleanly/u],
+    ["reference teardown session missing", (value) => {
+      value.teardown.referenceSessions.pop();
+    }, /tear down cleanly/u],
+    ["reference teardown extra session", (value) => {
+      value.teardown.referenceSessions.push(
+        structuredClone(value.teardown.referenceSessions[0]),
+      );
+    }, /tear down cleanly/u],
+    ["reference teardown session order", (value) => {
+      value.teardown.referenceSessions.reverse();
+    }, /tear down cleanly/u],
+    ["reference teardown duplicate profile", (value) => {
+      value.teardown.referenceSessions[1].sessionIdentityHash =
+        value.teardown.referenceSessions[0].sessionIdentityHash;
+      value.matrix[1].comparison.referenceReadiness.captureLifecycle
+        .sessionIdentityHash = value.teardown.referenceSessions[0]
+          .sessionIdentityHash;
+    }, /tear down cleanly/u],
+    ["reference teardown lifecycle mismatch", (value) => {
+      value.teardown.referenceSessions[0].sessionIdentityHash = "f".repeat(64);
+    }, /tear down cleanly/u],
+    ["reference teardown partial failure", (value) => {
+      value.teardown.referenceSessions[2].errorPresent = true;
+    }, /tear down cleanly/u],
     ["server teardown", (value) => {
       value.teardown.server.processClosed = false;
     }, /tear down cleanly/u],
@@ -5800,6 +6250,56 @@ test("segments a rendered PDF page from disconnected viewer white stripes", () =
   assert.equal(rendered.renderedPage, true);
   assert.ok(rendered.inkRowBands >= 4);
   assert.ok(rendered.inkSpanRatio > 0.5);
+});
+
+test("crops the unique top-anchored requested page when an adjacent page is larger", () => {
+  const width = 400;
+  const height = 600;
+  const pixels = createReferencePixels(width, height);
+  for (const y of [20, 330]) {
+    paintReferenceRectangle(pixels, width, {
+      height: 250,
+      value: 250,
+      width: 240,
+      x: 80,
+      y,
+    });
+  }
+  for (const y of [70, 110, 150, 190]) {
+    paintReferenceRectangle(pixels, width, {
+      height: 4,
+      value: 30,
+      width: 160,
+      x: 120,
+      y,
+    });
+  }
+  for (const y of [390, 450]) {
+    paintReferenceRectangle(pixels, width, {
+      height: 4,
+      value: 30,
+      width: 160,
+      x: 120,
+      y,
+    });
+  }
+  const decoded = { height, pixels, width };
+  const analysis = analyzeReferencePixels(decoded);
+  const target = analyzeReferenceTarget(decoded, 3, analysis);
+  assert.equal(analysis.renderedPage, true);
+  assert.equal(analysis.pageBounds.y, 330);
+  assert.equal(target.requestedPage, 3);
+  assert.equal(target.selectedComponentIndex, 0);
+  assert.equal(target.cropBounds.y, 20);
+  assert.equal(target.readiness.renderedPage, true);
+  assert.deepEqual(
+    target.readiness.pageBounds,
+    { height: 250, width: 240, x: 0, y: 0 },
+  );
+
+  const ambiguous = structuredClone(target);
+  ambiguous.components[1].bounds.y = 100;
+  assert.ok(ambiguous.components[1].bounds.y < ambiguous.anchorLimit);
 });
 
 test("rejects blank pages, spinners, stripes, toolbars, and clipped pages", () => {

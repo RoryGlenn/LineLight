@@ -97,11 +97,17 @@ metrics are applied before the first PDF navigation, whose nonempty new loader
 and frame must match a `Page.lifecycleEvent` load while a separate
 post-dispatch `Page.loadEventFired` proves the page-load boundary. The report
 retains only opaque ID hashes, fixed protocol/content classes, and the actual
-DPR, screen, layout, and visual-viewport metrics. It then binds two adjacent,
-byte-identical candidate PNGs at the exact expected physical dimensions to
-fixed basenames, byte counts, hashes, and version-2 segmentation metrics, the
-exact clean source commit/tree, and reviewed file hashes. A stable candidate
-may deliberately report `renderedPage: false`:
+DPR, screen, layout, and visual-viewport metrics. Native mobile PDF viewing is
+validated relationally: pre-navigation and viewer layouts remain stable,
+layout aspect follows the emulated screen, visual dimensions multiplied by
+their scale map back to that screen within the DPR tolerance, and viewer scale
+derives from the requested pinch and screen-to-layout ratio. Chromium's
+non-meta mobile layout therefore needs no hardcoded browser width. The mode
+then binds two adjacent, byte-identical candidate PNGs at the exact expected
+physical dimensions to fixed basenames, byte counts, hashes, version-2
+segmentation metrics, and the deterministic requested-page component
+observation, plus the exact clean source commit/tree and reviewed file hashes.
+A stable candidate may deliberately report `renderedPage: false`:
 that observation is diagnosis, never Issue 68 acceptance, and the report has no
 `passed` field or acceptance schema version. Raw capture exceptions, local
 output paths, private fixtures, and browser-profile paths are never serialized;
@@ -120,10 +126,15 @@ deployment, deterministic PDF hash, screenshots, and JSON result to that exact
 source commit/tree and reviewed-file hash set. Recorded evidence accepts only
 the repository's deterministic PDF
 fixture; a private local PDF is permitted only with transient `--output`, so its
-rendered pixels cannot be committed accidentally. Reference-browser,
-app-browser, and server cleanup run as
-independent settled operations; the validator requires each CDP connection,
-process, and disposable profile to report its own successful teardown.
+rendered pixels cannot be committed accidentally. Each acceptance configuration
+owns a fresh reference browser, CDP connection, and disposable profile from one
+exact `about:blank` baseline through its first configured PDF navigation and
+new-loader lifecycle. No reference target is reused across desktop, zoom,
+mobile, or pinch configurations. Each session closes before the next begins,
+is bound by an opaque unique identity to its comparison and exact teardown row,
+and is aggregated independently from app-browser and server cleanup. The
+schema-3 validator requires all six ordered reference sessions, every
+process/CDP/profile cleanup, and the app and server teardown to succeed.
 
 The six-scenario matrix covers desktop DPR 1 and 2 at normal and effective 125%
 browser-zoom metrics, plus mobile DPR 3 at normal scale and a 200%
@@ -148,7 +159,14 @@ runner-up white areas, and their exact dominance ratio before applying the
 unchanged 1% inset and five rendered-ink thresholds. A disconnected white
 thumbnail rail, toolbar, blank page, clipped page, spinner, loading surface, or
 ambiguous tied components therefore cannot satisfy readiness. The JSON
-validator independently checks those segmentation metrics and additionally
+validator independently checks those global segmentation metrics. It proves
+the requested page separately instead of assuming that page is the largest
+visible component: all substantial components are retained in deterministic
+top-first order, exactly one must be anchored in the top quarter after the
+exact `#page=N&zoom=page-width` new-loader navigation, and its exact RGBA bounds
+are cropped and run through the same unchanged version-2 thresholds. An
+adjacent page may legitimately be the global white-area winner, but cannot be
+substituted for the top-anchored requested page. The validator additionally
 requires:
 
 - an adjacent page cached at the independently derived, safety-capped preview
