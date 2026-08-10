@@ -72,6 +72,33 @@ privacy-safe hashes, counts, and independently derived source/model/library
 condition booleans even when a later setup step fails, rather than being
 discarded as one null result.
 
+When a failure depends on cumulative state across the six app configurations,
+use the distinct app-matrix runtime diagnostic with a fresh, absent external
+output directory:
+
+```bash
+node scripts/run-pdf-sharpness-browser-regression.mjs \
+  --diagnose-app-matrix-runtime \
+  --output /tmp/issue-68-app-matrix-runtime-diagnostic
+```
+
+This mode makes the same fresh build and runs the exact desktop/mobile matrix
+in its canonical order through one disposable app browser, CDP connection, and
+profile, while skipping fallback and native-reference work. It retains all
+completed rows and at most one terminal partial row. Each row binds the exact
+public fixture as observed in the page, its model and priority identities, the
+network fixed point, and a basename/hash-bound screenshot when that stage
+completed. A release failure retains one privacy-safe snapshot of the source
+and priority page shells, canvas state, visibility classes, independently
+recomputed reader/layout/visual intersections, mounted range, viewport, and
+bounded import-bound worker/draw activity. Bounded phase, draw-hook, canvas
+sampler, worker-dispatch, and Long Task records expose interval correlations
+without claiming causation. Raw errors, document identities, URLs, profile
+paths, and arbitrary local output paths are not serialized. The report is
+`diagnostic: true`, has `completed` rather than `passed`, and cannot satisfy
+canonical acceptance; exact clean source/build/fixture/session bindings and
+app/CDP/process/profile/server teardown remain mandatory.
+
 When the native PDF-viewer readiness classifier itself needs diagnosis, use
 the distinct reference-capture mode with a fresh, absent external output
 directory. It defaults to the first desktop configuration:

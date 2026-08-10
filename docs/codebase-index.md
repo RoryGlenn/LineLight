@@ -326,6 +326,15 @@ Its exact before/after
 stage sequence and stage-derived fixed failure category retain partial,
 privacy-safe setup hash/count/condition evidence without serializing raw
 exceptions.
+A separate app-matrix runtime diagnostic replays the exact six configurations
+in order with one disposable app browser/profile, but skips fallback and native
+reference capture. It retains a completed prefix plus at most one terminal
+partial row, including the exact public-file observation, priority proof,
+offscreen-release DOM/canvas/geometry snapshot, phase boundaries, bounded
+draw/sampler/worker timing rings, Long Task correlations, and the row's CDP
+fixed point. Its fresh-build/source, external-output, privacy, single-session,
+and full app/server teardown bindings are fail-closed. The report is explicitly
+noncanonical and cannot satisfy Issue 68 acceptance.
 A third, reference-only diagnostic allowlists the first desktop/page-2 and
 mobile-DPR-3/page-3 native-viewer configurations for the exact public fixture
 and retains two consecutive byte-identical PNG candidates plus the analyzer's

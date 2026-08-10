@@ -10,6 +10,10 @@ import { runInNewContext } from "node:vm";
 import { deflateSync } from "node:zlib";
 
 import {
+  waitForExpression as waitForHighlightExpression,
+} from "../scripts/run-pdf-highlight-browser-regression.mjs";
+
+import {
   PDF_SHARPNESS_MATRIX,
   PDF_SHARPNESS_MAX_BITMAP_COUNT,
   PDF_SHARPNESS_MAX_BITMAP_PIXELS,
@@ -19,6 +23,7 @@ import {
   validatePdfSharpnessEvidence,
 } from "../scripts/pdf-sharpness-evidence.mjs";
 import {
+  APP_MATRIX_RUNTIME_DIAGNOSTIC_STAGES,
   FALLBACK_IMPORT_DIAGNOSTIC_STAGES,
   FALLBACK_IMPORT_DIAGNOSTIC_STEPS,
   REFERENCE_CAPTURE_DIAGNOSTIC_CANDIDATES,
@@ -32,6 +37,7 @@ import {
   buildCdpNetworkFixedPointDiagnostic,
   buildFallbackWorkerModuleSource,
   buildFallbackImportDiagnosticReport,
+  buildAppMatrixRuntimeDiagnosticReport,
   buildFirstNetworkDiagnosticReport,
   buildReferenceCaptureDiagnosticReport,
   classifyCdpDiagnosticUrl,
@@ -7063,6 +7069,7 @@ test("documents a headed, fresh-build-only command without launching it", async 
   assert.match(stdout, /fresh production build/u);
   assert.match(stdout, /visible browser/u);
   assert.match(stdout, /--diagnose-fallback-import/u);
+  assert.match(stdout, /--diagnose-app-matrix-runtime/u);
   assert.match(stdout, /--diagnose-first-network-fixed-point/u);
   assert.match(stdout, /--diagnose-reference-capture/u);
   assert.match(stdout, /--reference-configuration/u);
@@ -7517,8 +7524,1196 @@ test("forces bounded fallback diagnostic cleanup before reporting", async () => 
   );
   assert.match(
     source,
-    /runBoundedDiagnosticOperation\(collectAppEvidence[\s\S]*appCdp\?\.close\(\)[\s\S]*finally \{[\s\S]*closeOwnedBrowser[\s\S]*buildFallbackImportDiagnosticReport/u,
+    /runBoundedDiagnosticOperation\(\(\) => \{[\s\S]*appCollectionPromise = collectAppEvidence\(\)[\s\S]*appCdp\?\.close\(\)[\s\S]*finally \{[\s\S]*closeOwnedBrowser[\s\S]*buildFallbackImportDiagnosticReport/u,
   );
+});
+
+test("keeps the app-matrix runtime diagnostic bounded and noncanonical", async () => {
+  const runner = "scripts/run-pdf-sharpness-browser-regression.mjs";
+  const freshOutput = path.join(
+    os.tmpdir(),
+    `issue-68-app-runtime-cli-${process.pid}`,
+  );
+  await rm(freshOutput, { force: true, recursive: true });
+  const rejectedArguments = [
+    [["--diagnose-app-matrix-runtime", "--record"], /cannot be combined with --record/u],
+    [["--diagnose-app-matrix-runtime"], /requires an explicit --output/u],
+    [[
+      "--diagnose-app-matrix-runtime",
+      "--output",
+      "outputs/issue-68-app-runtime",
+    ], /output must be outside the source repository/u],
+    [[
+      "--diagnose-app-matrix-runtime",
+      "--fixture",
+      path.join(os.tmpdir(), "private-reader-document.pdf"),
+      "--output",
+      freshOutput,
+    ], /requires the exact repository PDF fixture/u],
+    ...[
+      "--diagnose-fallback-import",
+      "--diagnose-first-network-fixed-point",
+      "--diagnose-reference-capture",
+    ].map((mode) => [[
+      "--diagnose-app-matrix-runtime",
+      mode,
+      "--output",
+      freshOutput,
+    ], /diagnostic modes are mutually exclusive/u]),
+  ];
+  for (const [arguments_, expected] of rejectedArguments) {
+    await assert.rejects(
+      execFileAsync(process.execPath, [runner, ...arguments_], {
+        cwd: path.resolve("."),
+      }),
+      expected,
+    );
+  }
+
+  const existingOutput = await mkdtemp(
+    path.join(os.tmpdir(), "issue-68-app-runtime-existing-"),
+  );
+  const symlinkRoot = await mkdtemp(
+    path.join(os.tmpdir(), "issue-68-app-runtime-link-"),
+  );
+  try {
+    await assert.rejects(
+      execFileAsync(process.execPath, [
+        runner,
+        "--diagnose-app-matrix-runtime",
+        "--output",
+        existingOutput,
+      ], { cwd: path.resolve(".") }),
+      /fresh absent directory/u,
+    );
+    const repositoryLink = path.join(symlinkRoot, "repository-link");
+    await symlink(path.resolve("."), repositoryLink, "dir");
+    await assert.rejects(
+      execFileAsync(process.execPath, [
+        runner,
+        "--diagnose-app-matrix-runtime",
+        "--output",
+        path.join(repositoryLink, "outputs", "runtime-diagnostic"),
+      ], { cwd: path.resolve(".") }),
+      /output must be outside the source repository/u,
+    );
+  } finally {
+    await Promise.all([
+      rm(existingOutput, { force: true, recursive: true }),
+      rm(symlinkRoot, { force: true, recursive: true }),
+    ]);
+  }
+  await assert.rejects(
+    execFileAsync(process.execPath, [
+      runner,
+      "--diagnose-app-matrix-runtime",
+      "--output",
+      freshOutput,
+    ], {
+      cwd: path.resolve("."),
+      env: { ...process.env, DISPLAY: "", WAYLAND_DISPLAY: "" },
+    }),
+    /requires a graphical DISPLAY or WAYLAND_DISPLAY/u,
+  );
+
+  const source = await readFile(runner, "utf8");
+  assert.match(
+    source,
+    /if \(options\.diagnoseAppMatrixRuntime\) \{[\s\S]*existsSync\(options\.outputDirectory\)[\s\S]*await mkdir\(options\.outputDirectory\)/u,
+  );
+  assert.match(
+    source,
+    /appBrowser = await startBrowser[\s\S]*appCdp = await CdpSession\.connect[\s\S]*for \(const configuration of PDF_SHARPNESS_MATRIX\)/u,
+  );
+  assert.match(
+    source,
+    /appMatrixRuntimeDiagnostics: options\.diagnoseAppMatrixRuntime/u,
+  );
+  assert.match(
+    source,
+    /!options\.diagnoseFallbackImport &&\s*!options\.diagnoseFirstNetworkFixedPoint &&\s*!options\.diagnoseAppMatrixRuntime[\s\S]*forced-main-fallback/u,
+  );
+  assert.match(
+    source,
+    /APP_MATRIX_RUNTIME_DIAGNOSTIC_RUN_TIMEOUT_MS[\s\S]*appMatrixRuntimeAbortState\.aborted = true[\s\S]*await appCollectionPromise\.catch/u,
+  );
+  assert.match(source, /buildAppMatrixRuntimeDiagnosticReport/u);
+  assert.match(source, /pdf-sharpness-app-matrix-runtime-diagnostic\.json/u);
+  assert.doesNotMatch(
+    buildAppMatrixRuntimeDiagnosticReport.toString(),
+    /\bpassed\b|schemaVersion/u,
+  );
+});
+
+test("stops expression polling when the owned CDP session closes", async () => {
+  let sends = 0;
+  const cdp = {
+    send() {
+      sends += 1;
+      return Promise.reject(new Error("The browser debugging connection closed."));
+    },
+    webSocket: { readyState: 3 },
+  };
+  const startedAt = Date.now();
+  await assert.rejects(
+    waitForHighlightExpression(cdp, "true", "a closed session", 5_000),
+    /debugging connection closed/u,
+  );
+  assert.equal(sends, 1);
+  assert.ok(Date.now() - startedAt < 500);
+});
+
+function passingAppMatrixRuntimeFailureInput(outputDirectory) {
+  const configurationId = "desktop-dpr1-zoom100";
+  const adjacentPage = 2;
+  const priorityTarget = 4;
+  const stageHistory = APP_MATRIX_RUNTIME_DIAGNOSTIC_STAGES.slice(
+    0,
+    APP_MATRIX_RUNTIME_DIAGNOSTIC_STAGES.indexOf(
+      "release-observation-started",
+    ) + 1,
+  );
+  const phaseStages = stageHistory.filter((stage) =>
+    !stage.startsWith("navigate-") &&
+    APP_MATRIX_RUNTIME_DIAGNOSTIC_STAGES.indexOf(stage) <=
+      APP_MATRIX_RUNTIME_DIAGNOSTIC_STAGES.indexOf("scenario-finish-started")
+  );
+  const documentKey = "public-document:revision-1";
+  const revision = "revision-1";
+  const modelIdentity = {
+    documentKey,
+    importJobId: 1,
+    revision,
+    workerInstanceId: 1,
+  };
+  const readerRect = { bottom: 900, left: 0, right: 1_100, top: 0 };
+  const priorityProbe = {
+    compositions: [{
+      activityId: 101,
+      at: 300,
+      bitmapEventId: 19,
+      compositionId: 1,
+      drawInvocationId: 51,
+      geometryVisible: true,
+      height: 990,
+      page: priorityTarget,
+      source: "worker-bitmap",
+      visible: true,
+      width: 765,
+    }],
+    scrollAction: {
+      activityId: 100,
+      at: 290,
+      drawInvocationBoundary: 50,
+      readerViewportAfter: readerRect,
+      readerViewportBefore: readerRect,
+      scrollTopAfter: 1_000,
+      scrollTopBefore: 0,
+      targetGeometryAfter: { bottom: 800, left: 100, right: 900, top: 100 },
+      targetGeometryBefore: {
+        bottom: 1_800,
+        left: 100,
+        right: 900,
+        top: 1_000,
+      },
+      targetPage: priorityTarget,
+    },
+    targetAfter: {
+      canvasHeight: 990,
+      canvasWidth: 765,
+      renderSource: "worker-bitmap",
+      visible: true,
+    },
+    targetBefore: { visible: false },
+    targetPage: priorityTarget,
+  };
+  const page = ({ distance, pageNumber, rect, visible, width, height }) => ({
+    canvas: {
+      capped: "false",
+      connected: true,
+      height,
+      present: true,
+      renderSource: "worker-bitmap",
+      scale: 1.25,
+      targetHeight: height,
+      targetScale: 1.25,
+      targetWidth: width,
+      width,
+    },
+    datasetVisible: visible ? "true" : "false",
+    distance,
+    intersectsLayoutViewport: visible,
+    intersectsReader: visible,
+    intersectsVisualViewport: visible,
+    page: pageNumber,
+    pageIndex: pageNumber - 1,
+    present: true,
+    rect,
+    textOverlayCount: 12,
+  });
+  const row = {
+    adjacentPage,
+    completedSnapshot: {
+      drawHookTimingCount: 0,
+      drawHookTimings: [],
+      longTasks: [],
+      phaseMarkers: phaseStages.map((stage, index) => ({
+        activityId: index + 1,
+        at: 50 + index * 10,
+        configurationId,
+        drawInvocationId: index,
+        sequence: index + 1,
+        stage,
+        workerEventId: index,
+      })),
+      samplerTimingCount: 0,
+      samplerTimings: [],
+      workerMessageTimingCount: 0,
+      workerMessageTimings: [],
+    },
+    configurationId,
+    currentStage: "release-observation-started",
+    failureStage: "release-observation-started",
+    finalizationErrorPresent: false,
+    modelCompletion: { documentKey, importJobId: 1, revision },
+    modelIdentity,
+    priorityProbe,
+    priorityTarget,
+    releaseSnapshot: {
+      draws: [{
+        activityId: 101,
+        at: 300,
+        bitmapEventId: 19,
+        compositionId: 1,
+        drawInvocationId: 51,
+        height: 990,
+        page: priorityTarget,
+        source: "worker-bitmap",
+        visible: true,
+        width: 765,
+      }],
+      elapsedMs: 90_050,
+      evaluationAttemptCount: 901,
+      evaluationErrorCount: 0,
+      mountedPages: [1, 2, 3, 4, 5, 6],
+      observedAt: 450,
+      pages: [
+        page({
+          distance: 2,
+          height: 100,
+          pageNumber: adjacentPage,
+          rect: { bottom: -100, left: 100, right: 900, top: -1_000 },
+          visible: false,
+          width: 100,
+        }),
+        page({
+          distance: 0,
+          height: 990,
+          pageNumber: priorityTarget,
+          rect: { bottom: 800, left: 100, right: 900, top: 100 },
+          visible: true,
+          width: 765,
+        }),
+      ],
+      range: "0:5",
+      reader: {
+        clientHeight: 900,
+        clientWidth: 1_100,
+        rect: readerRect,
+        scrollHeight: 5_000,
+        scrollTop: 1_500,
+        scrollWidth: 1_100,
+      },
+      snapshotErrorPresent: false,
+      viewport: {
+        devicePixelRatio: 1,
+        innerHeight: 900,
+        innerWidth: 1_100,
+        visualHeight: 900,
+        visualOffsetLeft: 0,
+        visualOffsetTop: 0,
+        visualScale: 1,
+        visualWidth: 1_100,
+      },
+      visiblePages: [priorityTarget],
+      waitOutcome: "timeout",
+      workerEvents: [{
+        activityId: 102,
+        at: 350,
+        direction: "to-worker",
+        documentKey,
+        enabled: false,
+        eventId: 20,
+        jobId: 1,
+        pageNumber: adjacentPage,
+        revision,
+        type: "render",
+        workerInstanceId: 1,
+      }],
+    },
+    scenario: { finishedAt: 500, startedAt: 100 },
+    scenarioFinalized: true,
+    screenshot: {
+      bytes: 1_024,
+      path: path.relative(
+        path.resolve("."),
+        path.join(outputDirectory, `linelight-${configurationId}.png`),
+      ),
+      sha256: "9".repeat(64),
+    },
+    sequence: 1,
+    sessionIdentityHash: "e".repeat(64),
+    sourceObservation: {
+      bytes: PUBLIC_PDF_FIXTURE_BYTES,
+      selectionCount: 1,
+      sha256: PUBLIC_PDF_FIXTURE_SHA256,
+    },
+    stageHistory,
+    status: "failed",
+  };
+  return {
+    build: {
+      fresh: true,
+      localManifest: {
+        deploymentId: "d".repeat(20),
+        privateField: "/home/private/build",
+        sha256: SHA,
+      },
+      servedManifest: { deploymentId: "d".repeat(20), sha256: SHA },
+      sourceCommit: COMMIT,
+      sourceTree: TREE,
+    },
+    fixture: {
+      bytes: PUBLIC_PDF_FIXTURE_BYTES,
+      path: PUBLIC_PDF_FIXTURE,
+      privateField: "/home/private/fixture",
+      sha256: PUBLIC_PDF_FIXTURE_SHA256,
+    },
+    initialTargetBaseline: {
+      checked: true,
+      pageCount: 1,
+      pageUrlClass: "about",
+      targetCount: 1,
+      workerCount: 0,
+    },
+    outputDirectory,
+    recordedAt: "2026-08-10T00:00:00.000Z",
+    rows: [row],
+    runnerFailure: new Error("/home/private/first stack"),
+    runnerFailureStage: `matrix:${configurationId}`,
+    sessionIdentityHash: "e".repeat(64),
+    source: {
+      ...passingReferenceDiagnosticSource(),
+      postBuildCommit: COMMIT,
+      postBuildStatus: [],
+      postBuildTree: TREE,
+    },
+    teardown: {
+      app: {
+        cdpClosed: true,
+        cdpPresent: true,
+        error: null,
+        present: true,
+        processClosed: true,
+        profileRemoved: true,
+      },
+      browserClosed: true,
+      cdpClosed: true,
+      errors: [],
+      profilesRemoved: true,
+      reference: {
+        cdpClosed: true,
+        cdpPresent: false,
+        error: null,
+        present: false,
+        processClosed: true,
+        profileRemoved: true,
+      },
+      server: { error: null, present: true, processClosed: true },
+      serverClosed: true,
+    },
+  };
+}
+
+function passingAppMatrixNetworkDiagnostic(label) {
+  const documentSetup = completedCdpTargetSetup({ cdpIdStart: 1, startedAt: 10 });
+  const parserSetup = completedCdpTargetSetup({ cdpIdStart: 11, startedAt: 30 });
+  const serviceSetup = completedCdpTargetSetup({
+    cdpIdStart: 21,
+    serviceWorker: true,
+    startedAt: 50,
+  });
+  const documentTarget = {
+    ancestry: [],
+    attachComplete: true,
+    ...documentSetup,
+    detached: false,
+    identityHash: diagnosticIdentity(`${label}-document-session`, `${label}-document-target`),
+    parentSessionId: null,
+    phase: label,
+    resumed: true,
+    sessionId: `${label}-document-session`,
+    targetId: `${label}-document-target`,
+    type: "worker",
+    urlClass: "pdf-document-worker",
+    waitingForDebugger: true,
+  };
+  const parserTarget = {
+    ancestry: [{
+      phase: label,
+      sessionId: documentTarget.sessionId,
+      type: "worker",
+      urlClass: "pdf-document-worker",
+    }],
+    attachComplete: true,
+    ...parserSetup,
+    detached: false,
+    identityHash: diagnosticIdentity(`${label}-parser-session`, `${label}-parser-target`),
+    parentSessionId: documentTarget.sessionId,
+    phase: label,
+    resumed: true,
+    sessionId: `${label}-parser-session`,
+    targetId: `${label}-parser-target`,
+    type: "worker",
+    urlClass: "pdf-parser-worker",
+    waitingForDebugger: true,
+  };
+  const serviceTarget = {
+    ancestry: [],
+    attachComplete: true,
+    ...serviceSetup,
+    detached: false,
+    identityHash: diagnosticIdentity(`${label}-service-session`, `${label}-service-target`),
+    parentSessionId: null,
+    phase: label,
+    resumed: true,
+    sessionId: `${label}-service-session`,
+    targetId: `${label}-service-target`,
+    type: "service_worker",
+    urlClass: "app-asset",
+    waitingForDebugger: true,
+  };
+  const settlement = (target, requestId) => ({
+    identityHash: diagnosticIdentity(
+      target.parentSessionId,
+      requestId,
+      target.sessionId,
+      target.targetId,
+    ),
+    method: "GET",
+    phase: label,
+    requestId,
+    requestSessionId: target.parentSessionId,
+    resourceType: "Script",
+    targetDetachedAtSettlement: false,
+    targetId: target.targetId,
+    targetParentSessionId: target.parentSessionId,
+    targetSessionId: target.sessionId,
+    targetType: "worker",
+    terminalReason: "target-attached",
+    urlClass: target.urlClass,
+  });
+  const counts = {
+    attachErrorCount: 0,
+    attachPromiseCount: 3,
+    completedRequestCount: 3,
+    externalRequestCount: 0,
+    inflightRequestCount: 0,
+    networkFailureCount: 0,
+    pendingAttachCount: 0,
+    requestCount: 3,
+    serviceWorkerBootstrapObservationCount: 1,
+    targetBootstrapSettlementCount: 2,
+    targetCount: 3,
+  };
+  return {
+    attachErrors: [],
+    counts,
+    inflightRequests: [],
+    initialTargetBaseline: {
+      checked: true,
+      pageCount: 1,
+      pageUrlClass: "about",
+      targetCount: 1,
+      workerCount: 0,
+    },
+    label,
+    outcome: "fixed-point-reached",
+    pendingAttaches: [],
+    serviceWorkerBootstrapObservations: [{
+      earlierRequestCount: 0,
+      identityHash: diagnosticIdentity(
+        serviceTarget.sessionId,
+        `${label}-service-request`,
+        serviceTarget.sessionId,
+        serviceTarget.targetId,
+      ),
+      method: "GET",
+      phase: label,
+      requestId: `${label}-service-request`,
+      requestIsFirst: true,
+      requestSequence: 3,
+      requestSessionId: serviceTarget.sessionId,
+      requestStartedAt: serviceSetup.resumeDispatchedAt + 1,
+      resourceType: "Script",
+      resumeDispatchedAt: serviceSetup.resumeDispatchedAt,
+      sessionFailureCount: 0,
+      sessionRequestCount: 1,
+      targetDetachedAtObservation: false,
+      targetId: serviceTarget.targetId,
+      targetSessionId: serviceTarget.sessionId,
+      targetType: "service_worker",
+      targetUrlMatched: true,
+      terminalAt: serviceSetup.resumeDispatchedAt + 2,
+      terminalReason: "loading-finished",
+      urlClass: "app-asset",
+    }],
+    serviceWorkerBypassed: true,
+    targetBootstrapSettlements: [
+      settlement(documentTarget, `${label}-document-request`),
+      settlement(parserTarget, `${label}-parser-request`),
+    ],
+    targets: [documentTarget, parserTarget, serviceTarget],
+    wait: {
+      recentSamples: [1, 2, 3].map((stableSamples) => ({
+        attachErrorCount: 0,
+        attachmentReady: true,
+        incompleteTargetCount: 0,
+        inflightRequestCount: 0,
+        pendingAttachCount: 0,
+        requestCount: counts.requestCount,
+        serviceWorkerBypassed: true,
+        stableSamples,
+        targetCount: counts.targetCount,
+      })),
+      requiredStableSamples: 3,
+      stableSamples: 3,
+    },
+  };
+}
+
+function passingAppMatrixRuntimeCompletedInput(outputDirectory) {
+  const base = passingAppMatrixRuntimeFailureInput(outputDirectory);
+  const rows = PDF_SHARPNESS_MATRIX.map((configuration, index) => {
+    const row = structuredClone(base.rows[0]);
+    const adjacentPage = index < 4 ? 2 : 3;
+    const priorityTarget = adjacentPage + 2;
+    const documentKey = `public-document-${index + 1}:revision-${index + 1}`;
+    const revision = `revision-${index + 1}`;
+    row.adjacentPage = adjacentPage;
+    row.configurationId = configuration.id;
+    row.currentStage = APP_MATRIX_RUNTIME_DIAGNOSTIC_STAGES.at(-1);
+    row.failureStage = null;
+    row.modelCompletion = { documentKey, importJobId: index + 1, revision };
+    row.modelIdentity = {
+      documentKey,
+      importJobId: index + 1,
+      revision,
+      workerInstanceId: index + 1,
+    };
+    row.networkFixedPoint = passingAppMatrixNetworkDiagnostic(configuration.id);
+    row.priorityProbe.targetPage = priorityTarget;
+    row.priorityProbe.scrollAction.targetPage = priorityTarget;
+    row.priorityProbe.compositions[0].page = priorityTarget;
+    row.priorityTarget = priorityTarget;
+    row.releaseSnapshot.draws[0].page = priorityTarget;
+    row.releaseSnapshot.pages[0].page = adjacentPage;
+    row.releaseSnapshot.pages[0].pageIndex = adjacentPage - 1;
+    row.releaseSnapshot.pages[0].canvas.height = 0;
+    row.releaseSnapshot.pages[0].canvas.width = 0;
+    row.releaseSnapshot.pages[1].page = priorityTarget;
+    row.releaseSnapshot.pages[1].pageIndex = priorityTarget - 1;
+    row.releaseSnapshot.visiblePages = [priorityTarget];
+    row.releaseSnapshot.viewport = {
+      devicePixelRatio:
+        configuration.baseDevicePixelRatio * configuration.browserZoom,
+      innerHeight: Math.round(configuration.height / configuration.browserZoom),
+      innerWidth: Math.round(configuration.width / configuration.browserZoom),
+      visualHeight:
+        Math.round(configuration.height / configuration.browserZoom) /
+          configuration.pinchZoom,
+      visualOffsetLeft: 0,
+      visualOffsetTop: 0,
+      visualScale: configuration.pinchZoom,
+      visualWidth:
+        Math.round(configuration.width / configuration.browserZoom) /
+          configuration.pinchZoom,
+    };
+    row.releaseSnapshot.waitOutcome = "released";
+    row.releaseSnapshot.workerEvents[0] = {
+      ...row.releaseSnapshot.workerEvents[0],
+      documentKey,
+      jobId: index + 1,
+      pageNumber: adjacentPage,
+      revision,
+      workerInstanceId: index + 1,
+    };
+    row.screenshot.path = path.relative(
+      path.resolve("."),
+      path.join(outputDirectory, `linelight-${configuration.id}.png`),
+    );
+    row.sequence = index + 1;
+    row.stageHistory = [...APP_MATRIX_RUNTIME_DIAGNOSTIC_STAGES];
+    const phaseStages = row.stageHistory.filter((stage) =>
+      !stage.startsWith("navigate-") &&
+      APP_MATRIX_RUNTIME_DIAGNOSTIC_STAGES.indexOf(stage) <=
+        APP_MATRIX_RUNTIME_DIAGNOSTIC_STAGES.indexOf("scenario-finish-started")
+    );
+    row.completedSnapshot.phaseMarkers = phaseStages.map((stage, phaseIndex) => ({
+      activityId: phaseIndex + 1,
+      at: 50 + phaseIndex * 10,
+      configurationId: configuration.id,
+      drawInvocationId: phaseIndex,
+      sequence: phaseIndex + 1,
+      stage,
+      workerEventId: phaseIndex,
+    }));
+    row.status = "completed";
+    return row;
+  });
+  return {
+    ...base,
+    rows,
+    runnerFailure: null,
+    runnerFailureStage: null,
+  };
+}
+
+function addRepresentativeAppMatrixRuntimeTiming(input, rowIndex = 0) {
+  const row = input.rows[rowIndex];
+  row.scenario = { finishedAt: 1_400, startedAt: 100 };
+  row.completedSnapshot.drawHookTimingCount = 1;
+  row.completedSnapshot.drawHookTimings = [{
+    activityId: 120,
+    blockLookupCompletedAt: 205,
+    blockRectCompletedAt: 215,
+    drawInvocationId: 70,
+    hookEnteredAt: 200,
+    microtaskRecordedAt: 250,
+    nativeDrawCompletedAt: 240,
+    nativeDrawStartedAt: 235,
+    nativeDrawThrew: false,
+    page: row.adjacentPage,
+    readerLookupCompletedAt: 210,
+    readerRectCompletedAt: 220,
+    visiblePagesCompletedAt: 230,
+    visiblePagesStartedAt: 225,
+  }];
+  row.completedSnapshot.samplerTimingCount = 1;
+  row.completedSnapshot.samplerTimings = [{
+    blockCount: 6,
+    endedAt: 195,
+    readerRectCompletedAt: 190,
+    sampleStartedAt: 180,
+  }];
+  row.completedSnapshot.workerMessageTimingCount = 1;
+  row.completedSnapshot.workerMessageTimings = [{
+    activityId: 121,
+    eventId: 71,
+    messageReceivedAt: 190,
+    messageSettledAt: 1_210,
+    pageNumber: row.priorityTarget,
+    type: "bitmap",
+  }];
+  row.completedSnapshot.longTasks = [{
+    attribution: [{
+      containerIdPresent: false,
+      containerNamePresent: false,
+      containerSrcPresent: false,
+      containerType: "window",
+    }],
+    attributionCount: 1,
+    attributionTruncated: false,
+    duration: 1_004,
+    name: "self",
+    startTime: 200,
+  }];
+  return input;
+}
+
+test("builds a fail-closed privacy-safe app-matrix runtime diagnostic", () => {
+  const input = passingAppMatrixRuntimeFailureInput(
+    path.join(os.tmpdir(), "issue-68-app-matrix-runtime-test"),
+  );
+  const report = buildAppMatrixRuntimeDiagnosticReport(input);
+  assert.equal(report.diagnostic, true);
+  assert.equal(report.mode, "app-matrix-runtime");
+  assert.equal(report.completed, false);
+  assert.equal(report.execution.orderExact, true);
+  assert.equal(report.rows[0].integrity, true);
+  assert.equal(report.rows[0].release.classification, "offscreen-stale-canvas");
+  assert.deepEqual(report.failures, [
+    "The bounded app-matrix runtime diagnostic runner reported a stage failure.",
+  ]);
+  assert.equal("passed" in report, false);
+  assert.equal("schemaVersion" in report, false);
+  const serialized = JSON.stringify(report);
+  assert.doesNotMatch(
+    serialized,
+    /\/home\/private|privateField|documentKey|revision|public-document/u,
+  );
+
+  const changedPrivateError = buildAppMatrixRuntimeDiagnosticReport({
+    ...input,
+    runnerFailure: new Error("C:\\private\\second stack"),
+  });
+  assert.deepEqual(changedPrivateError, report);
+
+  const missingRunner = buildAppMatrixRuntimeDiagnosticReport({
+    ...input,
+    runnerFailure: null,
+    runnerFailureStage: null,
+  });
+  assert.equal(missingRunner.completed, false);
+  assert.ok(missingRunner.failures.some((failure) =>
+    failure.includes("failure row is not bound")
+  ));
+
+  const privateCleanupReport = (privateValue) => {
+    const changed = passingAppMatrixRuntimeFailureInput(input.outputDirectory);
+    changed.source.privateProfilePath = privateValue;
+    changed.rows[0].privateWorkerDocument = privateValue;
+    changed.teardown.app.error = new Error(privateValue);
+    changed.teardown.app.profilePath = privateValue;
+    changed.teardown.errors = [new Error(privateValue)];
+    return buildAppMatrixRuntimeDiagnosticReport(changed);
+  };
+  const firstPrivateCleanup = privateCleanupReport("/home/private/cleanup-a");
+  const secondPrivateCleanup = privateCleanupReport("C:\\private\\cleanup-b");
+  assert.deepEqual(firstPrivateCleanup, secondPrivateCleanup);
+  assert.doesNotMatch(
+    JSON.stringify(firstPrivateCleanup),
+    /home|private|profilePath|documentKey|revision/u,
+  );
+});
+
+test("binds all six app-matrix runtime rows and the exact sixth timeout", () => {
+  const outputDirectory = path.join(
+    os.tmpdir(),
+    "issue-68-app-matrix-runtime-complete",
+  );
+  const completedInput = passingAppMatrixRuntimeCompletedInput(outputDirectory);
+  for (const row of completedInput.rows) {
+    assert.equal(isCdpFixedPointDiagnosticHealthy(row.networkFixedPoint), true);
+  }
+  const completed = buildAppMatrixRuntimeDiagnosticReport(completedInput);
+  assert.equal(completed.completed, true, completed.failures.join("\n"));
+  assert.deepEqual(completed.failures, []);
+  assert.equal(completed.rows.length, 6);
+  assert.ok(completed.rows.every((row) =>
+    row.timing.phaseMarkers[0].sequence === 1
+  ));
+
+  const failedInput = structuredClone(completedInput);
+  const failed = failedInput.rows[5];
+  failed.stageHistory = APP_MATRIX_RUNTIME_DIAGNOSTIC_STAGES.slice(
+    0,
+    APP_MATRIX_RUNTIME_DIAGNOSTIC_STAGES.indexOf(
+      "release-observation-started",
+    ) + 1,
+  );
+  failed.currentStage = "release-observation-started";
+  failed.failureStage = "release-observation-started";
+  failed.status = "failed";
+  failed.networkFixedPoint = null;
+  failed.releaseSnapshot.pages[0].canvas.height = 100;
+  failed.releaseSnapshot.pages[0].canvas.width = 100;
+  failed.releaseSnapshot.waitOutcome = "timeout";
+  failed.completedSnapshot.phaseMarkers = failed.stageHistory
+    .filter((stage) => !stage.startsWith("navigate-"))
+    .map((stage, index) => ({
+      activityId: index + 1,
+      at: 50 + index * 10,
+      configurationId: failed.configurationId,
+      drawInvocationId: index,
+      sequence: index + 1,
+      stage,
+      workerEventId: index,
+    }));
+  failedInput.runnerFailure = new Error("/home/private/sixth timeout");
+  failedInput.runnerFailureStage = "matrix:mobile-dpr3-pinch200";
+  const timeout = buildAppMatrixRuntimeDiagnosticReport(failedInput);
+  assert.equal(timeout.completed, false);
+  assert.equal(timeout.execution.completedConfigurationCount, 5);
+  assert.equal(
+    timeout.execution.failedConfigurationId,
+    "mobile-dpr3-pinch200",
+  );
+  assert.equal(timeout.execution.orderExact, true, timeout.failures.join("\n"));
+  assert.equal(timeout.rows[5].adjacentPage, 3);
+  assert.equal(timeout.rows[5].priorityTarget, 5);
+  assert.equal(timeout.rows[5].release.classification, "offscreen-stale-canvas");
+  assert.deepEqual(timeout.failures, [
+    "The bounded app-matrix runtime diagnostic runner reported a stage failure.",
+  ]);
+
+  failedInput.runnerFailureStage = "matrix:desktop-dpr1-zoom100";
+  const substitutedStage = buildAppMatrixRuntimeDiagnosticReport(failedInput);
+  assert.equal(substitutedStage.execution.orderExact, true);
+  assert.ok(substitutedStage.failures.some((failure) =>
+    failure.includes("failure row is not bound")
+  ));
+});
+
+test("rejects isolated app-matrix runtime proof substitutions", () => {
+  const outputDirectory = path.join(
+    os.tmpdir(),
+    "issue-68-app-matrix-runtime-mutations",
+  );
+  const mutationCases = [
+    ["dirty post-build source", (input) => {
+      input.source.postBuildStatus = [" M private"];
+    }],
+    ["dirty post-capture source", (input) => {
+      input.source.postCaptureStatus = ["?? private"];
+    }],
+    ["private deployment identity", (input) => {
+      input.build.localManifest.deploymentId = "/home/private/deployment";
+    }],
+    ["wrong fixture hash", (input) => {
+      input.fixture.sha256 = "0".repeat(64);
+    }],
+    ["dirty initial target baseline", (input) => {
+      input.initialTargetBaseline.workerCount = 1;
+    }],
+    ["repository output", (input) => {
+      input.outputDirectory = path.resolve("outputs/app-runtime-forgery");
+    }],
+    ["row session substitution", (input) => {
+      input.rows[5].sessionIdentityHash = "f".repeat(64);
+    }],
+    ["teardown error", (input) => {
+      input.teardown.errors = ["/home/private/cleanup"];
+    }],
+    ["stage reorder", (input) => {
+      [input.rows[0].stageHistory[0], input.rows[0].stageHistory[1]] =
+        [input.rows[0].stageHistory[1], input.rows[0].stageHistory[0]];
+    }],
+    ["completed current stage substitution", (input) => {
+      input.rows[0].currentStage = "release-observation-completed";
+    }],
+    ["completed scenario not finalized", (input) => {
+      input.rows[0].scenarioFinalized = false;
+    }],
+    ["browser source missing", (input) => {
+      input.rows[0].sourceObservation.selectionCount = 0;
+    }],
+    ["browser source size", (input) => {
+      input.rows[0].sourceObservation.bytes += 1;
+    }],
+    ["browser source hash", (input) => {
+      input.rows[0].sourceObservation.sha256 = "0".repeat(64);
+    }],
+    ["model identity", (input) => {
+      input.rows[0].modelCompletion.importJobId += 1;
+    }],
+    ["adjacent page", (input) => {
+      input.rows[0].adjacentPage = 3;
+    }],
+    ["screenshot binding", (input) => {
+      input.rows[0].screenshot.path = "private.png";
+    }],
+    ["empty priority composition", (input) => {
+      input.rows[0].priorityProbe.compositions = [];
+    }],
+    ["priority scroll delta", (input) => {
+      input.rows[0].priorityProbe.scrollAction.scrollTopAfter = 0;
+    }],
+    ["priority before geometry", (input) => {
+      input.rows[0].priorityProbe.scrollAction.targetGeometryBefore = {
+        bottom: 800,
+        left: 100,
+        right: 900,
+        top: 100,
+      };
+    }],
+    ["priority target after geometry", (input) => {
+      input.rows[0].priorityProbe.scrollAction.targetGeometryAfter.top = 1_000;
+      input.rows[0].priorityProbe.scrollAction.targetGeometryAfter.bottom = 1_800;
+    }],
+    ["priority composition dimensions", (input) => {
+      input.rows[0].priorityProbe.compositions[0].width -= 1;
+    }],
+    ["priority composition identity", (input) => {
+      input.rows[0].priorityProbe.compositions[0].compositionId = null;
+    }],
+    ["priority composition time", (input) => {
+      input.rows[0].priorityProbe.compositions[0].at = 289;
+    }],
+    ["malformed mounted range", (input) => {
+      input.rows[0].releaseSnapshot.range = "1:3,3:6";
+    }],
+    ["one-based mounted range", (input) => {
+      input.rows[0].releaseSnapshot.range = "1:6";
+    }],
+    ["duplicate mounted page", (input) => {
+      input.rows[0].releaseSnapshot.mountedPages = [1, 2, 2, 3, 4, 5, 6];
+    }],
+    ["visible page mismatch", (input) => {
+      input.rows[0].releaseSnapshot.visiblePages = [];
+    }],
+    ["viewport substitution", (input) => {
+      input.rows[0].releaseSnapshot.viewport.devicePixelRatio += 1;
+    }],
+    ["correlated geometry claim", (input) => {
+      input.rows[0].releaseSnapshot.pages[0].intersectsReader = true;
+    }],
+    ["target canvas substitution", (input) => {
+      input.rows[0].releaseSnapshot.pages[1].canvas.width -= 1;
+    }],
+    ["worker identity substitution", (input) => {
+      input.rows[0].releaseSnapshot.workerEvents[0].jobId += 1;
+    }],
+    ["worker direction substitution", (input) => {
+      input.rows[0].releaseSnapshot.workerEvents[0].direction = "from-worker";
+    }],
+    ["release draw truncation", (input) => {
+      const original = input.rows[0].releaseSnapshot.draws[0];
+      input.rows[0].releaseSnapshot.draws = Array.from(
+        { length: 33 },
+        (_, index) => ({
+          ...original,
+          activityId: original.activityId + index,
+          compositionId: original.compositionId + index,
+          drawInvocationId: original.drawInvocationId + index,
+        }),
+      );
+    }],
+    ["release snapshot error", (input) => {
+      input.rows[0].releaseSnapshot.snapshotErrorPresent = true;
+    }],
+    ["release evaluation errors exceed attempts", (input) => {
+      input.rows[0].releaseSnapshot.evaluationErrorCount = 902;
+    }],
+    ["release observation outside scenario", (input) => {
+      input.rows[0].releaseSnapshot.observedAt = 501;
+    }],
+    ["release page order", (input) => {
+      input.rows[0].releaseSnapshot.pages.reverse();
+    }],
+    ["release extra page", (input) => {
+      input.rows[0].releaseSnapshot.pages.push({
+        ...input.rows[0].releaseSnapshot.pages[0],
+        page: 6,
+        pageIndex: 5,
+      });
+    }],
+    ["fractional layout viewport", (input) => {
+      input.rows[0].releaseSnapshot.viewport.innerWidth += 0.5;
+    }],
+    ["negative visual viewport offset", (input) => {
+      input.rows[0].releaseSnapshot.viewport.visualOffsetLeft = -1;
+    }],
+    ["completed timeout state", (input) => {
+      input.rows[0].releaseSnapshot.waitOutcome = "timeout";
+      input.rows[0].releaseSnapshot.pages[0].canvas.width = 100;
+    }],
+    ["missing phase marker", (input) => {
+      input.rows[0].completedSnapshot.phaseMarkers.pop();
+    }],
+    ["negative timing count", (input) => {
+      input.rows[0].completedSnapshot.drawHookTimingCount = -1;
+    }],
+    ["missing fixed point", (input) => {
+      input.rows[0].networkFixedPoint = null;
+    }],
+    ["wrong fixed-point label", (input) => {
+      input.rows[0].networkFixedPoint.label = "mobile-dpr3-pinch200";
+    }],
+    ["unhealthy fixed point", (input) => {
+      input.rows[0].networkFixedPoint.counts.inflightRequestCount = 1;
+    }],
+  ];
+
+  for (const [label, mutate] of mutationCases) {
+    const input = passingAppMatrixRuntimeCompletedInput(outputDirectory);
+    mutate(input);
+    let report;
+    assert.doesNotThrow(() => {
+      report = buildAppMatrixRuntimeDiagnosticReport(input);
+    }, label);
+    assert.equal(report.completed, false, label);
+    assert.ok(report.failures.length > 0, label);
+  }
+});
+
+test("binds nonzero app-matrix Long Task timing rings and chronology", () => {
+  const outputDirectory = path.join(
+    os.tmpdir(),
+    "issue-68-app-matrix-runtime-timing",
+  );
+  const validInput = addRepresentativeAppMatrixRuntimeTiming(
+    passingAppMatrixRuntimeCompletedInput(outputDirectory),
+  );
+  const valid = buildAppMatrixRuntimeDiagnosticReport(validInput);
+  assert.equal(valid.completed, true, valid.failures.join("\n"));
+  assert.deepEqual(
+    valid.rows[0].timing.longTasks[0].correlations,
+    ["worker-message-dispatch"],
+  );
+  assert.equal(valid.rows[0].timing.workerMessages.total, 1);
+  assert.equal(valid.rows[0].timing.drawHooks.total, 1);
+
+  const thrownHook = structuredClone(validInput);
+  thrownHook.rows[0].completedSnapshot.drawHookTimings[0].nativeDrawThrew = true;
+  thrownHook.rows[0].completedSnapshot.drawHookTimings[0].microtaskRecordedAt = null;
+  const thrownHookReport = buildAppMatrixRuntimeDiagnosticReport(thrownHook);
+  assert.equal(
+    thrownHookReport.completed,
+    true,
+    thrownHookReport.failures.join("\n"),
+  );
+
+  const normalThenThrow = structuredClone(validInput);
+  const normalTiming = normalThenThrow.rows[0].completedSnapshot
+    .drawHookTimings[0];
+  const laterThrownTiming = {
+    ...normalTiming,
+    activityId: normalTiming.activityId + 1,
+    blockLookupCompletedAt: normalTiming.blockLookupCompletedAt + 100,
+    blockRectCompletedAt: normalTiming.blockRectCompletedAt + 100,
+    drawInvocationId: normalTiming.drawInvocationId + 1,
+    hookEnteredAt: normalTiming.hookEnteredAt + 100,
+    microtaskRecordedAt: null,
+    nativeDrawCompletedAt: normalTiming.nativeDrawCompletedAt + 100,
+    nativeDrawStartedAt: normalTiming.nativeDrawStartedAt + 100,
+    nativeDrawThrew: true,
+    readerLookupCompletedAt: normalTiming.readerLookupCompletedAt + 100,
+    readerRectCompletedAt: normalTiming.readerRectCompletedAt + 100,
+    visiblePagesCompletedAt: normalTiming.visiblePagesCompletedAt + 100,
+    visiblePagesStartedAt: normalTiming.visiblePagesStartedAt + 100,
+  };
+  normalThenThrow.rows[0].completedSnapshot.drawHookTimings = [
+    laterThrownTiming,
+    normalTiming,
+  ];
+  normalThenThrow.rows[0].completedSnapshot.drawHookTimingCount = 2;
+  const normalThenThrowReport = buildAppMatrixRuntimeDiagnosticReport(
+    normalThenThrow,
+  );
+  assert.equal(
+    normalThenThrowReport.completed,
+    true,
+    normalThenThrowReport.failures.join("\n"),
+  );
+  assert.deepEqual(
+    normalThenThrowReport.rows[0].timing.drawHooks.items.map(
+      (timing) => timing.drawInvocationId,
+    ),
+    [normalTiming.drawInvocationId, laterThrownTiming.drawInvocationId],
+  );
+
+  const mutations = [
+    ["draw chronology", (input) => {
+      input.rows[0].completedSnapshot.drawHookTimings[0]
+        .blockLookupCompletedAt = 199;
+    }],
+    ["sampler chronology", (input) => {
+      input.rows[0].completedSnapshot.samplerTimings[0]
+        .readerRectCompletedAt = 196;
+    }],
+    ["worker chronology", (input) => {
+      input.rows[0].completedSnapshot.workerMessageTimings[0]
+        .messageSettledAt = 189;
+    }],
+    ["post-finish worker timing", (input) => {
+      input.rows[0].completedSnapshot.workerMessageTimings[0]
+        .messageSettledAt = 1_401;
+    }],
+    ["worker count mismatch", (input) => {
+      input.rows[0].completedSnapshot.workerMessageTimings = [];
+    }],
+    ["duplicate draw identity", (input) => {
+      const timing = input.rows[0].completedSnapshot.drawHookTimings[0];
+      input.rows[0].completedSnapshot.drawHookTimings.push({ ...timing });
+      input.rows[0].completedSnapshot.drawHookTimingCount = 2;
+    }],
+    ["short Long Task", (input) => {
+      input.rows[0].completedSnapshot.longTasks[0].duration = 49;
+    }],
+    ["null Long Task", (input) => {
+      input.rows[0].completedSnapshot.longTasks[0] = null;
+    }],
+    ["Long Task attribution count", (input) => {
+      input.rows[0].completedSnapshot.longTasks[0].attributionCount = 2;
+    }],
+    ["Long Task outside scenario", (input) => {
+      input.rows[0].completedSnapshot.longTasks[0].startTime = 1_399;
+    }],
+    ["phase order", (input) => {
+      input.rows[0].completedSnapshot.phaseMarkers[1].sequence = 1;
+    }],
+    ["null phase marker", (input) => {
+      input.rows[0].completedSnapshot.phaseMarkers[1] = null;
+    }],
+    ["extra wrong-configuration phase", (input) => {
+      input.rows[0].completedSnapshot.phaseMarkers.push({
+        ...input.rows[0].completedSnapshot.phaseMarkers.at(-1),
+        configurationId: "mobile-dpr3-pinch200",
+      });
+    }],
+    ["decreasing phase boundary", (input) => {
+      input.rows[0].completedSnapshot.phaseMarkers[1].activityId = 0;
+    }],
+    ["reordered worker messages", (input) => {
+      const first = input.rows[0].completedSnapshot.workerMessageTimings[0];
+      input.rows[0].completedSnapshot.workerMessageTimings = [{
+        ...first,
+        activityId: first.activityId + 1,
+        eventId: first.eventId + 1,
+        messageReceivedAt: first.messageReceivedAt + 10,
+        messageSettledAt: first.messageSettledAt + 10,
+      }, first];
+      input.rows[0].completedSnapshot.workerMessageTimingCount = 2;
+    }],
+    ["reordered samplers", (input) => {
+      const first = input.rows[0].completedSnapshot.samplerTimings[0];
+      input.rows[0].completedSnapshot.samplerTimings = [{
+        ...first,
+        endedAt: first.endedAt + 10,
+        readerRectCompletedAt: first.readerRectCompletedAt + 10,
+        sampleStartedAt: first.sampleStartedAt + 10,
+      }, first];
+      input.rows[0].completedSnapshot.samplerTimingCount = 2;
+    }],
+    ["reordered Long Tasks", (input) => {
+      const first = input.rows[0].completedSnapshot.longTasks[0];
+      input.rows[0].completedSnapshot.longTasks = [{
+        ...first,
+        duration: 60,
+        startTime: 1_250,
+      }, first];
+    }],
+    ["concealed attribution overflow", (input) => {
+      const task = input.rows[0].completedSnapshot.longTasks[0];
+      task.attribution = Array.from(
+        { length: 5 },
+        () => ({ ...task.attribution[0] }),
+      );
+      task.attributionCount = 5;
+    }],
+    ["timing ring overflow", (input) => {
+      const timing = input.rows[0].completedSnapshot.workerMessageTimings[0];
+      input.rows[0].completedSnapshot.workerMessageTimings = Array.from(
+        { length: 65 },
+        (_, index) => ({
+          ...timing,
+          activityId: timing.activityId + index,
+          eventId: timing.eventId + index,
+        }),
+      );
+      input.rows[0].completedSnapshot.workerMessageTimingCount = 65;
+    }],
+  ];
+  for (const [label, mutate] of mutations) {
+    const input = addRepresentativeAppMatrixRuntimeTiming(
+      passingAppMatrixRuntimeCompletedInput(outputDirectory),
+    );
+    mutate(input);
+    const report = buildAppMatrixRuntimeDiagnosticReport(input);
+    assert.equal(report.completed, false, label);
+    assert.ok(report.failures.length > 0, label);
+  }
 });
 
 test("refuses to record screenshots from a private fixture", async () => {

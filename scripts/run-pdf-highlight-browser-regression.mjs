@@ -424,7 +424,13 @@ export async function waitForExpression(
     try {
       const value = await evaluate(cdp, expression);
       if (value) return value;
-    } catch {
+    } catch (error) {
+      if (
+        typeof cdp?.webSocket?.readyState === "number" &&
+        cdp.webSocket.readyState !== 1
+      ) {
+        throw error;
+      }
       // React may be replacing the queried subtree while it settles.
     }
     await delay(100);
