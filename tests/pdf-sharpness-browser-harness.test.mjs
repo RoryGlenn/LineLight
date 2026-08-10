@@ -8847,13 +8847,23 @@ test("retains a privacy-safe fixed-point timeout on the failed matrix row", () =
     }
     diagnostic.wait.stableSamples = 0;
   };
-  const makeFailedTarget = (value, { withError = false } = {}) => {
+  const makeFailedTarget = (
+    value,
+    {
+      errorCommand = "network-enable",
+      failedCommandCount = 1,
+      withError = false,
+    } = {},
+  ) => {
     const diagnostic = timeoutDiagnostic(value);
     const target = currentDocumentTarget(diagnostic);
     const resume = target.commands.at(-1);
     target.commands = [
       { ...target.commands[0], status: "failed" },
-      target.commands[1],
+      {
+        ...target.commands[1],
+        status: failedCommandCount > 1 ? "failed" : "completed",
+      },
       { ...resume, dispatchSequence: 3, resultSequence: 3 },
     ];
     target.attachComplete = false;
@@ -8861,7 +8871,7 @@ test("retains a privacy-safe fixed-point timeout on the failed matrix row", () =
     diagnostic.attachErrors = withError
       ? [{
           category: "setup",
-          command: "network-enable",
+          command: errorCommand,
           identityHash: diagnosticIdentity(target.sessionId, target.targetId),
           sessionId: target.sessionId,
           targetId: target.targetId,
@@ -8872,6 +8882,31 @@ test("retains a privacy-safe fixed-point timeout on the failed matrix row", () =
     diagnostic.counts.attachErrorCount = diagnostic.attachErrors.length;
     bindIncompleteSamples(diagnostic, {
       attachErrorCount: diagnostic.attachErrors.length,
+    });
+    return { diagnostic, target };
+  };
+  const setResumePending = ({ diagnostic, target }) => {
+    const resume = target.commands.at(-1);
+    resume.resultAt = null;
+    resume.resultSequence = null;
+    resume.status = "pending";
+    target.resumed = false;
+    diagnostic.pendingAttaches = [{
+      commands: target.commands.map((command) => ({ ...command })),
+      commandDeadlineAt: target.commandDeadlineAt,
+      identityHash: diagnosticIdentity(target.sessionId, target.targetId),
+      parentSessionId: target.parentSessionId,
+      phase: target.phase,
+      resumeDispatchedAt: target.resumeDispatchedAt,
+      sessionId: target.sessionId,
+      targetId: target.targetId,
+      type: target.type,
+      urlClass: target.urlClass,
+    }];
+    diagnostic.counts.pendingAttachCount = 1;
+    bindIncompleteSamples(diagnostic, {
+      attachErrorCount: diagnostic.attachErrors.length,
+      pendingAttachCount: 1,
     });
     return { diagnostic, target };
   };
@@ -9047,6 +9082,56 @@ test("retains a privacy-safe fixed-point timeout on the failed matrix row", () =
     });
     return { diagnostic, target };
   };
+  const makeServiceFailedTarget = (
+    value,
+    { errorCommand = "network-enable" } = {},
+  ) => {
+    const diagnostic = timeoutDiagnostic(value);
+    const setup = completedCdpTargetSetup({
+      cdpIdStart: 1_001,
+      serviceWorker: true,
+      startedAt: 1_100,
+    });
+    const target = {
+      ancestry: [],
+      ...setup,
+      attachComplete: false,
+      detached: false,
+      identityHash: diagnosticIdentity(
+        `${diagnostic.label}-failed-service-session`,
+        `${diagnostic.label}-failed-service-target`,
+      ),
+      parentSessionId: null,
+      phase: diagnostic.label,
+      resumed: true,
+      sessionId: `${diagnostic.label}-failed-service-session`,
+      targetId: `${diagnostic.label}-failed-service-target`,
+      type: "service_worker",
+      urlClass: "app-asset",
+      waitingForDebugger: true,
+      workerInstanceId: null,
+    };
+    target.commands[0].status = "failed";
+    target.commands[1].status = "failed";
+    diagnostic.targets.push(target);
+    diagnostic.attachErrors = [{
+      category: "setup",
+      command: errorCommand,
+      identityHash: diagnosticIdentity(target.sessionId, target.targetId),
+      sessionId: target.sessionId,
+      targetId: target.targetId,
+      type: target.type,
+      urlClass: target.urlClass,
+    }];
+    diagnostic.counts.attachErrorCount = 1;
+    diagnostic.counts.attachPromiseCount += 1;
+    diagnostic.counts.targetCount += 1;
+    bindIncompleteSamples(diagnostic, { attachErrorCount: 1 });
+    diagnostic.wait.recentSamples.forEach((sample) => {
+      sample.targetCount = diagnostic.counts.targetCount;
+    });
+    return { diagnostic, target };
+  };
   const setInflightRequests = (value, count) => {
     const diagnostic = timeoutDiagnostic(value);
     const target = diagnostic.targets[0];
@@ -9146,6 +9231,51 @@ test("retains a privacy-safe fixed-point timeout on the failed matrix row", () =
     resumePendingError.failures.join("\n"),
   );
   assert.equal(resumePendingError.rows[1].integrity, true);
+
+  const multipleFailureInput = passingAppMatrixRuntimeNetworkTimeoutInput(
+    outputDirectory,
+  );
+  makeFailedTarget(multipleFailureInput, {
+    failedCommandCount: 2,
+    withError: true,
+  });
+  const multipleFailure = buildAppMatrixRuntimeDiagnosticReport(
+    multipleFailureInput,
+  );
+  assert.equal(
+    multipleFailure.execution.orderExact,
+    true,
+    multipleFailure.failures.join("\n"),
+  );
+  assert.equal(multipleFailure.rows[1].integrity, true);
+
+  const multipleFailureResumePendingInput =
+    passingAppMatrixRuntimeNetworkTimeoutInput(outputDirectory);
+  setResumePending(makeFailedTarget(multipleFailureResumePendingInput, {
+    failedCommandCount: 2,
+    withError: true,
+  }));
+  const multipleFailureResumePending =
+    buildAppMatrixRuntimeDiagnosticReport(multipleFailureResumePendingInput);
+  assert.equal(
+    multipleFailureResumePending.execution.orderExact,
+    true,
+    multipleFailureResumePending.failures.join("\n"),
+  );
+  assert.equal(multipleFailureResumePending.rows[1].integrity, true);
+
+  const multipleServiceFailureInput =
+    passingAppMatrixRuntimeNetworkTimeoutInput(outputDirectory);
+  makeServiceFailedTarget(multipleServiceFailureInput);
+  const multipleServiceFailure = buildAppMatrixRuntimeDiagnosticReport(
+    multipleServiceFailureInput,
+  );
+  assert.equal(
+    multipleServiceFailure.execution.orderExact,
+    true,
+    multipleServiceFailure.failures.join("\n"),
+  );
+  assert.equal(multipleServiceFailure.rows[1].integrity, true);
 
   for (const resumePending of [false, true]) {
     const sequentialPendingInput = passingAppMatrixRuntimeNetworkTimeoutInput(
@@ -9429,6 +9559,23 @@ test("retains a privacy-safe fixed-point timeout on the failed matrix row", () =
     }],
     ["timeout failed target without attach error", (value) => {
       makeFailedTarget(value);
+    }],
+    ["timeout multiple normal failures name second failure", (value) => {
+      makeFailedTarget(value, {
+        errorCommand: "runtime-enable",
+        failedCommandCount: 2,
+        withError: true,
+      });
+    }],
+    ["timeout multiple resume-pending failures name second failure", (value) => {
+      setResumePending(makeFailedTarget(value, {
+        errorCommand: "runtime-enable",
+        failedCommandCount: 2,
+        withError: true,
+      }));
+    }],
+    ["timeout multiple service failures name second failure", (value) => {
+      makeServiceFailedTarget(value, { errorCommand: "runtime-enable" });
     }],
     ["timeout resume-pending failed setup without attach error", (value) => {
       const { diagnostic, target } = makeFailedTarget(value);
@@ -9767,6 +9914,15 @@ test("retains a privacy-safe fixed-point timeout on the failed matrix row", () =
       prior.detached = true;
       current.targets.find((entry) => entry.sessionId === prior.sessionId)
         .detached = false;
+    }],
+    ["timeout prior detached state omitted", (value) => {
+      delete value.rows[0].networkFixedPoint.targets[0].detached;
+    }],
+    ["timeout prior detached state null", (value) => {
+      value.rows[0].networkFixedPoint.targets[0].detached = null;
+    }],
+    ["timeout prior detached state string", (value) => {
+      value.rows[0].networkFixedPoint.targets[0].detached = "false";
     }],
     ["timeout retained worker instance clears", (value) => {
       const previous = value.rows[0].networkFixedPoint;

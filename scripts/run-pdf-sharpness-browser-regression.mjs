@@ -4877,14 +4877,16 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
             positiveInteger(command.resultSequence)
           : command.resultAt === null && command.resultSequence === null);
     });
-    const failedNames = new Set(
-      commands.filter((command) => command?.status === "failed")
-        .map((command) => command?.name),
+    const failedCommands = commands.filter((command) =>
+      command?.status === "failed"
     );
+    const failedNames = new Set(failedCommands.map((command) => command?.name));
+    const firstFailedName = failedCommands[0]?.name ?? null;
     const pending = commands.some((command) => command?.status === "pending");
     if (!lifecycleBound || !planBound || !commandFieldsBound) {
       return {
         bound: false,
+        firstFailedName,
         failedNames,
         pending,
         pendingFailureMayPrecedeError: false,
@@ -4918,10 +4920,6 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
     );
     const setupFailed = setupCommands.some((command) =>
       command.status === "failed"
-    );
-    const failedSetupNames = new Set(
-      setupCommands.filter((command) => command.status === "failed")
-        .map((command) => command.name),
     );
     const setupCompleted = setupCommands.length === 4 &&
       setupCommands.every((command) => command.status === "completed");
@@ -4978,13 +4976,13 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
     return {
       bound: commandOrderBound && setupProgressionBound && deadlineBound &&
         resumeStateBound && attachStateBound,
+      firstFailedName,
       failedNames,
       pending,
       pendingFailureMayPrecedeError,
       pendingSetupErrorAllowed,
       serviceWorkerBarrier,
       setupComplete: setupStateComplete,
-      failedSetupNames,
     };
   };
   const countKeys = [
@@ -5100,10 +5098,15 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
           targetState?.serviceWorkerBarrier === true ? "setup" : "resume"
         )
       : entry?.category !== "resume";
+    const setupErrorCommandBound = ["setup", "unhandled-setup"].includes(
+      entry?.category,
+    )
+      ? entry?.command === targetState?.firstFailedName
+      : true;
     return entry && typeof entry === "object" &&
       ["resume", "setup", "unhandled-setup"].includes(entry.category) &&
       attachErrorCommands.has(entry.command) &&
-      errorCategoryBound &&
+      errorCategoryBound && setupErrorCommandBound &&
       nonEmptyString(entry.sessionId) && nonEmptyString(entry.targetId) &&
       CDP_WORKER_TARGET_TYPES.has(entry.type) &&
       urlClasses.has(entry.urlClass) &&
@@ -5179,7 +5182,7 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
       if (targetState.pendingSetupErrorAllowed === true) {
         if (
           errors.length !== 1 || errors[0]?.category !== "setup" ||
-          !targetState.failedSetupNames.has(errors[0]?.command)
+          errors[0]?.command !== targetState.firstFailedName
         ) {
           return false;
         }
@@ -5617,7 +5620,8 @@ function isAppMatrixRuntimeCdpHistoryContinuous(
   const priorTargetsRetained = previousTargets.length <=
       currentTargets.length && previousTargets.every((prior, index) => {
     const retained = currentTargets[index];
-    return retained?.targetId === prior?.targetId &&
+    return typeof prior?.detached === "boolean" &&
+      retained?.targetId === prior?.targetId &&
       retained?.sessionId === prior?.sessionId &&
       retained?.identityHash === prior?.identityHash &&
       retained?.phase === prior?.phase &&
