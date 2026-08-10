@@ -11,6 +11,23 @@ Run the acceptance harness from that exact clean commit:
 node scripts/run-pdf-sharpness-browser-regression.mjs --record
 ```
 
+When the recursive CDP network gate itself needs diagnosis, use the bounded,
+non-recording mode with an explicit transient output directory:
+
+```bash
+node scripts/run-pdf-sharpness-browser-regression.mjs \
+  --diagnose-first-network-fixed-point --output /tmp/issue-68-network-diagnostic
+```
+
+That mode runs only the first desktop scenario, skips fallback and reference
+capture, and still closes its owned browser, CDP connection, profile, and
+server. On either success or timeout it writes a separate diagnostic JSON. The
+diagnostic contains counts, pending-attach metadata, inflight request method and
+resource type, same-origin paths without queries, opaque identity hashes, and
+sanitized target ancestry. It never records request bodies, headers, document
+text, query values, or browser-profile paths. It is a diagnosis aid, not Issue
+68 acceptance evidence.
+
 The runner always makes a fresh production build, serves that exact artifact on
 an owned loopback Wrangler process, and opens visible Brave windows. It refuses
 an uncommitted source tree and binds the source commit/tree, reviewed-file

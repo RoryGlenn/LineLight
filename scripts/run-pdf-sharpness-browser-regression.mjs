@@ -228,6 +228,139 @@ export function selectPdfFallbackAbortCandidate(candidates) {
   };
 }
 
+export function sanitizeCdpDiagnosticUrl(value, appUrl) {
+  if (typeof value !== "string" || value.length === 0) return null;
+  if (value === "about:blank") return value;
+  if (value.startsWith("data:")) return "data:<redacted>";
+  if (value.startsWith("blob:")) {
+    try {
+      const blobSource = new URL(value.slice("blob:".length));
+      const app = new URL(appUrl);
+      return blobSource.origin === app.origin
+        ? "blob:<same-origin>"
+        : "blob:<redacted-origin>";
+    } catch {
+      return "blob:<redacted>";
+    }
+  }
+  try {
+    const parsed = new URL(value);
+    const app = new URL(appUrl);
+    if (parsed.origin === app.origin) return parsed.pathname || "/";
+    return `<external-${parsed.protocol.replace(/:$/u, "")}>`;
+  } catch {
+    return "<unparseable-url>";
+  }
+}
+
+function cdpDiagnosticIdentity(...parts) {
+  return createHash("sha256")
+    .update(JSON.stringify(parts))
+    .digest("hex");
+}
+
+export function buildCdpNetworkFixedPointDiagnostic(
+  networkState,
+  appUrl,
+  label,
+  outcome = "timeout",
+) {
+  const requestForKey = (key) => networkState.byId.get(key) ?? null;
+  const pendingAttachMetadata = networkState.pendingAttachMetadata ?? new Map();
+  const pendingAttaches = [...networkState.pendingAttachPromises].map(
+    (promise) => {
+      const entry = pendingAttachMetadata.get(promise) ?? {};
+      return {
+        identityHash: cdpDiagnosticIdentity(
+          entry.phase,
+          entry.sessionId,
+          entry.targetId,
+          entry.type,
+          entry.url,
+        ),
+        parentSessionId: entry.parentSessionId ?? null,
+        phase: entry.phase ?? null,
+        sessionId: entry.sessionId ?? null,
+        targetId: entry.targetId ?? null,
+        type: entry.type ?? null,
+        url: sanitizeCdpDiagnosticUrl(entry.url, appUrl),
+      };
+    },
+  );
+  const inflightRequests = [...networkState.inflightRequests].map((key) => {
+    const request = requestForKey(key) ?? {};
+    return {
+      identityHash: cdpDiagnosticIdentity(
+        key,
+        request.method,
+        request.type,
+        request.url,
+      ),
+      method: request.method ?? null,
+      path: sanitizeCdpDiagnosticUrl(request.url, appUrl),
+      phase: request.phase ?? null,
+      sessionId: request.sessionId ?? null,
+      type: request.type ?? null,
+    };
+  });
+  const targets = withTargetAncestry(networkState.targets).map((target) => ({
+    ancestry: target.ancestry.map((ancestor) => ({
+      phase: ancestor.phase,
+      sessionId: ancestor.sessionId,
+      type: ancestor.type,
+      url: sanitizeCdpDiagnosticUrl(ancestor.url, appUrl),
+    })),
+    detached: target.detached === true,
+    identityHash: cdpDiagnosticIdentity(
+      target.phase,
+      target.sessionId,
+      target.targetId,
+      target.type,
+      target.url,
+    ),
+    parentSessionId: target.parentSessionId ?? null,
+    phase: target.phase ?? null,
+    sessionId: target.sessionId ?? null,
+    targetId: target.targetId ?? null,
+    type: target.type ?? null,
+    url: sanitizeCdpDiagnosticUrl(target.url, appUrl),
+    waitingForDebugger: target.waitingForDebugger === true,
+  }));
+  const attachErrors = networkState.attachErrors.map((entry) => ({
+    category: String(entry.error).startsWith("Could not resume target:")
+      ? "resume"
+      : String(entry.error).startsWith("Unhandled attach setup error:")
+        ? "unhandled-setup"
+        : "setup",
+    identityHash: cdpDiagnosticIdentity(
+      entry.error,
+      entry.sessionId,
+      entry.type,
+      entry.url,
+    ),
+    sessionId: entry.sessionId ?? null,
+    type: entry.type ?? null,
+    url: sanitizeCdpDiagnosticUrl(entry.url, appUrl),
+  }));
+  return {
+    attachErrors,
+    counts: {
+      attachErrorCount: networkState.attachErrors.length,
+      attachPromiseCount: networkState.attachPromises.length,
+      completedRequestCount: networkState.completedRequestCount,
+      inflightRequestCount: networkState.inflightRequests.size,
+      pendingAttachCount: networkState.pendingAttachPromises.size,
+      requestCount: networkState.requests.length,
+      targetCount: networkState.targets.length,
+    },
+    inflightRequests,
+    label,
+    outcome,
+    pendingAttaches,
+    targets,
+  };
+}
+
 export function planPdfVirtualScroll({
   clientHeight,
   mountedPages,
@@ -257,6 +390,7 @@ export function planPdfVirtualScroll({
 function parseArguments(argv) {
   const options = {
     browser: process.env.LINELIGHT_BROWSER ?? "/usr/bin/brave-browser",
+    diagnoseFirstNetworkFixedPoint: false,
     fixture: DEFAULT_PDF_HIGHLIGHT_FIXTURE,
     outputDirectory:
       process.env.LINELIGHT_PDF_SHARPNESS_EVIDENCE ??
@@ -266,6 +400,9 @@ function parseArguments(argv) {
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === "--browser") options.browser = argv[++index];
+    else if (argument === "--diagnose-first-network-fixed-point") {
+      options.diagnoseFirstNetworkFixedPoint = true;
+    }
     else if (argument === "--fixture") options.fixture = argv[++index];
     else if (argument === "--output") options.outputDirectory = argv[++index];
     else if (argument === "--record") options.record = true;
@@ -279,6 +416,8 @@ function parseArguments(argv) {
           "Issue #68 sharpness, priority, memory, fallback, privacy, and teardown evidence.",
           "",
           "  --browser PATH   Brave/Chromium executable.",
+          "  --diagnose-first-network-fixed-point",
+          "                   Stop after the first matrix network gate and cleanup.",
           "  --fixture PATH   Selectable-text PDF used for both original and import.",
           "  --output DIR     Transient evidence directory.",
           "  --record         Write review evidence to docs/evidence/issue-68/.",
@@ -292,6 +431,11 @@ function parseArguments(argv) {
     } else {
       throw new Error(`Unknown argument: ${argument}`);
     }
+  }
+  if (options.record && options.diagnoseFirstNetworkFixedPoint) {
+    throw new Error(
+      "First-network diagnostic mode cannot be combined with --record.",
+    );
   }
   if (options.record) options.outputDirectory = RECORDED_OUTPUT_DIRECTORY;
   options.browser = path.resolve(options.browser);
@@ -1777,6 +1921,14 @@ async function configureAppSession(cdp, networkState) {
       if (target) target.detached = true;
     } else if (message.method === "Target.attachedToTarget") {
       const { sessionId, targetInfo, waitingForDebugger } = event;
+      const attachMetadata = {
+        parentSessionId: message.sessionId ?? null,
+        phase: networkState.phase,
+        sessionId,
+        targetId: targetInfo.targetId,
+        type: targetInfo.type,
+        url: targetInfo.url,
+      };
       networkState.targets.push({
         openerId: targetInfo.openerId ?? null,
         parentSessionId: message.sessionId ?? null,
@@ -1836,10 +1988,15 @@ async function configureAppSession(cdp, networkState) {
       })();
       networkState.attachPromises.push(attachPromise);
       networkState.pendingAttachPromises.add(attachPromise);
+      networkState.pendingAttachMetadata.set(attachPromise, attachMetadata);
       void attachPromise.then(
-        () => networkState.pendingAttachPromises.delete(attachPromise),
+        () => {
+          networkState.pendingAttachPromises.delete(attachPromise);
+          networkState.pendingAttachMetadata.delete(attachPromise);
+        },
         (error) => {
           networkState.pendingAttachPromises.delete(attachPromise);
+          networkState.pendingAttachMetadata.delete(attachPromise);
           networkState.attachErrors.push({
             error: `Unhandled attach setup error: ${String(error)}`,
             sessionId,
@@ -1870,6 +2027,7 @@ async function configureAppSession(cdp, networkState) {
 
 async function waitForCdpNetworkFixedPoint(
   networkState,
+  appUrl,
   label,
   timeoutMs = 10_000,
 ) {
@@ -1914,6 +2072,12 @@ async function waitForCdpNetworkFixedPoint(
       return fixedPoint;
     }
   }
+  const diagnostic = buildCdpNetworkFixedPointDiagnostic(
+    networkState,
+    appUrl,
+    label,
+  );
+  networkState.fixedPointDiagnostics.push(diagnostic);
   throw new Error(
     `CDP worker attachment and network activity did not reach a fixed point for ${label}.`,
   );
@@ -3481,9 +3645,13 @@ async function run(options) {
     bitmapBudget: probePdfBitmapBudget(),
     build: null,
     fixture,
+    diagnosticMode: options.diagnoseFirstNetworkFixedPoint
+      ? "first-network-fixed-point"
+      : null,
     issue: 68,
     matrix: [],
     network: null,
+    networkDiagnostics: [],
     schemaVersion: PDF_SHARPNESS_SCHEMA_VERSION,
     source,
     teardown: null,
@@ -3495,9 +3663,11 @@ async function run(options) {
     completedRequestCount: 0,
     failures: [],
     inflightRequests: new Set(),
+    fixedPointDiagnostics: [],
     networkFixedPoints: [],
     phase: "startup",
     pendingAttachPromises: new Set(),
+    pendingAttachMetadata: new Map(),
     requests: [],
     responseFailures: [],
     targets: [],
@@ -3525,63 +3695,85 @@ async function run(options) {
         options.outputDirectory,
         configuration,
       );
-      await waitForCdpNetworkFixedPoint(networkState, configuration.id);
       matrixRun.comparison.sourceSha256 = fixture.sha256;
+      if (options.diagnoseFirstNetworkFixedPoint) {
+        evidence.matrix.push(matrixRun);
+      }
+      await waitForCdpNetworkFixedPoint(
+        networkState,
+        server.appUrl,
+        configuration.id,
+      );
+      if (options.diagnoseFirstNetworkFixedPoint) {
+        networkState.fixedPointDiagnostics.push(
+          buildCdpNetworkFixedPointDiagnostic(
+            networkState,
+            server.appUrl,
+            configuration.id,
+            "fixed-point-reached",
+          ),
+        );
+        break;
+      }
       targetPages.set(configuration.id, matrixRun.comparison.targetPage);
       evidence.matrix.push(matrixRun);
     }
-    networkState.phase = "forced-main-fallback";
-    evidence.fallback = await collectFallbackEvidence(
-      appCdp,
-      server.appUrl,
-      options.fixture,
-      options.outputDirectory,
-    );
-    await waitForCdpNetworkFixedPoint(
-      networkState,
-      "forced-main-fallback",
-    );
+    if (!options.diagnoseFirstNetworkFixedPoint) {
+      networkState.phase = "forced-main-fallback";
+      evidence.fallback = await collectFallbackEvidence(
+        appCdp,
+        server.appUrl,
+        options.fixture,
+        options.outputDirectory,
+      );
+      await waitForCdpNetworkFixedPoint(
+        networkState,
+        server.appUrl,
+        "forced-main-fallback",
+      );
 
-    referenceBrowser = await startBrowser(options.browser, true);
-    referenceCdp = await CdpSession.connect(
-      referenceBrowser.webSocketDebuggerUrl,
-    );
-    await Promise.all([
-      referenceCdp.send("Page.enable"),
-      referenceCdp.send("Runtime.enable"),
-    ]);
-    const reference = await captureReferenceScreenshots(
-      referenceCdp,
-      options.fixture,
-      options.outputDirectory,
-      targetPages,
-    );
-    for (const matrixRun of evidence.matrix) {
-      const referenceCapture = reference.screenshots.get(matrixRun.id);
-      matrixRun.comparison.referenceScreenshot =
-        referenceCapture?.artifact ?? null;
-      matrixRun.comparison.referenceReadiness =
-        referenceCapture?.readiness ?? null;
-      matrixRun.comparison.paired = true;
+      referenceBrowser = await startBrowser(options.browser, true);
+      referenceCdp = await CdpSession.connect(
+        referenceBrowser.webSocketDebuggerUrl,
+      );
+      await Promise.all([
+        referenceCdp.send("Page.enable"),
+        referenceCdp.send("Runtime.enable"),
+      ]);
+      const reference = await captureReferenceScreenshots(
+        referenceCdp,
+        options.fixture,
+        options.outputDirectory,
+        targetPages,
+      );
+      for (const matrixRun of evidence.matrix) {
+        const referenceCapture = reference.screenshots.get(matrixRun.id);
+        matrixRun.comparison.referenceScreenshot =
+          referenceCapture?.artifact ?? null;
+        matrixRun.comparison.referenceReadiness =
+          referenceCapture?.readiness ?? null;
+        matrixRun.comparison.paired = true;
+      }
+      await waitForCdpNetworkFixedPoint(
+        networkState,
+        server.appUrl,
+        "final-network-privacy",
+      );
+      evidence.network = summarizeNetwork(
+        networkState,
+        server.appUrl,
+        options.fixture,
+        fixture.sha256,
+        reference.scheme,
+      );
+      evidence.artifacts.screenshots = [
+        ...evidence.matrix.flatMap((matrixRun) => [
+          matrixRun.comparison.referenceScreenshot,
+          matrixRun.comparison.lineLightScreenshot,
+        ]),
+        evidence.fallback.artifact,
+      ];
     }
-    await waitForCdpNetworkFixedPoint(
-      networkState,
-      "final-network-privacy",
-    );
-    evidence.network = summarizeNetwork(
-      networkState,
-      server.appUrl,
-      options.fixture,
-      fixture.sha256,
-      reference.scheme,
-    );
-    evidence.artifacts.screenshots = [
-      ...evidence.matrix.flatMap((matrixRun) => [
-        matrixRun.comparison.referenceScreenshot,
-        matrixRun.comparison.lineLightScreenshot,
-      ]),
-      evidence.fallback.artifact,
-    ];
   } catch (error) {
     runnerFailure = error;
   } finally {
@@ -3611,30 +3803,51 @@ async function run(options) {
       server: serverShutdown,
       serverClosed: serverShutdown.processClosed,
     };
+    evidence.networkDiagnostics = [
+      ...networkState.fixedPointDiagnostics,
+    ];
   }
 
+  const diagnosticTeardownFailed =
+    options.diagnoseFirstNetworkFixedPoint &&
+    (
+      evidence.teardown?.browserClosed !== true ||
+      evidence.teardown?.cdpClosed !== true ||
+      evidence.teardown?.profilesRemoved !== true ||
+      evidence.teardown?.serverClosed !== true ||
+      evidence.teardown?.errors?.length > 0
+    );
   const failures = [
     ...(runnerFailure
       ? [runnerFailure instanceof Error
           ? runnerFailure.stack
           : String(runnerFailure)]
       : []),
-    ...validatePdfSharpnessEvidence(evidence),
+    ...(diagnosticTeardownFailed
+      ? ["Owned diagnostic browser/server/CDP resources did not tear down cleanly."]
+      : []),
+    ...(options.diagnoseFirstNetworkFixedPoint
+      ? []
+      : validatePdfSharpnessEvidence(evidence)),
   ];
   evidence.failures = failures;
   evidence.passed = failures.length === 0;
   evidence.recordedAt = new Date().toISOString();
   const evidencePath = path.join(
     options.outputDirectory,
-    "pdf-sharpness-browser.json",
+    options.diagnoseFirstNetworkFixedPoint
+      ? "pdf-sharpness-network-diagnostic.json"
+      : "pdf-sharpness-browser.json",
   );
   await writeFile(evidencePath, `${JSON.stringify(evidence, null, 2)}\n`);
   if (failures.length) {
     throw new Error(
-      `Issue #68 browser regression failed. Evidence: ${evidencePath}\n${failures.join("\n")}`,
+      `Issue #68 ${options.diagnoseFirstNetworkFixedPoint ? "network diagnostic" : "browser regression"} failed. Evidence: ${evidencePath}\n${failures.join("\n")}`,
     );
   }
-  process.stdout.write(`Issue #68 browser evidence passed: ${evidencePath}\n`);
+  process.stdout.write(
+    `Issue #68 ${options.diagnoseFirstNetworkFixedPoint ? "network diagnostic" : "browser evidence"} passed: ${evidencePath}\n`,
+  );
 }
 
 const invokedPath = process.argv[1] ? path.resolve(process.argv[1]) : "";

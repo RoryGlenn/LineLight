@@ -266,7 +266,9 @@ continuation arms that restored-document staging cannot consume,
 exact `AbortSignal`- and attempt-bound cancellation terminals, per-scenario
 measured narration alignment, Long Tasks, per-scenario document/parser worker
 traffic settled to a network-quiet fixed point, exact source/screenshot
-manifests, and owned-process teardown.
+manifests, and owned-process teardown. Its bounded first-scenario diagnostic
+mode persists privacy-safe pending-attach, inflight-request, and target-ancestry
+metadata on fixed-point timeouts without running fallback/reference work.
 The independently testable acceptance contract lives in
 [`scripts/pdf-sharpness-evidence.mjs`](../scripts/pdf-sharpness-evidence.mjs),
 its fast and opt-in browser gates live in

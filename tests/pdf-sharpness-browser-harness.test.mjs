@@ -18,11 +18,13 @@ import {
 } from "../scripts/pdf-sharpness-evidence.mjs";
 import {
   analyzeReferencePixels,
+  buildCdpNetworkFixedPointDiagnostic,
   classifyPdfRasterTransition,
   decodePngScreenshot,
   matchesPdfFallbackInjection,
   planPdfVirtualScroll,
   probePdfBitmapBudget,
+  sanitizeCdpDiagnosticUrl,
   selectPdfFallbackAbortCandidate,
   selectPdfFallbackScenarioEvents,
   summarizePdfModelCompletion,
@@ -750,6 +752,115 @@ test("filters fallback proof to the current imported document and signals", () =
     ],
   );
   assert.equal(maximumConcurrentStaging, 1);
+});
+
+test("records fixed-point diagnostics without private URL or payload data", () => {
+  const appUrl = "http://127.0.0.1:4173/";
+  const privateText = "private-reader-sentence";
+  const privateProfile = "/tmp/linelight-private-profile/Default";
+  const pendingPromise = Promise.resolve();
+  const requestKey = "worker-session:private-request-id";
+  const workerUrl =
+    `${appUrl}assets/pdf-document.worker-test.js?text=${privateText}`;
+  const parserUrl =
+    `${appUrl}assets/pdf-parser.worker-test.js?profile=${privateProfile}`;
+  const networkState = {
+    attachErrors: [{
+      error: `Could not resume target: ${privateProfile}?text=${privateText}`,
+      sessionId: "worker-session",
+      type: "worker",
+      url: parserUrl,
+    }],
+    attachPromises: [pendingPromise],
+    byId: new Map([[requestKey, {
+      method: "GET",
+      phase: "desktop-dpr1-zoom100",
+      sessionId: "worker-session",
+      type: "Script",
+      url: parserUrl,
+    }]]),
+    completedRequestCount: 4,
+    inflightRequests: new Set([requestKey]),
+    pendingAttachMetadata: new Map([[pendingPromise, {
+      parentSessionId: null,
+      phase: "desktop-dpr1-zoom100",
+      sessionId: "worker-session",
+      targetId: "worker-target",
+      type: "worker",
+      url: parserUrl,
+    }]]),
+    pendingAttachPromises: new Set([pendingPromise]),
+    requests: [{ method: "GET", url: workerUrl }],
+    targets: [
+      {
+        detached: false,
+        parentSessionId: null,
+        phase: "desktop-dpr1-zoom100",
+        sessionId: "document-session",
+        targetId: "document-target",
+        type: "worker",
+        url: workerUrl,
+        waitingForDebugger: false,
+      },
+      {
+        detached: false,
+        parentSessionId: "document-session",
+        phase: "desktop-dpr1-zoom100",
+        sessionId: "worker-session",
+        targetId: "worker-target",
+        type: "worker",
+        url: parserUrl,
+        waitingForDebugger: true,
+      },
+    ],
+  };
+  const diagnostic = buildCdpNetworkFixedPointDiagnostic(
+    networkState,
+    appUrl,
+    "desktop-dpr1-zoom100",
+  );
+  assert.deepEqual(Object.keys(diagnostic).sort(), [
+    "attachErrors",
+    "counts",
+    "inflightRequests",
+    "label",
+    "outcome",
+    "pendingAttaches",
+    "targets",
+  ]);
+  assert.equal(diagnostic.inflightRequests[0].path,
+    "/assets/pdf-parser.worker-test.js");
+  assert.equal(diagnostic.pendingAttaches[0].url,
+    "/assets/pdf-parser.worker-test.js");
+  assert.equal(diagnostic.targets[0].url,
+    "/assets/pdf-document.worker-test.js");
+  assert.equal(diagnostic.targets[1].url,
+    "/assets/pdf-parser.worker-test.js");
+  assert.equal(diagnostic.targets[1].ancestry[0].url,
+    "/assets/pdf-document.worker-test.js");
+  assert.match(diagnostic.inflightRequests[0].identityHash, /^[a-f0-9]{64}$/u);
+  assert.deepEqual(diagnostic.counts, {
+    attachErrorCount: 1,
+    attachPromiseCount: 1,
+    completedRequestCount: 4,
+    inflightRequestCount: 1,
+    pendingAttachCount: 1,
+    requestCount: 1,
+    targetCount: 2,
+  });
+  const serialized = JSON.stringify(diagnostic);
+  assert.doesNotMatch(serialized, /private-reader-sentence/u);
+  assert.doesNotMatch(serialized, /linelight-private-profile/u);
+  assert.doesNotMatch(serialized, /\?/u);
+  assert.doesNotMatch(serialized, /requestId|body|documentText/u);
+  assert.equal(
+    sanitizeCdpDiagnosticUrl("data:text/plain,private", appUrl),
+    "data:<redacted>",
+  );
+  assert.equal(
+    sanitizeCdpDiagnosticUrl("https://example.test/private?token=secret", appUrl),
+    "<external-https>",
+  );
 });
 
 test("keeps fallback probes armed through restored and wrong-page staging", async () => {
@@ -1629,7 +1740,41 @@ test("documents a headed, fresh-build-only command without launching it", async 
   );
   assert.match(stdout, /fresh production build/u);
   assert.match(stdout, /visible browser/u);
+  assert.match(stdout, /--diagnose-first-network-fixed-point/u);
   assert.doesNotMatch(stdout, /headless/u);
+});
+
+test("keeps the first-network diagnostic bounded and non-recording", async () => {
+  await assert.rejects(
+    execFileAsync(
+      process.execPath,
+      [
+        "scripts/run-pdf-sharpness-browser-regression.mjs",
+        "--diagnose-first-network-fixed-point",
+        "--record",
+      ],
+      { cwd: path.resolve(".") },
+    ),
+    /cannot be combined with --record/u,
+  );
+  const source = await readFile(
+    "scripts/run-pdf-sharpness-browser-regression.mjs",
+    "utf8",
+  );
+  assert.match(
+    source,
+    /if \(!options\.diagnoseFirstNetworkFixedPoint\) \{\s*networkState\.phase = "forced-main-fallback"/u,
+  );
+  assert.match(
+    source,
+    /networkState\.fixedPointDiagnostics\.push\(diagnostic\);\s*throw new Error/u,
+  );
+  assert.match(
+    source,
+    /evidence\.networkDiagnostics = \[\s*\.\.\.networkState\.fixedPointDiagnostics/u,
+  );
+  assert.match(source, /diagnosticTeardownFailed/u);
+  assert.match(source, /pdf-sharpness-network-diagnostic\.json/u);
 });
 
 test("refuses to record screenshots from a private fixture", async () => {
