@@ -5165,6 +5165,12 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
       return targetState?.setupComplete === true &&
         targetState.pending === false && errors.length === 0;
     }
+    if (
+      targetState?.pendingFailureMayPrecedeError === true &&
+      errors.length > 0
+    ) {
+      return false;
+    }
     const explained = targetState?.pending === true || errors.length > 0;
     const failedCommandExplained = targetState?.failedNames.size === 0 ||
       targetState?.pendingFailureMayPrecedeError === true ||
@@ -5518,6 +5524,188 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
   };
 }
 
+function isAppMatrixRuntimeCdpHistoryContinuous(
+  previous,
+  current,
+  currentConfigurationId,
+) {
+  const previousTargets = Array.isArray(previous?.targets)
+    ? previous.targets
+    : null;
+  const currentTargets = Array.isArray(current?.targets)
+    ? current.targets
+    : null;
+  const previousSettlements = Array.isArray(
+      previous?.targetBootstrapSettlements,
+    )
+    ? previous.targetBootstrapSettlements
+    : null;
+  const currentSettlements = Array.isArray(
+      current?.targetBootstrapSettlements,
+    )
+    ? current.targetBootstrapSettlements
+    : null;
+  const previousServiceWorkers = Array.isArray(
+      previous?.serviceWorkerBootstrapObservations,
+    )
+    ? previous.serviceWorkerBootstrapObservations
+    : null;
+  const currentServiceWorkers = Array.isArray(
+      current?.serviceWorkerBootstrapObservations,
+    )
+    ? current.serviceWorkerBootstrapObservations
+    : null;
+  if (
+    !previousTargets || !currentTargets ||
+    !previousSettlements || !currentSettlements ||
+    !previousServiceWorkers || !currentServiceWorkers
+  ) {
+    return false;
+  }
+  const commandFields = [
+    "cdpId",
+    "deadlineAt",
+    "dispatchedAt",
+    "dispatchSequence",
+    "method",
+    "name",
+    "resultAt",
+    "resultSequence",
+    "status",
+  ];
+  const commandsEqual = (left, right) =>
+    Array.isArray(left) && Array.isArray(right) &&
+    left.length === right.length &&
+    left.every((command, index) =>
+      command && typeof command === "object" &&
+      right[index] && typeof right[index] === "object" &&
+      commandFields.every((field) => command[field] === right[index][field])
+    );
+  const currentBySession = new Map(
+    currentTargets.map((target) => [target?.sessionId, target]),
+  );
+  const previousSessions = new Set(
+    previousTargets.map((target) => target?.sessionId),
+  );
+  const priorTargetsRetained = previousTargets.every((prior) => {
+    const retained = currentBySession.get(prior?.sessionId);
+    return retained?.targetId === prior?.targetId &&
+      retained?.identityHash === prior?.identityHash &&
+      retained?.phase === prior?.phase &&
+      retained?.parentSessionId === prior?.parentSessionId &&
+      retained?.lifecycleStrategy === prior?.lifecycleStrategy &&
+      retained?.waitingForDebugger === prior?.waitingForDebugger &&
+      retained?.commandDeadlineAt === prior?.commandDeadlineAt &&
+      retained?.resumeDispatchedAt === prior?.resumeDispatchedAt &&
+      commandsEqual(retained?.commands, prior?.commands) &&
+      isCdpTargetSetupComplete(retained);
+  });
+  const newTargetsCurrent = currentTargets.every((target) =>
+    previousSessions.has(target?.sessionId) ||
+    target?.phase === currentConfigurationId
+  );
+  const recordsRetained = (priorRecords, currentRecords, fields) => {
+    const currentByIdentity = new Map(
+      currentRecords.map((record) => [record?.identityHash, record]),
+    );
+    const priorIdentities = new Set(
+      priorRecords.map((record) => record?.identityHash),
+    );
+    return priorRecords.every((prior) => {
+      const retained = currentByIdentity.get(prior?.identityHash);
+      return retained && fields.every((field) =>
+        retained[field] === prior[field]
+      );
+    }) && currentRecords.every((record) =>
+      priorIdentities.has(record?.identityHash) ||
+      record?.phase === currentConfigurationId
+    );
+  };
+  const settlementFields = [
+    "identityHash",
+    "method",
+    "phase",
+    "requestId",
+    "requestSessionId",
+    "resourceType",
+    "targetDetachedAtSettlement",
+    "targetId",
+    "targetParentSessionId",
+    "targetSessionId",
+    "targetType",
+    "terminalReason",
+    "urlClass",
+  ];
+  const serviceWorkerFields = [
+    "earlierRequestCount",
+    "identityHash",
+    "method",
+    "phase",
+    "requestId",
+    "requestIsFirst",
+    "requestSequence",
+    "requestSessionId",
+    "requestStartedAt",
+    "resourceType",
+    "resumeDispatchedAt",
+    "targetDetachedAtObservation",
+    "targetId",
+    "targetSessionId",
+    "targetType",
+    "terminalAt",
+    "terminalReason",
+    "urlClass",
+  ];
+  const priorRecordsRetained = recordsRetained(
+    previousSettlements,
+    currentSettlements,
+    settlementFields,
+  ) && recordsRetained(
+    previousServiceWorkers,
+    currentServiceWorkers,
+    serviceWorkerFields,
+  );
+  const currentTargetForSession = (sessionId) =>
+    currentBySession.get(sessionId) ?? null;
+  const noPriorPhaseWork = (
+    Array.isArray(current?.pendingAttaches) &&
+    current.pendingAttaches.every((entry) =>
+      currentTargetForSession(entry?.sessionId)?.phase ===
+        currentConfigurationId
+    ) &&
+    Array.isArray(current?.attachErrors) &&
+    current.attachErrors.every((entry) =>
+      currentTargetForSession(entry?.sessionId)?.phase ===
+        currentConfigurationId
+    ) &&
+    Array.isArray(current?.inflightRequests) &&
+    current.inflightRequests.every((entry) =>
+      entry?.phase === currentConfigurationId &&
+      (entry?.sessionId === null ||
+        currentTargetForSession(entry.sessionId)?.phase ===
+          currentConfigurationId)
+    )
+  );
+  const cumulativeCountFields = [
+    "attachErrorCount",
+    "attachPromiseCount",
+    "completedRequestCount",
+    "externalRequestCount",
+    "networkFailureCount",
+    "requestCount",
+    "serviceWorkerBootstrapObservationCount",
+    "targetBootstrapSettlementCount",
+    "targetCount",
+  ];
+  const cumulativeCountsBound = cumulativeCountFields.every((field) =>
+    Number.isSafeInteger(previous?.counts?.[field]) &&
+    Number.isSafeInteger(current?.counts?.[field]) &&
+    current.counts[field] >= previous.counts[field]
+  );
+  return priorTargetsRetained && newTargetsCurrent && priorRecordsRetained &&
+    noPriorPhaseWork && cumulativeCountsBound;
+}
+
 export function buildAppMatrixRuntimeDiagnosticReport({
   build,
   fixture,
@@ -5633,6 +5821,28 @@ export function buildAppMatrixRuntimeDiagnosticReport({
       failedAtNetworkStage,
     );
     const networkFailure = networkFailureResult.value;
+    const rawCurrentNetworkDiagnostic = networkExpected
+      ? (networkHealthy ? row.networkFixedPoint : null)
+      : row?.networkFailure?.category === "fixed-point-timeout"
+        ? (networkFailureResult.bound ? row.networkFailure.diagnostic : null)
+        : null;
+    const networkHistoryExpected = index > 0 && (
+      networkExpected ||
+      row?.networkFailure?.category === "fixed-point-timeout"
+    );
+    const priorNetworkDiagnostic = networkHistoryExpected
+      ? rawRows[index - 1]?.networkFixedPoint
+      : null;
+    const networkHistoryBound = !networkHistoryExpected || (
+      rawCurrentNetworkDiagnostic !== null &&
+      priorNetworkDiagnostic?.label === PDF_SHARPNESS_MATRIX[index - 1]?.id &&
+      isCdpFixedPointDiagnosticHealthy(priorNetworkDiagnostic) &&
+      isAppMatrixRuntimeCdpHistoryContinuous(
+        priorNetworkDiagnostic,
+        rawCurrentNetworkDiagnostic,
+        expected?.id,
+      )
+    );
     const statusBound = failed
       ? exactPrefix && !fullSequence &&
         stageHistory.length > 0 && Boolean(failureStep) &&
@@ -5661,6 +5871,7 @@ export function buildAppMatrixRuntimeDiagnosticReport({
       (networkExpected
         ? networkHealthy && row?.networkFailure === null
         : row?.networkFixedPoint == null && networkFailureResult.bound) &&
+      networkHistoryBound &&
       (stageHistory.includes("release-observation-started")
         ? release?.integrity === true && releaseContinuationBound
         : release === null)

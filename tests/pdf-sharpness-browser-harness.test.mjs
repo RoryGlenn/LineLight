@@ -8932,6 +8932,73 @@ test("retains a privacy-safe fixed-point timeout on the failed matrix row", () =
     bindIncompleteSamples(diagnostic, { attachErrorCount: 1 });
     return { diagnostic, target };
   };
+  const makeServicePendingTarget = (value, { withError = false } = {}) => {
+    const diagnostic = timeoutDiagnostic(value);
+    const setup = completedCdpTargetSetup({
+      cdpIdStart: 1_001,
+      serviceWorker: true,
+      startedAt: 1_100,
+    });
+    const target = {
+      ancestry: [],
+      attachComplete: false,
+      ...setup,
+      detached: false,
+      identityHash: diagnosticIdentity(
+        `${diagnostic.label}-pending-service-session`,
+        `${diagnostic.label}-pending-service-target`,
+      ),
+      parentSessionId: null,
+      phase: diagnostic.label,
+      resumed: true,
+      sessionId: `${diagnostic.label}-pending-service-session`,
+      targetId: `${diagnostic.label}-pending-service-target`,
+      type: "service_worker",
+      urlClass: "app-asset",
+      waitingForDebugger: true,
+      workerInstanceId: null,
+    };
+    target.commands[0].status = "failed";
+    target.commands[3].resultAt = null;
+    target.commands[3].resultSequence = null;
+    target.commands[3].status = "pending";
+    diagnostic.targets.push(target);
+    diagnostic.pendingAttaches = [{
+      commands: target.commands.map((command) => ({ ...command })),
+      commandDeadlineAt: target.commandDeadlineAt,
+      identityHash: diagnosticIdentity(target.sessionId, target.targetId),
+      parentSessionId: target.parentSessionId,
+      phase: target.phase,
+      resumeDispatchedAt: target.resumeDispatchedAt,
+      sessionId: target.sessionId,
+      targetId: target.targetId,
+      type: target.type,
+      urlClass: target.urlClass,
+    }];
+    diagnostic.attachErrors = withError
+      ? [{
+          category: "setup",
+          command: "network-enable",
+          identityHash: diagnosticIdentity(target.sessionId, target.targetId),
+          sessionId: target.sessionId,
+          targetId: target.targetId,
+          type: target.type,
+          urlClass: target.urlClass,
+        }]
+      : [];
+    diagnostic.counts.attachErrorCount = diagnostic.attachErrors.length;
+    diagnostic.counts.pendingAttachCount = 1;
+    diagnostic.counts.attachPromiseCount += 1;
+    diagnostic.counts.targetCount += 1;
+    bindIncompleteSamples(diagnostic, {
+      attachErrorCount: diagnostic.attachErrors.length,
+      pendingAttachCount: 1,
+    });
+    diagnostic.wait.recentSamples.forEach((sample) => {
+      sample.targetCount = diagnostic.counts.targetCount;
+    });
+    return { diagnostic, target };
+  };
   const setInflightRequests = (value, count) => {
     const diagnostic = timeoutDiagnostic(value);
     const target = diagnostic.targets[0];
@@ -8988,37 +9055,54 @@ test("retains a privacy-safe fixed-point timeout on the failed matrix row", () =
   );
   assert.equal(resumeFailure.rows[1].integrity, true);
 
+  const resumePendingErrorInput = passingAppMatrixRuntimeNetworkTimeoutInput(
+    outputDirectory,
+  );
+  const resumePendingErrorState = makeFailedTarget(
+    resumePendingErrorInput,
+    { withError: true },
+  );
+  const pendingResume = resumePendingErrorState.target.commands.at(-1);
+  pendingResume.resultAt = null;
+  pendingResume.resultSequence = null;
+  pendingResume.status = "pending";
+  resumePendingErrorState.target.resumed = false;
+  resumePendingErrorState.diagnostic.pendingAttaches = [{
+    commands: resumePendingErrorState.target.commands.map(
+      (command) => ({ ...command }),
+    ),
+    commandDeadlineAt: resumePendingErrorState.target.commandDeadlineAt,
+    identityHash: diagnosticIdentity(
+      resumePendingErrorState.target.sessionId,
+      resumePendingErrorState.target.targetId,
+    ),
+    parentSessionId: resumePendingErrorState.target.parentSessionId,
+    phase: resumePendingErrorState.target.phase,
+    resumeDispatchedAt: resumePendingErrorState.target.resumeDispatchedAt,
+    sessionId: resumePendingErrorState.target.sessionId,
+    targetId: resumePendingErrorState.target.targetId,
+    type: resumePendingErrorState.target.type,
+    urlClass: resumePendingErrorState.target.urlClass,
+  }];
+  resumePendingErrorState.diagnostic.counts.pendingAttachCount = 1;
+  bindIncompleteSamples(resumePendingErrorState.diagnostic, {
+    attachErrorCount: 1,
+    pendingAttachCount: 1,
+  });
+  const resumePendingError = buildAppMatrixRuntimeDiagnosticReport(
+    resumePendingErrorInput,
+  );
+  assert.equal(
+    resumePendingError.execution.orderExact,
+    true,
+    resumePendingError.failures.join("\n"),
+  );
+  assert.equal(resumePendingError.rows[1].integrity, true);
+
   const servicePendingInput = passingAppMatrixRuntimeNetworkTimeoutInput(
     outputDirectory,
   );
-  const servicePendingDiagnostic = timeoutDiagnostic(servicePendingInput);
-  const servicePendingTarget = servicePendingDiagnostic.targets.find(
-    (target) => target.type === "service_worker",
-  );
-  servicePendingTarget.commands[0].status = "failed";
-  servicePendingTarget.commands[3].resultAt = null;
-  servicePendingTarget.commands[3].resultSequence = null;
-  servicePendingTarget.commands[3].status = "pending";
-  servicePendingTarget.attachComplete = false;
-  servicePendingDiagnostic.pendingAttaches = [{
-    commands: servicePendingTarget.commands.map((command) => ({ ...command })),
-    commandDeadlineAt: servicePendingTarget.commandDeadlineAt,
-    identityHash: diagnosticIdentity(
-      servicePendingTarget.sessionId,
-      servicePendingTarget.targetId,
-    ),
-    parentSessionId: servicePendingTarget.parentSessionId,
-    phase: servicePendingTarget.phase,
-    resumeDispatchedAt: servicePendingTarget.resumeDispatchedAt,
-    sessionId: servicePendingTarget.sessionId,
-    targetId: servicePendingTarget.targetId,
-    type: servicePendingTarget.type,
-    urlClass: servicePendingTarget.urlClass,
-  }];
-  servicePendingDiagnostic.serviceWorkerBootstrapObservations = [];
-  servicePendingDiagnostic.counts.pendingAttachCount = 1;
-  servicePendingDiagnostic.counts.serviceWorkerBootstrapObservationCount = 0;
-  bindIncompleteSamples(servicePendingDiagnostic, { pendingAttachCount: 1 });
+  makeServicePendingTarget(servicePendingInput);
   const servicePending = buildAppMatrixRuntimeDiagnosticReport(
     servicePendingInput,
   );
@@ -9028,6 +9112,92 @@ test("retains a privacy-safe fixed-point timeout on the failed matrix row", () =
     servicePending.failures.join("\n"),
   );
   assert.equal(servicePending.rows[1].integrity, true);
+
+  const mutableHistoryInput = passingAppMatrixRuntimeNetworkTimeoutInput(
+    outputDirectory,
+  );
+  const previousMutableDiagnostic = mutableHistoryInput.rows[0]
+    .networkFixedPoint;
+  const currentMutableDiagnostic = timeoutDiagnostic(mutableHistoryInput);
+  const previousPhase = previousMutableDiagnostic.label;
+  const mutableRoot = {
+    ancestry: [],
+    attachComplete: true,
+    ...completedCdpTargetSetup({ cdpIdStart: 2_001, startedAt: 2_100 }),
+    detached: false,
+    identityHash: diagnosticIdentity(
+      `${previousPhase}-mutable-root-session`,
+      `${previousPhase}-mutable-root-target`,
+    ),
+    parentSessionId: null,
+    phase: previousPhase,
+    resumed: true,
+    sessionId: `${previousPhase}-mutable-root-session`,
+    targetId: `${previousPhase}-mutable-root-target`,
+    type: "shared_worker",
+    urlClass: "other-local",
+    waitingForDebugger: true,
+    workerInstanceId: null,
+  };
+  const mutableChild = {
+    ancestry: [{
+      phase: previousPhase,
+      sessionId: mutableRoot.sessionId,
+      type: mutableRoot.type,
+      urlClass: mutableRoot.urlClass,
+    }],
+    attachComplete: true,
+    ...completedCdpTargetSetup({ cdpIdStart: 2_011, startedAt: 2_120 }),
+    detached: false,
+    identityHash: diagnosticIdentity(
+      `${previousPhase}-mutable-child-session`,
+      `${previousPhase}-mutable-child-target`,
+    ),
+    parentSessionId: mutableRoot.sessionId,
+    phase: previousPhase,
+    resumed: true,
+    sessionId: `${previousPhase}-mutable-child-session`,
+    targetId: `${previousPhase}-mutable-child-target`,
+    type: "worker",
+    urlClass: "blob",
+    waitingForDebugger: true,
+    workerInstanceId: null,
+  };
+  for (const diagnostic of [
+    previousMutableDiagnostic,
+    currentMutableDiagnostic,
+  ]) {
+    diagnostic.targets.push(
+      structuredClone(mutableRoot),
+      structuredClone(mutableChild),
+    );
+    diagnostic.counts.attachPromiseCount += 2;
+    diagnostic.counts.targetCount += 2;
+    diagnostic.wait.recentSamples.forEach((sample) => {
+      sample.targetCount = diagnostic.counts.targetCount;
+    });
+  }
+  const retainedMutableRoot = currentMutableDiagnostic.targets.find(
+    (target) => target.sessionId === mutableRoot.sessionId,
+  );
+  const retainedMutableChild = currentMutableDiagnostic.targets.find(
+    (target) => target.sessionId === mutableChild.sessionId,
+  );
+  retainedMutableRoot.detached = true;
+  retainedMutableRoot.type = "worker";
+  retainedMutableRoot.urlClass = "blob";
+  retainedMutableRoot.workerInstanceId = 99;
+  retainedMutableChild.ancestry[0].type = retainedMutableRoot.type;
+  retainedMutableChild.ancestry[0].urlClass = retainedMutableRoot.urlClass;
+  const mutableHistory = buildAppMatrixRuntimeDiagnosticReport(
+    mutableHistoryInput,
+  );
+  assert.equal(
+    mutableHistory.execution.orderExact,
+    true,
+    mutableHistory.failures.join("\n"),
+  );
+  assert.equal(mutableHistory.rows[1].integrity, true);
 
   const mutations = [
     ["timeout label", (value) => {
@@ -9172,6 +9342,47 @@ test("retains a privacy-safe fixed-point timeout on the failed matrix row", () =
       diagnostic.counts.pendingAttachCount = 1;
       bindIncompleteSamples(diagnostic, { pendingAttachCount: 1 });
     }],
+    ["timeout premature normal pending attach error", (value) => {
+      const { diagnostic, target } = makePendingTarget(value, {
+        withPending: true,
+      });
+      target.commands[0].status = "failed";
+      diagnostic.pendingAttaches[0].commands[0].status = "failed";
+      diagnostic.attachErrors = [{
+        category: "setup",
+        command: "network-enable",
+        identityHash: diagnosticIdentity(target.sessionId, target.targetId),
+        sessionId: target.sessionId,
+        targetId: target.targetId,
+        type: target.type,
+        urlClass: target.urlClass,
+      }];
+      diagnostic.counts.attachErrorCount = 1;
+      diagnostic.wait.recentSamples.forEach((sample) => {
+        sample.attachErrorCount = 1;
+      });
+    }],
+    ["timeout premature pending unhandled error", (value) => {
+      const { diagnostic, target } = makePendingTarget(value, {
+        withPending: true,
+      });
+      diagnostic.attachErrors = [{
+        category: "unhandled-setup",
+        command: null,
+        identityHash: diagnosticIdentity(target.sessionId, target.targetId),
+        sessionId: target.sessionId,
+        targetId: target.targetId,
+        type: target.type,
+        urlClass: target.urlClass,
+      }];
+      diagnostic.counts.attachErrorCount = 1;
+      diagnostic.wait.recentSamples.forEach((sample) => {
+        sample.attachErrorCount = 1;
+      });
+    }],
+    ["timeout premature service pending attach error", (value) => {
+      makeServicePendingTarget(value, { withError: true });
+    }],
     ["timeout pending target without pending attach", (value) => {
       makePendingTarget(value);
     }],
@@ -9312,6 +9523,117 @@ test("retains a privacy-safe fixed-point timeout on the failed matrix row", () =
     }],
     ["timeout worker instance BigInt does not throw", (value) => {
       currentDocumentTarget(timeoutDiagnostic(value)).workerInstanceId = 1n;
+    }],
+    ["timeout prior target regresses to pending", (value) => {
+      const diagnostic = timeoutDiagnostic(value);
+      const target = diagnostic.targets.find((entry) =>
+        entry.phase !== diagnostic.label &&
+        entry.urlClass === "pdf-document-worker"
+      );
+      target.commands = [
+        target.commands[0],
+        {
+          ...target.commands[1],
+          resultAt: null,
+          resultSequence: null,
+          status: "pending",
+        },
+      ];
+      target.attachComplete = false;
+      target.resumed = false;
+      target.resumeDispatchedAt = null;
+      removeTargetSettlement(diagnostic, target);
+      diagnostic.pendingAttaches = [{
+        commands: target.commands.map((command) => ({ ...command })),
+        commandDeadlineAt: target.commandDeadlineAt,
+        identityHash: diagnosticIdentity(target.sessionId, target.targetId),
+        parentSessionId: target.parentSessionId,
+        phase: target.phase,
+        resumeDispatchedAt: target.resumeDispatchedAt,
+        sessionId: target.sessionId,
+        targetId: target.targetId,
+        type: target.type,
+        urlClass: target.urlClass,
+      }];
+      diagnostic.counts.pendingAttachCount = 1;
+      bindIncompleteSamples(diagnostic, { pendingAttachCount: 1 });
+    }],
+    ["timeout prior settlement deleted", (value) => {
+      const diagnostic = timeoutDiagnostic(value);
+      const target = diagnostic.targets.find((entry) =>
+        entry.phase !== diagnostic.label &&
+        entry.urlClass === "pdf-document-worker"
+      );
+      removeTargetSettlement(diagnostic, target);
+    }],
+    ["timeout prior service observation deleted", (value) => {
+      const diagnostic = timeoutDiagnostic(value);
+      diagnostic.serviceWorkerBootstrapObservations = [];
+      diagnostic.counts.serviceWorkerBootstrapObservationCount = 0;
+    }],
+    ["timeout prior target identity substituted", (value) => {
+      const diagnostic = timeoutDiagnostic(value);
+      const target = diagnostic.targets.find((entry) =>
+        entry.phase !== diagnostic.label &&
+        entry.urlClass === "pdf-document-worker"
+      );
+      const settlement = diagnostic.targetBootstrapSettlements.find(
+        (entry) => entry.targetSessionId === target.sessionId,
+      );
+      target.targetId = `${target.targetId}-substituted`;
+      target.identityHash = diagnosticIdentity(target.sessionId, target.targetId);
+      settlement.targetId = target.targetId;
+      settlement.identityHash = diagnosticIdentity(
+        settlement.requestSessionId,
+        settlement.requestId,
+        settlement.targetSessionId,
+        settlement.targetId,
+      );
+    }],
+    ["timeout prior command history substituted", (value) => {
+      const diagnostic = timeoutDiagnostic(value);
+      diagnostic.targets.find((entry) =>
+        entry.phase !== diagnostic.label &&
+        entry.urlClass === "pdf-document-worker"
+      ).commands.forEach((command) => {
+        command.cdpId += 5_000;
+      });
+    }],
+    ["timeout extra prior-phase target", (value) => {
+      const diagnostic = timeoutDiagnostic(value);
+      const sourceTarget = diagnostic.targets.find((entry) =>
+        entry.phase !== diagnostic.label &&
+        entry.urlClass === "pdf-document-worker"
+      );
+      const extra = structuredClone(sourceTarget);
+      extra.ancestry = [];
+      extra.commands.forEach((command) => {
+        command.cdpId += 6_000;
+      });
+      extra.identityHash = diagnosticIdentity(
+        `${sourceTarget.phase}-extra-session`,
+        `${sourceTarget.phase}-extra-target`,
+      );
+      extra.parentSessionId = null;
+      extra.sessionId = `${sourceTarget.phase}-extra-session`;
+      extra.targetId = `${sourceTarget.phase}-extra-target`;
+      extra.type = "shared_worker";
+      extra.urlClass = "other-local";
+      diagnostic.targets.push(extra);
+      diagnostic.counts.attachPromiseCount += 1;
+      diagnostic.counts.targetCount += 1;
+      diagnostic.wait.recentSamples.forEach((sample) => {
+        sample.targetCount = diagnostic.counts.targetCount;
+      });
+    }],
+    ["timeout cumulative request count regresses", (value) => {
+      const previous = value.rows[0].networkFixedPoint;
+      const current = timeoutDiagnostic(value);
+      previous.counts.requestCount = current.counts.requestCount + 1;
+      previous.counts.completedRequestCount = previous.counts.requestCount;
+      previous.wait.recentSamples.forEach((sample) => {
+        sample.requestCount = previous.counts.requestCount;
+      });
     }],
     ["timeout external count exceeds requests", (value) => {
       const diagnostic = timeoutDiagnostic(value);
