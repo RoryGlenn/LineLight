@@ -1812,7 +1812,8 @@ function sanitizeReferenceDiagnosticAnalysis(analysis) {
       componentBounds.x + componentBounds.width <= analysis.width &&
       componentBounds.y + componentBounds.height <= analysis.height &&
       Number.isInteger(component?.whiteArea) &&
-      component.whiteArea >= 1 &&
+      component.whiteArea >=
+        componentBounds.width + componentBounds.height - 1 &&
       component.whiteArea <= componentBounds.width * componentBounds.height
     );
   };
@@ -1927,6 +1928,7 @@ function sanitizeReferenceDiagnosticAnalysis(analysis) {
     const expectedPagePixels =
       (bounds.width - insetX * 2) * (bounds.height - insetY * 2);
     const interiorHeight = bounds.height - insetY * 2;
+    const interiorWidth = bounds.width - insetX * 2;
     const renderedPage =
       analysis.pageWhiteRatio >= PDF_SHARPNESS_REFERENCE_MIN_WHITE_RATIO &&
       analysis.inkPixels >= PDF_SHARPNESS_REFERENCE_MIN_INK_PIXELS &&
@@ -1946,6 +1948,10 @@ function sanitizeReferenceDiagnosticAnalysis(analysis) {
       analysis.pageWhitePixels + analysis.inkPixels <= analysis.pagePixels &&
       analysis.inkRowBands <= Math.ceil(interiorHeight / 3) &&
       analysis.inkPixels >= analysis.inkRowBands * 3 &&
+      Math.abs(
+        analysis.inkSpanRatio * interiorWidth -
+          Math.round(analysis.inkSpanRatio * interiorWidth),
+      ) <= 1e-7 &&
       closeTo(
         analysis.inkRatio,
         analysis.inkPixels / analysis.pagePixels,

@@ -185,6 +185,9 @@ function validRenderedReferenceAnalysis(analysis) {
   const interiorHeight = Number.isInteger(bounds?.height)
     ? bounds.height - insetY * 2
     : 0;
+  const interiorWidth = Number.isInteger(bounds?.width)
+    ? bounds.width - insetX * 2
+    : 0;
   return (
     analysis?.renderedPage === true &&
     analysis?.proof === "white-page-with-rendered-ink" &&
@@ -209,6 +212,7 @@ function validRenderedReferenceAnalysis(analysis) {
     bounds.x + bounds.width <= analysis.width &&
     bounds.y + bounds.height <= analysis.height &&
     winnerWhiteArea <= bounds.width * bounds.height &&
+    winnerWhiteArea >= bounds.width + bounds.height - 1 &&
     runnerUpWhiteArea <= analysis.width * analysis.height &&
     Number.isInteger(analysis?.pagePixels) &&
     analysis.pagePixels === expectedPagePixels &&
@@ -240,7 +244,11 @@ function validRenderedReferenceAnalysis(analysis) {
     analysis.inkPixels >= analysis.inkRowBands * 3 &&
     finite(analysis?.inkSpanRatio) &&
     analysis.inkSpanRatio >= PDF_SHARPNESS_REFERENCE_MIN_INK_SPAN_RATIO &&
-    analysis.inkSpanRatio <= 1
+    analysis.inkSpanRatio <= 1 &&
+    Math.abs(
+      analysis.inkSpanRatio * interiorWidth -
+        Math.round(analysis.inkSpanRatio * interiorWidth),
+    ) <= 1e-7
   );
 }
 
@@ -670,8 +678,14 @@ export function validatePdfSharpnessEvidence(evidence) {
     const referenceInsetY = Number.isInteger(pageBounds?.height)
       ? Math.max(2, Math.floor(pageBounds.height * 0.01))
       : 0;
+    const referenceInsetX = Number.isInteger(pageBounds?.width)
+      ? Math.max(2, Math.floor(pageBounds.width * 0.01))
+      : 0;
     const referenceInteriorHeight = Number.isInteger(pageBounds?.height)
       ? pageBounds.height - referenceInsetY * 2
+      : 0;
+    const referenceInteriorWidth = Number.isInteger(pageBounds?.width)
+      ? pageBounds.width - referenceInsetX * 2
       : 0;
     if (
       referenceReadiness?.renderedPage !== true ||
@@ -739,7 +753,13 @@ export function validatePdfSharpnessEvidence(evidence) {
       !finite(referenceReadiness?.inkSpanRatio) ||
       referenceReadiness.inkSpanRatio <
         PDF_SHARPNESS_REFERENCE_MIN_INK_SPAN_RATIO ||
-      referenceReadiness.inkSpanRatio > 1
+      referenceReadiness.inkSpanRatio > 1 ||
+      Math.abs(
+        referenceReadiness.inkSpanRatio * referenceInteriorWidth -
+          Math.round(
+            referenceReadiness.inkSpanRatio * referenceInteriorWidth,
+          ),
+      ) > 1e-7
     ) {
       fail(`${expected.id} original PDF reference lacks rendered-page pixel proof`);
     }
@@ -767,7 +787,7 @@ export function validatePdfSharpnessEvidence(evidence) {
         bounds.x + bounds.width <= expectedPhysicalWidth &&
         bounds.y + bounds.height <= expectedPhysicalHeight &&
         Number.isInteger(component?.whiteArea) &&
-        component.whiteArea >= 1 &&
+        component.whiteArea >= bounds.width + bounds.height - 1 &&
         component.whiteArea <= bounds.width * bounds.height
       );
     };

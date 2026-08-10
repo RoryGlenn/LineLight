@@ -161,8 +161,9 @@ unchanged 1% inset and five rendered-ink thresholds. A disconnected white
 thumbnail rail, toolbar, blank page, clipped page, spinner, loading surface, or
 ambiguous tied components therefore cannot satisfy readiness. The JSON
 validator independently checks those global segmentation metrics, including
-the disjoint-component area sum, disjoint white/ink pixel counts, and the
-minimum-pixel and row-spacing implications of each ink band. It proves
+each connected component's minimum spanning area, the disjoint-component area
+sum, disjoint white/ink pixel counts, the minimum-pixel and row-spacing
+implications of each ink band, and the integer-pixel horizontal ink span. It proves
 the requested page separately instead of assuming that page is the largest
 visible component: all substantial components are retained in deterministic
 top-first order, exactly one must be anchored in the top quarter after the

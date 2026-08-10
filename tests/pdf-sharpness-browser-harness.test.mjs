@@ -1755,6 +1755,26 @@ test("builds a noncanonical privacy-safe reference-capture diagnostic", () => {
   assert.ok(componentOverflowReport.failures.length > 0);
   assert.deepEqual(componentOverflowReport.artifacts.candidates, []);
 
+  const impossibleConnectedComponentArea = structuredClone(input);
+  for (const candidate of impossibleConnectedComponentArea.capture.candidates) {
+    const impossibleComponent = {
+      pageBounds: { height: 674, width: 300, x: 0, y: 226 },
+      whiteArea: 1,
+    };
+    candidate.analysis.substantialComponents.push(impossibleComponent);
+    candidate.analysis.substantialComponentCount = 2;
+    candidate.analysis.runnerUpWhiteArea = impossibleComponent.whiteArea;
+    candidate.analysis.winnerDominanceRatio =
+      candidate.analysis.winnerWhiteArea / impossibleComponent.whiteArea;
+    candidate.referenceTarget = passingReferenceTarget(candidate.analysis, 2);
+  }
+  const impossibleComponentReport = buildReferenceCaptureDiagnosticReport(
+    impossibleConnectedComponentArea,
+  );
+  assert.equal(impossibleComponentReport.completed, false);
+  assert.ok(impossibleComponentReport.failures.length > 0);
+  assert.deepEqual(impossibleComponentReport.artifacts.candidates, []);
+
   for (const mutateTargetReadiness of [
     (readiness) => {
       const insetY = Math.max(2, Math.floor(readiness.pageBounds.height * 0.01));
@@ -1765,6 +1785,9 @@ test("builds a noncanonical privacy-safe reference-capture diagnostic", () => {
       readiness.inkPixels =
         readiness.pagePixels - readiness.pageWhitePixels + 1;
       readiness.inkRatio = readiness.inkPixels / readiness.pagePixels;
+    },
+    (readiness) => {
+      readiness.inkSpanRatio = 0.6500001;
     },
   ]) {
     const value = structuredClone(input);
@@ -2164,6 +2187,7 @@ function passingCanonicalReference(configuration, targetPage, index) {
   const pagePixels = (pageWidth - insetX * 2) * (pageHeight - insetY * 2);
   const pageWhitePixels = Math.floor(pagePixels * 0.9);
   const inkPixels = Math.max(100, Math.floor(pagePixels * 0.01));
+  const interiorWidth = pageWidth - insetX * 2;
   const component = { pageBounds, whiteArea: winnerWhiteArea };
   const readiness = {
     attempts: 2,
@@ -2171,7 +2195,7 @@ function passingCanonicalReference(configuration, targetPage, index) {
     inkPixels,
     inkRatio: inkPixels / pagePixels,
     inkRowBands: 4,
-    inkSpanRatio: 0.65,
+    inkSpanRatio: Math.round(interiorWidth * 0.65) / interiorWidth,
     pageBounds,
     pagePixels,
     pageWhitePixels,
@@ -3326,6 +3350,28 @@ function forgeCorrelatedReferenceComponentAreaOverflow(run) {
     bounds: { ...component.pageBounds },
     whiteArea: component.whiteArea,
   })));
+}
+
+function forgeImpossibleConnectedReferenceComponent(run) {
+  const readiness = run.comparison.referenceReadiness;
+  const target = run.comparison.referenceTarget;
+  const impossible = {
+    pageBounds: {
+      ...readiness.substantialComponents[0].pageBounds,
+      x: 20,
+      y: target.anchorLimit + 1,
+    },
+    whiteArea: 1,
+  };
+  readiness.substantialComponents.push(impossible);
+  readiness.substantialComponentCount = 2;
+  readiness.runnerUpWhiteArea = impossible.whiteArea;
+  readiness.winnerDominanceRatio =
+    readiness.winnerWhiteArea / readiness.runnerUpWhiteArea;
+  target.components.push({
+    bounds: { ...impossible.pageBounds },
+    whiteArea: impossible.whiteArea,
+  });
 }
 
 test("accepts complete Issue 68 sharpness evidence", () => {
@@ -5406,6 +5452,9 @@ test("rejects each material Issue 68 acceptance regression", async (t) => {
     ["reference correlated component area overflow", (value) => {
       forgeCorrelatedReferenceComponentAreaOverflow(value.matrix[0]);
     }, /requested top page/u],
+    ["reference impossible connected component area", (value) => {
+      forgeImpossibleConnectedReferenceComponent(value.matrix[0]);
+    }, /requested top page/u],
     ["reference target anchor ambiguity", (value) => {
       makeAdjacentReferenceComponentTheGlobalWinner(value.matrix[0]);
       const run = value.matrix[0];
@@ -5440,6 +5489,10 @@ test("rejects each material Issue 68 acceptance regression", async (t) => {
       readiness.inkPixels =
         readiness.pagePixels - readiness.pageWhitePixels + 1;
       readiness.inkRatio = readiness.inkPixels / readiness.pagePixels;
+    }, /requested top page/u],
+    ["reference target fractional ink span", (value) => {
+      value.matrix[0].comparison.referenceTarget.readiness.inkSpanRatio =
+        0.6500001;
     }, /requested top page/u],
     ["reference target crop winner", (value) => {
       value.matrix[0].comparison.referenceTarget.readiness.winnerWhiteArea -= 1;
