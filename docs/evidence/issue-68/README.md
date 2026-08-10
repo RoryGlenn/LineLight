@@ -102,8 +102,14 @@ worker-dispatch, Long Task, and diagnostic-only Long Animation Frame records
 expose interval overlap without claiming causation. Long Animation Frame
 support may be unavailable; when available, frame and script timing is bounded
 and only fixed source/invoker classes plus function-name presence are retained.
+Callback and drained batches are filtered by each frame's own half-open
+scenario interval and sorted before the bounded snapshot, excluding delayed
+prior-row delivery while retaining a boundary-spanning frame. A failed network
+fixed-point stage retains the label-bound timeout diagnostic as fixed failure
+classes, derived gates/counts, and at most twelve ID-free stability samples;
+unexpected failures use a separate fixed category.
 Raw errors, function names, document identities, URLs, profile paths, and
-arbitrary local output paths are not serialized. Its version-2 noncanonical
+arbitrary local output paths are not serialized. Its version-3 noncanonical
 report is `diagnostic: true`, has `completed` rather than `passed`, and cannot
 satisfy canonical acceptance; exact clean source/build/fixture/session bindings
 and app/CDP/process/profile/server teardown remain mandatory.

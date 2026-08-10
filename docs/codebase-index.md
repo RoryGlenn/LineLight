@@ -334,12 +334,18 @@ offscreen-release DOM/canvas/geometry snapshot, phase boundaries, bounded
 draw/sampler/worker timing rings, Long Task correlations, and diagnostic-only
 Long Animation Frame timing when that browser API is available. Long Animation
 Frame scripts retain only fixed source/invoker classes and function-name
-presence; raw URLs and names never enter the report. Release proof is anchored
+presence; callback and drained batches are bound by each frame's own half-open
+scenario overlap and sorted before the bounded snapshot, so delayed delivery
+cannot move a prior frame into the next row. Raw URLs and names never enter the
+report. Release proof is anchored
 to the polled DOM/geometry/canvas state, so an empty post-boundary worker-event
 list is valid; any retained event must still match the current worker, job,
 revision, page, type, and order. Each cumulative CDP fixed point validates
 historical targets and settlements against their own phase and requires exactly
-one current document worker/parser pair with one settlement each. Its
+one current document worker/parser pair with one settlement each. A failed
+network stage retains the already-built label-bound timeout diagnostic as fixed
+failure classes, derived gates/counts, and bounded ID-free stability samples;
+unexpected failures remain a separate fixed category. Its
 fresh-build/source, external-output, privacy, single-session, and full
 app/server teardown bindings are fail-closed. The report is explicitly
 noncanonical and cannot satisfy Issue 68 acceptance.

@@ -66,6 +66,7 @@ import {
   reconcileCdpTargetBootstrapRequests,
   referenceViewportContract,
   runBoundedDiagnosticOperation,
+  collectAppMatrixRuntimeLongAnimationFrameBatch,
   selectPdfLongTasksForWindow,
   selectPdfFallbackAbortCandidate,
   selectPdfFallbackScenarioEvents,
@@ -5389,13 +5390,137 @@ test("drains runtime observers before scenario snapshots", async () => {
   assert.match(source, /longAnimationFrameObserver\.takeRecords\(\)/u);
   assert.match(
     source,
-    /finishScenario[\s\S]*finishedAt = performance\.now\(\);\s*if \(runtimeDiagnosticsEnabled\) drainLongAnimationFrames\(\);\s*drainLongTasks\(\)/u,
+    /recordLongAnimationFrameEntries\(longAnimationFrameObserver\.takeRecords\(\)\)/u,
+  );
+  assert.match(
+    source,
+    /PerformanceObserver\(\(list\) => \{\s*recordLongAnimationFrameEntries\(list\.getEntries\(\)\)/u,
+  );
+  assert.doesNotMatch(
+    source,
+    /longAnimationFrameObserver\.observe\([\s\S]{0,100}buffered:\s*true/u,
+  );
+  assert.match(
+    source,
+    /finishScenario[\s\S]*finishedAt = performance\.now\(\);\s*if \(runtimeDiagnosticsEnabled\) \{\s*drainLongAnimationFrames\(\);\s*\}\s*drainLongTasks\(\)/u,
   );
   assert.match(
     source,
     /state\.snapshot = \(\) => \{\s*if \(runtimeDiagnosticsEnabled\) drainLongAnimationFrames\(\);\s*drainLongTasks\(\)/u,
   );
   assert.doesNotMatch(source, /longTaskStart|longTaskEnd/u);
+});
+
+test("binds LoAF batches to exact scenario intervals before the ring", () => {
+  const frames = [
+    { deliverySequence: 1, duration: 50, startTime: 120 },
+    { deliverySequence: 2, duration: 50, startTime: 220 },
+    { deliverySequence: 3, duration: 50, startTime: 90 },
+    { deliverySequence: 4, duration: 50, startTime: 50 },
+    { deliverySequence: 5, duration: 50, startTime: 300 },
+    { deliverySequence: 6, duration: 50, startTime: 290 },
+  ];
+  const callbackBatch = collectAppMatrixRuntimeLongAnimationFrameBatch(
+    { items: [], total: 0 },
+    frames.slice(0, 2),
+    { finishedAt: 300, startedAt: 100 },
+    32,
+  );
+  const first = collectAppMatrixRuntimeLongAnimationFrameBatch(
+    callbackBatch,
+    frames.slice(2),
+    { finishedAt: 300, startedAt: 100 },
+    32,
+  );
+  assert.deepEqual(
+    first.items.map((frame) => frame.deliverySequence),
+    [3, 1, 2, 6],
+  );
+  assert.equal(first.total, 4);
+  assert.equal(first.truncated, false);
+
+  const second = collectAppMatrixRuntimeLongAnimationFrameBatch(
+    { items: [], total: 0 },
+    [
+      { deliverySequence: 4, duration: 50, startTime: 250 },
+      frames[4],
+    ],
+    { finishedAt: 400, startedAt: 300 },
+    32,
+  );
+  assert.deepEqual(
+    second.items.map((frame) => frame.deliverySequence),
+    [5],
+  );
+  assert.equal(second.total, 1);
+
+  const sameTimeFirst = collectAppMatrixRuntimeLongAnimationFrameBatch(
+    { items: [], total: 0 },
+    [{ deliverySequence: 1, duration: 60, startTime: 120 }],
+    { finishedAt: 200, startedAt: 100 },
+    32,
+  );
+  const sameTime = collectAppMatrixRuntimeLongAnimationFrameBatch(
+    sameTimeFirst,
+    [{ deliverySequence: 2, duration: 60, startTime: 120 }],
+    { finishedAt: 200, startedAt: 100 },
+    32,
+  );
+  assert.deepEqual(
+    sameTime.items.map((frame) => frame.deliverySequence),
+    [1, 2],
+  );
+
+  const bounded = collectAppMatrixRuntimeLongAnimationFrameBatch(
+    { items: [], total: 0 },
+    Array.from({ length: 34 }, (_, index) => ({
+      deliverySequence: index + 1,
+      duration: 50,
+      startTime: 100 + index,
+    })),
+    { finishedAt: 300, startedAt: 100 },
+    32,
+  );
+  assert.equal(bounded.total, 34);
+  assert.equal(bounded.items.length, 32);
+  assert.equal(bounded.truncated, true);
+
+  const malformed = { duration: "private", startTime: null };
+  const retainedMalformed = collectAppMatrixRuntimeLongAnimationFrameBatch(
+    { items: [], total: 0 },
+    [malformed],
+    { finishedAt: 300, startedAt: 100 },
+    32,
+  );
+  assert.deepEqual(retainedMalformed, {
+    items: [malformed],
+    total: 1,
+    truncated: false,
+  });
+  const boundedMalformed = collectAppMatrixRuntimeLongAnimationFrameBatch(
+    { items: [], total: 0 },
+    [
+      malformed,
+      ...Array.from({ length: 32 }, (_, index) => ({
+        duration: 50,
+        startTime: 100 + index,
+      })),
+    ],
+    { finishedAt: 300, startedAt: 100 },
+    32,
+  );
+  assert.equal(boundedMalformed.total, 33);
+  assert.equal(boundedMalformed.items.includes(malformed), true);
+  const shortOutside = { duration: 49, startTime: 0 };
+  assert.deepEqual(
+    collectAppMatrixRuntimeLongAnimationFrameBatch(
+      { items: [], total: 0 },
+      [shortOutside],
+      { finishedAt: 300, startedAt: 100 },
+      32,
+    ).items,
+    [shortOutside],
+  );
 });
 
 test("independently validates a safety-capped physical-pixel target", () => {
@@ -7167,7 +7292,7 @@ test("keeps the first-network diagnostic bounded and non-recording", async () =>
   );
   assert.match(
     source,
-    /networkState\.fixedPointDiagnostics\.push\(diagnostic\);\s*throw new Error/u,
+    /networkState\.fixedPointDiagnostics\.push\(diagnostic\);\s*throw new CdpFixedPointTimeoutError\(diagnostic\)/u,
   );
   assert.match(
     source,
@@ -7787,6 +7912,8 @@ function passingAppMatrixRuntimeFailureInput(outputDirectory) {
     finalizationErrorPresent: false,
     modelCompletion: { documentKey, importJobId: 1, revision },
     modelIdentity,
+    networkFailure: null,
+    networkFixedPoint: null,
     priorityProbe,
     priorityTarget,
     releaseSnapshot: {
@@ -8152,6 +8279,53 @@ function passingCumulativeAppMatrixNetworkDiagnostics() {
   });
 }
 
+function passingAppMatrixRuntimeNetworkTimeoutDiagnostic(label) {
+  const index = PDF_SHARPNESS_MATRIX.findIndex(
+    (configuration) => configuration.id === label,
+  );
+  const diagnostic = passingCumulativeAppMatrixNetworkDiagnostics()[index];
+  diagnostic.outcome = "timeout";
+  diagnostic.wait = {
+    elapsedMs: 10_050,
+    recentSamples: [9_800, 9_900, 10_000].map((elapsedMs) => ({
+      attachErrorCount: 0,
+      attachmentReady: false,
+      elapsedMs,
+      incompleteTargetCount: 0,
+      inflightRequestCount: 0,
+      pendingAttachCount: 0,
+      requestCount: diagnostic.counts.requestCount,
+      serviceWorkerBypassed: true,
+      stableSamples: 0,
+      targetCount: diagnostic.counts.targetCount,
+    })),
+    requiredStableSamples: 3,
+    stableSamples: 0,
+    timeoutMs: 10_000,
+  };
+  return diagnostic;
+}
+
+function passingAppMatrixRuntimeNetworkTimeoutInput(outputDirectory) {
+  const input = passingAppMatrixRuntimeCompletedInput(outputDirectory);
+  input.rows.length = 2;
+  const row = input.rows[1];
+  row.stageHistory = APP_MATRIX_RUNTIME_DIAGNOSTIC_STAGES.slice(0, -1);
+  row.currentStage = "network-fixed-point-started";
+  row.failureStage = "network-fixed-point-started";
+  row.networkFixedPoint = null;
+  row.networkFailure = {
+    category: "fixed-point-timeout",
+    diagnostic: passingAppMatrixRuntimeNetworkTimeoutDiagnostic(
+      row.configurationId,
+    ),
+  };
+  row.status = "failed";
+  input.runnerFailure = new Error("/home/private/network timeout stack");
+  input.runnerFailureStage = `matrix:${row.configurationId}`;
+  return input;
+}
+
 test("validates cumulative fixed-point history and exact current PDF coverage", () => {
   const diagnostics = passingCumulativeAppMatrixNetworkDiagnostics();
   assert.equal(isCdpFixedPointDiagnosticHealthy(diagnostics[1]), true);
@@ -8399,7 +8573,7 @@ test("builds a fail-closed privacy-safe app-matrix runtime diagnostic", () => {
   );
   const report = buildAppMatrixRuntimeDiagnosticReport(input);
   assert.equal(report.diagnostic, true);
-  assert.equal(report.diagnosticSchemaVersion, 2);
+  assert.equal(report.diagnosticSchemaVersion, 3);
   assert.equal(report.mode, "app-matrix-runtime");
   assert.equal(report.completed, false);
   assert.equal(report.execution.orderExact, true);
@@ -8534,6 +8708,94 @@ test("binds all six app-matrix runtime rows and the exact sixth timeout", () => 
   assert.ok(substitutedStage.failures.some((failure) =>
     failure.includes("failure row is not bound")
   ));
+});
+
+test("retains a privacy-safe fixed-point timeout on the failed matrix row", () => {
+  const outputDirectory = path.join(
+    os.tmpdir(),
+    "issue-68-app-matrix-network-timeout",
+  );
+  const input = passingAppMatrixRuntimeNetworkTimeoutInput(outputDirectory);
+  const report = buildAppMatrixRuntimeDiagnosticReport(input);
+  assert.equal(report.completed, false);
+  assert.equal(report.execution.orderExact, true, report.failures.join("\n"));
+  assert.equal(report.rows[1].integrity, true);
+  assert.equal(report.rows[1].failureCategory, "fixed-point-timeout");
+  assert.deepEqual(report.rows[1].networkFailure.failureClasses, [
+    "stability",
+  ]);
+  assert.equal(report.rows[1].networkFailure.label, input.rows[1].configurationId);
+  assert.equal(report.rows[1].networkFailure.stability.timeoutMs, 10_000);
+  assert.equal(report.rows[1].networkFixedPoint, null);
+  assert.deepEqual(report.failures, [
+    "The bounded app-matrix runtime diagnostic runner reported a stage failure.",
+  ]);
+
+  const unexpectedInput = passingAppMatrixRuntimeNetworkTimeoutInput(
+    outputDirectory,
+  );
+  unexpectedInput.rows[1].networkFailure = {
+    category: "unexpected",
+    diagnostic: null,
+  };
+  const unexpected = buildAppMatrixRuntimeDiagnosticReport(unexpectedInput);
+  assert.equal(unexpected.execution.orderExact, true);
+  assert.deepEqual(unexpected.rows[1].networkFailure, {
+    category: "unexpected",
+    label: unexpected.rows[1].configurationId,
+  });
+
+  const mutations = [
+    ["timeout label", (value) => {
+      value.rows[1].networkFailure.diagnostic.label = value.rows[0]
+        .configurationId;
+    }],
+    ["timeout outcome", (value) => {
+      value.rows[1].networkFailure.diagnostic.outcome = "fixed-point-reached";
+    }],
+    ["timeout duration", (value) => {
+      value.rows[1].networkFailure.diagnostic.wait.elapsedMs = 9_999;
+    }],
+    ["timeout final sample", (value) => {
+      value.rows[1].networkFailure.diagnostic.wait.recentSamples.at(-1)
+        .targetCount += 1;
+    }],
+    ["timeout count type", (value) => {
+      value.rows[1].networkFailure.diagnostic.counts.requestCount = "5";
+    }],
+    ["timeout settlement phase", (value) => {
+      value.rows[1].networkFailure.diagnostic.targetBootstrapSettlements[0]
+        .phase = value.rows[1].configurationId;
+    }],
+    ["unexpected with diagnostic", (value) => {
+      value.rows[1].networkFailure = {
+        category: "unexpected",
+        diagnostic: value.rows[1].networkFailure.diagnostic,
+      };
+    }],
+  ];
+  for (const [label, mutate] of mutations) {
+    const changed = passingAppMatrixRuntimeNetworkTimeoutInput(outputDirectory);
+    mutate(changed);
+    const changedReport = buildAppMatrixRuntimeDiagnosticReport(changed);
+    assert.equal(changedReport.execution.orderExact, false, label);
+    assert.equal(changedReport.rows[1].integrity, false, label);
+  }
+
+  const privateReport = (privateValue) => {
+    const changed = passingAppMatrixRuntimeNetworkTimeoutInput(outputDirectory);
+    const diagnostic = changed.rows[1].networkFailure.diagnostic;
+    diagnostic.privateError = privateValue;
+    diagnostic.recentActivity = [{ error: privateValue, url: privateValue }];
+    return buildAppMatrixRuntimeDiagnosticReport(changed);
+  };
+  const firstPrivate = privateReport("/home/private/query?secret=first");
+  const secondPrivate = privateReport("C:\\private\\secret=second");
+  assert.deepEqual(firstPrivate, secondPrivate);
+  assert.doesNotMatch(
+    JSON.stringify(firstPrivate),
+    /home\/private|C:\\private|secret|privateError|recentActivity/u,
+  );
 });
 
 test("rejects isolated app-matrix runtime proof substitutions", () => {

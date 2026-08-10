@@ -702,6 +702,78 @@ export function selectPdfLongTasksForWindow(
   );
 }
 
+export function collectAppMatrixRuntimeLongAnimationFrameBatch(
+  current,
+  entries,
+  { finishedAt = null, startedAt },
+  limit = APP_MATRIX_RUNTIME_LOAF_LIMIT,
+) {
+  if (
+    !Number.isInteger(current?.total) ||
+    current.total < 0 ||
+    !Array.isArray(current?.items) ||
+    !Array.isArray(entries) ||
+    !Number.isFinite(startedAt) ||
+    !(finishedAt === null || (
+      Number.isFinite(finishedAt) && finishedAt >= startedAt
+    )) ||
+    !Number.isInteger(limit) ||
+    limit < 1
+  ) {
+    throw new TypeError(
+      "Long Animation Frame collection requires state, a batch, a window, and a limit.",
+    );
+  }
+  const accepted = entries.flatMap((entry) => {
+    const startTime = entry?.startTime;
+    const duration = entry?.duration;
+    const endTime = startTime + duration;
+    if (
+      Number.isFinite(startTime) && Number.isFinite(duration) &&
+      duration >= 50 && Number.isFinite(endTime) &&
+      (endTime <= startedAt || (
+        Number.isFinite(finishedAt) && startTime >= finishedAt
+      ))
+    ) {
+      return [];
+    }
+    return [entry];
+  });
+  const selected = [...current.items, ...accepted]
+    .map((entry, index) => {
+      const startTime = Number.isFinite(entry?.startTime)
+        ? entry.startTime
+        : Number.NaN;
+      const duration = Number.isFinite(entry?.duration)
+        ? entry.duration
+        : Number.NaN;
+      return {
+        endTime: startTime + duration,
+        entry,
+        index,
+        startTime,
+      };
+    })
+    .sort((left, right) => {
+      const finiteDifference = (leftValue, rightValue) =>
+        Number.isFinite(leftValue) && Number.isFinite(rightValue)
+          ? leftValue - rightValue
+          : Number.isFinite(leftValue)
+            ? -1
+            : Number.isFinite(rightValue)
+              ? 1
+              : 0;
+      return finiteDifference(left.startTime, right.startTime) ||
+        finiteDifference(left.endTime, right.endTime) ||
+        left.index - right.index;
+    });
+  return {
+    items: selected.slice(-limit).map(({ entry }) => entry),
+    total: current.total + accepted.length,
+    truncated: current.total + accepted.length > limit,
+  };
+}
+
 export function classifyPdfRasterTransition(previewComposition, sharpTarget) {
   return previewComposition?.width === sharpTarget?.targetWidth &&
       previewComposition?.height === sharpTarget?.targetHeight &&
@@ -4652,6 +4724,329 @@ function isExactAppMatrixRuntimeBuild(build, source) {
     build.localManifest.deploymentId === build?.servedManifest?.deploymentId;
 }
 
+function sanitizeAppMatrixRuntimeNetworkFailure(
+  rawFailure,
+  expectedConfigurationId,
+  failedAtNetworkStage,
+) {
+  if (!failedAtNetworkStage) {
+    return { bound: rawFailure === null, value: null };
+  }
+  if (
+    rawFailure?.category === "unexpected" &&
+    rawFailure?.diagnostic === null
+  ) {
+    return {
+      bound: true,
+      value: { category: "unexpected", label: expectedConfigurationId },
+    };
+  }
+  const diagnostic = rawFailure?.category === "fixed-point-timeout"
+    ? rawFailure.diagnostic
+    : null;
+  const counts = diagnostic?.counts;
+  const targets = Array.isArray(diagnostic?.targets)
+    ? diagnostic.targets
+    : null;
+  const settlements = Array.isArray(diagnostic?.targetBootstrapSettlements)
+    ? diagnostic.targetBootstrapSettlements
+    : null;
+  const serviceWorkers = Array.isArray(
+      diagnostic?.serviceWorkerBootstrapObservations,
+    )
+    ? diagnostic.serviceWorkerBootstrapObservations
+    : null;
+  const samples = Array.isArray(diagnostic?.wait?.recentSamples)
+    ? diagnostic.wait.recentSamples
+    : null;
+  const attachErrors = Array.isArray(diagnostic?.attachErrors)
+    ? diagnostic.attachErrors
+    : null;
+  const pendingAttaches = Array.isArray(diagnostic?.pendingAttaches)
+    ? diagnostic.pendingAttaches
+    : null;
+  const inflightRequests = Array.isArray(diagnostic?.inflightRequests)
+    ? diagnostic.inflightRequests
+    : null;
+  if (
+    diagnostic?.label !== expectedConfigurationId ||
+    diagnostic?.outcome !== "timeout" ||
+    !targets || !settlements || !serviceWorkers || !samples ||
+    !attachErrors || !pendingAttaches || !inflightRequests ||
+    targets.length > 128 || settlements.length > 128 ||
+    serviceWorkers.length > 16 || samples.length < 1 || samples.length > 12
+  ) {
+    return { bound: false, value: null };
+  }
+  const integer = (value) => Number.isInteger(value) && value >= 0;
+  const countKeys = [
+    "attachErrorCount",
+    "attachPromiseCount",
+    "completedRequestCount",
+    "externalRequestCount",
+    "inflightRequestCount",
+    "networkFailureCount",
+    "pendingAttachCount",
+    "requestCount",
+    "serviceWorkerBootstrapObservationCount",
+    "targetBootstrapSettlementCount",
+    "targetCount",
+  ];
+  const countsBound = countKeys.every((key) => integer(counts?.[key])) &&
+    counts.attachErrorCount === attachErrors.length &&
+    counts.pendingAttachCount === pendingAttaches.length &&
+    counts.inflightRequestCount === inflightRequests.length &&
+    counts.targetCount === targets.length &&
+    counts.targetBootstrapSettlementCount === settlements.length &&
+    counts.serviceWorkerBootstrapObservationCount === serviceWorkers.length &&
+    counts.attachPromiseCount === targets.length &&
+    counts.completedRequestCount <= counts.requestCount;
+  const nonEmptyString = (value) =>
+    typeof value === "string" && value.length > 0;
+  const targetBySession = new Map(
+    targets.map((target) => [target?.sessionId, target]),
+  );
+  const targetSessions = targets.map((target) => target?.sessionId);
+  const targetIds = targets.map((target) => target?.targetId);
+  const targetIdentitiesBound =
+    targetSessions.every(nonEmptyString) &&
+    new Set(targetSessions).size === targetSessions.length &&
+    targetIds.every(nonEmptyString) &&
+    new Set(targetIds).size === targetIds.length &&
+    targets.every((target) =>
+      nonEmptyString(target?.phase) &&
+      nonEmptyString(target?.type) &&
+      Array.isArray(target?.commands) &&
+      Array.isArray(target?.ancestry) &&
+      target?.identityHash === cdpDiagnosticIdentity(
+        target.sessionId,
+        target.targetId,
+      )
+    );
+  const settlementIdentities = settlements.map((settlement) =>
+    `${settlement?.requestSessionId ?? "page"}:${settlement?.requestId}`
+  );
+  const settlementsBound =
+    new Set(settlements.map((entry) => entry?.targetSessionId)).size ===
+      settlements.length &&
+    new Set(settlementIdentities).size === settlements.length &&
+    settlements.every((settlement) => {
+      const target = targetBySession.get(settlement?.targetSessionId);
+      return nonEmptyString(settlement?.requestId) &&
+        (settlement?.requestSessionId === null ||
+          nonEmptyString(settlement?.requestSessionId)) &&
+        settlement?.identityHash === cdpDiagnosticIdentity(
+          settlement.requestSessionId,
+          settlement.requestId,
+          settlement.targetSessionId,
+          settlement.targetId,
+        ) &&
+        target?.targetId === settlement?.targetId &&
+        target?.parentSessionId === settlement?.targetParentSessionId &&
+        target?.parentSessionId === settlement?.requestSessionId &&
+        target?.phase === settlement?.phase &&
+        target?.type === settlement?.targetType &&
+        target?.urlClass === settlement?.urlClass &&
+        settlement?.method === "GET" &&
+        settlement?.resourceType === "Script" &&
+        settlement?.targetDetachedAtSettlement === false &&
+        settlement?.terminalReason === "target-attached";
+    });
+  const parserAncestryBound = targets
+    .filter((target) => target?.urlClass === "pdf-parser-worker")
+    .every((target) => {
+      const parent = targetBySession.get(target?.parentSessionId);
+      const ancestor = target?.ancestry?.[0];
+      return parent?.urlClass === "pdf-document-worker" &&
+        parent?.phase === target.phase &&
+        ancestor?.sessionId === parent.sessionId &&
+        ancestor?.phase === parent.phase &&
+        ancestor?.type === parent.type &&
+        ancestor?.urlClass === parent.urlClass;
+    });
+  const serviceWorkerTargets = targets.filter(
+    (target) => target?.type === "service_worker",
+  );
+  const serviceWorkerIdentitiesBound =
+    new Set(serviceWorkers.map((entry) => entry?.targetSessionId)).size ===
+      serviceWorkers.length &&
+    serviceWorkers.every((entry) => {
+      const target = targetBySession.get(entry?.targetSessionId);
+      return target?.type === "service_worker" &&
+        entry?.identityHash === cdpDiagnosticIdentity(
+          entry.requestSessionId,
+          entry.requestId,
+          entry.targetSessionId,
+          entry.targetId,
+        ) &&
+        entry?.requestSessionId === target.sessionId &&
+        entry?.targetId === target.targetId &&
+        entry?.phase === target.phase &&
+        entry?.targetType === target.type &&
+        entry?.urlClass === target.urlClass &&
+        entry?.method === "GET" && entry?.resourceType === "Script" &&
+        entry?.targetDetachedAtObservation === false &&
+        entry?.targetUrlMatched === true && entry?.requestIsFirst === true &&
+        integer(entry?.requestSequence) && entry.requestSequence > 0 &&
+        integer(entry?.earlierRequestCount) && entry.earlierRequestCount === 0 &&
+        integer(entry?.sessionRequestCount) && entry.sessionRequestCount > 0 &&
+        integer(entry?.sessionFailureCount) && entry.sessionFailureCount === 0 &&
+        Number.isFinite(entry?.resumeDispatchedAt) &&
+        Number.isFinite(entry?.requestStartedAt) &&
+        entry.requestStartedAt >= entry.resumeDispatchedAt &&
+        Number.isFinite(entry?.terminalAt) &&
+        entry.terminalAt >= entry.requestStartedAt &&
+        entry?.terminalReason === "loading-finished";
+    });
+  const incompleteTargetCount = targets.filter(
+    (target) => !isCdpTargetSetupComplete(target),
+  ).length;
+  const sampleKeys = [
+    "attachErrorCount",
+    "elapsedMs",
+    "incompleteTargetCount",
+    "inflightRequestCount",
+    "pendingAttachCount",
+    "requestCount",
+    "stableSamples",
+    "targetCount",
+  ];
+  const samplesBound = samples.every((sample, index) =>
+    sampleKeys.every((key) => integer(sample?.[key])) &&
+    typeof sample?.attachmentReady === "boolean" &&
+    typeof sample?.serviceWorkerBypassed === "boolean" &&
+    (index === 0 || sample.elapsedMs >= samples[index - 1].elapsedMs)
+  );
+  const finalSample = samples.at(-1);
+  const waitBound =
+    Number.isFinite(diagnostic?.wait?.elapsedMs) &&
+    diagnostic.wait.elapsedMs >= 10_000 &&
+    diagnostic?.wait?.timeoutMs === 10_000 &&
+    diagnostic?.wait?.requiredStableSamples === CDP_FIXED_POINT_STABLE_SAMPLES &&
+    integer(diagnostic?.wait?.stableSamples) &&
+    diagnostic.wait.stableSamples === finalSample?.stableSamples &&
+    finalSample?.elapsedMs <= diagnostic.wait.elapsedMs &&
+    finalSample?.attachErrorCount === counts?.attachErrorCount &&
+    finalSample?.incompleteTargetCount === incompleteTargetCount &&
+    finalSample?.inflightRequestCount === counts?.inflightRequestCount &&
+    finalSample?.pendingAttachCount === counts?.pendingAttachCount &&
+    finalSample?.requestCount === counts?.requestCount &&
+    finalSample?.targetCount === counts?.targetCount &&
+    finalSample?.serviceWorkerBypassed ===
+      (diagnostic?.serviceWorkerBypassed === true);
+  const currentDocumentTargets = targets.filter((target) =>
+    target?.phase === expectedConfigurationId &&
+    target?.urlClass === "pdf-document-worker"
+  );
+  const currentParserTargets = targets.filter((target) =>
+    target?.phase === expectedConfigurationId &&
+    target?.urlClass === "pdf-parser-worker"
+  );
+  const settlementCount = (target) => settlements.filter(
+    (settlement) => settlement?.targetSessionId === target?.sessionId,
+  ).length;
+  const pdfCardinality = currentDocumentTargets.length === 1 &&
+    currentParserTargets.length === 1 &&
+    settlementCount(currentDocumentTargets[0]) === 1 &&
+    settlementCount(currentParserTargets[0]) === 1;
+  const stableTail = samples.slice(-CDP_FIXED_POINT_STABLE_SAMPLES);
+  const gates = {
+    attachSetup: countsBound && counts.attachErrorCount === 0 &&
+      incompleteTargetCount === 0,
+    externalRequest: countsBound && counts.externalRequestCount === 0,
+    inflightRequest: countsBound && counts.inflightRequestCount === 0,
+    networkFailure: countsBound && counts.networkFailureCount === 0,
+    pdfCardinality,
+    pendingAttach: countsBound && counts.pendingAttachCount === 0,
+    serviceWorker: diagnostic?.serviceWorkerBypassed === true &&
+      serviceWorkerTargets.length > 0 &&
+      serviceWorkers.length === serviceWorkerTargets.length &&
+      serviceWorkerTargets.every((target) => serviceWorkers.some(
+        (entry) => entry?.targetSessionId === target.sessionId,
+      )),
+    stability: stableTail.length === CDP_FIXED_POINT_STABLE_SAMPLES &&
+      stableTail.every((sample, index) =>
+        sample?.attachmentReady === true &&
+        sample?.attachErrorCount === 0 &&
+        sample?.incompleteTargetCount === 0 &&
+        sample?.inflightRequestCount === 0 &&
+        sample?.pendingAttachCount === 0 &&
+        sample?.serviceWorkerBypassed === true &&
+        sample?.requestCount === counts?.requestCount &&
+        sample?.targetCount === counts?.targetCount &&
+        sample?.stableSamples === index + 1
+      ),
+  };
+  const gateEntries = [
+    ["pending-attach", gates.pendingAttach],
+    ["inflight-request", gates.inflightRequest],
+    ["attach-setup", gates.attachSetup],
+    ["pdf-cardinality", gates.pdfCardinality],
+    ["stability", gates.stability],
+    ["service-worker", gates.serviceWorker],
+    ["network-failure", gates.networkFailure],
+    ["external-request", gates.externalRequest],
+  ];
+  const failureClasses = gateEntries.flatMap(([name, passed]) =>
+    passed ? [] : [name]
+  );
+  const bound = countsBound && targetIdentitiesBound && settlementsBound &&
+    parserAncestryBound && serviceWorkerIdentitiesBound && samplesBound &&
+    waitBound && failureClasses.length > 0;
+  return {
+    bound,
+    value: bound
+      ? {
+          category: "fixed-point-timeout",
+          counts: {
+            attachErrorCount: counts.attachErrorCount,
+            completedRequestCount: counts.completedRequestCount,
+            currentDocumentSettlementCount:
+              currentDocumentTargets.length === 1
+                ? settlementCount(currentDocumentTargets[0])
+                : 0,
+            currentDocumentTargetCount: currentDocumentTargets.length,
+            currentParserSettlementCount:
+              currentParserTargets.length === 1
+                ? settlementCount(currentParserTargets[0])
+                : 0,
+            currentParserTargetCount: currentParserTargets.length,
+            externalRequestCount: counts.externalRequestCount,
+            incompleteTargetCount,
+            inflightRequestCount: counts.inflightRequestCount,
+            networkFailureCount: counts.networkFailureCount,
+            pendingAttachCount: counts.pendingAttachCount,
+            requestCount: counts.requestCount,
+            serviceWorkerObservationCount: serviceWorkers.length,
+            serviceWorkerTargetCount: serviceWorkerTargets.length,
+            targetCount: counts.targetCount,
+          },
+          failureClasses,
+          gates,
+          label: expectedConfigurationId,
+          stability: {
+            elapsedMs: diagnostic.wait.elapsedMs,
+            requiredStableSamples: CDP_FIXED_POINT_STABLE_SAMPLES,
+            samples: samples.map((sample) => ({
+              attachErrorCount: sample.attachErrorCount,
+              attachmentReady: sample.attachmentReady,
+              elapsedMs: sample.elapsedMs,
+              incompleteTargetCount: sample.incompleteTargetCount,
+              inflightRequestCount: sample.inflightRequestCount,
+              pendingAttachCount: sample.pendingAttachCount,
+              requestCount: sample.requestCount,
+              serviceWorkerBypassed: sample.serviceWorkerBypassed,
+              stableSamples: sample.stableSamples,
+              targetCount: sample.targetCount,
+            })),
+            stableSamples: diagnostic.wait.stableSamples,
+            timeoutMs: diagnostic.wait.timeoutMs,
+          },
+        }
+      : null,
+  };
+}
+
 export function buildAppMatrixRuntimeDiagnosticReport({
   build,
   fixture,
@@ -4759,6 +5154,14 @@ export function buildAppMatrixRuntimeDiagnosticReport({
         row.currentStage.endsWith("-started")
       ? row.currentStage.slice(0, -"-started".length)
       : null;
+    const failedAtNetworkStage = failed &&
+      row?.currentStage === "network-fixed-point-started";
+    const networkFailureResult = sanitizeAppMatrixRuntimeNetworkFailure(
+      row?.networkFailure ?? null,
+      expected?.id,
+      failedAtNetworkStage,
+    );
+    const networkFailure = networkFailureResult.value;
     const statusBound = failed
       ? exactPrefix && !fullSequence &&
         stageHistory.length > 0 && Boolean(failureStep) &&
@@ -4784,7 +5187,9 @@ export function buildAppMatrixRuntimeDiagnosticReport({
       screenshotBound &&
       (scenarioExpected ? timing?.integrity === true : timing === null) &&
       (priorityExpected ? priorityProbe !== null : priorityProbe === null) &&
-      (networkExpected ? networkHealthy : row?.networkFixedPoint == null) &&
+      (networkExpected
+        ? networkHealthy && row?.networkFailure === null
+        : row?.networkFixedPoint == null && networkFailureResult.bound) &&
       (stageHistory.includes("release-observation-started")
         ? release?.integrity === true && releaseContinuationBound
         : release === null)
@@ -4792,8 +5197,10 @@ export function buildAppMatrixRuntimeDiagnosticReport({
     return {
       adjacentPage: appMatrixRuntimeInteger(row?.adjacentPage, 1),
       configurationId: expected?.id ?? null,
-      failureCategory: failed ? `${failureStep}-failure` : "none",
+      failureCategory: networkFailure?.category ??
+        (failed ? `${failureStep}-failure` : "none"),
       integrity,
+      networkFailure,
       networkFixedPoint,
       priorityProbe,
       priorityTarget: appMatrixRuntimeInteger(row?.priorityTarget, 1),
@@ -4922,7 +5329,7 @@ export function buildAppMatrixRuntimeDiagnosticReport({
       rowOrderBound && phaseSequenceBound && runnerFailureBound &&
       !teardownFailed && !runnerFailure,
     diagnostic: true,
-    diagnosticSchemaVersion: 2,
+    diagnosticSchemaVersion: 3,
     execution: {
       attemptedConfigurationCount: publicRows.length,
       completedConfigurationCount,
@@ -6244,10 +6651,13 @@ const INSTRUMENTATION_SOURCE = String.raw`
     'reject-promise',
     'other'
   ].includes(invokerType) ? invokerType : 'other';
+  const collectLongAnimationFrameBatch = (
+    ${collectAppMatrixRuntimeLongAnimationFrameBatch.toString()}
+  );
   const recordLongAnimationFrameEntries = (entries) => {
-    if (!runtimeDiagnosticsEnabled) return;
+    if (!runtimeDiagnosticsEnabled || !currentScenario) return;
+    const batch = [];
     for (const entry of entries) {
-      if (!currentScenario) continue;
       const rawScriptCount = Number(entry.scripts?.length) || 0;
       const scripts = Array.prototype.slice.call(
         entry.scripts ?? [],
@@ -6265,8 +6675,7 @@ const INSTRUMENTATION_SOURCE = String.raw`
           startTime: script.startTime
         })
       );
-      state.longAnimationFrameCount += 1;
-      state.longAnimationFrames.push({
+      batch.push({
         blockingDuration: entry.blockingDuration,
         duration: entry.duration,
         pauseDuration: scripts.reduce(
@@ -6280,10 +6689,18 @@ const INSTRUMENTATION_SOURCE = String.raw`
         startTime: entry.startTime,
         styleAndLayoutStart: entry.styleAndLayoutStart
       });
-      if (state.longAnimationFrames.length > ${APP_MATRIX_RUNTIME_LOAF_LIMIT}) {
-        state.longAnimationFrames.shift();
-      }
     }
+    const collected = collectLongAnimationFrameBatch(
+      {
+        items: state.longAnimationFrames,
+        total: state.longAnimationFrameCount
+      },
+      batch,
+      currentScenario,
+      ${APP_MATRIX_RUNTIME_LOAF_LIMIT}
+    );
+    state.longAnimationFrameCount = collected.total;
+    state.longAnimationFrames = collected.items;
   };
   let longAnimationFrameObserver = null;
   const drainLongAnimationFrames = () => {
@@ -6300,10 +6717,7 @@ const INSTRUMENTATION_SOURCE = String.raw`
       longAnimationFrameObserver = new PerformanceObserver((list) => {
         recordLongAnimationFrameEntries(list.getEntries());
       });
-      longAnimationFrameObserver.observe({
-        type: 'long-animation-frame',
-        buffered: true
-      });
+      longAnimationFrameObserver.observe({ type: 'long-animation-frame' });
       state.longAnimationFrameObserverAvailable = true;
     } catch {
       longAnimationFrameObserver = null;
@@ -7011,7 +7425,9 @@ const INSTRUMENTATION_SOURCE = String.raw`
   state.finishScenario = () => {
     if (!currentScenario) return null;
     currentScenario.finishedAt = performance.now();
-    if (runtimeDiagnosticsEnabled) drainLongAnimationFrames();
+    if (runtimeDiagnosticsEnabled) {
+      drainLongAnimationFrames();
+    }
     drainLongTasks();
     currentScenario.drawEnd = state.draws.length;
     currentScenario.sampleEnd = state.samples.length;
@@ -8175,6 +8591,14 @@ async function configureAppSession(
   });
 }
 
+class CdpFixedPointTimeoutError extends Error {
+  constructor(diagnostic) {
+    super("CDP network fixed point timed out.");
+    this.code = "cdp-fixed-point-timeout";
+    this.diagnostic = diagnostic;
+  }
+}
+
 async function waitForCdpNetworkFixedPoint(
   networkState,
   appUrl,
@@ -8287,9 +8711,7 @@ async function waitForCdpNetworkFixedPoint(
     },
   );
   networkState.fixedPointDiagnostics.push(diagnostic);
-  throw new Error(
-    `CDP worker attachment and network activity did not reach a fixed point for ${label}.`,
-  );
+  throw new CdpFixedPointTimeoutError(diagnostic);
 }
 
 async function navigateToReader(cdp, appUrl, configuration, fallback = false) {
@@ -11378,6 +11800,8 @@ async function run(options) {
                 failureStage: null,
                 finalizationErrorPresent: false,
                 modelIdentity: null,
+                networkFailure: null,
+                networkFixedPoint: null,
                 priorityProbe: null,
                 priorityTarget: null,
                 releaseSnapshot: null,
@@ -11417,11 +11841,24 @@ async function run(options) {
             );
             if (runtimeDiagnostic) {
               runtimeDiagnostic.networkFixedPoint = networkFixedPoint.diagnostic;
+              runtimeDiagnostic.networkFailure = null;
               runtimeDiagnostic.status = "completed";
               appMatrixRuntimeRows.push(runtimeDiagnostic);
             }
           } catch (error) {
             if (runtimeDiagnostic) {
+              if (runtimeDiagnostic.currentStage === "network-fixed-point-started") {
+                const timeoutDiagnostic = error instanceof CdpFixedPointTimeoutError
+                  ? error.diagnostic
+                  : null;
+                runtimeDiagnostic.networkFailure =
+                  timeoutDiagnostic
+                    ? {
+                        category: "fixed-point-timeout",
+                        diagnostic: timeoutDiagnostic,
+                      }
+                    : { category: "unexpected", diagnostic: null };
+              }
               runtimeDiagnostic.status = "failed";
               runtimeDiagnostic.failureStage ??=
                 runtimeDiagnostic.currentStage ?? "navigate-started";
