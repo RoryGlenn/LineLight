@@ -8680,6 +8680,24 @@ test("binds all six app-matrix runtime rows and the exact sixth timeout", () => 
     assert.equal(report.rows.at(-1).integrity, false, label);
   }
 
+  const unresolvedHistoryInput = structuredClone(completedInput);
+  const retainedServiceSession = unresolvedHistoryInput.rows[0]
+    .networkFixedPoint.targets.find((target) =>
+      target.type === "service_worker"
+    ).sessionId;
+  for (const row of unresolvedHistoryInput.rows) {
+    const target = row.networkFixedPoint.targets.find((candidate) =>
+      candidate.sessionId === retainedServiceSession
+    );
+    target.parentSessionId = "unresolved-private-parent";
+    target.ancestry = [];
+  }
+  const unresolvedHistory = buildAppMatrixRuntimeDiagnosticReport(
+    unresolvedHistoryInput,
+  );
+  assert.equal(unresolvedHistory.completed, false);
+  assert.ok(unresolvedHistory.rows.some((row) => row.integrity === false));
+
   const retainedEventsInput = structuredClone(completedInput);
   retainedEventsInput.rows[0].releaseSnapshot.workerEvents =
     passingAppMatrixRuntimeReleaseEvents(retainedEventsInput.rows[0]);
@@ -8853,6 +8871,25 @@ test("retains a privacy-safe fixed-point timeout on the failed matrix row", () =
 
   const timeoutDiagnostic = (value) =>
     value.rows[1].networkFailure.diagnostic;
+  const firstRowTimeoutInput = () => {
+    const value = passingAppMatrixRuntimeCompletedInput(outputDirectory);
+    value.rows.length = 1;
+    const row = value.rows[0];
+    row.stageHistory = APP_MATRIX_RUNTIME_DIAGNOSTIC_STAGES.slice(0, -1);
+    row.currentStage = "network-fixed-point-started";
+    row.failureStage = "network-fixed-point-started";
+    row.networkFixedPoint = null;
+    row.networkFailure = {
+      category: "fixed-point-timeout",
+      diagnostic: passingAppMatrixRuntimeNetworkTimeoutDiagnostic(
+        row.configurationId,
+      ),
+    };
+    row.status = "failed";
+    value.runnerFailure = new Error("/home/private/first-row timeout");
+    value.runnerFailureStage = `matrix:${row.configurationId}`;
+    return value;
+  };
   const currentDocumentTarget = (diagnostic) => diagnostic.targets.find(
     (target) => target.phase === diagnostic.label &&
       target.urlClass === "pdf-document-worker",
@@ -8865,6 +8902,87 @@ test("retains a privacy-safe fixed-point timeout on the failed matrix row", () =
     diagnostic.counts.targetBootstrapSettlementCount =
       diagnostic.targetBootstrapSettlements.length;
   };
+  const rebindTargetParent = (
+    diagnostic,
+    target,
+    parentSessionId,
+    ancestry,
+  ) => {
+    target.parentSessionId = parentSessionId;
+    target.ancestry = ancestry;
+    const settlement = diagnostic.targetBootstrapSettlements.find((entry) =>
+      entry.targetSessionId === target.sessionId
+    );
+    settlement.requestSessionId = parentSessionId;
+    settlement.targetParentSessionId = parentSessionId;
+    settlement.identityHash = diagnosticIdentity(
+      settlement.requestSessionId,
+      settlement.requestId,
+      settlement.targetSessionId,
+      settlement.targetId,
+    );
+  };
+  const validFirstRowTimeout = buildAppMatrixRuntimeDiagnosticReport(
+    firstRowTimeoutInput(),
+  );
+  assert.equal(
+    validFirstRowTimeout.execution.orderExact,
+    true,
+    validFirstRowTimeout.failures.join("\n"),
+  );
+  assert.equal(validFirstRowTimeout.rows[0].integrity, true);
+
+  const firstRowAncestryMutations = [
+    ["unresolved parent", (diagnostic) => {
+      const target = currentDocumentTarget(diagnostic);
+      rebindTargetParent(
+        diagnostic,
+        target,
+        "unresolved-private-parent",
+        [],
+      );
+    }],
+    ["self cycle", (diagnostic) => {
+      const target = currentDocumentTarget(diagnostic);
+      rebindTargetParent(diagnostic, target, target.sessionId, []);
+    }],
+    ["two-target cycle", (diagnostic) => {
+      const documentTarget = currentDocumentTarget(diagnostic);
+      const parserTarget = diagnostic.targets.find((target) =>
+        target.phase === diagnostic.label &&
+        target.urlClass === "pdf-parser-worker"
+      );
+      rebindTargetParent(
+        diagnostic,
+        documentTarget,
+        parserTarget.sessionId,
+        [{
+          phase: parserTarget.phase,
+          sessionId: parserTarget.sessionId,
+          type: parserTarget.type,
+          urlClass: parserTarget.urlClass,
+        }],
+      );
+      rebindTargetParent(
+        diagnostic,
+        parserTarget,
+        documentTarget.sessionId,
+        [{
+          phase: documentTarget.phase,
+          sessionId: documentTarget.sessionId,
+          type: documentTarget.type,
+          urlClass: documentTarget.urlClass,
+        }],
+      );
+    }],
+  ];
+  for (const [label, mutate] of firstRowAncestryMutations) {
+    const value = firstRowTimeoutInput();
+    mutate(value.rows[0].networkFailure.diagnostic);
+    const changed = buildAppMatrixRuntimeDiagnosticReport(value);
+    assert.equal(changed.completed, false, label);
+    assert.equal(changed.rows[0].integrity, false, label);
+  }
   const bindIncompleteSamples = (
     diagnostic,
     { attachErrorCount = 0, pendingAttachCount = 0 } = {},

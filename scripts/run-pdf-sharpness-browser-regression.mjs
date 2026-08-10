@@ -4724,6 +4724,47 @@ function isExactAppMatrixRuntimeBuild(build, source) {
     build.localManifest.deploymentId === build?.servedManifest?.deploymentId;
 }
 
+function appMatrixRuntimeTargetAncestryBound(targets) {
+  if (!Array.isArray(targets)) return false;
+  const sessions = targets.map((target) => target?.sessionId);
+  if (
+    sessions.some((sessionId) =>
+      typeof sessionId !== "string" || sessionId.length === 0
+    ) || new Set(sessions).size !== sessions.length
+  ) {
+    return false;
+  }
+  const targetBySession = new Map(
+    targets.map((target) => [target.sessionId, target]),
+  );
+  return targets.every((target) => {
+    const ancestry = [];
+    const visited = new Set([target.sessionId]);
+    let parentSessionId = target?.parentSessionId;
+    while (parentSessionId !== null) {
+      if (visited.has(parentSessionId)) return false;
+      const parent = targetBySession.get(parentSessionId);
+      if (!parent) return false;
+      visited.add(parentSessionId);
+      ancestry.push({
+        phase: parent.phase,
+        sessionId: parent.sessionId,
+        type: parent.type,
+        urlClass: parent.urlClass,
+      });
+      parentSessionId = parent.parentSessionId;
+    }
+    return Array.isArray(target?.ancestry) &&
+      target.ancestry.length === ancestry.length &&
+      target.ancestry.every((entry, index) =>
+        entry?.phase === ancestry[index].phase &&
+        entry?.sessionId === ancestry[index].sessionId &&
+        entry?.type === ancestry[index].type &&
+        entry?.urlClass === ancestry[index].urlClass
+      );
+  });
+}
+
 function sanitizeAppMatrixRuntimeNetworkFailure(
   rawFailure,
   expectedConfigurationId,
@@ -5042,32 +5083,7 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
       validateTargetCommandState(target),
     ]),
   );
-  const exactTargetAncestry = (target) => {
-    const expected = [];
-    const visited = new Set([target?.sessionId]);
-    let parentSessionId = target?.parentSessionId;
-    while (parentSessionId && !visited.has(parentSessionId)) {
-      visited.add(parentSessionId);
-      const parent = targetBySession.get(parentSessionId);
-      if (!parent) break;
-      expected.push({
-        phase: parent.phase,
-        sessionId: parent.sessionId,
-        type: parent.type,
-        urlClass: parent.urlClass,
-      });
-      parentSessionId = parent.parentSessionId;
-    }
-    return Array.isArray(target?.ancestry) &&
-      target.ancestry.length === expected.length &&
-      target.ancestry.every((ancestor, index) =>
-        ancestor && typeof ancestor === "object" &&
-        ancestor.sessionId === expected[index].sessionId &&
-        ancestor.phase === expected[index].phase &&
-        ancestor.type === expected[index].type &&
-        ancestor.urlClass === expected[index].urlClass
-      );
-  };
+  const targetAncestryBound = appMatrixRuntimeTargetAncestryBound(targets);
   const targetIdentitiesBound =
     targetSessions.every(nonEmptyString) &&
     new Set(targetSessions).size === targetSessions.length &&
@@ -5085,12 +5101,11 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
         (positiveInteger(target?.workerInstanceId) &&
           target?.type === "worker" && target?.urlClass === "blob")) &&
       targetStates.get(target.sessionId)?.bound === true &&
-      exactTargetAncestry(target) &&
       target?.identityHash === cdpDiagnosticIdentity(
         target.sessionId,
         target.targetId,
       )
-    ) &&
+    ) && targetAncestryBound &&
     targetCommandIds.every(positiveInteger) &&
     new Set(targetCommandIds).size === targetCommandIds.length;
   const attachErrorCommands = new Set([
@@ -5564,45 +5579,15 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
 }
 
 function appMatrixRuntimeTargetMetadataBound(diagnostic) {
-  if (!Array.isArray(diagnostic?.targets)) return false;
-  const targetBySession = new Map(
-    diagnostic.targets.map((target) => [target?.sessionId, target]),
-  );
-  return diagnostic.targets.every((target) => {
-    const ancestry = [];
-    const visited = new Set([target?.sessionId]);
-    let cycleFree = true;
-    let parentSessionId = target?.parentSessionId;
-    while (parentSessionId) {
-      if (visited.has(parentSessionId)) {
-        cycleFree = false;
-        break;
-      }
-      visited.add(parentSessionId);
-      const parent = targetBySession.get(parentSessionId);
-      if (!parent) break;
-      ancestry.push({
-        phase: parent.phase,
-        sessionId: parent.sessionId,
-        type: parent.type,
-        urlClass: parent.urlClass,
-      });
-      parentSessionId = parent.parentSessionId;
-    }
-    return cycleFree && typeof target?.detached === "boolean" &&
+  return appMatrixRuntimeTargetAncestryBound(diagnostic?.targets) &&
+    diagnostic.targets.every((target) =>
+      typeof target?.detached === "boolean" &&
       (target?.workerInstanceId === null || (
         Number.isSafeInteger(target?.workerInstanceId) &&
         target.workerInstanceId > 0 && target?.type === "worker" &&
         target?.urlClass === "blob"
-      )) && Array.isArray(target?.ancestry) &&
-      target.ancestry.length === ancestry.length &&
-      target.ancestry.every((entry, index) =>
-        entry?.phase === ancestry[index].phase &&
-        entry?.sessionId === ancestry[index].sessionId &&
-        entry?.type === ancestry[index].type &&
-        entry?.urlClass === ancestry[index].urlClass
-      );
-  });
+      ))
+    );
 }
 
 function isAppMatrixRuntimeCdpHistoryContinuous(
