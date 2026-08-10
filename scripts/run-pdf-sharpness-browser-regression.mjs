@@ -4801,35 +4801,170 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
     ["auto-attach", "Target.setAutoAttach"],
     ["resume", "Runtime.runIfWaitingForDebugger"],
   ];
-  const validCommandSnapshot = (commands) => {
-    if (!Array.isArray(commands) || commands.length > commandPlan.length) {
-      return false;
+  const commandKeys = [
+    "cdpId",
+    "deadlineAt",
+    "dispatchedAt",
+    "dispatchSequence",
+    "method",
+    "name",
+    "resultAt",
+    "resultSequence",
+    "status",
+  ].sort();
+  const exactCommandKeys = (command) =>
+    command && typeof command === "object" &&
+    Object.keys(command).sort().join("\0") === commandKeys.join("\0");
+  const commandsMatch = (left, right) =>
+    Array.isArray(left) && Array.isArray(right) &&
+    left.length === right.length &&
+    left.every((command, index) =>
+      exactCommandKeys(command) && exactCommandKeys(right[index]) &&
+      commandKeys.every((key) => command[key] === right[index][key])
+    );
+  const validateTargetCommandState = (target) => {
+    const commands = Array.isArray(target?.commands) ? target.commands : null;
+    const stateBooleansBound =
+      typeof target?.attachComplete === "boolean" &&
+      typeof target?.detached === "boolean" &&
+      typeof target?.resumed === "boolean" &&
+      typeof target?.waitingForDebugger === "boolean";
+    if (!commands || !stateBooleansBound) {
+      return { bound: false, failedNames: new Set(), pending: false };
     }
-    const hasResume = commands.at(-1)?.name === "resume";
-    const setupCommandCount = commands.length - (hasResume ? 1 : 0);
-    const resultSequences = [];
-    const valid = commands.every((command, index) => {
-      const [name, method] = hasResume && index === commands.length - 1
-        ? commandPlan.at(-1)
-        : commandPlan[index];
+    const lifecycleStrategy = target.lifecycleStrategy;
+    const serviceWorkerBarrier =
+      lifecycleStrategy === "setup-dispatched-before-resume";
+    const lifecycleBound = target.waitingForDebugger === false
+      ? lifecycleStrategy === "already-running"
+      : [
+          "setup-completed-before-resume",
+          "setup-dispatched-before-resume",
+        ].includes(lifecycleStrategy);
+    const resumeIndexes = commands.flatMap((command, index) =>
+      command?.name === "resume" ? [index] : []
+    );
+    const hasResume = resumeIndexes.length === 1 &&
+      resumeIndexes[0] === commands.length - 1;
+    const setupCommands = hasResume ? commands.slice(0, -1) : commands;
+    const resume = hasResume ? commands.at(-1) : null;
+    const planBound = setupCommands.length >= 2 &&
+      setupCommands.length <= commandPlan.length - 1 &&
+      setupCommands.every((command, index) =>
+        command?.name === commandPlan[index][0] &&
+        command?.method === commandPlan[index][1]
+      ) &&
+      (!hasResume || (
+        resume.name === commandPlan.at(-1)[0] &&
+        resume.method === commandPlan.at(-1)[1]
+      ));
+    const settledCommands = commands.filter((command) =>
+      ["completed", "failed"].includes(command?.status)
+    );
+    const commandFieldsBound = commands.every((command, index) => {
       const settled = ["completed", "failed"].includes(command?.status);
-      if (settled) resultSequences.push(command.resultSequence);
-      return command?.name === name && command?.method === method &&
-        command?.dispatchSequence === index + 1 &&
-        positiveInteger(command?.cdpId) &&
-        positiveInteger(command?.dispatchedAt) &&
-        safeClockOrNull(command?.deadlineAt) &&
-        (command?.deadlineAt === null ||
+      return exactCommandKeys(command) &&
+        command.dispatchSequence === index + 1 &&
+        positiveInteger(command.cdpId) &&
+        positiveInteger(command.dispatchedAt) &&
+        safeClockOrNull(command.deadlineAt) &&
+        (command.deadlineAt === null ||
           command.deadlineAt >= command.dispatchedAt) &&
-        ["pending", "completed", "failed"].includes(command?.status) &&
+        ["pending", "completed", "failed"].includes(command.status) &&
         (settled
-          ? positiveInteger(command?.resultAt) &&
+          ? positiveInteger(command.resultAt) &&
             command.resultAt >= command.dispatchedAt &&
-            positiveInteger(command?.resultSequence)
-          : command?.resultAt === null && command?.resultSequence === null);
+            positiveInteger(command.resultSequence)
+          : command.resultAt === null && command.resultSequence === null);
     });
-    return setupCommandCount <= commandPlan.length - 1 && valid &&
-      new Set(resultSequences).size === resultSequences.length;
+    const failedNames = new Set(
+      commands.filter((command) => command?.status === "failed")
+        .map((command) => command?.name),
+    );
+    const pending = commands.some((command) => command?.status === "pending");
+    if (!lifecycleBound || !planBound || !commandFieldsBound) {
+      return { bound: false, failedNames, pending, setupComplete: false };
+    }
+    const settledByResult = [...settledCommands].sort(
+      (left, right) => left.resultSequence - right.resultSequence,
+    );
+    const commandIds = commands.map((command) => command?.cdpId);
+    const commandOrderBound = commandIds.every((id, index) =>
+      index === 0 || id > commandIds[index - 1]
+    ) && commands.every((command, index) =>
+      index === 0 || command.dispatchedAt >= commands[index - 1].dispatchedAt
+    ) && settledByResult.every((command, index) =>
+      command.resultSequence === index + 1 &&
+      (index === 0 || command.resultAt >= settledByResult[index - 1].resultAt)
+    );
+    const setupProgressionBound = serviceWorkerBarrier || (
+      (setupCommands.length < 3 ||
+        setupCommands.slice(0, 2).every((command) =>
+          command.status === "completed"
+        )) &&
+      (setupCommands.length < 4 ||
+        setupCommands[2]?.status === "completed")
+    );
+    const setupSettled = setupCommands.every((command) =>
+      ["completed", "failed"].includes(command.status)
+    );
+    const setupFailed = setupCommands.some((command) =>
+      command.status === "failed"
+    );
+    const setupCompleted = setupCommands.length === 4 &&
+      setupCommands.every((command) => command.status === "completed");
+    const normalResumeBound = !hasResume || (
+      target.waitingForDebugger === true && setupSettled &&
+      (setupFailed || setupCompleted)
+    );
+    const normalNoResumeBound = hasResume || (
+      target.waitingForDebugger === true
+        ? commands.some((command) => command.status === "pending")
+        : !(setupCommands.length < 4 &&
+          setupCommands.every((command) => command.status === "completed"))
+    );
+    const deadlineBound = serviceWorkerBarrier
+      ? target.waitingForDebugger === true && hasResume &&
+        commands.length === commandPlan.length &&
+        positiveInteger(target.commandDeadlineAt) &&
+        target.commandDeadlineAt > resume.dispatchedAt &&
+        commands.every((command) =>
+          command.deadlineAt === target.commandDeadlineAt
+        ) &&
+        commandIds.every((id, index) =>
+          index === 0 || id === commandIds[index - 1] + 1
+        ) &&
+        setupCommands.every((command) =>
+          command.dispatchedAt <= resume.dispatchedAt
+        ) &&
+        settledCommands.every((command) =>
+          command.resultAt >= resume.dispatchedAt
+        )
+      : target.commandDeadlineAt === null &&
+        commands.every((command) => command.deadlineAt === null) &&
+        normalResumeBound && normalNoResumeBound &&
+        (!hasResume || setupCommands.every((command) =>
+          command.resultAt <= resume.dispatchedAt
+        ));
+    const resumeStateBound = target.waitingForDebugger === true
+      ? target.resumeDispatchedAt === (resume?.dispatchedAt ?? null) &&
+        target.resumed === (resume?.status === "completed")
+      : !hasResume && target.resumeDispatchedAt === null &&
+        target.resumed === true;
+    const setupStateComplete = setupCompleted &&
+      (target.waitingForDebugger === false ||
+        (hasResume && resume.status === "completed")) &&
+      (!serviceWorkerBarrier || settledCommands.every((command) =>
+        command.resultAt <= target.commandDeadlineAt
+      ));
+    const attachStateBound = target.attachComplete === setupStateComplete;
+    return {
+      bound: commandOrderBound && setupProgressionBound && deadlineBound &&
+        resumeStateBound && attachStateBound,
+      failedNames,
+      pending,
+      setupComplete: setupStateComplete,
+    };
   };
   const countKeys = [
     "attachErrorCount",
@@ -4875,6 +5010,12 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
       ? target.commands.map((command) => command?.cdpId)
       : []
   );
+  const targetStates = new Map(
+    targets.map((target) => [
+      target?.sessionId,
+      validateTargetCommandState(target),
+    ]),
+  );
   const targetIdentitiesBound =
     targetSessions.every(nonEmptyString) &&
     new Set(targetSessions).size === targetSessions.length &&
@@ -4888,7 +5029,7 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
         nonEmptyString(target?.parentSessionId)) &&
       safeClockOrNull(target?.commandDeadlineAt) &&
       safeClockOrNull(target?.resumeDispatchedAt) &&
-      validCommandSnapshot(target?.commands) &&
+      targetStates.get(target.sessionId)?.bound === true &&
       Array.isArray(target?.ancestry) &&
       target.ancestry.every((ancestor) =>
         nonEmptyString(ancestor?.sessionId) &&
@@ -4909,27 +5050,46 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
   ]);
   const attachErrorsBound = attachErrors.every((entry) => {
     const target = targetBySession.get(entry?.sessionId);
+    const targetState = targetStates.get(entry?.sessionId);
     return entry && typeof entry === "object" &&
       ["resume", "setup", "unhandled-setup"].includes(entry.category) &&
       attachErrorCommands.has(entry.command) &&
       (entry.category !== "resume" || entry.command === "resume") &&
       nonEmptyString(entry.sessionId) && nonEmptyString(entry.targetId) &&
-      nonEmptyString(entry.type) && urlClasses.has(entry.urlClass) &&
+      CDP_WORKER_TARGET_TYPES.has(entry.type) &&
+      urlClasses.has(entry.urlClass) &&
       entry.identityHash === cdpDiagnosticIdentity(
         entry.sessionId,
         entry.targetId,
       ) &&
-      target?.targetId === entry.targetId && target?.type === entry.type &&
-      target?.urlClass === entry.urlClass &&
-      (entry.command === null || target?.commands?.some((command) =>
-        command?.name === entry.command && command?.status === "failed"
-      ));
+      target?.targetId === entry.targetId &&
+      target?.attachComplete === false &&
+      (entry.command === null || targetState?.failedNames.has(entry.command));
   });
+  const errorsBySession = new Map();
+  for (const entry of attachErrors) {
+    const entries = errorsBySession.get(entry?.sessionId) ?? [];
+    entries.push(entry);
+    errorsBySession.set(entry?.sessionId, entries);
+  }
+  const attachErrorCardinalityBound = [...errorsBySession.values()].every(
+    (entries) => {
+      const categories = entries.map((entry) => entry?.category);
+      const identities = entries.map((entry) =>
+        `${entry?.category}:${entry?.command ?? "none"}`
+      );
+      return entries.length <= 2 &&
+        new Set(categories).size === categories.length &&
+        new Set(identities).size === identities.length &&
+        (!categories.includes("unhandled-setup") || entries.length === 1);
+    },
+  );
   const pendingSessions = pendingAttaches.map((entry) => entry?.sessionId);
   const pendingAttachesBound =
     new Set(pendingSessions).size === pendingSessions.length &&
     pendingAttaches.every((entry) => {
       const target = targetBySession.get(entry?.sessionId);
+      const targetState = targetStates.get(entry?.sessionId);
       return entry && typeof entry === "object" &&
         nonEmptyString(entry.sessionId) && nonEmptyString(entry.targetId) &&
         nonEmptyString(entry.phase) &&
@@ -4943,15 +5103,34 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
         ) &&
         safeClockOrNull(entry.commandDeadlineAt) &&
         safeClockOrNull(entry.resumeDispatchedAt) &&
-        validCommandSnapshot(entry.commands) &&
+        Array.isArray(entry.commands) && targetState?.pending === true &&
         target?.targetId === entry.targetId &&
         target?.parentSessionId === entry.parentSessionId &&
-        target?.phase === entry.phase && target?.type === entry.type &&
-        target?.urlClass === entry.urlClass &&
+        target?.phase === entry.phase && target?.attachComplete === false &&
         target?.commandDeadlineAt === entry.commandDeadlineAt &&
         target?.resumeDispatchedAt === entry.resumeDispatchedAt &&
-        JSON.stringify(target?.commands) === JSON.stringify(entry.commands);
+        commandsMatch(target?.commands, entry.commands);
     });
+  const pendingCommandSessions = targets.flatMap((target) =>
+    targetStates.get(target?.sessionId)?.pending ? [target.sessionId] : []
+  );
+  const pendingCoverageBound =
+    pendingSessions.length === pendingCommandSessions.length &&
+    pendingSessions.every((sessionId) =>
+      pendingCommandSessions.includes(sessionId)
+    );
+  const targetFailureCoverageBound = targets.every((target) => {
+    const targetState = targetStates.get(target?.sessionId);
+    const errors = errorsBySession.get(target?.sessionId) ?? [];
+    if (target?.attachComplete === true) {
+      return targetState?.setupComplete === true &&
+        targetState.pending === false && errors.length === 0;
+    }
+    const explained = targetState?.pending === true || errors.length > 0;
+    const failedCommandExplained = targetState?.failedNames.size === 0 ||
+      errors.some((entry) => targetState.failedNames.has(entry?.command));
+    return explained && failedCommandExplained;
+  });
   const inflightIdentities = inflightRequests.map((entry) =>
     `${entry?.sessionId ?? "page"}:${entry?.requestId}`
   );
@@ -4983,17 +5162,18 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
       return nonEmptyString(settlement?.requestId) &&
         (settlement?.requestSessionId === null ||
           nonEmptyString(settlement?.requestSessionId)) &&
+        target?.targetId === settlement?.targetId &&
         settlement?.identityHash === cdpDiagnosticIdentity(
           settlement.requestSessionId,
           settlement.requestId,
           settlement.targetSessionId,
           settlement.targetId,
         ) &&
-        target?.targetId === settlement?.targetId &&
         target?.parentSessionId === settlement?.targetParentSessionId &&
         target?.parentSessionId === settlement?.requestSessionId &&
         target?.phase === settlement?.phase &&
         target?.type === "worker" &&
+        targetStates.get(target.sessionId)?.setupComplete === true &&
         target?.type === settlement?.targetType &&
         target?.urlClass === settlement?.urlClass &&
         settlement?.method === "GET" &&
@@ -5031,15 +5211,17 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
     serviceWorkers.every((entry) => {
       const target = targetBySession.get(entry?.targetSessionId);
       return target?.type === "service_worker" &&
+        nonEmptyString(entry?.requestId) &&
+        entry?.requestSessionId === target.sessionId &&
+        entry?.targetId === target.targetId &&
         entry?.identityHash === cdpDiagnosticIdentity(
           entry.requestSessionId,
           entry.requestId,
           entry.targetSessionId,
           entry.targetId,
         ) &&
-        nonEmptyString(entry?.requestId) &&
-        entry?.requestSessionId === target.sessionId &&
-        entry?.targetId === target.targetId &&
+        targetStates.get(target.sessionId)?.setupComplete === true &&
+        isCdpTargetSetupComplete(target) &&
         entry?.phase === target.phase &&
         entry?.targetType === target.type &&
         entry?.urlClass === target.urlClass &&
@@ -5063,8 +5245,46 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
         entry.terminalAt >= entry.requestStartedAt &&
         entry?.terminalReason === "loading-finished";
     });
+  const requestIdentityKey = (sessionId, requestId) => {
+    if (
+      !(sessionId === null || nonEmptyString(sessionId)) ||
+      !nonEmptyString(requestId)
+    ) {
+      return null;
+    }
+    const sessionPart = sessionId === null
+      ? "page"
+      : `session:${sessionId.length}:${sessionId}`;
+    return `${sessionPart}:request:${requestId.length}:${requestId}`;
+  };
+  const settlementRequestIdentities = settlements.map((entry) =>
+    requestIdentityKey(entry?.requestSessionId, entry?.requestId)
+  );
+  const serviceRequestIdentities = serviceWorkers.map((entry) =>
+    requestIdentityKey(entry?.requestSessionId, entry?.requestId)
+  );
+  const inflightRequestIdentityHashes = inflightRequests.map((entry) =>
+    requestIdentityKey(entry?.sessionId, entry?.requestId)
+  );
+  const terminalRequestIdentities = [
+    ...settlementRequestIdentities,
+    ...serviceRequestIdentities,
+  ];
+  const allRequestIdentities = [
+    ...terminalRequestIdentities,
+    ...inflightRequestIdentityHashes,
+  ];
+  const requestUnionBound = settlementsBound &&
+    serviceWorkerIdentitiesBound && inflightRequestsBound &&
+    allRequestIdentities.every(nonEmptyString) &&
+    new Set(terminalRequestIdentities).size ===
+      terminalRequestIdentities.length &&
+    new Set(allRequestIdentities).size === allRequestIdentities.length &&
+    counts.requestCount >= allRequestIdentities.length &&
+    counts.completedRequestCount >= terminalRequestIdentities.length;
   const incompleteTargetCount = targets.filter(
-    (target) => !isCdpTargetSetupComplete(target),
+    (target) => targetStates.get(target?.sessionId)?.bound !== true ||
+      !isCdpTargetSetupComplete(target),
   ).length;
   const sampleKeys = [
     "attachErrorCount",
@@ -5077,7 +5297,7 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
     "targetCount",
   ];
   const samplesBound =
-    typeof diagnostic?.serviceWorkerBypassed === "boolean" &&
+    diagnostic?.serviceWorkerBypassed === true &&
     samples.every((sample, index) => {
       const previous = samples[index - 1];
       const fieldsBound = sampleKeys.every((key) => integer(sample?.[key])) &&
@@ -5097,7 +5317,11 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
       const quiet = sample.attachmentReady === true &&
         sample.pendingAttachCount === 0 &&
         sample.inflightRequestCount === 0;
-      if (!previous) return quiet || sample.stableSamples === 0;
+      if (!previous) {
+        return samples.length === 12 && quiet
+          ? sample.stableSamples < CDP_FIXED_POINT_STABLE_SAMPLES
+          : sample.stableSamples === 0;
+      }
       const cumulative = sample.elapsedMs >= previous.elapsedMs &&
         sample.requestCount >= previous.requestCount &&
         sample.targetCount >= previous.targetCount &&
@@ -5144,6 +5368,19 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
     currentParserTargets.length === 1 &&
     settlementCount(currentDocumentTargets[0]) === 1 &&
     settlementCount(currentParserTargets[0]) === 1;
+  const serviceWorkerCoverage = serviceWorkerIdentitiesBound &&
+    serviceWorkerTargets.length > 0 &&
+    serviceWorkers.length === serviceWorkerTargets.length &&
+    serviceWorkerTargets.every((target) => serviceWorkers.some(
+      (entry) => entry?.targetSessionId === target.sessionId,
+    ));
+  const finalAttachmentReady = diagnostic?.serviceWorkerBypassed === true &&
+    attachErrors.length === 0 && targets.length > 0 && targetIdentitiesBound &&
+    targets.every((target) => isCdpTargetSetupComplete(target)) &&
+    serviceWorkerCoverage && pdfCardinality &&
+    counts.networkFailureCount === 0 && counts.externalRequestCount === 0;
+  const finalReadinessBound =
+    finalSample?.attachmentReady === finalAttachmentReady;
   const stableTail = samples.slice(-CDP_FIXED_POINT_STABLE_SAMPLES);
   const gates = {
     attachSetup: countsBound && counts.attachErrorCount === 0 &&
@@ -5153,12 +5390,7 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
     networkFailure: countsBound && counts.networkFailureCount === 0,
     pdfCardinality,
     pendingAttach: countsBound && counts.pendingAttachCount === 0,
-    serviceWorker: diagnostic?.serviceWorkerBypassed === true &&
-      serviceWorkerTargets.length > 0 &&
-      serviceWorkers.length === serviceWorkerTargets.length &&
-      serviceWorkerTargets.every((target) => serviceWorkers.some(
-        (entry) => entry?.targetSessionId === target.sessionId,
-      )),
+    serviceWorker: serviceWorkerCoverage,
     stability: stableTail.length === CDP_FIXED_POINT_STABLE_SAMPLES &&
       stableTail.every((sample, index) =>
         sample?.attachmentReady === true &&
@@ -5186,9 +5418,11 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
     passed ? [] : [name]
   );
   const bound = countsBound && targetIdentitiesBound && attachErrorsBound &&
-    pendingAttachesBound && inflightRequestsBound && settlementsBound &&
-    parserAncestryBound && serviceWorkerIdentitiesBound && samplesBound &&
-    waitBound && failureClasses.length > 0;
+    attachErrorCardinalityBound && pendingAttachesBound &&
+    pendingCoverageBound && targetFailureCoverageBound &&
+    inflightRequestsBound && settlementsBound && parserAncestryBound &&
+    serviceWorkerIdentitiesBound && requestUnionBound && samplesBound &&
+    waitBound && finalReadinessBound && failureClasses.length > 0;
   return {
     bound,
     value: bound
