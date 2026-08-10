@@ -2040,8 +2040,12 @@ export function buildReferenceCaptureDiagnosticReport({
     Math.abs(left - right) <= 1e-7;
   const configuredViewportBound = Boolean(expected && configuredViewport) &&
     closeTo(configuredViewport.devicePixelRatio, expected.devicePixelRatio) &&
+    closeTo(configuredViewport.innerWidth, expected.layoutWidth) &&
+    closeTo(configuredViewport.innerHeight, expected.layoutHeight) &&
     closeTo(configuredViewport.screenWidth, expected.layoutWidth) &&
     closeTo(configuredViewport.screenHeight, expected.layoutHeight) &&
+    closeTo(configuredViewport.visualViewportWidth, expected.layoutWidth) &&
+    closeTo(configuredViewport.visualViewportHeight, expected.layoutHeight) &&
     closeTo(
       configuredViewport.visualViewportScale,
       expected.visualViewportScale,

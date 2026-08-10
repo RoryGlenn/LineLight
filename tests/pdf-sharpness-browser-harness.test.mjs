@@ -1517,6 +1517,10 @@ test("builds a noncanonical privacy-safe reference-capture diagnostic", () => {
       value.capture.navigation.lifecycleLoad.frameId = "stale-frame";
     },
     (value) => { value.capture.configuredViewport.devicePixelRatio = 2; },
+    (value) => { value.capture.configuredViewport.innerWidth = 1; },
+    (value) => { value.capture.configuredViewport.innerHeight = 2; },
+    (value) => { value.capture.configuredViewport.visualViewportWidth = 3; },
+    (value) => { value.capture.configuredViewport.visualViewportHeight = 4; },
     (value) => { value.capture.viewer.viewport.innerWidth = 1_099; },
     (value) => { value.capture.viewer.protocol = "https:"; },
     (value) => { value.capture.viewer.contentType = "text/plain"; },
@@ -1561,6 +1565,18 @@ test("builds a noncanonical privacy-safe reference-capture diagnostic", () => {
     mobileReport.artifacts.candidates[0].analysis.renderedPage,
     false,
   );
+  for (const field of [
+    "innerWidth",
+    "innerHeight",
+    "visualViewportWidth",
+    "visualViewportHeight",
+  ]) {
+    const forgedMobile = structuredClone(mobileObservation);
+    forgedMobile.capture.configuredViewport[field] = 1;
+    const failed = buildReferenceCaptureDiagnosticReport(forgedMobile);
+    assert.equal(failed.completed, false);
+    assert.ok(failed.failures.length > 0);
+  }
 
   const impossibleStableAnalyses = [
     (analysis) => {
