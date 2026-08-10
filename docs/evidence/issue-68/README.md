@@ -50,21 +50,28 @@ validator additionally requires:
 - count and total-pixel bitmap limits, temporary pinned-only overflow, and a
   zero-sized offscreen canvas whose measured text/highlight shell remains;
 - one main-thread fallback staging render at a time, an injected first-render
-  failure followed by recovery, and page-3 cancellation after its PDF.js
-  continuation is delayed; page 3 and a unique attempt ID are derived from the
-  sole real visible, unsatisfied fallback flow rather than supplied by the test
-  caller. Delay, viewport exit, continuation resume, and no-late-compose proof
-  must share that identity, and the harness waits for the continuation to resume
-  more than one second later before accepting a retained zero-sized canvas;
+  failure followed by recovery on the same document revision and target, and
+  page-3 cancellation after its PDF.js continuation is delayed; page 3 and a
+  unique attempt ID are derived from the sole real visible, unsatisfied fallback
+  flow rather than supplied by the test caller. Abort request, viewport exit,
+  continuation resume, exact cancelled terminal outcome, and no-late-compose
+  proof must share that document/revision/attempt identity, and the harness waits
+  for the continuation to resume more than one second later before accepting a
+  retained zero-sized canvas;
 - deterministic local narration advancing a word inside its measured sentence
   highlight in every desktop/mobile/zoom scenario, with no Window Long Task
   above 50 ms;
 - recursive CDP attachment to a fixed point covering normal document/parser
   workers and the forced blob-wrapper/parser chain, with their session ancestry
-  and non-page request counts; attachment promises and all observed network
-  requests must reach a quiet fixed point before the privacy snapshot, with no
-  attach error, external request, request for the imported PDF source, or other
-  network failure; and a local `file:` reference comparison.
+  and non-page request counts in every one of the six matrix phases; attachment
+  promises and all observed network requests must reach a quiet fixed point
+  before the privacy snapshot, with no attach error, external request, request
+  for the imported PDF source, or other network failure; and a local `file:`
+  reference comparison.
+
+The validator also requires the exact reviewed source-file key set and one
+unique, expected filename/path/hash/byte reference for every screenshot. A
+partial or substituted manifest cannot preserve a passing record.
 
 The report stores only PDF byte counts/hashes and local test-speech character
 counts; it does not serialize PDF text or narration text. A non-default local

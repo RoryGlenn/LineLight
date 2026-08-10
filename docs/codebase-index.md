@@ -261,8 +261,8 @@ independently recomputed preview-to-sharp backing targets, current viewport
 priority, bitmap/canvas
 budgets, offscreen release, identity-bound serialized fallback
 failure/retry/cancellation, per-scenario measured narration alignment, Long
-Tasks, recursively attached worker traffic settled to a network-quiet fixed
-point, artifact hashes, and owned-process teardown.
+Tasks, per-scenario document/parser worker traffic settled to a network-quiet
+fixed point, exact source/screenshot manifests, and owned-process teardown.
 The independently testable acceptance contract lives in
 [`scripts/pdf-sharpness-evidence.mjs`](../scripts/pdf-sharpness-evidence.mjs),
 its fast and opt-in browser gates live in

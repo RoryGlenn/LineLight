@@ -38,6 +38,7 @@ import {
   PDF_SHARPNESS_REFERENCE_MIN_INK_ROW_BANDS,
   PDF_SHARPNESS_REFERENCE_MIN_WHITE_RATIO,
   PDF_SHARPNESS_SCHEMA_VERSION,
+  PDF_SHARPNESS_SOURCE_FILES,
   validatePdfSharpnessEvidence,
 } from "./pdf-sharpness-evidence.mjs";
 
@@ -61,34 +62,6 @@ const BUILD_TIMEOUT_MS = 300_000;
 const SERVER_TIMEOUT_MS = 60_000;
 const SCENARIO_TIMEOUT_MS = 90_000;
 const SHUTDOWN_TIMEOUT_MS = 3_000;
-
-const SOURCE_FILES = Object.freeze([
-  "app/pdf-document-model.mjs",
-  "app/pdf-document-protocol.mjs",
-  "app/pdf-document-types.ts",
-  "app/pdf-document.ts",
-  "app/pdf-document.worker.ts",
-  "app/pdf-fallback-scheduler.mjs",
-  "app/pdf-page-store.mjs",
-  "app/pdf-page-view.tsx",
-  "app/pdf-parser.worker.ts",
-  "app/pdf-raster-scheduler.mjs",
-  "app/pdf-raster-scale.mjs",
-  "app/reader-virtualization.mjs",
-  "docs/codebase-index.md",
-  "docs/evidence/issue-68/README.md",
-  "scripts/generate-pdf-highlight-fixture.mjs",
-  "scripts/pdf-sharpness-evidence.mjs",
-  "scripts/run-pdf-highlight-browser-regression.mjs",
-  "scripts/run-pdf-sharpness-browser-regression.mjs",
-  "tests/pdf-document-model.test.mjs",
-  "tests/pdf-fallback-scheduler.test.mjs",
-  "tests/pdf-page-store.test.mjs",
-  "tests/pdf-raster-lifecycle.test.mjs",
-  "tests/pdf-raster-scale.test.mjs",
-  "tests/pdf-sharpness-browser-harness.test.mjs",
-  "tests/reader-virtualization.test.mjs",
-]);
 
 function parseArguments(argv) {
   const options = {
@@ -176,7 +149,7 @@ function gitStatus() {
 
 async function collectSourceEvidence() {
   const files = {};
-  for (const relativeFile of SOURCE_FILES) {
+  for (const relativeFile of PDF_SHARPNESS_SOURCE_FILES) {
     files[relativeFile] = await sha256File(
       path.join(REPOSITORY_ROOT, relativeFile),
     );
@@ -693,13 +666,19 @@ const INSTRUMENTATION_SOURCE = String.raw`
       if (pdfWorker) {
         this.addEventListener("message", (event) => {
           const message = event.data || {};
+          const documentId = message.page?.documentId || message.document?.id;
+          const revision = message.page?.revision || message.revision || null;
           workerEvents.push({
             at: performance.now(),
             direction: "from-worker",
+            documentKey: documentId && revision
+              ? documentId + ":" + revision
+              : null,
             height: Number(message.height) || null,
             pageHeight: Number(message.page?.layout?.height) || null,
             pageNumber: Number(message.pageNumber || message.page?.pageNumber) || null,
             pageWidth: Number(message.page?.layout?.width) || null,
+            revision,
             scale: Number(message.scale) || null,
             type: message.type || null,
             width: Number(message.width) || null
@@ -753,6 +732,36 @@ const INSTRUMENTATION_SOURCE = String.raw`
   let delayNextContinuation = null;
   const fallbackAttempts = new Map();
   const stagingSymbol = Symbol("issue68FallbackStaging");
+  const nativeAbort = AbortController.prototype.abort;
+  AbortController.prototype.abort = function issue68Abort(reason) {
+    if (forceFallback) {
+      const activeAttempts = Array.from(fallbackAttempts.values()).filter(
+        (attempt) => !attempt.finished
+      );
+      const attempt = activeAttempts.length === 1 ? activeAttempts[0] : null;
+      const delayedAttempt = attempt && state.fallback.events.some((event) =>
+        event.type === "continuation-delay" &&
+        event.renderAttemptId === attempt.renderAttemptId
+      );
+      if (
+        attempt &&
+        attempt.cancelRequestedAt === null &&
+        delayedAttempt
+      ) {
+        attempt.cancelRequestedAt = performance.now();
+        state.fallback.events.push({
+          at: attempt.cancelRequestedAt,
+          documentKey: attempt.documentKey,
+          page: attempt.page,
+          pageDerivation: attempt.pageDerivation,
+          renderAttemptId: attempt.renderAttemptId,
+          revision: attempt.revision,
+          type: "cancel-request"
+        });
+      }
+    }
+    return nativeAbort.call(this, reason);
+  };
   const recordError = (value) => state.errors.push(String(value));
   addEventListener("error", (event) => {
     recordError(event.error?.stack || event.message || "window error");
@@ -896,9 +905,11 @@ const INSTRUMENTATION_SOURCE = String.raw`
         armedAt,
         callbackName: callback?.name || null,
         delay,
+        documentKey: attempt?.documentKey ?? null,
         page: attempt?.page ?? null,
         pageDerivation: attempt?.pageDerivation ?? null,
         renderAttemptId: attempt?.renderAttemptId ?? null,
+        revision: attempt?.revision ?? null,
         type: "continuation-delay"
       });
       return setTimeout(() => {
@@ -906,9 +917,11 @@ const INSTRUMENTATION_SOURCE = String.raw`
         state.fallback.events.push({
           afterMs: resumedAt - delayedAt,
           at: resumedAt,
+          documentKey: attempt?.documentKey ?? null,
           page: attempt?.page ?? null,
           pageDerivation: attempt?.pageDerivation ?? null,
           renderAttemptId: attempt?.renderAttemptId ?? null,
+          revision: attempt?.revision ?? null,
           type: "continuation-resume"
         });
         nativeRequestAnimationFrame(callback);
@@ -925,14 +938,20 @@ const INSTRUMENTATION_SOURCE = String.raw`
     const staging = canvas[stagingSymbol];
     if (!staging || staging.finished) return;
     staging.finished = true;
+    const terminalOutcome = staging.cancelRequestedAt === null
+      ? outcome
+      : "cancelled";
     state.fallback.activeStaging = Math.max(0, state.fallback.activeStaging - 1);
     state.fallback.events.push({
       at: performance.now(),
+      cancelRequestedAt: staging.cancelRequestedAt,
+      documentKey: staging.documentKey,
       id: staging.id,
-      outcome,
+      outcome: terminalOutcome,
       page: staging.page,
       pageDerivation: staging.pageDerivation,
       renderAttemptId: staging.renderAttemptId,
+      revision: staging.revision,
       targetHeight: staging.targetHeight,
       targetKey: staging.targetKey,
       targetWidth: staging.targetWidth,
@@ -972,10 +991,22 @@ const INSTRUMENTATION_SOURCE = String.raw`
       }
       return [page];
     });
+    const page = candidates.length === 1 ? candidates[0] : null;
+    const pageEvent = Number.isInteger(page)
+      ? workerEvents.findLast((event) =>
+          event.direction === "from-worker" &&
+          event.type === "page" &&
+          event.pageNumber === page &&
+          event.documentKey &&
+          event.revision
+        )
+      : null;
     return {
       candidatePages: candidates,
-      page: candidates.length === 1 ? candidates[0] : null,
-      pageDerivation: "sole-visible-unsatisfied-page"
+      documentKey: pageEvent?.documentKey ?? null,
+      page,
+      pageDerivation: "sole-visible-unsatisfied-page",
+      revision: pageEvent?.revision ?? null
     };
   };
   const nativeGetContext = HTMLCanvasElement.prototype.getContext;
@@ -987,6 +1018,7 @@ const INSTRUMENTATION_SOURCE = String.raw`
       const derivedPage = deriveFallbackPage(this.width, this.height);
       const attempt = {
         ...derivedPage,
+        cancelRequestedAt: null,
         finished: false,
         id,
         renderAttemptId: id,
@@ -1004,11 +1036,13 @@ const INSTRUMENTATION_SOURCE = String.raw`
       state.fallback.events.push({
         at: performance.now(),
         candidatePages: derivedPage.candidatePages,
+        documentKey: attempt.documentKey,
         height: this.height,
         id,
         page: derivedPage.page,
         pageDerivation: derivedPage.pageDerivation,
         renderAttemptId: id,
+        revision: attempt.revision,
         targetHeight: attempt.targetHeight,
         targetKey: attempt.targetKey,
         targetWidth: attempt.targetWidth,
@@ -1049,10 +1083,12 @@ const INSTRUMENTATION_SOURCE = String.raw`
         if (fallbackCompose) {
           state.fallback.events.push({
             at: draw.at,
+            documentKey: fallbackAttempt.documentKey,
             page: draw.page,
             pageDerivation: fallbackAttempt.pageDerivation,
             pageMatchesAttempt: draw.page === fallbackAttempt.page,
             renderAttemptId: fallbackAttempt.renderAttemptId,
+            revision: fallbackAttempt.revision,
             sourcePage: fallbackAttempt.page,
             targetHeight: fallbackAttempt.targetHeight,
             targetKey: fallbackAttempt.targetKey,
@@ -1191,14 +1227,18 @@ const INSTRUMENTATION_SOURCE = String.raw`
       ? document.querySelector('#pdf-page-' + attempt.page)
       : null;
     const canvas = block?.querySelector("canvas") ?? null;
+    const at = performance.now();
     const event = {
-      at: performance.now(),
+      at,
+      cancelRequestedAt: attempt?.cancelRequestedAt ?? null,
       canvasHeight: canvas?.height ?? null,
       canvasPresent: Boolean(canvas),
       canvasWidth: canvas?.width ?? null,
+      documentKey: attempt?.documentKey ?? null,
       page: attempt?.page ?? null,
       pageDerivation: attempt?.pageDerivation ?? null,
       renderAttemptId: attempt?.renderAttemptId ?? null,
+      revision: attempt?.revision ?? null,
       textOverlayCount: block?.querySelectorAll(".pdf-word-overlay").length ?? 0,
       type: "viewport-exit",
       visible: block?.dataset.pdfPageVisible === "true"
@@ -2179,6 +2219,7 @@ async function collectFallbackEvidence(
       const failure = events.find((event) =>
         event.type === 'staging-finish' &&
         event.outcome === 'injected-failure' &&
+        event.documentKey && event.revision &&
         Number.isInteger(event.renderAttemptId) &&
         Number.isInteger(event.page) &&
         event.targetKey
@@ -2186,32 +2227,40 @@ async function collectFallbackEvidence(
       const failedStart = failure && events.find((event) =>
         event.type === 'staging-start' &&
         event.renderAttemptId === failure.renderAttemptId &&
+        event.documentKey === failure.documentKey &&
         event.page === failure.page &&
+        event.revision === failure.revision &&
         event.targetKey === failure.targetKey &&
         event.at <= failure.at
       );
       const retryStart = failure && events.find((event) =>
         event.type === 'staging-start' &&
         event.renderAttemptId !== failure.renderAttemptId &&
+        event.documentKey === failure.documentKey &&
         event.page === failure.page &&
+        event.revision === failure.revision &&
         event.targetKey === failure.targetKey &&
         event.at > failure.at
       );
       const retryCompose = retryStart && events.find((event) =>
         event.type === 'visible-compose' &&
         event.renderAttemptId === retryStart.renderAttemptId &&
+        event.documentKey === retryStart.documentKey &&
         event.page === retryStart.page &&
+        event.revision === retryStart.revision &&
         event.targetKey === retryStart.targetKey &&
         event.at >= retryStart.at
       );
       return failure && failedStart && retryStart && retryCompose && {
         composedAt: retryCompose.at,
+        documentKey: failure.documentKey,
         failedAttemptId: failure.renderAttemptId,
         failedAt: failure.at,
         page: failure.page,
         pageDerivation: failure.pageDerivation,
         retryAttemptId: retryStart.renderAttemptId,
         retryStartedAt: retryStart.at,
+        revision: failure.revision,
         targetHeight: failure.targetHeight,
         targetKey: failure.targetKey,
         targetWidth: failure.targetWidth
@@ -2239,7 +2288,9 @@ async function collectFallbackEvidence(
   );
   if (
     continuationDelay.page !== 3 ||
-    continuationDelay.pageDerivation !== "sole-visible-unsatisfied-page"
+    continuationDelay.pageDerivation !== "sole-visible-unsatisfied-page" ||
+    !continuationDelay.documentKey ||
+    !continuationDelay.revision
   ) {
     throw new Error(
       "The delayed fallback attempt did not derive the intended visible page 3.",
@@ -2270,10 +2321,29 @@ async function collectFallbackEvidence(
       return globalThis.__lineLightIssue68.fallback.events.find(
         (event) => event.type === 'continuation-resume' &&
           event.renderAttemptId === ${renderAttemptId} &&
+          event.documentKey === ${JSON.stringify(continuationDelay.documentKey)} &&
+          event.revision === ${JSON.stringify(continuationDelay.revision)} &&
           event.page === ${cancelledPage} && event.afterMs >= 950
       ) || false;
     `),
     `page ${cancelledPage} delayed continuation to resume after one second`,
+    SCENARIO_TIMEOUT_MS,
+  );
+  const cancellationTerminal = await waitForExpression(
+    cdp,
+    browserExpression(`
+      return globalThis.__lineLightIssue68.fallback.events.find(
+        (event) => event.type === 'staging-finish' &&
+          event.outcome === 'cancelled' &&
+          event.renderAttemptId === ${renderAttemptId} &&
+          event.documentKey === ${JSON.stringify(continuationDelay.documentKey)} &&
+          event.revision === ${JSON.stringify(continuationDelay.revision)} &&
+          event.page === ${cancelledPage} &&
+          event.cancelRequestedAt === ${viewportExit.cancelRequestedAt} &&
+          event.at >= ${continuationResume.at}
+      ) || false;
+    `),
+    `page ${cancelledPage} delayed attempt to reach its cancellation terminal`,
     SCENARIO_TIMEOUT_MS,
   );
   await waitForSharpCanvas(cdp, 5, "main-fallback");
@@ -2334,17 +2404,20 @@ async function collectFallbackEvidence(
       canvasHeightAfterExit: releasedCancelledPage?.height ?? 0,
       canvasPresentAfterExit: Boolean(releasedCancelledPage),
       canvasWidthAfterExit: releasedCancelledPage?.width ?? 0,
+      cancellationTerminal,
       completedAfterExit: cancelledAttemptLateComposes.length > 0,
       continuationDelayAt: continuationDelay.at,
       continuationDelayObserved: true,
       continuationResumeAt: continuationResume.at,
       continuationResumeObserved: true,
       continuationResumedAfterMs: continuationResume.afterMs,
+      documentKey: continuationDelay.documentKey,
       exitedAt: viewportExit.at,
       lateComposes: cancelledAttemptLateComposes,
       page: cancelledPage,
       pageDerivation: continuationDelay.pageDerivation,
       renderAttemptId,
+      revision: continuationDelay.revision,
       textOverlayRetainedAfterExit:
         (releasedCancelledPage?.wordOverlays ?? 0) > 0,
       viewportExit,
@@ -2472,6 +2545,38 @@ function summarizeNetwork(
   );
   const requestBelongsTo = (request, predicate) =>
     targetChain(targetBySession.get(request.sessionId)).some(predicate);
+  const matrixCoverage = Object.fromEntries(
+    PDF_SHARPNESS_MATRIX.map(({ id }) => {
+      const documentTargets = targets.filter(
+        (target) => target.phase === id && documentWorker(target),
+      );
+      const parserTargets = targets.filter(
+        (target) =>
+          target.phase === id &&
+          parserWorker(target) &&
+          targetChain(target).some(documentWorker),
+      );
+      const documentRequestCount = nonPageRequests.filter(
+        (request) =>
+          targetBySession.get(request.sessionId)?.phase === id &&
+          requestBelongsTo(request, documentWorker),
+      ).length;
+      const parserRequestCount = nonPageRequests.filter(
+        (request) =>
+          targetBySession.get(request.sessionId)?.phase === id &&
+          parserWorker(targetBySession.get(request.sessionId)) &&
+          targetChain(targetBySession.get(request.sessionId)).some(
+            documentWorker,
+          ),
+      ).length;
+      return [id, {
+        documentRequestCount,
+        documentTargets,
+        parserRequestCount,
+        parserTargets,
+      }];
+    }),
+  );
   const nonPageRequestCounts = {
     forcedBlobWrapper: nonPageRequests.filter(
       (request) => requestBelongsTo(request, blobWrapper),
@@ -2502,6 +2607,7 @@ function summarizeNetwork(
     failures,
     localRequestCount: networkState.requests.length - externalRequests.length,
     inflightRequestCount: networkState.inflightRequests.size,
+    matrixCoverage,
     nonPageRequestCounts,
     nonPageRequests,
     referenceScheme,

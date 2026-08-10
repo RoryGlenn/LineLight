@@ -14,6 +14,34 @@ export const PDF_SHARPNESS_REFERENCE_MIN_INK_SPAN_RATIO = 0.2;
 const PDF_SHARPNESS_RASTER_SCALE_STEP = 0.25;
 const PDF_SHARPNESS_SCALE_EPSILON = 1e-7;
 
+export const PDF_SHARPNESS_SOURCE_FILES = Object.freeze([
+  "app/pdf-document-model.mjs",
+  "app/pdf-document-protocol.mjs",
+  "app/pdf-document-types.ts",
+  "app/pdf-document.ts",
+  "app/pdf-document.worker.ts",
+  "app/pdf-fallback-scheduler.mjs",
+  "app/pdf-page-store.mjs",
+  "app/pdf-page-view.tsx",
+  "app/pdf-parser.worker.ts",
+  "app/pdf-raster-scheduler.mjs",
+  "app/pdf-raster-scale.mjs",
+  "app/reader-virtualization.mjs",
+  "docs/codebase-index.md",
+  "docs/evidence/issue-68/README.md",
+  "scripts/generate-pdf-highlight-fixture.mjs",
+  "scripts/pdf-sharpness-evidence.mjs",
+  "scripts/run-pdf-highlight-browser-regression.mjs",
+  "scripts/run-pdf-sharpness-browser-regression.mjs",
+  "tests/pdf-document-model.test.mjs",
+  "tests/pdf-fallback-scheduler.test.mjs",
+  "tests/pdf-page-store.test.mjs",
+  "tests/pdf-raster-lifecycle.test.mjs",
+  "tests/pdf-raster-scale.test.mjs",
+  "tests/pdf-sharpness-browser-harness.test.mjs",
+  "tests/reader-virtualization.test.mjs",
+]);
+
 export const PDF_SHARPNESS_MATRIX = Object.freeze([
   {
     id: "desktop-dpr1-zoom100",
@@ -214,6 +242,10 @@ function artifactIsBound(artifact) {
   );
 }
 
+function artifactBasename(artifact) {
+  return String(artifact?.path ?? "").split(/[\\/]/u).at(-1) ?? "";
+}
+
 export function validatePdfSharpnessEvidence(evidence) {
   const failures = [];
   const fail = (message) => failures.push(message);
@@ -247,7 +279,14 @@ export function validatePdfSharpnessEvidence(evidence) {
       !Array.isArray(source.files)
     ? Object.entries(source.files)
     : [];
-  if (!sourceFiles.length) fail("source.files must bind reviewed files");
+  const sourceFileKeys = sourceFiles.map(([file]) => file).sort();
+  const expectedSourceFileKeys = [...PDF_SHARPNESS_SOURCE_FILES].sort();
+  if (
+    sourceFileKeys.length !== expectedSourceFileKeys.length ||
+    sourceFileKeys.join("\n") !== expectedSourceFileKeys.join("\n")
+  ) {
+    fail("source.files must bind the exact reviewed file set");
+  }
   for (const [file, hash] of sourceFiles) {
     if (!file || !SHA256_PATTERN.test(hash ?? "")) {
       fail(`source file ${file || "<missing>"} lacks a SHA-256 binding`);
@@ -447,8 +486,8 @@ export function validatePdfSharpnessEvidence(evidence) {
       sharp.cssHeight <= 0 ||
       sharp.pageWidth <= 0 ||
       sharp.pageHeight <= 0 ||
-      sharp.actualWidth < (independentlyExpected?.width ?? Infinity) ||
-      sharp.actualHeight < (independentlyExpected?.height ?? Infinity) ||
+      sharp.actualWidth !== independentlyExpected?.width ||
+      sharp.actualHeight !== independentlyExpected?.height ||
       sharp.targetWidth !== independentlyExpected?.width ||
       sharp.targetHeight !== independentlyExpected?.height ||
       !closeTo(sharp.targetScale, independentlyExpected?.scale, 1e-6) ||
@@ -492,6 +531,8 @@ export function validatePdfSharpnessEvidence(evidence) {
       !nonNegativeInteger(run?.canvasBudget?.maximumPixels) ||
       run?.canvasBudget?.maximumCount < 1 ||
       run?.canvasBudget?.maximumPixels < 1 ||
+      run?.canvasBudget?.maximumPixels <
+        sharp.actualWidth * sharp.actualHeight ||
       run?.canvasBudget?.maximumCount > PDF_SHARPNESS_MAX_COMPOSED_CANVASES ||
       run?.canvasBudget?.maximumPixels > PDF_SHARPNESS_MAX_BITMAP_PIXELS
     ) {
@@ -640,6 +681,8 @@ export function validatePdfSharpnessEvidence(evidence) {
     retryAttemptId !== failedAttemptId &&
     Number.isInteger(retry?.page) &&
     retry.page > 0 &&
+    nonEmptyString(retry?.documentKey) &&
+    nonEmptyString(retry?.revision) &&
     retry?.pageDerivation === "sole-visible-unsatisfied-page" &&
     Number.isInteger(retry?.targetWidth) &&
     retry.targetWidth > 0 &&
@@ -651,6 +694,8 @@ export function validatePdfSharpnessEvidence(evidence) {
       (event) =>
         event?.page === retry.page &&
         event?.pageDerivation === retry.pageDerivation &&
+        event?.documentKey === retry.documentKey &&
+        event?.revision === retry.revision &&
         event?.targetWidth === retry.targetWidth &&
         event?.targetHeight === retry.targetHeight &&
         event?.targetKey === retry.targetKey,
@@ -670,16 +715,58 @@ export function validatePdfSharpnessEvidence(evidence) {
     retryCompose?.at === retry?.composedAt &&
     retryCompose?.pageMatchesAttempt === true &&
     failedAttemptComposes.length === 0;
+  const cancellationTerminal = invisibleCancellation?.cancellationTerminal;
+  const cancellationTerminalEvents = stagingEvents.filter(
+    (event) =>
+      event?.type === "staging-finish" &&
+      event?.renderAttemptId === renderAttemptId,
+  );
+  const cancellationTerminalEvent = cancellationTerminalEvents.find(
+    (event) => event?.outcome === "cancelled",
+  );
+  const cancelRequestEvents = stagingEvents.filter(
+    (event) =>
+      event?.type === "cancel-request" &&
+      event?.renderAttemptId === renderAttemptId,
+  );
+  const cancelRequestEvent = cancelRequestEvents[0];
+  const cancellationIdentityBound =
+    nonEmptyString(invisibleCancellation?.documentKey) &&
+    nonEmptyString(invisibleCancellation?.revision) &&
+    cancellationTerminalEvents.length === 1 &&
+    cancellationTerminalEvent?.outcome === "cancelled" &&
+    cancellationTerminalEvent?.documentKey ===
+    invisibleCancellation.documentKey &&
+    cancellationTerminalEvent?.revision === invisibleCancellation.revision &&
+    cancellationTerminalEvent?.page === cancelledPage &&
+    cancellationTerminalEvent?.pageDerivation ===
+      invisibleCancellation.pageDerivation &&
+    cancelRequestEvents.length === 1 &&
+    cancelRequestEvent?.at <= viewportExitEvent?.at &&
+    viewportExitEvent?.cancelRequestedAt === cancelRequestEvent?.at &&
+    cancellationTerminalEvent?.cancelRequestedAt === cancelRequestEvent?.at &&
+    cancellationTerminalEvent?.at >= continuationResumeEvent?.at &&
+    cancellationTerminal?.at === cancellationTerminalEvent?.at &&
+    cancellationTerminal?.outcome === cancellationTerminalEvent?.outcome &&
+    cancellationTerminal?.renderAttemptId === renderAttemptId &&
+    cancellationTerminal?.documentKey === invisibleCancellation.documentKey &&
+    cancellationTerminal?.revision === invisibleCancellation.revision &&
+    cancellationTerminal?.page === cancelledPage &&
+    cancellationTerminal?.cancelRequestedAt === cancelRequestEvent?.at;
   const matchingIdentity = [
     cancelledStagingStart,
     continuationDelayEvent,
     viewportExitEvent,
     continuationResumeEvent,
+    cancelRequestEvent,
+    cancellationTerminalEvent,
   ].every(
     (event) =>
       event?.renderAttemptId === renderAttemptId &&
       event?.page === cancelledPage &&
-      event?.pageDerivation === "sole-visible-unsatisfied-page",
+      event?.pageDerivation === "sole-visible-unsatisfied-page" &&
+      event?.documentKey === invisibleCancellation?.documentKey &&
+      event?.revision === invisibleCancellation?.revision,
   );
   if (
     !artifactIsBound(fallback?.artifact) ||
@@ -691,6 +778,7 @@ export function validatePdfSharpnessEvidence(evidence) {
     fallback?.importedSource?.size !== fixture?.bytes ||
     fallback?.retrySucceeded !== true ||
     !retryIdentityBound ||
+    !cancellationIdentityBound ||
     !Number.isInteger(renderAttemptId) ||
     renderAttemptId < 1 ||
     cancelledPage !== 3 ||
@@ -736,13 +824,17 @@ export function validatePdfSharpnessEvidence(evidence) {
     viewportExitEvent?.canvasPresent !== true ||
     viewportExitEvent?.canvasWidth !== 0 ||
     viewportExitEvent?.canvasHeight !== 0 ||
+    viewportExitEvent?.cancelRequestedAt !== cancelRequestEvent?.at ||
     !Number.isInteger(viewportExitEvent?.textOverlayCount) ||
     viewportExitEvent.textOverlayCount < 1 ||
     recordedViewportExit?.renderAttemptId !== renderAttemptId ||
+    recordedViewportExit?.documentKey !== invisibleCancellation?.documentKey ||
+    recordedViewportExit?.revision !== invisibleCancellation?.revision ||
     recordedViewportExit?.page !== cancelledPage ||
     recordedViewportExit?.pageDerivation !==
       "sole-visible-unsatisfied-page" ||
     recordedViewportExit?.at !== viewportExitEvent?.at ||
+    recordedViewportExit?.cancelRequestedAt !== cancelRequestEvent?.at ||
     recordedViewportExit?.visible !== viewportExitEvent?.visible ||
     recordedViewportExit?.canvasPresent !== viewportExitEvent?.canvasPresent ||
     recordedViewportExit?.canvasWidth !== viewportExitEvent?.canvasWidth ||
@@ -839,6 +931,53 @@ export function validatePdfSharpnessEvidence(evidence) {
       requestCounts[name] > 0 &&
       requestCounts[name] === computedRequestCounts[name],
   );
+  const matrixCoverage = network?.matrixCoverage;
+  const matrixCoverageKeys = matrixCoverage &&
+      typeof matrixCoverage === "object" &&
+      !Array.isArray(matrixCoverage)
+    ? Object.keys(matrixCoverage)
+    : [];
+  const matrixCoverageComplete =
+    matrixCoverageKeys.join(",") === expectedIds.join(",") &&
+    PDF_SHARPNESS_MATRIX.every(({ id }) => {
+      const reported = matrixCoverage?.[id];
+      const documentTargets = networkTargets.filter(
+        (target) => target?.phase === id && documentWorker(target),
+      );
+      const parserTargets = networkTargets.filter(
+        (target) =>
+          target?.phase === id &&
+          parserWorker(target) &&
+          targetChain(target).some(documentWorker),
+      );
+      const documentRequestCount = nonPageRequests.filter(
+        (request) =>
+          targetBySession.get(request?.sessionId)?.phase === id &&
+          requestBelongsTo(request, documentWorker),
+      ).length;
+      const parserRequestCount = nonPageRequests.filter(
+        (request) =>
+          targetBySession.get(request?.sessionId)?.phase === id &&
+          parserWorker(targetBySession.get(request?.sessionId)) &&
+          targetChain(targetBySession.get(request?.sessionId)).some(
+            documentWorker,
+          ),
+      ).length;
+      const sessionIds = (targets) =>
+        targets.map(({ sessionId }) => sessionId).sort().join(",");
+      return (
+        documentTargets.length > 0 &&
+        parserTargets.length > 0 &&
+        documentRequestCount > 0 &&
+        parserRequestCount > 0 &&
+        Array.isArray(reported?.documentTargets) &&
+        Array.isArray(reported?.parserTargets) &&
+        sessionIds(reported.documentTargets) === sessionIds(documentTargets) &&
+        sessionIds(reported.parserTargets) === sessionIds(parserTargets) &&
+        reported?.documentRequestCount === documentRequestCount &&
+        reported?.parserRequestCount === parserRequestCount
+      );
+    });
   const expectedFixedPointLabels = [
     ...PDF_SHARPNESS_MATRIX.map(({ id }) => id),
     "forced-main-fallback",
@@ -883,6 +1022,7 @@ export function validatePdfSharpnessEvidence(evidence) {
     requestCounts.total !== network.nonPageRequests.length ||
     !coverageComplete ||
     !requestCoverageComplete ||
+    !matrixCoverageComplete ||
     !Array.isArray(network?.networkFixedPoints) ||
     fixedPoints.map(({ label }) => label).join(",") !==
       expectedFixedPointLabels.join(",") ||
@@ -917,18 +1057,49 @@ export function validatePdfSharpnessEvidence(evidence) {
   const screenshots = Array.isArray(artifacts?.screenshots)
     ? artifacts.screenshots
     : [];
-  const expectedScreenshotHashes = [
+  const expectedScreenshotEntries = [
     ...runs.flatMap((run) => [
-      run?.comparison?.referenceScreenshot?.sha256,
-      run?.comparison?.lineLightScreenshot?.sha256,
+      {
+        artifact: run?.comparison?.referenceScreenshot,
+        filename: `reference-${run?.id}.png`,
+      },
+      {
+        artifact: run?.comparison?.lineLightScreenshot,
+        filename: `linelight-${run?.id}.png`,
+      },
     ]),
-    fallback?.artifact?.sha256,
+    {
+      artifact: fallback?.artifact,
+      filename: "fallback-visible-retry.png",
+    },
   ];
+  const expectedScreenshotArtifacts = expectedScreenshotEntries.map(
+    ({ artifact }) => artifact,
+  );
+  const exactExpectedFilenames = expectedScreenshotEntries.every(
+    ({ artifact, filename }) =>
+      artifactIsBound(artifact) && artifactBasename(artifact) === filename,
+  );
+  const screenshotPaths = screenshots.map((artifact) => artifact?.path);
+  const uniqueScreenshotPaths =
+    screenshotPaths.every(nonEmptyString) &&
+    new Set(screenshotPaths).size === screenshotPaths.length;
+  const exactManifestReferences = screenshots.every(
+    (artifact, index) => {
+      const expectedArtifact = expectedScreenshotArtifacts[index];
+      return (
+        artifact?.path === expectedArtifact?.path &&
+        artifact?.bytes === expectedArtifact?.bytes &&
+        artifact?.sha256 === expectedArtifact?.sha256
+      );
+    },
+  );
   if (
     !Array.isArray(artifacts?.screenshots) ||
-    screenshots.length !== expectedScreenshotHashes.length ||
-    screenshots.map((artifact) => artifact?.sha256).join(",") !==
-      expectedScreenshotHashes.join(",")
+    screenshots.length !== expectedScreenshotArtifacts.length ||
+    !exactExpectedFilenames ||
+    !uniqueScreenshotPaths ||
+    !exactManifestReferences
   ) {
     fail("artifact manifest does not exactly enumerate the reviewed screenshots");
   }
