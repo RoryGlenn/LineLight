@@ -214,6 +214,20 @@ export function matchesPdfFallbackInjection(armed, attempt) {
   );
 }
 
+export function selectPdfFallbackAbortCandidate(candidates) {
+  const eligible = (candidates ?? []).filter(
+    (candidate) =>
+      candidate?.bound === false &&
+      candidate?.retired === false &&
+      typeof candidate?.signal?.aborted === "boolean" &&
+      candidate.signal.aborted === false,
+  );
+  return {
+    candidate: eligible.length === 1 ? eligible[0] : null,
+    candidateCount: eligible.length,
+  };
+}
+
 export function planPdfVirtualScroll({
   clientHeight,
   mountedPages,
@@ -923,6 +937,7 @@ const INSTRUMENTATION_SOURCE = String.raw`
   let fallbackProofIdentity = null;
   let delayNextContinuation = null;
   const matchesArmedFallbackInjection = (${matchesPdfFallbackInjection.toString()});
+  const selectFallbackAbortCandidate = (${selectPdfFallbackAbortCandidate.toString()});
   const latestValidatedPdfImport = () => workerEvents.findLast((event) =>
     event.direction === 'to-worker' &&
     event.type === 'import' &&
@@ -946,12 +961,14 @@ const INSTRUMENTATION_SOURCE = String.raw`
       forceFallback &&
       type === "abort" &&
       typeof listener === "function" &&
+      !this.aborted &&
       /\.cancel\s*\(/u.test(Function.prototype.toString.call(listener)) &&
       !fallbackAbortCandidates.some((candidate) => candidate.signal === this)
     ) {
       const candidate = {
         bound: false,
         registeredAt: performance.now(),
+        retired: false,
         signal: this,
         signalId: ++abortSignalSequence
       };
@@ -967,6 +984,20 @@ const INSTRUMENTATION_SOURCE = String.raw`
   const nativeAbort = AbortController.prototype.abort;
   AbortController.prototype.abort = function issue68Abort(reason) {
     if (forceFallback) {
+      const unboundCandidate = fallbackAbortCandidates.find((candidate) =>
+        candidate.signal === this.signal &&
+        !candidate.bound &&
+        !candidate.retired
+      );
+      if (unboundCandidate) {
+        unboundCandidate.retired = true;
+        state.fallback.events.push({
+          abortSignalId: unboundCandidate.signalId,
+          at: performance.now(),
+          reason: 'aborted-before-staging',
+          type: 'abort-signal-retired'
+        });
+      }
       const attempt = fallbackAttemptBySignal.get(this.signal) ?? null;
       const delayedAttempt = attempt && state.fallback.events.some((event) =>
         event.type === "continuation-delay" &&
@@ -1252,15 +1283,13 @@ const INSTRUMENTATION_SOURCE = String.raw`
     if (staging && !this[stagingSymbol]) {
       const id = ++state.fallback.stagingStarted;
       const derivedPage = deriveFallbackPage(this.width, this.height);
-      const abortCandidates = fallbackAbortCandidates.filter(
-        (candidate) => !candidate.bound
-      );
-      const abortCandidate = abortCandidates.length === 1
-        ? abortCandidates[0]
-        : null;
+      const {
+        candidate: abortCandidate,
+        candidateCount: abortSignalCandidateCount
+      } = selectFallbackAbortCandidate(fallbackAbortCandidates);
       const attempt = {
         ...derivedPage,
-        abortSignalCandidateCount: abortCandidates.length,
+        abortSignalCandidateCount,
         abortSignalId: abortCandidate?.signalId ?? null,
         abortSignalRegisteredAt: abortCandidate?.registeredAt ?? null,
         cancelRequestedAt: null,

@@ -72,7 +72,9 @@ validator additionally requires:
   identity. Page 3 and a unique attempt ID are therefore derived from the real
   fallback flow rather than supplied by the delay caller. Each attempt is bound
   to the unique `AbortSignal` registered by its production PDF.js cancel
-  listener. The
+  listener; an already-aborted signal is ineligible, and a restored-document
+  signal aborted before staging is explicitly retired instead of competing
+  with the current attempt. The
   page-exit action, exact controller abort, cancelled terminal outcome, viewport
   exit confirmation, delayed continuation resume, and no-late-compose proof must
   share that signal/document/revision/attempt identity and occur in that order;

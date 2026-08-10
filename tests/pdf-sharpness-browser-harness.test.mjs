@@ -23,6 +23,7 @@ import {
   matchesPdfFallbackInjection,
   planPdfVirtualScroll,
   probePdfBitmapBudget,
+  selectPdfFallbackAbortCandidate,
   selectPdfFallbackScenarioEvents,
   summarizePdfModelCompletion,
 } from
@@ -794,6 +795,65 @@ test("keeps fallback probes armed through restored and wrong-page staging", asyn
   assert.match(
     source,
     /latestImport\?\.jobId !== fallbackProofIdentity\.importJobId/u,
+  );
+});
+
+test("retires restored fallback signals before binding current staging", async () => {
+  const restoredController = new AbortController();
+  const currentController = new AbortController();
+  const restored = {
+    bound: false,
+    retired: false,
+    signal: restoredController.signal,
+    signalId: 1,
+  };
+  const current = {
+    bound: false,
+    retired: false,
+    signal: currentController.signal,
+    signalId: 2,
+  };
+  restoredController.abort();
+  const afterRestoreAbort = selectPdfFallbackAbortCandidate([
+    restored,
+    current,
+  ]);
+  assert.equal(afterRestoreAbort.candidateCount, 1);
+  assert.equal(afterRestoreAbort.candidate, current);
+
+  const alreadyAborted = new AbortController();
+  alreadyAborted.abort();
+  assert.deepEqual(
+    selectPdfFallbackAbortCandidate([{
+      bound: false,
+      retired: false,
+      signal: alreadyAborted.signal,
+      signalId: 3,
+    }]),
+    { candidate: null, candidateCount: 0 },
+  );
+
+  const multipleLive = selectPdfFallbackAbortCandidate([
+    current,
+    {
+      bound: false,
+      retired: false,
+      signal: new AbortController().signal,
+      signalId: 4,
+    },
+  ]);
+  assert.equal(multipleLive.candidate, null);
+  assert.equal(multipleLive.candidateCount, 2);
+
+  const source = await readFile(
+    "scripts/run-pdf-sharpness-browser-regression.mjs",
+    "utf8",
+  );
+  assert.match(source, /typeof listener === "function" &&\s*!this\.aborted/u);
+  assert.match(source, /reason: 'aborted-before-staging'/u);
+  assert.match(
+    source,
+    /selectFallbackAbortCandidate\(fallbackAbortCandidates\)/u,
   );
 });
 
