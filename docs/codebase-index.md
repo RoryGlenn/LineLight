@@ -261,8 +261,9 @@ independently recomputed preview targets that either exactly satisfy the final
 backing without a redundant draw or upgrade through distinct bitmap/composition
 identities, current viewport priority after import-bound worker completion and
 bounded traversal of virtualized page shells. The priority boundary is recorded
-atomically with the final target scroll after mounting. One monotonic activity
-sequence covers worker events, the scroll action, and draw invocations; each
+atomically with an instant final target scroll after mounting, and requires the
+target to move from geometrically offscreen to intersecting the reader. One
+monotonic activity sequence covers worker events, the scroll action, and draw invocations; each
 draw also captures an invocation ID and independent page/reader geometry before
 its deferred metadata record. The proof distinguishes an exact cache-satisfied
 composition with zero new target requests/bitmaps from one exact
@@ -317,10 +318,14 @@ Its exact before/after
 stage sequence and stage-derived fixed failure category retain partial,
 privacy-safe setup hash/count/condition evidence without serializing raw
 exceptions.
-A third, reference-only diagnostic opens page 2 of the exact public fixture in
-the first desktop native-viewer configuration and retains two consecutive
-byte-identical PNG candidates plus the analyzer's versioned segmentation
-metrics. The analyzer forms deterministic 4-connected components with the
+A third, reference-only diagnostic allowlists the first desktop/page-2 and
+mobile-DPR-3/page-3 native-viewer configurations for the exact public fixture
+and retains two consecutive byte-identical PNG candidates plus the analyzer's
+versioned segmentation metrics. It starts from one clean `about:blank` target,
+applies device metrics before the first PDF navigation, binds the returned new
+loader/frame to matching lifecycle and load events, and records fixed viewer
+classes plus actual DPR/layout/visual-viewport metrics. The analyzer forms
+deterministic 4-connected components with the
 existing white predicate, requires one uniquely largest substantial white page,
 then preserves the existing inset and rendered-ink thresholds. It starts no app
 build or server, writes only to a fresh absent external directory, binds the

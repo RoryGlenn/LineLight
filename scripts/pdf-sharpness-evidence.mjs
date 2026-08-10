@@ -720,6 +720,10 @@ export function validatePdfSharpnessEvidence(evidence) {
       validGeometryRect(priorityAction?.readerViewportBefore) &&
       validGeometryRect(priorityAction?.readerViewportAfter) &&
       validGeometryRect(priorityAction?.targetGeometryBefore) &&
+      !geometryIntersectsViewport(
+        priorityAction?.targetGeometryBefore,
+        priorityAction?.readerViewportBefore,
+      ) &&
       geometryIntersectsViewport(
         priorityAction?.targetGeometryAfter,
         priorityAction?.readerViewportAfter,

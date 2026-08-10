@@ -22,6 +22,7 @@ import {
   FALLBACK_IMPORT_DIAGNOSTIC_STAGES,
   FALLBACK_IMPORT_DIAGNOSTIC_STEPS,
   REFERENCE_CAPTURE_DIAGNOSTIC_CANDIDATES,
+  REFERENCE_CAPTURE_DIAGNOSTIC_CONFIGURATIONS,
   REFERENCE_CAPTURE_DIAGNOSTIC_STAGES,
   REFERENCE_CAPTURE_DIAGNOSTIC_STEPS,
   analyzeReferencePixels,
@@ -50,6 +51,7 @@ import {
   matchesPdfFallbackInjection,
   markFallbackImportDiagnosticStage,
   markReferenceCaptureDiagnosticStage,
+  navigateReferenceCaptureDiagnosticPage,
   planPdfVirtualScroll,
   probePdfBitmapBudget,
   recordCdpNetworkRequest,
@@ -164,6 +166,77 @@ const passingReferenceAnalysis = () => ({
   width: 1_100,
   winnerDominanceRatio: 42.63196628085903,
   winnerWhiteArea: 637_220,
+});
+
+const emptyReferenceAnalysis = (width, height) => ({
+  height,
+  inkPixels: 0,
+  inkRatio: 0,
+  inkRowBands: 0,
+  inkSpanRatio: 0,
+  pageBounds: null,
+  pagePixels: 0,
+  pageWhitePixels: 0,
+  pageWhiteRatio: 0,
+  proof: "white-page-with-rendered-ink",
+  renderedPage: false,
+  runnerUpWhiteArea: 0,
+  segmentationVersion: 2,
+  substantialComponentCount: 0,
+  width,
+  winnerDominanceRatio: null,
+  winnerWhiteArea: 0,
+});
+
+const referenceViewport = ({ dpr, height, width }) => ({
+  devicePixelRatio: dpr,
+  innerHeight: height,
+  innerWidth: width,
+  screenHeight: height,
+  screenWidth: width,
+  visualViewportHeight: height,
+  visualViewportScale: 1,
+  visualViewportWidth: width,
+});
+
+const passingReferenceCaptureMechanics = ({ dpr, height, width }) => ({
+  baseline: {
+    checked: true,
+    frameId: "fresh-main-frame",
+    frameTreeMainOnly: true,
+    frameUrlClass: "about-blank",
+    locationClass: "about-blank",
+    pageCount: 1,
+    pageUrlClass: "about",
+    readyStateComplete: true,
+    targetCount: 1,
+    workerCount: 0,
+  },
+  configuredViewport: referenceViewport({ dpr, height, width }),
+  navigation: {
+    dispatchSequence: 1,
+    errorText: null,
+    finalSequence: 4,
+    frameId: "fresh-main-frame",
+    isDownload: false,
+    lifecycleLoad: {
+      frameId: "fresh-main-frame",
+      loaderId: "new-pdf-loader",
+      name: "load",
+      sequence: 2,
+    },
+    loadEvent: { sequence: 3 },
+    loaderId: "new-pdf-loader",
+    newDocument: true,
+    responseSequence: 4,
+  },
+  viewer: {
+    contentType: "text/html",
+    pdfEmbedPresent: true,
+    protocol: "chrome-extension:",
+    readyStateComplete: true,
+    viewport: referenceViewport({ dpr, height, width }),
+  },
 });
 
 function artifact(name, digit) {
@@ -1369,6 +1442,7 @@ test("builds a noncanonical privacy-safe reference-capture diagnostic", () => {
   );
   const input = {
     capture: {
+      ...passingReferenceCaptureMechanics({ dpr: 1, height: 900, width: 1_100 }),
       attempts: 5,
       candidates,
       captureErrorCount: 0,
@@ -1384,6 +1458,7 @@ test("builds a noncanonical privacy-safe reference-capture diagnostic", () => {
     outputDirectory,
     progress,
     recordedAt: "2026-08-10T00:00:00.000Z",
+    referenceConfigurationId: PDF_SHARPNESS_MATRIX[0].id,
     runnerFailure: null,
     source: passingReferenceDiagnosticSource(),
     teardown: {
@@ -1399,6 +1474,7 @@ test("builds a noncanonical privacy-safe reference-capture diagnostic", () => {
   };
   const report = buildReferenceCaptureDiagnosticReport(input);
   assert.equal(report.diagnostic, true);
+  assert.equal(report.diagnosticSchemaVersion, 2);
   assert.equal(report.completed, true);
   assert.equal(report.capture.stableByteIdentical, true);
   assert.equal(report.execution.sequenceComplete, true);
@@ -1413,15 +1489,37 @@ test("builds a noncanonical privacy-safe reference-capture diagnostic", () => {
   assert.equal("passed" in report, false);
   assert.equal("schemaVersion" in report, false);
   assert.doesNotMatch(JSON.stringify(report), new RegExp(outputDirectory, "u"));
+  assert.doesNotMatch(
+    JSON.stringify(report),
+    /fresh-main-frame|new-pdf-loader|chrome-extension:/u,
+  );
 
   const mutations = [
     (value) => { value.fixture.bytes -= 1; },
     (value) => { value.source.files[PDF_SHARPNESS_SOURCE_FILES[0]] = null; },
     (value) => { value.source.postCaptureStatus = ["private/path.pdf"]; },
     (value) => { value.progress.history.pop(); },
+    (value) => { value.referenceConfigurationId = "unknown-configuration"; },
     (value) => { value.capture.configurationId = "mobile-dpr3-zoom100"; },
     (value) => { value.capture.referenceScheme = "https:"; },
     (value) => { value.capture.targetPage = 3; },
+    (value) => { value.capture.baseline.locationClass = "other"; },
+    (value) => { value.capture.navigation.loaderId = ""; },
+    (value) => { value.capture.navigation.frameId = "different-frame"; },
+    (value) => { value.capture.navigation.isDownload = true; },
+    (value) => { value.capture.navigation.errorText = "private path"; },
+    (value) => { value.capture.navigation.newDocument = false; },
+    (value) => { value.capture.navigation.loadEvent.sequence = 1; },
+    (value) => {
+      value.capture.navigation.lifecycleLoad.loaderId = "stale-loader";
+    },
+    (value) => {
+      value.capture.navigation.lifecycleLoad.frameId = "stale-frame";
+    },
+    (value) => { value.capture.configuredViewport.devicePixelRatio = 2; },
+    (value) => { value.capture.viewer.viewport.innerWidth = 1_099; },
+    (value) => { value.capture.viewer.protocol = "https:"; },
+    (value) => { value.capture.viewer.contentType = "text/plain"; },
     (value) => { value.capture.candidates.pop(); },
     (value) => { value.capture.candidates[1].sha256 = "e".repeat(64); },
     (value) => { value.capture.candidates[1].analysis.inkPixels += 1; },
@@ -1441,6 +1539,28 @@ test("builds a noncanonical privacy-safe reference-capture diagnostic", () => {
     assert.ok(failed.failures.length > 0);
     assert.equal(failed.completed, false);
   }
+
+  const mobileObservation = structuredClone(input);
+  mobileObservation.referenceConfigurationId = "mobile-dpr3-zoom100";
+  Object.assign(mobileObservation.capture, {
+    ...passingReferenceCaptureMechanics({ dpr: 3, height: 844, width: 390 }),
+    configurationId: "mobile-dpr3-zoom100",
+    targetPage: 3,
+  });
+  for (const candidate of mobileObservation.capture.candidates) {
+    candidate.analysis = emptyReferenceAnalysis(1_170, 2_532);
+  }
+  const mobileReport = buildReferenceCaptureDiagnosticReport(
+    mobileObservation,
+  );
+  assert.equal(mobileReport.completed, true);
+  assert.deepEqual(mobileReport.failures, []);
+  assert.equal(mobileReport.configuration.mobile, true);
+  assert.equal(mobileReport.configuration.targetPage, 3);
+  assert.equal(
+    mobileReport.artifacts.candidates[0].analysis.renderedPage,
+    false,
+  );
 
   const impossibleStableAnalyses = [
     (analysis) => {
@@ -1546,6 +1666,69 @@ test("enforces the exact reference-capture diagnostic stage order", () => {
       REFERENCE_CAPTURE_DIAGNOSTIC_STAGES[2],
     ),
     /stage ordering is invalid/u,
+  );
+});
+
+test("binds reference navigation to one new loader and both load signals", async () => {
+  const listeners = new Map();
+  const cdp = {
+    on(method, listener) {
+      listeners.set(method, listener);
+    },
+    send(method) {
+      assert.equal(method, "Page.navigate");
+      queueMicrotask(() => {
+        listeners.get("Page.lifecycleEvent")?.({
+          frameId: "fresh-main-frame",
+          loaderId: "new-pdf-loader",
+          name: "load",
+        });
+        listeners.get("Page.loadEventFired")?.({});
+      });
+      return Promise.resolve({
+        frameId: "fresh-main-frame",
+        loaderId: "new-pdf-loader",
+      });
+    },
+  };
+  const result = await navigateReferenceCaptureDiagnosticPage(
+    cdp,
+    "file:///public-fixture.pdf#page=3",
+    100,
+  );
+  assert.equal(result.newDocument, true);
+  assert.equal(result.lifecycleLoad.loaderId, result.loaderId);
+  assert.equal(result.lifecycleLoad.frameId, result.frameId);
+  assert.ok(result.lifecycleLoad.sequence > result.dispatchSequence);
+  assert.ok(result.loadEvent.sequence > result.dispatchSequence);
+
+  const staleListeners = new Map();
+  const stale = {
+    on(method, listener) {
+      staleListeners.set(method, listener);
+    },
+    send() {
+      queueMicrotask(() => {
+        staleListeners.get("Page.lifecycleEvent")?.({
+          frameId: "fresh-main-frame",
+          loaderId: "stale-loader",
+          name: "load",
+        });
+        staleListeners.get("Page.loadEventFired")?.({});
+      });
+      return Promise.resolve({
+        frameId: "fresh-main-frame",
+        loaderId: "new-pdf-loader",
+      });
+    },
+  };
+  await assert.rejects(
+    navigateReferenceCaptureDiagnosticPage(
+      stale,
+      "file:///public-fixture.pdf#page=3",
+      1,
+    ),
+    /new loader's load lifecycle/u,
   );
 });
 
@@ -4515,7 +4698,11 @@ test("marks priority in the same task as the final mounted target scroll", async
   );
   assert.match(
     source,
-    /drawInvocationBoundary: drawInvocationSequence[\s\S]*currentPriorityProbe = \{[\s\S]*block\.scrollIntoView/u,
+    /drawInvocationBoundary: drawInvocationSequence[\s\S]*currentPriorityProbe = \{[\s\S]*block\.scrollIntoView\(\{ behavior: 'instant', block: 'center' \}\);[\s\S]*action\.readerViewportAfter = rectangle\(reader\);[\s\S]*action\.scrollTopAfter = Number\(reader\?\.scrollTop\);[\s\S]*action\.targetGeometryAfter = rectangle\(block\)/u,
+  );
+  assert.doesNotMatch(
+    source,
+    /beginPriorityScroll[\s\S]*scrollIntoView\(\{ behavior: 'auto'/u,
   );
   assert.match(
     source,
@@ -4835,6 +5022,33 @@ test("rejects each material Issue 68 acceptance regression", async (t) => {
     ["priority action did not move scroll position", (value) => {
       const action = value.matrix[2].visibleFirst.scrollAction;
       action.scrollTopAfter = action.scrollTopBefore;
+    }, /current viewport first/u],
+    ["priority target was already visible before instant scroll", (value) => {
+      const action = value.matrix[2].visibleFirst.scrollAction;
+      action.targetGeometryBefore = {
+        bottom: 650,
+        left: 20,
+        right: 620,
+        top: 50,
+      };
+    }, /current viewport first/u],
+    ["priority target remained offscreen after instant scroll", (value) => {
+      const action = value.matrix[2].visibleFirst.scrollAction;
+      action.targetGeometryAfter = {
+        bottom: 1_600,
+        left: 20,
+        right: 620,
+        top: 800,
+      };
+    }, /current viewport first/u],
+    ["priority composition activity stayed at action boundary", (value) => {
+      const priority = value.matrix[0].visibleFirst;
+      priority.targetComposition.activityId = priority.scrollAction.activityId;
+    }, /current viewport first/u],
+    ["priority draw invocation stayed at action boundary", (value) => {
+      const priority = value.matrix[0].visibleFirst;
+      priority.targetComposition.drawInvocationId =
+        priority.scrollAction.drawInvocationBoundary;
     }, /current viewport first/u],
     ["cached priority bitmap preempts target composition", (value) => {
       value.matrix[0].visibleFirst.nonTargetBitmaps[0].activityId = 105;
@@ -5921,6 +6135,7 @@ test("documents a headed, fresh-build-only command without launching it", async 
   assert.match(stdout, /--diagnose-fallback-import/u);
   assert.match(stdout, /--diagnose-first-network-fixed-point/u);
   assert.match(stdout, /--diagnose-reference-capture/u);
+  assert.match(stdout, /--reference-configuration/u);
   assert.doesNotMatch(stdout, /headless/u);
 });
 
@@ -6087,6 +6302,64 @@ test("keeps the reference-capture diagnostic bounded and noncanonical", async ()
     ),
     /diagnostic modes are mutually exclusive/u,
   );
+  await assert.rejects(
+    execFileAsync(
+      process.execPath,
+      [
+        runner,
+        "--reference-configuration",
+        "mobile-dpr3-zoom100",
+        "--output",
+        freshOutput,
+      ],
+      { cwd: path.resolve(".") },
+    ),
+    /only valid with --diagnose-reference-capture/u,
+  );
+  await assert.rejects(
+    execFileAsync(
+      process.execPath,
+      [
+        runner,
+        "--diagnose-reference-capture",
+        "--reference-configuration",
+      ],
+      { cwd: path.resolve(".") },
+    ),
+    /requires one allowlisted configuration ID/u,
+  );
+  await assert.rejects(
+    execFileAsync(
+      process.execPath,
+      [
+        runner,
+        "--diagnose-reference-capture",
+        "--reference-configuration",
+        "mobile-dpr3-pinch200",
+        "--output",
+        freshOutput,
+      ],
+      { cwd: path.resolve(".") },
+    ),
+    /configuration is not allowlisted/u,
+  );
+  await assert.rejects(
+    execFileAsync(
+      process.execPath,
+      [
+        runner,
+        "--diagnose-reference-capture",
+        "--reference-configuration",
+        "mobile-dpr3-zoom100",
+        "--reference-configuration",
+        "desktop-dpr1-zoom100",
+        "--output",
+        freshOutput,
+      ],
+      { cwd: path.resolve(".") },
+    ),
+    /may be selected only once/u,
+  );
   const existingOutput = await mkdtemp(
     path.join(os.tmpdir(), "issue-68-reference-existing-"),
   );
@@ -6123,6 +6396,34 @@ test("keeps the reference-capture diagnostic bounded and noncanonical", async ()
     ),
     /requires a graphical DISPLAY or WAYLAND_DISPLAY/u,
   );
+  await assert.rejects(
+    execFileAsync(
+      process.execPath,
+      [
+        runner,
+        "--diagnose-reference-capture",
+        "--reference-configuration",
+        "mobile-dpr3-zoom100",
+        "--output",
+        freshOutput,
+      ],
+      {
+        cwd: path.resolve("."),
+        env: { ...process.env, DISPLAY: "", WAYLAND_DISPLAY: "" },
+      },
+    ),
+    /requires a graphical DISPLAY or WAYLAND_DISPLAY/u,
+  );
+
+  assert.deepEqual(
+    Object.keys(REFERENCE_CAPTURE_DIAGNOSTIC_CONFIGURATIONS),
+    ["desktop-dpr1-zoom100", "mobile-dpr3-zoom100"],
+  );
+  assert.equal(
+    REFERENCE_CAPTURE_DIAGNOSTIC_CONFIGURATIONS["mobile-dpr3-zoom100"]
+      .targetPage,
+    3,
+  );
 
   const source = await readFile(runner, "utf8");
   for (const step of REFERENCE_CAPTURE_DIAGNOSTIC_STEPS) {
@@ -6142,6 +6443,10 @@ test("keeps the reference-capture diagnostic bounded and noncanonical", async ()
   assert.match(
     source,
     /runBoundedDiagnosticOperation\(async \(\) => \{[\s\S]*captureStableReferenceDiagnosticCandidates[\s\S]*referenceCdp\?\.close\(\)[\s\S]*closeOwnedBrowser/u,
+  );
+  assert.match(
+    source,
+    /readReferenceCaptureDiagnosticBaseline[\s\S]*Page\.setLifecycleEventsEnabled[\s\S]*applyMatrixConfiguration[\s\S]*navigateReferenceCaptureDiagnosticPage/u,
   );
   assert.match(source, /pdf-sharpness-reference-capture-diagnostic\.json/u);
   assert.doesNotMatch(

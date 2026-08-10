@@ -73,7 +73,18 @@ const FALLBACK_IMPORT_DIAGNOSTIC_LABEL = "fallback-import-diagnostic";
 const FALLBACK_IMPORT_DIAGNOSTIC_SCREENSHOT =
   "linelight-fallback-import-diagnostic.png";
 const REFERENCE_CAPTURE_DIAGNOSTIC_TIMEOUT_MS = 120_000;
-const REFERENCE_CAPTURE_DIAGNOSTIC_TARGET_PAGE = 2;
+const REFERENCE_CAPTURE_DIAGNOSTIC_DEFAULT_CONFIGURATION =
+  "desktop-dpr1-zoom100";
+export const REFERENCE_CAPTURE_DIAGNOSTIC_CONFIGURATIONS = Object.freeze({
+  "desktop-dpr1-zoom100": Object.freeze({
+    matrixIndex: 0,
+    targetPage: 2,
+  }),
+  "mobile-dpr3-zoom100": Object.freeze({
+    matrixIndex: 4,
+    targetPage: 3,
+  }),
+});
 const REFERENCE_CAPTURE_DIAGNOSTIC_REPORT =
   "pdf-sharpness-reference-capture-diagnostic.json";
 export const REFERENCE_CAPTURE_DIAGNOSTIC_CANDIDATES = Object.freeze([
@@ -83,6 +94,7 @@ export const REFERENCE_CAPTURE_DIAGNOSTIC_CANDIDATES = Object.freeze([
 export const REFERENCE_CAPTURE_DIAGNOSTIC_STEPS = Object.freeze([
   "browser-launch",
   "cdp-connect",
+  "baseline",
   "configure",
   "navigate",
   "viewer-ready",
@@ -95,6 +107,35 @@ export const REFERENCE_CAPTURE_DIAGNOSTIC_STAGES = Object.freeze(
     `${step}-completed`,
   ]),
 );
+
+function resolveReferenceCaptureDiagnosticConfiguration(configurationId) {
+  const selection =
+    REFERENCE_CAPTURE_DIAGNOSTIC_CONFIGURATIONS[configurationId];
+  const configuration = Number.isInteger(selection?.matrixIndex)
+    ? PDF_SHARPNESS_MATRIX[selection.matrixIndex]
+    : null;
+  if (!configuration || configuration.id !== configurationId) return null;
+  const devicePixelRatio =
+    configuration.baseDevicePixelRatio * configuration.browserZoom;
+  const layoutWidth = Math.round(
+    configuration.width / configuration.browserZoom,
+  );
+  const layoutHeight = Math.round(
+    configuration.height / configuration.browserZoom,
+  );
+  return {
+    configuration,
+    devicePixelRatio,
+    id: configuration.id,
+    layoutHeight,
+    layoutWidth,
+    mobile: configuration.kind === "mobile",
+    physicalHeight: Math.round(layoutHeight * devicePixelRatio),
+    physicalWidth: Math.round(layoutWidth * devicePixelRatio),
+    targetPage: selection.targetPage,
+    visualViewportScale: configuration.pinchZoom,
+  };
+}
 export const FALLBACK_IMPORT_DIAGNOSTIC_STEPS = Object.freeze([
   "connect",
   "baseline",
@@ -148,6 +189,151 @@ async function runReferenceCaptureDiagnosticStage(progress, step, operation) {
   const result = await operation();
   markReferenceCaptureDiagnosticStage(progress, `${step}-completed`);
   return result;
+}
+
+async function readReferenceCaptureDiagnosticBaseline(cdp) {
+  const [targetResult, frameResult, pageState] = await Promise.all([
+    cdp.send("Target.getTargets"),
+    cdp.send("Page.getFrameTree"),
+    evaluate(cdp, `({
+      locationClass: location.href === 'about:blank' ? 'about-blank' : 'other',
+      readyStateComplete: document.readyState === 'complete'
+    })`),
+  ]);
+  const targetBaseline = validateCdpInitialTargetBaseline(
+    targetResult?.targetInfos,
+  );
+  const mainFrame = frameResult?.frameTree?.frame;
+  return {
+    ...targetBaseline,
+    frameId: typeof mainFrame?.id === "string" ? mainFrame.id : null,
+    frameTreeMainOnly:
+      Array.isArray(frameResult?.frameTree?.childFrames)
+        ? frameResult.frameTree.childFrames.length === 0
+        : true,
+    frameUrlClass: mainFrame?.url === "about:blank" ? "about-blank" : "other",
+    locationClass: pageState?.locationClass ?? "other",
+    readyStateComplete: pageState?.readyStateComplete === true,
+  };
+}
+
+async function readReferenceCaptureDiagnosticViewport(cdp) {
+  return evaluate(cdp, `({
+    devicePixelRatio: Number(devicePixelRatio),
+    innerHeight: Number(innerHeight),
+    innerWidth: Number(innerWidth),
+    screenHeight: Number(screen.height),
+    screenWidth: Number(screen.width),
+    visualViewportHeight: Number(visualViewport?.height),
+    visualViewportScale: Number(visualViewport?.scale),
+    visualViewportWidth: Number(visualViewport?.width)
+  })`);
+}
+
+export async function navigateReferenceCaptureDiagnosticPage(
+  cdp,
+  requestedUrl,
+  timeoutMs = SCENARIO_TIMEOUT_MS,
+) {
+  let sequence = 0;
+  const lifecycleEvents = [];
+  const loadEvents = [];
+  cdp.on("Page.lifecycleEvent", (event) => {
+    lifecycleEvents.push({
+      frameId: event?.frameId,
+      loaderId: event?.loaderId,
+      name: event?.name,
+      sequence: ++sequence,
+    });
+  });
+  cdp.on("Page.loadEventFired", () => {
+    loadEvents.push({ sequence: ++sequence });
+  });
+  const dispatchSequence = ++sequence;
+  const navigation = await cdp.send("Page.navigate", { url: requestedUrl });
+  const responseSequence = ++sequence;
+  if (
+    typeof navigation?.frameId !== "string" ||
+    !navigation.frameId ||
+    typeof navigation?.loaderId !== "string" ||
+    !navigation.loaderId ||
+    navigation?.errorText ||
+    navigation?.isDownload === true
+  ) {
+    throw new Error(
+      "The reference-capture diagnostic did not start a new PDF document loader.",
+    );
+  }
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const lifecycleLoad = lifecycleEvents.find(
+      (event) =>
+        event.sequence > dispatchSequence &&
+        event.name === "load" &&
+        event.frameId === navigation.frameId &&
+        event.loaderId === navigation.loaderId,
+    );
+    const loadEvent = loadEvents.find(
+      (event) => event.sequence > dispatchSequence,
+    );
+    if (lifecycleLoad && loadEvent) {
+      return {
+        dispatchSequence,
+        errorText: null,
+        finalSequence: sequence,
+        frameId: navigation.frameId,
+        isDownload: navigation.isDownload === true,
+        lifecycleLoad,
+        loadEvent,
+        loaderId: navigation.loaderId,
+        newDocument: true,
+        responseSequence,
+      };
+    }
+    await delay(25);
+  }
+  throw new Error(
+    "The reference-capture diagnostic did not observe the new loader's load lifecycle.",
+  );
+}
+
+async function waitForReferenceCaptureDiagnosticViewer(
+  cdp,
+  configurationId,
+) {
+  return waitForExpression(
+    cdp,
+    `(() => {
+      const protocol = location.protocol;
+      const contentType = document.contentType;
+      const pdfEmbedPresent = Boolean(document.querySelector(
+        'embed[type="application/pdf"], embed[type="application/x-google-chrome-pdf"]'
+      ));
+      const fixedViewerClass =
+        (protocol === 'chrome-extension:' && contentType === 'text/html') ||
+        (protocol === 'file:' &&
+          (contentType === 'application/pdf' || pdfEmbedPresent));
+      if (document.readyState !== 'complete' || !fixedViewerClass) return false;
+      return {
+        contentType,
+        pdfEmbedPresent,
+        protocol,
+        readyStateComplete: true,
+        viewport: {
+          devicePixelRatio: Number(devicePixelRatio),
+          innerHeight: Number(innerHeight),
+          innerWidth: Number(innerWidth),
+          screenHeight: Number(screen.height),
+          screenWidth: Number(screen.width),
+          visualViewportHeight: Number(visualViewport?.height),
+          visualViewportScale: Number(visualViewport?.scale),
+          visualViewportWidth: Number(visualViewport?.width)
+        }
+      };
+    })()`,
+    `${configurationId} reference-capture diagnostic viewer`,
+    SCENARIO_TIMEOUT_MS,
+  );
 }
 
 export function createFallbackImportDiagnosticProgress() {
@@ -1761,12 +1947,52 @@ function summarizeReferenceDiagnosticProgress(progress, runnerFailure) {
   return { failureCategory, history, sequenceComplete, terminalStage };
 }
 
+function sanitizeReferenceDiagnosticViewport(viewport) {
+  const positiveFinite = (value) =>
+    Number.isFinite(value) && value > 0;
+  if (
+    !positiveFinite(viewport?.devicePixelRatio) ||
+    !positiveFinite(viewport?.innerHeight) ||
+    !positiveFinite(viewport?.innerWidth) ||
+    !positiveFinite(viewport?.screenHeight) ||
+    !positiveFinite(viewport?.screenWidth) ||
+    !positiveFinite(viewport?.visualViewportHeight) ||
+    !positiveFinite(viewport?.visualViewportScale) ||
+    !positiveFinite(viewport?.visualViewportWidth)
+  ) {
+    return null;
+  }
+  return {
+    devicePixelRatio: viewport.devicePixelRatio,
+    innerHeight: viewport.innerHeight,
+    innerWidth: viewport.innerWidth,
+    screenHeight: viewport.screenHeight,
+    screenWidth: viewport.screenWidth,
+    visualViewportHeight: viewport.visualViewportHeight,
+    visualViewportScale: viewport.visualViewportScale,
+    visualViewportWidth: viewport.visualViewportWidth,
+  };
+}
+
+function referenceDiagnosticProtocolClass(protocol) {
+  if (protocol === "chrome-extension:") return "extension";
+  if (protocol === "file:") return "file";
+  return "other";
+}
+
+function referenceDiagnosticContentTypeClass(contentType) {
+  if (contentType === "application/pdf") return "pdf";
+  if (contentType === "text/html") return "html";
+  return "other";
+}
+
 export function buildReferenceCaptureDiagnosticReport({
   capture,
   fixture,
   outputDirectory,
   progress,
   recordedAt = new Date().toISOString(),
+  referenceConfigurationId,
   runnerFailure,
   source,
   teardown,
@@ -1780,6 +2006,105 @@ export function buildReferenceCaptureDiagnosticReport({
     fixture?.bytes === PUBLIC_PDF_FIXTURE_BYTES &&
     fixture?.sha256 === PUBLIC_PDF_FIXTURE_SHA256;
   const outputIsExternal = isOutsideRepository(outputDirectory);
+  const expected = resolveReferenceCaptureDiagnosticConfiguration(
+    referenceConfigurationId,
+  );
+  const configurationBound = Boolean(expected) &&
+    capture?.configurationId === expected.id &&
+    capture?.referenceScheme === "file:" &&
+    capture?.targetPage === expected.targetPage;
+
+  const baseline = capture?.baseline;
+  const baselineBound =
+    baseline?.checked === true &&
+    baseline?.targetCount === 1 &&
+    baseline?.pageCount === 1 &&
+    baseline?.workerCount === 0 &&
+    baseline?.pageUrlClass === "about" &&
+    typeof baseline?.frameId === "string" &&
+    baseline.frameId.length > 0 &&
+    baseline?.frameTreeMainOnly === true &&
+    baseline?.frameUrlClass === "about-blank" &&
+    baseline?.locationClass === "about-blank" &&
+    baseline?.readyStateComplete === true;
+
+  const configuredViewport = sanitizeReferenceDiagnosticViewport(
+    capture?.configuredViewport,
+  );
+  const viewerViewport = sanitizeReferenceDiagnosticViewport(
+    capture?.viewer?.viewport,
+  );
+  const closeTo = (left, right) =>
+    Number.isFinite(left) &&
+    Number.isFinite(right) &&
+    Math.abs(left - right) <= 1e-7;
+  const configuredViewportBound = Boolean(expected && configuredViewport) &&
+    closeTo(configuredViewport.devicePixelRatio, expected.devicePixelRatio) &&
+    closeTo(configuredViewport.screenWidth, expected.layoutWidth) &&
+    closeTo(configuredViewport.screenHeight, expected.layoutHeight) &&
+    closeTo(
+      configuredViewport.visualViewportScale,
+      expected.visualViewportScale,
+    );
+  const viewerViewportBound = Boolean(expected && viewerViewport) &&
+    closeTo(viewerViewport.devicePixelRatio, expected.devicePixelRatio) &&
+    closeTo(viewerViewport.innerWidth, expected.layoutWidth) &&
+    closeTo(viewerViewport.innerHeight, expected.layoutHeight) &&
+    closeTo(viewerViewport.screenWidth, expected.layoutWidth) &&
+    closeTo(viewerViewport.screenHeight, expected.layoutHeight) &&
+    closeTo(viewerViewport.visualViewportWidth, expected.layoutWidth) &&
+    closeTo(viewerViewport.visualViewportHeight, expected.layoutHeight) &&
+    closeTo(viewerViewport.visualViewportScale, expected.visualViewportScale);
+
+  const navigation = capture?.navigation;
+  const lifecycleLoad = navigation?.lifecycleLoad;
+  const loadEvent = navigation?.loadEvent;
+  const navigationSequences = [
+    navigation?.dispatchSequence,
+    navigation?.responseSequence,
+    lifecycleLoad?.sequence,
+    loadEvent?.sequence,
+  ];
+  const navigationBound =
+    baselineBound &&
+    typeof navigation?.frameId === "string" &&
+    navigation.frameId.length > 0 &&
+    navigation.frameId === baseline.frameId &&
+    typeof navigation?.loaderId === "string" &&
+    navigation.loaderId.length > 0 &&
+    navigation?.newDocument === true &&
+    navigation?.errorText === null &&
+    navigation?.isDownload === false &&
+    navigationSequences.every(
+      (sequence) => Number.isInteger(sequence) && sequence > 0,
+    ) &&
+    new Set(navigationSequences).size === navigationSequences.length &&
+    navigation.dispatchSequence === 1 &&
+    navigation.responseSequence > navigation.dispatchSequence &&
+    lifecycleLoad.sequence > navigation.dispatchSequence &&
+    loadEvent.sequence > navigation.dispatchSequence &&
+    Number.isInteger(navigation?.finalSequence) &&
+    navigation.finalSequence >= Math.max(...navigationSequences) &&
+    lifecycleLoad?.name === "load" &&
+    lifecycleLoad?.frameId === navigation.frameId &&
+    lifecycleLoad?.loaderId === navigation.loaderId;
+
+  const protocolClass = referenceDiagnosticProtocolClass(
+    capture?.viewer?.protocol,
+  );
+  const contentTypeClass = referenceDiagnosticContentTypeClass(
+    capture?.viewer?.contentType,
+  );
+  const viewerClassBound =
+    capture?.viewer?.readyStateComplete === true &&
+    typeof capture?.viewer?.pdfEmbedPresent === "boolean" &&
+    (
+      (protocolClass === "extension" && contentTypeClass === "html") ||
+      (protocolClass === "file" &&
+        (contentTypeClass === "pdf" ||
+          capture.viewer.pdfEmbedPresent === true))
+    );
+
   const candidates = Array.isArray(capture?.candidates)
     ? capture.candidates
     : [];
@@ -1800,7 +2125,9 @@ export function buildReferenceCaptureDiagnosticReport({
       SHA256_PATTERN.test(candidate?.sha256 ?? "") &&
       Number.isInteger(candidate?.attempt) &&
       candidate.attempt > 0 &&
-      Boolean(analysis);
+      Boolean(analysis) &&
+      analysis.width === expected?.physicalWidth &&
+      analysis.height === expected?.physicalHeight;
     return bound
       ? {
           analysis,
@@ -1815,17 +2142,15 @@ export function buildReferenceCaptureDiagnosticReport({
   });
   const stableCandidatesBound =
     outputIsExternal &&
-    capture?.configurationId === PDF_SHARPNESS_MATRIX[0].id &&
-    capture?.referenceScheme === "file:" &&
-    capture?.targetPage === REFERENCE_CAPTURE_DIAGNOSTIC_TARGET_PAGE &&
+    configurationBound &&
     Number.isInteger(capture?.attempts) &&
     capture.attempts >= 2 &&
     Number.isInteger(capture?.captureErrorCount) &&
     capture.captureErrorCount >= 0 &&
     candidates.length === REFERENCE_CAPTURE_DIAGNOSTIC_CANDIDATES.length &&
     publicCandidates.every(Boolean) &&
-    publicCandidates[0].attempt < publicCandidates[1].attempt &&
-    publicCandidates[1].attempt <= capture.attempts &&
+    publicCandidates[0].attempt + 1 === publicCandidates[1].attempt &&
+    publicCandidates[1].attempt === capture.attempts &&
     publicCandidates[0].artifact.bytes === publicCandidates[1].artifact.bytes &&
     publicCandidates[0].artifact.sha256 ===
       publicCandidates[1].artifact.sha256 &&
@@ -1859,6 +2184,21 @@ export function buildReferenceCaptureDiagnosticReport({
     ...(!outputIsExternal
       ? ["The reference-capture diagnostic output is not external."]
       : []),
+    ...(!configurationBound
+      ? ["The reference-capture diagnostic configuration is not allowlisted and exact."]
+      : []),
+    ...(!baselineBound
+      ? ["The reference-capture diagnostic did not start from one clean about:blank page."]
+      : []),
+    ...(!configuredViewportBound
+      ? ["The reference-capture diagnostic metrics were not applied before navigation."]
+      : []),
+    ...(!navigationBound
+      ? ["The reference-capture diagnostic did not bind a new loader and its load lifecycle."]
+      : []),
+    ...(!viewerClassBound || !viewerViewportBound
+      ? ["The reference-capture diagnostic viewer class or actual viewport is invalid."]
+      : []),
     ...(!stableCandidatesBound
       ? ["The reference-capture diagnostic did not retain two stable byte-identical candidates."]
       : []),
@@ -1872,6 +2212,13 @@ export function buildReferenceCaptureDiagnosticReport({
       sourceCommit: sourceBound ? source.commit : null,
       sourceTree: sourceBound ? source.tree : null,
     },
+    baseline: {
+      cleanAboutBlank: baselineBound,
+      frameIdentityHash:
+        typeof baseline?.frameId === "string" && baseline.frameId
+          ? cdpDiagnosticIdentity(baseline.frameId)
+          : null,
+    },
     capture: {
       attempts: Number.isInteger(capture?.attempts) ? capture.attempts : null,
       captureErrorCount: Number.isInteger(capture?.captureErrorCount)
@@ -1883,19 +2230,58 @@ export function buildReferenceCaptureDiagnosticReport({
       progressSummary.sequenceComplete &&
       sourceBound &&
       fixtureBound &&
+      configurationBound &&
+      baselineBound &&
+      configuredViewportBound &&
+      navigationBound &&
+      viewerClassBound &&
+      viewerViewportBound &&
       stableCandidatesBound &&
       !teardownFailed &&
       !runnerFailure,
-    configuration: {
-      id: PDF_SHARPNESS_MATRIX[0].id,
-      targetPage: REFERENCE_CAPTURE_DIAGNOSTIC_TARGET_PAGE,
-    },
+    configuration: expected
+      ? {
+          devicePixelRatio: expected.devicePixelRatio,
+          id: expected.id,
+          layoutHeight: expected.layoutHeight,
+          layoutWidth: expected.layoutWidth,
+          mobile: expected.mobile,
+          physicalHeight: expected.physicalHeight,
+          physicalWidth: expected.physicalWidth,
+          targetPage: expected.targetPage,
+          visualViewportScale: expected.visualViewportScale,
+        }
+      : null,
     diagnostic: true,
-    diagnosticSchemaVersion: 1,
+    diagnosticSchemaVersion: 2,
     execution: progressSummary,
     failures,
     fixture: fixtureBound ? fixture : null,
     mode: "reference-capture",
+    navigation: {
+      dispatchSequence: Number.isInteger(navigation?.dispatchSequence)
+        ? navigation.dispatchSequence
+        : null,
+      frameIdentityHash:
+        typeof navigation?.frameId === "string" && navigation.frameId
+          ? cdpDiagnosticIdentity(navigation.frameId)
+          : null,
+      lifecycleLoadMatched: navigationBound,
+      lifecycleLoadSequence: Number.isInteger(lifecycleLoad?.sequence)
+        ? lifecycleLoad.sequence
+        : null,
+      loadEventFiredSequence: Number.isInteger(loadEvent?.sequence)
+        ? loadEvent.sequence
+        : null,
+      loaderIdentityHash:
+        typeof navigation?.loaderId === "string" && navigation.loaderId
+          ? cdpDiagnosticIdentity(navigation.loaderId)
+          : null,
+      newDocument: navigation?.newDocument === true,
+      responseSequence: Number.isInteger(navigation?.responseSequence)
+        ? navigation.responseSequence
+        : null,
+    },
     recordedAt,
     source: summarizeReferenceDiagnosticSource(source),
     teardown: {
@@ -1909,6 +2295,19 @@ export function buildReferenceCaptureDiagnosticReport({
         processClosed: teardown?.reference?.processClosed === true,
         profileRemoved: teardown?.reference?.profileRemoved === true,
       },
+    },
+    viewer: {
+      contentTypeClass,
+      pdfEmbedPresent:
+        typeof capture?.viewer?.pdfEmbedPresent === "boolean"
+          ? capture.viewer.pdfEmbedPresent
+          : null,
+      protocolClass,
+      readyStateComplete: capture?.viewer?.readyStateComplete === true,
+    },
+    viewport: {
+      configured: configuredViewport,
+      viewer: viewerViewport,
     },
   };
 }
@@ -2927,6 +3326,9 @@ function parseArguments(argv) {
       process.env.LINELIGHT_PDF_SHARPNESS_EVIDENCE ??
       DEFAULT_OUTPUT_DIRECTORY,
     outputProvided: false,
+    referenceConfigurationId:
+      REFERENCE_CAPTURE_DIAGNOSTIC_DEFAULT_CONFIGURATION,
+    referenceConfigurationProvided: false,
     record: false,
   };
   for (let index = 0; index < argv.length; index += 1) {
@@ -2940,6 +3342,21 @@ function parseArguments(argv) {
     }
     else if (argument === "--diagnose-reference-capture") {
       options.diagnoseReferenceCapture = true;
+    }
+    else if (argument === "--reference-configuration") {
+      if (options.referenceConfigurationProvided) {
+        throw new Error(
+          "Reference-capture diagnostic configuration may be selected only once.",
+        );
+      }
+      const configurationId = argv[++index];
+      if (!configurationId || configurationId.startsWith("--")) {
+        throw new Error(
+          "--reference-configuration requires one allowlisted configuration ID.",
+        );
+      }
+      options.referenceConfigurationId = configurationId;
+      options.referenceConfigurationProvided = true;
     }
     else if (argument === "--fixture") options.fixture = argv[++index];
     else if (argument === "--output") {
@@ -2962,7 +3379,9 @@ function parseArguments(argv) {
           "  --diagnose-first-network-fixed-point",
           "                   Stop after the first matrix network gate and cleanup.",
           "  --diagnose-reference-capture",
-          "                   Capture two stable native-viewer frames for the first desktop case.",
+          "                   Capture two stable native-viewer frames without acceptance.",
+          "  --reference-configuration ID",
+          "                   Reference diagnostic: desktop-dpr1-zoom100 (default) or mobile-dpr3-zoom100.",
           "  --fixture PATH   Selectable-text PDF used for both original and import.",
           "  --output DIR     Transient evidence directory.",
           "  --record         Write review evidence to docs/evidence/issue-68/.",
@@ -3000,6 +3419,24 @@ function parseArguments(argv) {
   ].filter(Boolean).length;
   if (enabledDiagnosticModes > 1) {
     throw new Error("Issue #68 diagnostic modes are mutually exclusive.");
+  }
+  if (
+    options.referenceConfigurationProvided &&
+    !options.diagnoseReferenceCapture
+  ) {
+    throw new Error(
+      "--reference-configuration is only valid with --diagnose-reference-capture.",
+    );
+  }
+  if (
+    options.diagnoseReferenceCapture &&
+    !resolveReferenceCaptureDiagnosticConfiguration(
+      options.referenceConfigurationId,
+    )
+  ) {
+    throw new Error(
+      "Reference-capture diagnostic configuration is not allowlisted.",
+    );
   }
   if (
     enabledDiagnosticModes === 1 &&
@@ -4589,7 +5026,7 @@ const INSTRUMENTATION_SOURCE = String.raw`
       },
       targetPage
     };
-    block.scrollIntoView({ behavior: 'auto', block: 'center' });
+    block.scrollIntoView({ behavior: 'instant', block: 'center' });
     action.readerViewportAfter = rectangle(reader);
     action.scrollTopAfter = Number(reader?.scrollTop);
     action.targetGeometryAfter = rectangle(block);
@@ -7772,10 +8209,22 @@ async function runReferenceCaptureDiagnostic(options, source) {
   const fixture = await fileArtifact(options.fixture);
   const progress = createReferenceCaptureDiagnosticProgress();
   let capture = null;
+  let baseline = null;
+  let configuredViewport = null;
+  let navigation = null;
   let referenceBrowser = null;
   let referenceCdp = null;
   let referenceShutdown = null;
   let runnerFailure = null;
+  let viewer = null;
+  const selected = resolveReferenceCaptureDiagnosticConfiguration(
+    options.referenceConfigurationId,
+  );
+  if (!selected) {
+    throw new Error(
+      "Reference-capture diagnostic configuration is not allowlisted.",
+    );
+  }
   try {
     await runBoundedDiagnosticOperation(async () => {
       referenceBrowser = await runReferenceCaptureDiagnosticStage(
@@ -7788,38 +8237,47 @@ async function runReferenceCaptureDiagnostic(options, source) {
         "cdp-connect",
         () => CdpSession.connect(referenceBrowser.webSocketDebuggerUrl),
       );
-      await runReferenceCaptureDiagnosticStage(
+      baseline = await runReferenceCaptureDiagnosticStage(
+        progress,
+        "baseline",
+        () => readReferenceCaptureDiagnosticBaseline(referenceCdp),
+      );
+      configuredViewport = await runReferenceCaptureDiagnosticStage(
         progress,
         "configure",
-        () => Promise.all([
-          referenceCdp.send("Page.enable"),
-          referenceCdp.send("Runtime.enable"),
-          applyMatrixConfiguration(
+        async () => {
+          await Promise.all([
+            referenceCdp.send("Page.enable"),
+            referenceCdp.send("Runtime.enable"),
+            referenceCdp.send("Page.setLifecycleEventsEnabled", {
+              enabled: true,
+            }),
+          ]);
+          await applyMatrixConfiguration(
             referenceCdp,
-            PDF_SHARPNESS_MATRIX[0],
+            selected.configuration,
             true,
-          ),
-        ]),
+          );
+          return readReferenceCaptureDiagnosticViewport(referenceCdp);
+        },
       );
       const requestedUrl = new URL(pathToFileURL(options.fixture));
       requestedUrl.hash =
-        `page=${REFERENCE_CAPTURE_DIAGNOSTIC_TARGET_PAGE}&zoom=page-width`;
-      await runReferenceCaptureDiagnosticStage(
+        `page=${selected.targetPage}&zoom=page-width`;
+      navigation = await runReferenceCaptureDiagnosticStage(
         progress,
         "navigate",
-        () => referenceCdp.send("Page.navigate", { url: requestedUrl.href }),
+        () => navigateReferenceCaptureDiagnosticPage(
+          referenceCdp,
+          requestedUrl.href,
+        ),
       );
-      await runReferenceCaptureDiagnosticStage(
+      viewer = await runReferenceCaptureDiagnosticStage(
         progress,
         "viewer-ready",
-        () => waitForExpression(
+        () => waitForReferenceCaptureDiagnosticViewer(
           referenceCdp,
-          `document.readyState === 'complete' &&
-            (document.contentType === 'application/pdf' ||
-              Boolean(document.querySelector('embed[type="application/pdf"]')) ||
-              location.protocol === 'chrome-extension:')`,
-          "desktop-dpr1-zoom100 reference-capture diagnostic",
-          SCENARIO_TIMEOUT_MS,
+          selected.id,
         ),
       );
       const stable = await runReferenceCaptureDiagnosticStage(
@@ -7832,9 +8290,13 @@ async function runReferenceCaptureDiagnostic(options, source) {
       );
       capture = {
         ...stable,
-        configurationId: PDF_SHARPNESS_MATRIX[0].id,
+        baseline,
+        configurationId: selected.id,
+        configuredViewport,
+        navigation,
         referenceScheme: requestedUrl.protocol,
-        targetPage: REFERENCE_CAPTURE_DIAGNOSTIC_TARGET_PAGE,
+        targetPage: selected.targetPage,
+        viewer,
       };
       await runReferenceCaptureDiagnosticStage(
         progress,
@@ -7862,11 +8324,21 @@ async function runReferenceCaptureDiagnostic(options, source) {
     ]);
     referenceShutdown = cleanupResult(cleanup, "browser");
   }
+  capture ??= {
+    baseline,
+    configurationId: selected.id,
+    configuredViewport,
+    navigation,
+    referenceScheme: "file:",
+    targetPage: selected.targetPage,
+    viewer,
+  };
   const report = buildReferenceCaptureDiagnosticReport({
     capture,
     fixture,
     outputDirectory: options.outputDirectory,
     progress,
+    referenceConfigurationId: options.referenceConfigurationId,
     runnerFailure,
     source,
     teardown: {

@@ -73,21 +73,35 @@ condition booleans even when a later setup step fails, rather than being
 discarded as one null result.
 
 When the native PDF-viewer readiness classifier itself needs diagnosis, use
-the distinct first-desktop capture mode with a fresh, absent external output
-directory:
+the distinct reference-capture mode with a fresh, absent external output
+directory. It defaults to the first desktop configuration:
 
 ```bash
 node scripts/run-pdf-sharpness-browser-regression.mjs \
   --diagnose-reference-capture --output /tmp/issue-68-reference-diagnostic
 ```
 
-This mode accepts only the exact public fixture, applies the first desktop
-configuration, opens page 2 in the native viewer, and retains exactly two
-consecutive byte-identical candidate PNGs. Its noncanonical `diagnostic: true`
-report binds both fixed basenames, byte counts, hashes, and the reference
-analyzer's versioned segmentation metrics to the exact clean source
-commit/tree and reviewed file hashes. A stable candidate may deliberately
-report `renderedPage: false`:
+The only alternate selector is a fresh mobile DPR-3 observation of page 3:
+
+```bash
+node scripts/run-pdf-sharpness-browser-regression.mjs \
+  --diagnose-reference-capture \
+  --reference-configuration mobile-dpr3-zoom100 \
+  --output /tmp/issue-68-mobile-reference-diagnostic
+```
+
+The mode accepts only the exact public fixture and the allowlisted
+`desktop-dpr1-zoom100`/page-2 or `mobile-dpr3-zoom100`/page-3 pair. A fresh
+disposable viewer must begin with one `about:blank` page. The selected device
+metrics are applied before the first PDF navigation, whose nonempty new loader
+and frame must match a `Page.lifecycleEvent` load while a separate
+post-dispatch `Page.loadEventFired` proves the page-load boundary. The report
+retains only opaque ID hashes, fixed protocol/content classes, and the actual
+DPR, screen, layout, and visual-viewport metrics. It then binds two adjacent,
+byte-identical candidate PNGs at the exact expected physical dimensions to
+fixed basenames, byte counts, hashes, and version-2 segmentation metrics, the
+exact clean source commit/tree, and reviewed file hashes. A stable candidate
+may deliberately report `renderedPage: false`:
 that observation is diagnosis, never Issue 68 acceptance, and the report has no
 `passed` field or acceptance schema version. Raw capture exceptions, local
 output paths, private fixtures, and browser-profile paths are never serialized;
@@ -153,9 +167,13 @@ requires:
   invocation ID, page/reader rectangles, product visibility, and independent
   geometric intersection are captured synchronously; only render source and
   scale are filled in by the deferred recorder. The action snapshots the draw
-  invocation boundary and immediately calls `scrollIntoView` in that same
-  browser task, so a draw invoked before the scroll cannot be mislabeled by a
-  later microtask. An exact cached bitmap that already satisfies the target
+  invocation boundary and immediately calls instant `scrollIntoView` in that
+  same browser task. The target must be geometrically outside the reader before
+  the action, the scroll position must change synchronously, and the target
+  must intersect the reader afterward, so CSS smooth-scroll timing cannot
+  relabel an intermediate draw as the final target. A draw invoked before the
+  scroll cannot be mislabeled by a later microtask. An exact cached bitmap that
+  already satisfies the target
   must compose with exactly zero new target requests or bitmaps, before any
   non-target bitmap. An undersized or missing bitmap must instead produce
   exactly one first post-action visible request, exactly one later target
