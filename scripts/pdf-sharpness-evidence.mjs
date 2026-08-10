@@ -7,7 +7,6 @@ export const PDF_SHARPNESS_RASTER_TRANSITIONS = Object.freeze([
 ]);
 export const PDF_SHARPNESS_MAX_BITMAP_COUNT = 8;
 export const PDF_SHARPNESS_MAX_BITMAP_PIXELS = 33_554_432;
-export const PDF_SHARPNESS_MAX_COMPOSED_CANVASES = 2;
 export const PDF_SHARPNESS_MAX_RASTER_PIXELS = 16_777_216;
 export const PDF_SHARPNESS_MAX_RASTER_DIMENSION = 8_192;
 export const PDF_SHARPNESS_REFERENCE_MIN_WHITE_RATIO = 0.5;
@@ -163,6 +162,52 @@ function validBitmapStats(value) {
   return (
     nonNegativeInteger(value?.count) &&
     nonNegativeInteger(value?.pixels)
+  );
+}
+
+function validComposedCanvasFrame(frame, { count = null, pixels = null } = {}) {
+  const composedPages = Array.isArray(frame?.composedPages)
+    ? frame.composedPages
+    : [];
+  const visiblePages = Array.isArray(frame?.visiblePages)
+    ? frame.visiblePages
+    : [];
+  const composedIds = composedPages.map((entry) => entry?.page);
+  const validPageIds = (pages) =>
+    pages.length > 0 &&
+    pages.every(
+      (page) => Number.isInteger(page) && page >= 1 && page <= 6,
+    ) &&
+    new Set(pages).size === pages.length;
+  const composedPixels = composedPages.reduce(
+    (sum, entry) => sum + Number(entry?.pixels ?? 0),
+    0,
+  );
+  return (
+    finite(frame?.at) &&
+    nonNegativeInteger(frame?.composedCount) &&
+    nonNegativeInteger(frame?.composedPixels) &&
+    frame.composedCount > 0 &&
+    frame.composedPixels > 0 &&
+    frame.composedCount === composedPages.length &&
+    (count === null || frame.composedCount === count) &&
+    (pixels === null || frame.composedPixels === pixels) &&
+    frame.composedPixels <= PDF_SHARPNESS_MAX_BITMAP_PIXELS &&
+    validPageIds(composedIds) &&
+    validPageIds(visiblePages) &&
+    composedIds.length === visiblePages.length &&
+    composedIds.every((page) => visiblePages.includes(page)) &&
+    composedPages.every(
+      (entry) =>
+        entry?.visible === true &&
+        Number.isInteger(entry?.width) &&
+        entry.width > 0 &&
+        Number.isInteger(entry?.height) &&
+        entry.height > 0 &&
+        Number.isInteger(entry?.pixels) &&
+        entry.pixels === entry.width * entry.height,
+    ) &&
+    composedPixels === frame.composedPixels
   );
 }
 
@@ -342,6 +387,8 @@ export function validatePdfSharpnessEvidence(evidence) {
     fail("matrix IDs/order do not match the required desktop/mobile matrix");
   }
   let strictRasterUpgradeCount = 0;
+  let cachedPriorityCount = 0;
+  let renderedPriorityCount = 0;
   for (const [index, run] of runs.entries()) {
     const expected = PDF_SHARPNESS_MATRIX[index];
     if (!expected) continue;
@@ -567,15 +614,120 @@ export function validatePdfSharpnessEvidence(evidence) {
       fail(`${expected.id} preview-to-sharp upgrade ordering regressed`);
     }
 
-    if (
-      !Number.isInteger(run?.visibleFirst?.targetPage) ||
-      run?.visibleFirst?.firstComposedPage !== run?.visibleFirst?.targetPage ||
-      run?.visibleFirst?.firstWorkerBitmapPage !== run?.visibleFirst?.targetPage ||
-      !emptyArray(run?.visibleFirst?.staleNonVisibleCompositions) ||
-      !emptyArray(run?.visibleFirst?.staleWorkerBitmaps)
-    ) {
+    const priority = run?.visibleFirst;
+    const priorityTarget = priority?.targetPage;
+    const priorityBefore = priority?.targetBefore;
+    const priorityAfter = priority?.targetAfter;
+    const priorityAction = priority?.scrollAction;
+    const priorityComposition = priority?.targetComposition;
+    const priorityRequest = priority?.targetVisibleRequest;
+    const priorityBitmap = priority?.targetBitmapAfterVisibleRequest;
+    const priorityVisiblePages = priorityComposition?.visiblePages;
+    const priorityBaseValid =
+      Number.isInteger(priorityTarget) &&
+      priorityTarget >= 1 &&
+      priorityTarget <= 6 &&
+      priorityAction?.type === "rapid-scroll-action" &&
+      priorityAction?.targetPage === priorityTarget &&
+      finite(priorityAction?.at) &&
+      nonNegativeInteger(priorityAction?.eventId) &&
+      priorityBefore?.visible === false &&
+      priorityBefore?.distance === 1 &&
+      priorityBefore?.canvasWidth === 0 &&
+      priorityBefore?.canvasHeight === 0 &&
+      priorityAfter?.visible === true &&
+      priorityAfter?.distance === 0 &&
+      priorityAfter?.renderSource === "worker-bitmap" &&
+      Number.isInteger(priorityAfter?.targetWidth) &&
+      priorityAfter.targetWidth > 0 &&
+      Number.isInteger(priorityAfter?.targetHeight) &&
+      priorityAfter.targetHeight > 0 &&
+      finite(priorityAfter?.targetScale) &&
+      priorityAfter.targetScale > 0 &&
+      priorityAfter?.canvasWidth === priorityAfter.targetWidth &&
+      priorityAfter?.canvasHeight === priorityAfter.targetHeight &&
+      closeTo(priorityAfter?.scale, priorityAfter.targetScale, 1e-7) &&
+      priorityComposition?.page === priorityTarget &&
+      priorityComposition?.source === "worker-bitmap" &&
+      priorityComposition?.visible === true &&
+      finite(priorityComposition?.at) &&
+      priorityComposition.at >= priorityAction.at &&
+      Number.isInteger(priorityComposition?.compositionId) &&
+      priorityComposition.compositionId > 0 &&
+      Number.isInteger(priorityComposition?.bitmapEventId) &&
+      priorityComposition.bitmapEventId > 0 &&
+      priorityComposition?.width === priorityAfter.targetWidth &&
+      priorityComposition?.height === priorityAfter.targetHeight &&
+      closeTo(priorityComposition?.scale, priorityAfter.targetScale, 1e-7) &&
+      Array.isArray(priorityVisiblePages) &&
+      priorityVisiblePages.includes(priorityTarget) &&
+      priorityVisiblePages.every(
+        (page) => Number.isInteger(page) && page >= 1 && page <= 6,
+      ) &&
+      new Set(priorityVisiblePages).size === priorityVisiblePages.length &&
+      priority?.firstPostScrollCompositionPage === priorityTarget &&
+      emptyArray(priority?.staleNonVisibleCompositions) &&
+      emptyArray(priority?.staleWorkerBitmaps);
+    const cachedPriority =
+      priority?.targetPath === "cached-target" &&
+      Number.isInteger(priorityBefore?.latestBitmapEventId) &&
+      priorityBefore.latestBitmapEventId > 0 &&
+      priorityBefore?.latestBitmapWidth === priorityAfter?.targetWidth &&
+      priorityBefore?.latestBitmapHeight === priorityAfter?.targetHeight &&
+      closeTo(
+        priorityBefore?.latestBitmapScale,
+        priorityAfter?.targetScale,
+        1e-7,
+      ) &&
+      priorityComposition?.bitmapEventId ===
+        priorityBefore?.latestBitmapEventId &&
+      priorityRequest === null &&
+      priorityBitmap === null;
+    const beforeBitmapMissing =
+      priorityBefore?.latestBitmapEventId === null &&
+      priorityBefore?.latestBitmapWidth === null &&
+      priorityBefore?.latestBitmapHeight === null &&
+      priorityBefore?.latestBitmapScale === null;
+    const beforeBitmapUndersized =
+      Number.isInteger(priorityBefore?.latestBitmapEventId) &&
+      priorityBefore.latestBitmapEventId > 0 &&
+      Number.isInteger(priorityBefore?.latestBitmapWidth) &&
+      Number.isInteger(priorityBefore?.latestBitmapHeight) &&
+      finite(priorityBefore?.latestBitmapScale) &&
+      priorityBefore.latestBitmapWidth <= priorityAfter?.targetWidth &&
+      priorityBefore.latestBitmapHeight <= priorityAfter?.targetHeight &&
+      (
+        priorityBefore.latestBitmapWidth < priorityAfter?.targetWidth ||
+        priorityBefore.latestBitmapHeight < priorityAfter?.targetHeight
+      );
+    const renderedPriority =
+      priority?.targetPath === "render-required" &&
+      (beforeBitmapMissing || beforeBitmapUndersized) &&
+      priorityRequest?.type === "render" &&
+      priorityRequest?.pageNumber === priorityTarget &&
+      priorityRequest?.enabled === true &&
+      priorityRequest?.visible === true &&
+      priorityRequest?.distance === 0 &&
+      finite(priorityRequest?.scale) &&
+      closeTo(priorityRequest.scale, priorityAfter?.targetScale, 1e-7) &&
+      Number.isInteger(priorityRequest?.eventId) &&
+      priorityRequest.eventId > priorityAction?.eventId &&
+      SHA256_PATTERN.test(priorityRequest?.identityHash ?? "") &&
+      priority?.firstPostScrollVisibleRequestPage === priorityTarget &&
+      priorityBitmap?.type === "bitmap" &&
+      priorityBitmap?.pageNumber === priorityTarget &&
+      priorityBitmap?.width === priorityAfter?.targetWidth &&
+      priorityBitmap?.height === priorityAfter?.targetHeight &&
+      closeTo(priorityBitmap?.scale, priorityAfter?.targetScale, 1e-7) &&
+      Number.isInteger(priorityBitmap?.eventId) &&
+      priorityBitmap.eventId > priorityRequest?.eventId &&
+      SHA256_PATTERN.test(priorityBitmap?.identityHash ?? "") &&
+      priorityComposition?.bitmapEventId === priorityBitmap?.eventId;
+    if (!priorityBaseValid || (!cachedPriority && !renderedPriority)) {
       fail(`${expected.id} did not render the current viewport first`);
     }
+    if (cachedPriority) cachedPriorityCount += 1;
+    if (renderedPriority) renderedPriorityCount += 1;
     if (
       run?.release?.canvasWidth !== 0 ||
       run?.release?.canvasHeight !== 0 ||
@@ -592,8 +744,15 @@ export function validatePdfSharpnessEvidence(evidence) {
       run?.canvasBudget?.maximumPixels < 1 ||
       run?.canvasBudget?.maximumPixels <
         sharp.actualWidth * sharp.actualHeight ||
-      run?.canvasBudget?.maximumCount > PDF_SHARPNESS_MAX_COMPOSED_CANVASES ||
-      run?.canvasBudget?.maximumPixels > PDF_SHARPNESS_MAX_BITMAP_PIXELS
+      run?.canvasBudget?.maximumPixels > PDF_SHARPNESS_MAX_BITMAP_PIXELS ||
+      !validComposedCanvasFrame(
+        run?.canvasBudget?.maximumCountFrame,
+        { count: run?.canvasBudget?.maximumCount },
+      ) ||
+      !validComposedCanvasFrame(
+        run?.canvasBudget?.maximumPixelsFrame,
+        { pixels: run?.canvasBudget?.maximumPixels },
+      )
     ) {
       fail(`${expected.id} exceeded the visible composed-canvas budget`);
     }
@@ -615,6 +774,9 @@ export function validatePdfSharpnessEvidence(evidence) {
   }
   if (strictRasterUpgradeCount < 1) {
     fail("matrix did not prove any strict preview-to-sharp raster upgrade");
+  }
+  if (cachedPriorityCount < 1 || renderedPriorityCount < 1) {
+    fail("matrix did not prove cached and render-required viewport priority");
   }
 
   const budget = evidence?.bitmapBudget;
@@ -671,6 +833,12 @@ export function validatePdfSharpnessEvidence(evidence) {
       event?.renderAttemptId === renderAttemptId,
   );
   const continuationDelayEvent = continuationDelayEvents[0];
+  const continuationMinimumElapsedEvents = stagingEvents.filter(
+    (event) =>
+      event?.type === "continuation-minimum-elapsed" &&
+      event?.renderAttemptId === renderAttemptId,
+  );
+  const continuationMinimumElapsedEvent = continuationMinimumElapsedEvents[0];
   const viewportExitRequestEvents = stagingEvents.filter(
     (event) =>
       event?.type === "viewport-exit-request" &&
@@ -845,6 +1013,14 @@ export function validatePdfSharpnessEvidence(evidence) {
       event?.renderAttemptId === renderAttemptId,
   );
   const cancelRequestEvent = cancelRequestEvents[0];
+  const cancellationEventOrder = [
+    continuationDelayEvent,
+    viewportExitRequestEvent,
+    cancelRequestEvent,
+    cancellationTerminalEvent,
+    viewportExitEvent,
+    continuationResumeEvent,
+  ].map((event) => stagingEvents.indexOf(event));
   const cancellationSignalId = invisibleCancellation?.abortSignalId;
   const cancellationSignalRegistrations = signalRegistrationEvents.filter(
     (event) => event?.abortSignalId === cancellationSignalId,
@@ -885,6 +1061,7 @@ export function validatePdfSharpnessEvidence(evidence) {
       invisibleCancellation.continuationArmedAt &&
     continuationArmEvent?.at <= cancelledStagingStart?.at &&
     continuationDelayEvents.length === 1 &&
+    continuationMinimumElapsedEvents.length === 1 &&
     viewportExitRequestEvents.length === 1 &&
     viewportExitEvents.length === 1 &&
     continuationResumeEvents.length === 1 &&
@@ -907,7 +1084,16 @@ export function validatePdfSharpnessEvidence(evidence) {
     viewportExitRequestEvent?.at <= cancelRequestEvent?.at &&
     cancelRequestEvent?.at <= cancellationTerminalEvent?.at &&
     cancellationTerminalEvent?.at <= viewportExitEvent?.at &&
-    viewportExitEvent?.at < continuationResumeEvent?.at &&
+    viewportExitEvent?.at <= continuationResumeEvent?.at &&
+    continuationDelayEvent?.at <= continuationMinimumElapsedEvent?.at &&
+    continuationMinimumElapsedEvent?.at <= continuationResumeEvent?.at &&
+    continuationMinimumElapsedEvent?.afterMs >= 1_000 &&
+    continuationResumeEvent?.releaseRequestedAt === viewportExitEvent?.at &&
+    cancellationEventOrder.every((index) => index >= 0) &&
+    cancellationEventOrder.every(
+      (index, position) =>
+        position === 0 || cancellationEventOrder[position - 1] < index,
+    ) &&
     viewportExitEvent?.cancelRequestedAt === cancelRequestEvent?.at &&
     cancellationTerminalEvent?.cancelRequestedAt === cancelRequestEvent?.at &&
     cancellationTerminalEvent?.abortSignalId === cancellationSignalId &&
@@ -922,6 +1108,7 @@ export function validatePdfSharpnessEvidence(evidence) {
   const matchingIdentity = [
     cancelledStagingStart,
     continuationDelayEvent,
+    continuationMinimumElapsedEvent,
     viewportExitRequestEvent,
     viewportExitEvent,
     continuationResumeEvent,
@@ -938,6 +1125,7 @@ export function validatePdfSharpnessEvidence(evidence) {
   const matchingCancellationSignal = [
     cancelledStagingStart,
     continuationDelayEvent,
+    continuationMinimumElapsedEvent,
     viewportExitRequestEvent,
     viewportExitEvent,
     continuationResumeEvent,
@@ -972,17 +1160,20 @@ export function validatePdfSharpnessEvidence(evidence) {
     invisibleCancellation?.canvasWidthAfterExit !== 0 ||
     invisibleCancellation?.canvasHeightAfterExit !== 0 ||
     invisibleCancellation?.continuationDelayObserved !== true ||
+    invisibleCancellation?.continuationMinimumElapsedObserved !== true ||
     invisibleCancellation?.continuationResumeObserved !== true ||
     !finite(invisibleCancellation?.continuationDelayAt) ||
+    !finite(invisibleCancellation?.continuationMinimumElapsedAt) ||
+    !finite(invisibleCancellation?.continuationReleaseRequestedAt) ||
     !finite(invisibleCancellation?.exitRequestedAt) ||
     !finite(invisibleCancellation?.exitedAt) ||
     !finite(invisibleCancellation?.continuationResumeAt) ||
     !finite(invisibleCancellation?.continuationResumedAfterMs) ||
-    invisibleCancellation.continuationResumedAfterMs < 950 ||
+    invisibleCancellation.continuationResumedAfterMs < 1_000 ||
     invisibleCancellation.continuationDelayAt >
       invisibleCancellation.exitRequestedAt ||
     invisibleCancellation.exitRequestedAt > invisibleCancellation.exitedAt ||
-    invisibleCancellation.exitedAt >= invisibleCancellation.continuationResumeAt ||
+    invisibleCancellation.exitedAt > invisibleCancellation.continuationResumeAt ||
     !emptyArray(invisibleCancellation?.lateComposes) ||
     lateComposesForAttempt.length !== 0 ||
     invisibleCancellation?.textOverlayRetainedAfterExit !== true ||
@@ -996,11 +1187,18 @@ export function validatePdfSharpnessEvidence(evidence) {
     !finite(cancelledStagingStart?.at) ||
     cancelledStagingStart.at > continuationDelayEvent?.at ||
     continuationDelayEvent?.at !== invisibleCancellation?.continuationDelayAt ||
+    continuationMinimumElapsedEvent?.at !==
+      invisibleCancellation?.continuationMinimumElapsedAt ||
     viewportExitRequestEvent?.at !== invisibleCancellation?.exitRequestedAt ||
     viewportExitEvent?.at !== invisibleCancellation?.exitedAt ||
+    viewportExitEvent?.at !==
+      invisibleCancellation?.continuationReleaseRequestedAt ||
     continuationResumeEvent?.at !== invisibleCancellation?.continuationResumeAt ||
     continuationResumeEvent?.afterMs !==
       invisibleCancellation?.continuationResumedAfterMs ||
+    continuationResumeEvent?.afterMs <
+      continuationMinimumElapsedEvent?.afterMs ||
+    continuationResumeEvent?.releaseRequestedAt !== viewportExitEvent?.at ||
     viewportExitEvent?.visible !== false ||
     viewportExitEvent?.canvasPresent !== true ||
     viewportExitEvent?.canvasWidth !== 0 ||

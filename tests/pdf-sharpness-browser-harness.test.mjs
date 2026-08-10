@@ -54,6 +54,7 @@ import {
   selectPdfFallbackScenarioEvents,
   sendToCdpSession,
   settleCdpCommandDispatches,
+  summarizePdfFallbackCancellationDiagnostic,
   summarizePdfModelCompletion,
   summarizeFallbackImportLifecycle,
   summarizeFallbackDiagnosticProgress,
@@ -1545,6 +1546,58 @@ function passingEvidence() {
     const previewSatisfiedTarget = previewScale === targetScale;
     const sharpCompositionId = previewSatisfiedTarget ? 1 : 2;
     const sharpComposedAt = previewSatisfiedTarget ? 10 : 20;
+    const composedPageIds = configuration.kind === "mobile"
+      ? [2, 3, 4]
+      : [1, 2];
+    const composedPages = composedPageIds.map((page) => ({
+      height: targetHeight,
+      page,
+      pixels: targetWidth * targetHeight,
+      visible: true,
+      width: targetWidth,
+    }));
+    const composedPixels = composedPages.reduce(
+      (sum, page) => sum + page.pixels,
+      0,
+    );
+    const canvasFrame = {
+      at: 50,
+      composedCount: composedPages.length,
+      composedPages,
+      composedPixels,
+      visiblePages: [...composedPageIds],
+    };
+    const priorityTarget = 4;
+    const priorityCached = previewSatisfiedTarget;
+    const priorityBitmapEventId = priorityCached ? 80 : 102;
+    const priorityRequest = priorityCached
+      ? null
+      : {
+          distance: 0,
+          enabled: true,
+          eventId: 101,
+          height: null,
+          identityHash: diagnosticIdentity(configuration.id, "render", 101),
+          pageNumber: priorityTarget,
+          scale: targetScale,
+          type: "render",
+          visible: true,
+          width: null,
+        };
+    const priorityBitmap = priorityCached
+      ? null
+      : {
+          distance: null,
+          enabled: null,
+          eventId: 102,
+          height: targetHeight,
+          identityHash: diagnosticIdentity(configuration.id, "bitmap", 102),
+          pageNumber: priorityTarget,
+          scale: targetScale,
+          type: "bitmap",
+          visible: null,
+          width: targetWidth,
+        };
     return {
       alignment: {
         activeWordAfter: 2,
@@ -1557,8 +1610,10 @@ function passingEvidence() {
         spoken: [{ characters: 23 }],
       },
       canvasBudget: {
-        maximumCount: 2,
-        maximumPixels: targetWidth * targetHeight,
+        maximumCount: composedPages.length,
+        maximumCountFrame: structuredClone(canvasFrame),
+        maximumPixels: composedPixels,
+        maximumPixelsFrame: structuredClone(canvasFrame),
       },
       comparison: {
         lineLightScreenshot,
@@ -1584,7 +1639,7 @@ function passingEvidence() {
       },
       id: configuration.id,
       importedSource: { sha256: SHA, size: fixture.bytes },
-      longTasks: [{ duration: 49.9, name: "self", startTime: 1 }],
+      longTasks: [{ duration: 50, name: "self", startTime: 1 }],
       raster: {
         noLateLowOverwrite: true,
         noResolutionRegression: true,
@@ -1647,11 +1702,60 @@ function passingEvidence() {
         visualViewportScale: configuration.pinchZoom,
       },
       visibleFirst: {
-        firstComposedPage: 4,
-        firstWorkerBitmapPage: 4,
+        firstComposedPage: priorityTarget,
+        firstPostScrollBitmapPage: priorityCached ? null : priorityTarget,
+        firstPostScrollCompositionPage: priorityTarget,
+        firstPostScrollVisibleRequestPage:
+          priorityCached ? null : priorityTarget,
+        firstWorkerBitmapPage: priorityTarget,
+        scrollAction: {
+          at: 100,
+          eventId: 100,
+          targetPage: priorityTarget,
+          type: "rapid-scroll-action",
+        },
         staleNonVisibleCompositions: [],
         staleWorkerBitmaps: [],
-        targetPage: 4,
+        targetAfter: {
+          canvasHeight: targetHeight,
+          canvasWidth: targetWidth,
+          distance: 0,
+          renderSource: "worker-bitmap",
+          scale: targetScale,
+          targetHeight,
+          targetScale,
+          targetWidth,
+          visible: true,
+        },
+        targetBefore: {
+          canvasHeight: 0,
+          canvasWidth: 0,
+          distance: 1,
+          latestBitmapEventId: 80,
+          latestBitmapHeight: priorityCached ? targetHeight : previewHeight,
+          latestBitmapScale: priorityCached ? targetScale : previewScale,
+          latestBitmapWidth: priorityCached ? targetWidth : previewWidth,
+          targetHeight: null,
+          targetScale: null,
+          targetWidth: null,
+          visible: false,
+        },
+        targetBitmapAfterVisibleRequest: priorityBitmap,
+        targetComposition: {
+          at: 110,
+          bitmapEventId: priorityBitmapEventId,
+          compositionId: 90,
+          height: targetHeight,
+          page: priorityTarget,
+          scale: targetScale,
+          source: "worker-bitmap",
+          visible: true,
+          visiblePages: [priorityTarget],
+          width: targetWidth,
+        },
+        targetPage: priorityTarget,
+        targetPath: priorityCached ? "cached-target" : "render-required",
+        targetVisibleRequest: priorityRequest,
       },
     };
   });
@@ -1723,9 +1827,12 @@ function passingEvidence() {
         continuationArmPageDerivation: "next-page-from-sole-visible-page",
         continuationDelayAt: 100,
         continuationDelayObserved: true,
+        continuationMinimumElapsedAt: 1100,
+        continuationMinimumElapsedObserved: true,
         continuationResumeAt: 1100,
         continuationResumeObserved: true,
         continuationResumedAfterMs: 1000,
+        continuationReleaseRequestedAt: 150,
         documentKey: DOCUMENT_KEY,
         exitRequestedAt: 130,
         exitedAt: 150,
@@ -1764,7 +1871,7 @@ function passingEvidence() {
           visibleBeforeRequest: true,
         },
       },
-      longTasks: [{ duration: 49.9, name: "self", startTime: 1 }],
+      longTasks: [{ duration: 50, name: "self", startTime: 1 }],
       maximumConcurrentStaging: 1,
       noLateLowOverwrite: true,
       retry: {
@@ -1959,6 +2066,18 @@ function passingEvidence() {
           documentKey: DOCUMENT_KEY,
           page: 3,
           pageDerivation: "sole-visible-unsatisfied-page",
+          renderAttemptId: 7,
+          revision: REVISION,
+          type: "continuation-minimum-elapsed",
+        },
+        {
+          abortSignalId: CANCELLATION_ABORT_SIGNAL_ID,
+          afterMs: 1000,
+          at: 1100,
+          documentKey: DOCUMENT_KEY,
+          page: 3,
+          pageDerivation: "sole-visible-unsatisfied-page",
+          releaseRequestedAt: 150,
           renderAttemptId: 7,
           revision: REVISION,
           type: "continuation-resume",
@@ -3970,14 +4089,109 @@ test("retires restored fallback signals before binding current staging", async (
   );
 });
 
-test("accepts synchronous cancellation before a delayed PDF.js continuation resumes", () => {
+test("holds the exact cancelled continuation through release and one second", async () => {
   const evidence = passingEvidence();
   const cancellation = evidence.fallback.invisibleCancellation;
   assert.ok(
     cancellation.cancellationTerminal.at < cancellation.exitedAt &&
-    cancellation.exitedAt < cancellation.continuationResumeAt,
+    cancellation.exitedAt <= cancellation.continuationResumeAt,
   );
   assert.deepEqual(validatePdfSharpnessEvidence(evidence), []);
+
+  const source = await readFile(
+    "scripts/run-pdf-sharpness-browser-regression.mjs",
+    "utf8",
+  );
+  assert.match(source, /type: "continuation-minimum-elapsed"/u);
+  assert.match(
+    source,
+    /held\.minimumElapsed[\s\S]*held\.releaseRequestedAt[\s\S]*nativeRequestAnimationFrame\(held\.callback\)/u,
+  );
+  assert.match(
+    source,
+    /markFallbackViewportExit[\s\S]*matchingCancelRequests\.length !== 1[\s\S]*matchingTerminals\.length !== 1/u,
+  );
+});
+
+test("sanitizes partial fallback cancellation timeout state", () => {
+  const privateDocument = "private-document-name:private-revision";
+  const privateRevision = "private-revision";
+  const expected = {
+    abortSignalId: 3,
+    documentKey: privateDocument,
+    page: 3,
+    renderAttemptId: 7,
+    revision: privateRevision,
+  };
+  const raw = {
+    dom: {
+      blockPresent: true,
+      canvasHeight: 0,
+      canvasPresent: true,
+      canvasWidth: 0,
+      textOverlayCount: 12,
+      visible: false,
+    },
+    events: [
+      {
+        abortSignalId: 3,
+        at: 100,
+        documentKey: privateDocument,
+        page: 3,
+        renderAttemptId: 7,
+        revision: privateRevision,
+        type: "continuation-delay",
+      },
+      {
+        at: 101,
+        documentKey: "different-private-document",
+        page: 4,
+        revision: "different-private-revision",
+        type: "continuation-armed",
+      },
+    ],
+    held: {
+      abortSignalId: 3,
+      minimumElapsed: true,
+      releaseRequestedAt: null,
+      renderAttemptId: 7,
+      resumed: false,
+    },
+    rawError: "secret local path /tmp/private-reader-profile",
+  };
+  const diagnostic = summarizePdfFallbackCancellationDiagnostic(raw, expected);
+  assert.equal(diagnostic.counts["continuation-delay"], 1);
+  assert.equal(diagnostic.events[0].documentMatches, true);
+  assert.equal(diagnostic.events[0].revisionMatches, true);
+  assert.equal(diagnostic.held.minimumElapsed, true);
+  const serialized = JSON.stringify(diagnostic);
+  assert.doesNotMatch(serialized, /private|secret|\/tmp\//u);
+  assert.equal(
+    JSON.stringify(summarizePdfFallbackCancellationDiagnostic(
+      { ...raw, rawError: "a wholly different private failure" },
+      expected,
+    )),
+    serialized,
+  );
+});
+
+test("marks priority in the same task as the final mounted target scroll", async () => {
+  const source = await readFile(
+    "scripts/run-pdf-sharpness-browser-regression.mjs",
+    "utf8",
+  );
+  assert.match(
+    source,
+    /scrollPageIntoView\(cdp, intermediatePage\);[\s\S]*waitForPageShell\(cdp, priorityTarget\);[\s\S]*markPriorityScrollAction\([^)]*priorityTarget[^)]*\);[\s\S]*shell\.scrollIntoView/u,
+  );
+  assert.doesNotMatch(
+    source,
+    /mountPdfPageByTraversal\(cdp, priorityTarget\)/u,
+  );
+  assert.match(
+    source,
+    /event\.width === destination\.width[\s\S]*event\.height === destination\.height[\s\S]*pdfRasterScale/u,
+  );
 });
 
 test("uses composition and bitmap sequence when timer samples tie", () => {
@@ -4014,7 +4228,23 @@ test("independently validates a safety-capped physical-pixel target", () => {
   run.raster.sharp.composedAt = 10;
   run.raster.sharp.compositionId = 1;
   run.raster.transition = "preview-satisfied-target";
+  const cappedFrame = {
+    at: 50,
+    composedCount: 1,
+    composedPages: [{
+      height: 4096,
+      page: 1,
+      pixels: PDF_SHARPNESS_MAX_RASTER_PIXELS,
+      visible: true,
+      width: 4096,
+    }],
+    composedPixels: PDF_SHARPNESS_MAX_RASTER_PIXELS,
+    visiblePages: [1],
+  };
+  run.canvasBudget.maximumCount = 1;
+  run.canvasBudget.maximumCountFrame = structuredClone(cappedFrame);
   run.canvasBudget.maximumPixels = PDF_SHARPNESS_MAX_RASTER_PIXELS;
+  run.canvasBudget.maximumPixelsFrame = structuredClone(cappedFrame);
   assert.deepEqual(validatePdfSharpnessEvidence(evidence), []);
 
   run.raster.sharp.targetCapped = false;
@@ -4129,8 +4359,64 @@ test("rejects each material Issue 68 acceptance regression", async (t) => {
       value.matrix[0].comparison.referenceReadiness.inkRatio = 0;
     }, /rendered-page pixel proof/u],
     ["stale priority", (value) => {
-      value.matrix[0].visibleFirst.firstComposedPage = 3;
+      value.matrix[0].visibleFirst.firstPostScrollCompositionPage = 3;
     }, /current viewport first/u],
+    ["cached priority undersized bitmap", (value) => {
+      value.matrix[0].visibleFirst.targetBefore.latestBitmapWidth -= 1;
+    }, /current viewport first/u],
+    ["cached priority wrong bitmap identity", (value) => {
+      value.matrix[0].visibleFirst.targetComposition.bitmapEventId += 1;
+    }, /current viewport first/u],
+    ["cached priority manufactured render request", (value) => {
+      value.matrix[0].visibleFirst.targetVisibleRequest = structuredClone(
+        value.matrix[2].visibleFirst.targetVisibleRequest,
+      );
+    }, /current viewport first/u],
+    ["render priority wrong first visible request", (value) => {
+      value.matrix[2].visibleFirst.firstPostScrollVisibleRequestPage = 5;
+    }, /current viewport first/u],
+    ["render priority wrong target bitmap", (value) => {
+      value.matrix[2].visibleFirst.targetBitmapAfterVisibleRequest.pageNumber = 5;
+    }, /current viewport first/u],
+    ["priority composition before scroll action", (value) => {
+      value.matrix[2].visibleFirst.targetComposition.at = 99;
+    }, /current viewport first/u],
+    ["priority non-visible composition", (value) => {
+      value.matrix[2].visibleFirst.staleNonVisibleCompositions.push({
+        page: 3,
+        visible: false,
+      });
+    }, /current viewport first/u],
+    ["priority lacks a cached path", (value) => {
+      for (const run of value.matrix) {
+        if (run.visibleFirst.targetPath !== "cached-target") continue;
+        run.visibleFirst.targetPath = "render-required";
+      }
+    }, /cached and render-required/u],
+    ["visible canvas duplicate page", (value) => {
+      value.matrix[0].canvasBudget.maximumCountFrame.composedPages[1].page = 1;
+    }, /visible composed-canvas budget/u],
+    ["visible canvas count mismatch", (value) => {
+      value.matrix[0].canvasBudget.maximumCountFrame.composedCount += 1;
+    }, /visible composed-canvas budget/u],
+    ["visible canvas pixel sum mismatch", (value) => {
+      value.matrix[0].canvasBudget.maximumPixelsFrame.composedPixels += 1;
+    }, /visible composed-canvas budget/u],
+    ["visible canvas marked offscreen", (value) => {
+      value.matrix[4].canvasBudget.maximumCountFrame.composedPages[2].visible = false;
+    }, /visible composed-canvas budget/u],
+    ["visible canvas membership mismatch", (value) => {
+      value.matrix[4].canvasBudget.maximumPixelsFrame.visiblePages.pop();
+    }, /visible composed-canvas budget/u],
+    ["visible canvas per-page pixel mismatch", (value) => {
+      value.matrix[0].canvasBudget.maximumCountFrame.composedPages[0].pixels += 1;
+    }, /visible composed-canvas budget/u],
+    ["visible canvas pixel cap", (value) => {
+      const run = value.matrix[5];
+      run.canvasBudget.maximumPixels = PDF_SHARPNESS_MAX_BITMAP_PIXELS + 1;
+      run.canvasBudget.maximumPixelsFrame.composedPixels =
+        PDF_SHARPNESS_MAX_BITMAP_PIXELS + 1;
+    }, /visible composed-canvas budget/u],
     ["offscreen shell", (value) => {
       value.matrix[0].release.shellRetained = false;
     }, /retain its offscreen text/u],
@@ -4187,6 +4473,41 @@ test("rejects each material Issue 68 acceptance regression", async (t) => {
     }, /fallback cancellation\/retry/u],
     ["fallback cancellation", (value) => {
       value.fallback.invisibleCancellation.completedAfterExit = true;
+    }, /fallback cancellation\/retry/u],
+    ["fallback missing minimum elapsed", (value) => {
+      value.fallback.stagingEvents = value.fallback.stagingEvents.filter(
+        (event) => event.type !== "continuation-minimum-elapsed",
+      );
+    }, /fallback cancellation\/retry/u],
+    ["fallback early automatic resume order", (value) => {
+      const events = value.fallback.stagingEvents;
+      const resumeIndex = events.findIndex(
+        (event) => event.type === "continuation-resume",
+      );
+      const [resume] = events.splice(resumeIndex, 1);
+      const requestIndex = events.findIndex(
+        (event) => event.type === "viewport-exit-request",
+      );
+      events.splice(requestIndex, 0, resume);
+    }, /fallback cancellation\/retry/u],
+    ["fallback release before terminal order", (value) => {
+      const events = value.fallback.stagingEvents;
+      const exitIndex = events.findIndex((event) => event.type === "viewport-exit");
+      const [exit] = events.splice(exitIndex, 1);
+      const terminalIndex = events.findIndex(
+        (event) => event.outcome === "cancelled",
+      );
+      events.splice(terminalIndex, 0, exit);
+    }, /fallback cancellation\/retry/u],
+    ["fallback resume release identity", (value) => {
+      value.fallback.stagingEvents.find(
+        (event) => event.type === "continuation-resume",
+      ).releaseRequestedAt += 1;
+    }, /fallback cancellation\/retry/u],
+    ["fallback minimum hold duration", (value) => {
+      value.fallback.stagingEvents.find(
+        (event) => event.type === "continuation-minimum-elapsed",
+      ).afterMs = 999;
     }, /fallback cancellation\/retry/u],
     ["fallback cancellation signal mismatch", (value) => {
       value.fallback.stagingEvents.find(

@@ -260,10 +260,19 @@ requires decoded reference pixels to prove a rendered page, and records
 independently recomputed preview targets that either exactly satisfy the final
 backing without a redundant draw or upgrade through distinct bitmap/composition
 identities, current viewport priority after import-bound worker completion and
-bounded traversal of virtualized page shells, bitmap/canvas budgets, offscreen release,
+bounded traversal of virtualized page shells. The priority boundary is recorded
+atomically with the final target scroll after mounting, and distinguishes an
+exact cache-satisfied composition from a new visible request/bitmap chain.
+Peak canvas frames bind every composed page to the exact independently visible
+page set and pixel sum rather than imposing a fixed page count, while the store
+probe separately enforces count-plus-pixel bitmap-cache limits. The runner also
+records offscreen release,
 latest-import/page-bound serialized fallback injection, retry, and delayed
 continuation arms that restored-document staging cannot consume,
-exact `AbortSignal`- and attempt-bound cancellation terminals, per-scenario
+exact `AbortSignal`- and attempt-bound cancellation terminals. A proof-held
+PDF.js continuation resumes only after that terminal, an invisible zero-sized
+canvas with retained text, and a one-second minimum; sanitized partial state is
+preserved on timeout without document identities. It also records per-scenario
 measured narration alignment, Long Tasks, per-scenario document/parser worker
 traffic settled to a network-quiet fixed point through bounded attach commands,
 an exact clean pre-navigation target baseline, service-worker bypass, and exact

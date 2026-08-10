@@ -306,6 +306,107 @@ export function summarizePdfModelCompletion(workerEvents, expectedPageCount) {
   };
 }
 
+const PDF_FALLBACK_DIAGNOSTIC_EVENT_TYPES = new Set([
+  "abort-signal-registered",
+  "cancel-request",
+  "continuation-armed",
+  "continuation-delay",
+  "continuation-minimum-elapsed",
+  "continuation-resume",
+  "staging-finish",
+  "staging-start",
+  "viewport-exit",
+  "viewport-exit-request",
+]);
+
+/**
+ * Reduce a failed cancellation probe to fixed metadata. Document identities and
+ * revisions are compared in memory but never copied into the failure artifact.
+ */
+export function summarizePdfFallbackCancellationDiagnostic(raw, expected) {
+  const events = Array.isArray(raw?.events) ? raw.events : [];
+  const expectedAttempt = Number(expected?.renderAttemptId);
+  const expectedSignal = Number(expected?.abortSignalId);
+  const expectedPage = Number(expected?.page);
+  const matchesDocument = (event) =>
+    typeof expected?.documentKey === "string" &&
+    event?.documentKey === expected.documentKey;
+  const matchesRevision = (event) =>
+    typeof expected?.revision === "string" &&
+    event?.revision === expected.revision;
+  const relatedEvents = events.filter((event) => {
+    if (!PDF_FALLBACK_DIAGNOSTIC_EVENT_TYPES.has(event?.type)) return false;
+    if (event?.renderAttemptId === expectedAttempt) return true;
+    if (event?.abortSignalId === expectedSignal) return true;
+    return (
+      event?.page === expectedPage &&
+      matchesDocument(event) &&
+      matchesRevision(event)
+    );
+  });
+  const sanitizeNumber = (value) =>
+    Number.isFinite(value) ? Number(value) : null;
+  const sanitizeInteger = (value) =>
+    Number.isInteger(value) ? Number(value) : null;
+  const sanitizeOutcome = (value) =>
+    ["cancelled", "injected-failure", "released"].includes(value)
+      ? value
+      : null;
+  const sanitizedEvents = relatedEvents.map((event) => ({
+    abortSignalId: sanitizeInteger(event?.abortSignalId),
+    afterMs: sanitizeNumber(event?.afterMs),
+    at: sanitizeNumber(event?.at),
+    cancelRequestedAt: sanitizeNumber(event?.cancelRequestedAt),
+    canvasHeight: sanitizeInteger(event?.canvasHeight),
+    canvasPresent:
+      typeof event?.canvasPresent === "boolean" ? event.canvasPresent : null,
+    canvasWidth: sanitizeInteger(event?.canvasWidth),
+    candidateCount: sanitizeInteger(event?.abortSignalCandidateCount),
+    delay: sanitizeNumber(event?.delay),
+    documentMatches: matchesDocument(event),
+    outcome: sanitizeOutcome(event?.outcome),
+    page: sanitizeInteger(event?.page),
+    pageMatches: event?.page === expectedPage,
+    renderAttemptId: sanitizeInteger(event?.renderAttemptId),
+    revisionMatches: matchesRevision(event),
+    signalMatches: event?.abortSignalId === expectedSignal,
+    textOverlayCount: sanitizeInteger(event?.textOverlayCount),
+    type: event.type,
+    visible: typeof event?.visible === "boolean" ? event.visible : null,
+  }));
+  const counts = Object.fromEntries(
+    [...PDF_FALLBACK_DIAGNOSTIC_EVENT_TYPES].map((type) => [
+      type,
+      sanitizedEvents.filter((event) => event.type === type).length,
+    ]),
+  );
+  const dom = raw?.dom ?? {};
+  return {
+    counts,
+    dom: {
+      blockPresent: dom?.blockPresent === true,
+      canvasHeight: sanitizeInteger(dom?.canvasHeight),
+      canvasPresent: dom?.canvasPresent === true,
+      canvasWidth: sanitizeInteger(dom?.canvasWidth),
+      textOverlayCount: sanitizeInteger(dom?.textOverlayCount),
+      visible: typeof dom?.visible === "boolean" ? dom.visible : null,
+    },
+    events: sanitizedEvents,
+    expected: {
+      abortSignalId: sanitizeInteger(expectedSignal),
+      page: sanitizeInteger(expectedPage),
+      renderAttemptId: sanitizeInteger(expectedAttempt),
+    },
+    held: {
+      attemptMatches: raw?.held?.renderAttemptId === expectedAttempt,
+      minimumElapsed: raw?.held?.minimumElapsed === true,
+      releaseRequested: Number.isFinite(raw?.held?.releaseRequestedAt),
+      resumed: raw?.held?.resumed === true,
+      signalMatches: raw?.held?.abortSignalId === expectedSignal,
+    },
+  };
+}
+
 export function classifyPdfRasterTransition(previewComposition, sharpTarget) {
   return previewComposition?.width === sharpTarget?.targetWidth &&
       previewComposition?.height === sharpTarget?.targetHeight &&
@@ -3164,6 +3265,7 @@ const INSTRUMENTATION_SOURCE = String.raw`
   let failNextFallback = null;
   let fallbackProofIdentity = null;
   let delayNextContinuation = null;
+  let heldContinuation = null;
   const matchesArmedFallbackInjection = (${matchesPdfFallbackInjection.toString()});
   const selectFallbackAbortCandidate = (${selectPdfFallbackAbortCandidate.toString()});
   const latestValidatedPdfImport = () => workerEvents.findLast((event) =>
@@ -3381,6 +3483,31 @@ const INSTRUMENTATION_SOURCE = String.raw`
   }
 
   const nativeRequestAnimationFrame = globalThis.requestAnimationFrame.bind(globalThis);
+  const maybeResumeHeldContinuation = () => {
+    const held = heldContinuation;
+    if (
+      !held || held.resumed || !held.minimumElapsed ||
+      !Number.isFinite(held.releaseRequestedAt)
+    ) {
+      return false;
+    }
+    held.resumed = true;
+    const resumedAt = performance.now();
+    state.fallback.events.push({
+      abortSignalId: held.attempt.abortSignalId,
+      afterMs: resumedAt - held.delayedAt,
+      at: resumedAt,
+      documentKey: held.attempt.documentKey,
+      page: held.attempt.page,
+      pageDerivation: held.attempt.pageDerivation,
+      releaseRequestedAt: held.releaseRequestedAt,
+      renderAttemptId: held.attempt.renderAttemptId,
+      revision: held.attempt.revision,
+      type: "continuation-resume"
+    });
+    nativeRequestAnimationFrame(held.callback);
+    return true;
+  };
   globalThis.requestAnimationFrame = (callback) => {
     if (
       delayNextContinuation?.delay > 0 &&
@@ -3394,9 +3521,20 @@ const INSTRUMENTATION_SOURCE = String.raw`
       );
       const attempt = activeAttempts.length === 1 ? activeAttempts[0] : null;
       if (!attempt) return nativeRequestAnimationFrame(callback);
+      if (heldContinuation && !heldContinuation.resumed) {
+        return nativeRequestAnimationFrame(callback);
+      }
       const { armedAt, delay } = delayNextContinuation;
       delayNextContinuation = null;
       const delayedAt = performance.now();
+      heldContinuation = {
+        attempt,
+        callback,
+        delayedAt,
+        minimumElapsed: false,
+        releaseRequestedAt: null,
+        resumed: false
+      };
       state.fallback.events.push({
         abortSignalId: attempt?.abortSignalId ?? null,
         at: delayedAt,
@@ -3410,21 +3548,26 @@ const INSTRUMENTATION_SOURCE = String.raw`
         revision: attempt?.revision ?? null,
         type: "continuation-delay"
       });
-      return setTimeout(() => {
-        const resumedAt = performance.now();
+      setTimeout(() => {
+        if (!heldContinuation || heldContinuation.attempt !== attempt) return;
+        heldContinuation.minimumElapsed = true;
+        const elapsedAt = performance.now();
         state.fallback.events.push({
           abortSignalId: attempt?.abortSignalId ?? null,
-          afterMs: resumedAt - delayedAt,
-          at: resumedAt,
+          afterMs: elapsedAt - delayedAt,
+          at: elapsedAt,
           documentKey: attempt?.documentKey ?? null,
           page: attempt?.page ?? null,
           pageDerivation: attempt?.pageDerivation ?? null,
           renderAttemptId: attempt?.renderAttemptId ?? null,
           revision: attempt?.revision ?? null,
-          type: "continuation-resume"
+          type: "continuation-minimum-elapsed"
         });
-        nativeRequestAnimationFrame(callback);
+        maybeResumeHeldContinuation();
       }, delay);
+      // PDF.js may call cancelAnimationFrame with this return value. The real
+      // continuation remains under the explicit proof gate above.
+      return 0;
     }
     return nativeRequestAnimationFrame(callback);
   };
@@ -3581,16 +3724,39 @@ const INSTRUMENTATION_SOURCE = String.raw`
       const fallbackCompose = Boolean(fallbackAttempt);
       queueMicrotask(() => {
         const block = destination.closest(".pdf-page-block");
+        const page = Number(block?.dataset.pdfPageIndex || -1) + 1;
+        const latestImport = latestValidatedPdfImport();
+        const bitmapEvent = workerEvents.findLast((event) =>
+          latestImport &&
+          event.direction === "from-worker" &&
+          event.type === "bitmap" &&
+          event.pageNumber === page &&
+          event.jobId === latestImport?.jobId &&
+          event.revision === latestImport?.revision &&
+          event.at >= latestImport.at &&
+          event.width === destination.width &&
+          event.height === destination.height &&
+          Math.abs(
+            Number(event.scale) -
+              (Number(destination.dataset.pdfRasterScale) || 0)
+          ) <= 1e-7
+        ) ?? null;
         const draw = {
           at: performance.now(),
+          bitmapEventId: bitmapEvent?.eventId ?? null,
           compositionId: state.draws.length + 1,
           distance: Number(block?.dataset.pdfPageDistance),
           height: destination.height,
-          page: Number(block?.dataset.pdfPageIndex || -1) + 1,
+          page,
           scale: Number(destination.dataset.pdfRasterScale) || null,
           source: destination.dataset.pdfRenderSource ||
             (fallbackCompose ? "main-fallback" : "worker-bitmap"),
           visible: block?.dataset.pdfPageVisible === "true",
+          visiblePages: Array.from(document.querySelectorAll(
+            '.pdf-page-block[data-pdf-page-visible="true"]'
+          )).map((candidate) =>
+            Number(candidate.dataset.pdfPageIndex) + 1
+          ).filter(Number.isInteger).sort((left, right) => left - right),
           width: destination.width
         };
         state.draws.push(draw);
@@ -3672,9 +3838,6 @@ const INSTRUMENTATION_SOURCE = String.raw`
       if (previousCanvasState.get(canvas) !== key) {
         previousCanvasState.set(canvas, key);
         state.samples.push(sample);
-        if (currentPriorityProbe && sample.width > 0 && sample.height > 0) {
-          currentPriorityProbe.compositions.push(sample);
-        }
       }
     }
     if (currentScenario) {
@@ -3940,6 +4103,35 @@ const INSTRUMENTATION_SOURCE = String.raw`
       : null;
     const canvas = block?.querySelector("canvas") ?? null;
     const at = performance.now();
+    const matchingCancelRequests = state.fallback.events.filter((candidate) =>
+      candidate.type === "cancel-request" &&
+      candidate.renderAttemptId === attempt?.renderAttemptId &&
+      candidate.abortSignalId === attempt?.abortSignalId
+    );
+    const matchingTerminals = state.fallback.events.filter((candidate) =>
+      candidate.type === "staging-finish" &&
+      candidate.outcome === "cancelled" &&
+      candidate.renderAttemptId === attempt?.renderAttemptId &&
+      candidate.abortSignalId === attempt?.abortSignalId
+    );
+    const matchingExitRequests = state.fallback.events.filter((candidate) =>
+      candidate.type === "viewport-exit-request" &&
+      candidate.renderAttemptId === attempt?.renderAttemptId &&
+      candidate.abortSignalId === attempt?.abortSignalId
+    );
+    if (
+      !attempt || !heldContinuation || heldContinuation.attempt !== attempt ||
+      heldContinuation.resumed ||
+      matchingExitRequests.length !== 1 ||
+      matchingCancelRequests.length !== 1 ||
+      matchingTerminals.length !== 1 ||
+      !Number.isFinite(attempt.cancelRequestedAt) || !attempt.finished ||
+      block?.dataset.pdfPageVisible !== "false" || !canvas ||
+      canvas.width !== 0 || canvas.height !== 0 ||
+      !block.querySelector(".pdf-word-overlay")
+    ) {
+      throw new Error("Fallback continuation release requires one cancelled invisible attempt.");
+    }
     const event = {
       abortSignalId: attempt?.abortSignalId ?? null,
       at,
@@ -3957,8 +4149,19 @@ const INSTRUMENTATION_SOURCE = String.raw`
       visible: block?.dataset.pdfPageVisible === "true"
     };
     state.fallback.events.push(event);
+    heldContinuation.releaseRequestedAt = at;
+    maybeResumeHeldContinuation();
     return structuredClone(event);
   };
+  state.readHeldContinuation = () => heldContinuation
+    ? {
+        abortSignalId: heldContinuation.attempt?.abortSignalId ?? null,
+        minimumElapsed: heldContinuation.minimumElapsed,
+        releaseRequestedAt: heldContinuation.releaseRequestedAt,
+        renderAttemptId: heldContinuation.attempt?.renderAttemptId ?? null,
+        resumed: heldContinuation.resumed
+      }
+    : null;
   state.snapshot = () => structuredClone({
     draws: state.draws,
     errors: state.errors,
@@ -5608,16 +5811,50 @@ async function collectMatrixRun(
   const intermediatePage = Math.min(6, adjacent.page + 1);
   const priorityTarget = Math.min(6, adjacent.page + 2);
   await scrollPageIntoView(cdp, intermediatePage);
+  await waitForPageShell(cdp, priorityTarget);
   await evaluate(
     cdp,
     `globalThis.__lineLightIssue68.beginPriorityProbe(${priorityTarget}); true`,
   );
-  await evaluate(
+  const priorityScrollAction = await evaluate(
     cdp,
-    `globalThis.__lineLightIssue68.markPriorityScrollAction(${priorityTarget})`,
+    browserExpression(`
+      const shell = document.querySelector('#pdf-page-${priorityTarget}');
+      if (!shell) throw new Error('The mounted priority target disappeared.');
+      const action = globalThis.__lineLightIssue68
+        .markPriorityScrollAction(${priorityTarget});
+      shell.scrollIntoView({ behavior: 'auto', block: 'center' });
+      return action;
+    `),
   );
-  await scrollPageIntoView(cdp, priorityTarget);
-  await waitForSharpCanvas(cdp, priorityTarget, null, modelCompletion);
+  await waitForExpression(
+    cdp,
+    `document.querySelector('#pdf-page-${priorityTarget}')?.dataset.pdfPageVisible === 'true'`,
+    `PDF page ${priorityTarget} to enter the viewport after the priority action`,
+    SCENARIO_TIMEOUT_MS,
+  );
+  const prioritySharp = await waitForSharpCanvas(
+    cdp,
+    priorityTarget,
+    null,
+    modelCompletion,
+  );
+  await waitForExpression(
+    cdp,
+    browserExpression(`
+      return globalThis.__lineLightIssue68.draws.find((draw) =>
+        draw.page === ${priorityTarget} &&
+        draw.at >= ${priorityScrollAction.at} &&
+        draw.visible === true &&
+        draw.visiblePages.includes(${priorityTarget}) &&
+        draw.source === 'worker-bitmap' &&
+        draw.width === ${prioritySharp.targetWidth} &&
+        draw.height === ${prioritySharp.targetHeight}
+      ) || false;
+    `),
+    `page ${priorityTarget} post-action priority composition`,
+    SCENARIO_TIMEOUT_MS,
+  );
   const priorityProbe = await evaluate(
     cdp,
     `globalThis.__lineLightIssue68.finishPriorityProbe()`,
@@ -5721,6 +5958,28 @@ async function collectMatrixRun(
           event.eventId > targetVisibleRequest.eventId,
       ) ?? null
     : null;
+  const postScrollCompositions = (priorityProbe?.compositions ?? []).filter(
+    (composition) =>
+      Number.isInteger(composition?.compositionId) &&
+      Number(composition?.at) >= Number(priorityProbe?.scrollAction?.at),
+  );
+  const targetComposition = postScrollCompositions.find(
+    (composition) =>
+      composition.page === priorityTarget &&
+      composition.visible === true &&
+      Array.isArray(composition.visiblePages) &&
+      composition.visiblePages.includes(priorityTarget) &&
+      composition.source === "worker-bitmap" &&
+      composition.width === prioritySharp.targetWidth &&
+      composition.height === prioritySharp.targetHeight,
+  ) ?? null;
+  const cachedTargetSatisfied =
+    priorityProbe?.targetBefore?.latestBitmapWidth === prioritySharp.targetWidth &&
+    priorityProbe?.targetBefore?.latestBitmapHeight === prioritySharp.targetHeight &&
+    Math.abs(
+      Number(priorityProbe?.targetBefore?.latestBitmapScale) -
+        prioritySharp.targetScale,
+    ) <= 1e-7;
   const summarizePriorityEvent = (event) => event
     ? {
         distance: Number.isFinite(event.distance) ? event.distance : null,
@@ -5739,22 +5998,39 @@ async function collectMatrixRun(
         type: event.type,
         visible: typeof event.visible === "boolean" ? event.visible : null,
         width: event.width ?? null,
+    }
+    : null;
+  const summarizePriorityComposition = (composition) => composition
+    ? {
+        at: composition.at,
+        bitmapEventId: composition.bitmapEventId ?? null,
+        compositionId: composition.compositionId,
+        height: composition.height,
+        page: composition.page,
+        scale: composition.scale,
+        source: composition.source,
+        visible: composition.visible,
+        visiblePages: composition.visiblePages,
+        width: composition.width,
       }
     : null;
-  const firstTargetBitmapIndex = priorityBitmaps.findIndex(
-    (event) => event.pageNumber === priorityTarget,
+  const staleWorkerBitmaps = postScrollBitmaps.filter((bitmap) =>
+    bitmap.pageNumber !== priorityTarget &&
+    postScrollWorkerEvents.some((request) =>
+      request.direction === "to-worker" &&
+      request.type === "render" &&
+      request.enabled === true &&
+      request.visible === false &&
+      request.pageNumber === bitmap.pageNumber &&
+      request.eventId < bitmap.eventId
+    )
   );
-  const staleWorkerBitmaps = firstTargetBitmapIndex < 0
-    ? priorityBitmaps
-    : priorityBitmaps.slice(0, firstTargetBitmapIndex).filter(
-        (event) => event.pageNumber !== priorityTarget,
-      );
-  const staleNonVisibleCompositions = (
-    priorityProbe?.compositions ?? []
-  ).filter(
+  const staleNonVisibleCompositions = postScrollCompositions.filter(
     (composition) =>
-      composition.page !== priorityTarget && composition.visible === false,
-  );
+      composition.visible !== true ||
+      !Array.isArray(composition.visiblePages) ||
+      !composition.visiblePages.includes(composition.page),
+  ).map(summarizePriorityComposition);
 
   return {
     alignment,
@@ -5828,6 +6104,8 @@ async function collectMatrixRun(
     visibleFirst: {
       firstComposedPage: priorityProbe?.compositions?.[0]?.page ?? null,
       firstWorkerBitmapPage: priorityBitmaps[0]?.pageNumber ?? null,
+      firstPostScrollCompositionPage:
+        postScrollCompositions[0]?.page ?? null,
       staleNonVisibleCompositions,
       staleWorkerBitmaps,
       targetAfter: priorityProbe?.targetAfter ?? null,
@@ -5835,7 +6113,11 @@ async function collectMatrixRun(
       targetBitmapAfterVisibleRequest: summarizePriorityEvent(
         targetBitmapAfterVisibleRequest,
       ),
+      targetComposition: summarizePriorityComposition(targetComposition),
       targetPage: priorityTarget,
+      targetPath: cachedTargetSatisfied
+        ? "cached-target"
+        : "render-required",
       targetVisibleRequest: summarizePriorityEvent(targetVisibleRequest),
       firstPostScrollBitmapPage: postScrollBitmaps[0]?.pageNumber ?? null,
       firstPostScrollVisibleRequestPage:
@@ -5925,6 +6207,49 @@ export function probePdfBitmapBudget() {
     pinnedPeak,
     steadyState,
   };
+}
+
+async function readFallbackCancellationTimeoutDiagnostic(cdp, expected) {
+  try {
+    const raw = await evaluate(
+      cdp,
+      browserExpression(`
+        const state = globalThis.__lineLightIssue68;
+        const block = document.querySelector('#pdf-page-${expected.page}');
+        const canvas = block?.querySelector('canvas') ?? null;
+        return {
+          dom: {
+            blockPresent: Boolean(block),
+            canvasHeight: canvas?.height ?? null,
+            canvasPresent: Boolean(canvas),
+            canvasWidth: canvas?.width ?? null,
+            textOverlayCount: block?.querySelectorAll('.pdf-word-overlay').length ?? 0,
+            visible: block?.dataset.pdfPageVisible === 'true'
+          },
+          events: state?.fallback?.events ?? [],
+          held: state?.readHeldContinuation?.() ?? null
+        };
+      `),
+    );
+    return summarizePdfFallbackCancellationDiagnostic(raw, expected);
+  } catch {
+    return {
+      category: "diagnostic-unavailable",
+      counts: {},
+      dom: null,
+      events: [],
+      expected: {
+        abortSignalId: Number.isInteger(expected?.abortSignalId)
+          ? expected.abortSignalId
+          : null,
+        page: Number.isInteger(expected?.page) ? expected.page : null,
+        renderAttemptId: Number.isInteger(expected?.renderAttemptId)
+          ? expected.renderAttemptId
+          : null,
+      },
+      held: null,
+    };
+  }
 }
 
 async function collectFallbackEvidence(
@@ -6123,39 +6448,89 @@ async function collectFallbackEvidence(
     `globalThis.__lineLightIssue68.markFallbackViewportExitRequest(${renderAttemptId}, 5)`,
   );
   await scrollPageIntoView(cdp, 5);
-  await waitForExpression(
-    cdp,
-    browserExpression(`
-      const block = document.querySelector('#pdf-page-${cancelledPage}');
-      const canvas = block?.querySelector('canvas');
-      if (block && block.dataset.pdfPageVisible !== 'false') return false;
-      if (canvas && (canvas.width !== 0 || canvas.height !== 0)) return false;
-      return true;
-    `),
-    "the cancelled fallback page to leave the viewport and release its backing",
-    SCENARIO_TIMEOUT_MS,
-  );
-  const viewportExit = await evaluate(
-    cdp,
-    `globalThis.__lineLightIssue68.markFallbackViewportExit(${renderAttemptId})`,
-  );
-  const cancellationTerminal = await waitForExpression(
-    cdp,
-    browserExpression(`
-      return globalThis.__lineLightIssue68.fallback.events.find(
-        (event) => event.type === 'staging-finish' &&
+  let cancellationReady;
+  try {
+    cancellationReady = await waitForExpression(
+      cdp,
+      browserExpression(`
+        const state = globalThis.__lineLightIssue68;
+        const events = state?.fallback?.events ?? [];
+        const cancelRequest = events.find((event) =>
+          event.type === 'cancel-request' &&
+          event.abortSignalId === ${continuationDelay.abortSignalId} &&
+          event.renderAttemptId === ${renderAttemptId} &&
+          event.documentKey === ${JSON.stringify(continuationDelay.documentKey)} &&
+          event.revision === ${JSON.stringify(continuationDelay.revision)} &&
+          event.page === ${cancelledPage} &&
+          event.at >= ${viewportExitRequest.at}
+        );
+        const cancellationTerminal = cancelRequest && events.find((event) =>
+          event.type === 'staging-finish' &&
           event.abortSignalId === ${continuationDelay.abortSignalId} &&
           event.outcome === 'cancelled' &&
           event.renderAttemptId === ${renderAttemptId} &&
           event.documentKey === ${JSON.stringify(continuationDelay.documentKey)} &&
           event.revision === ${JSON.stringify(continuationDelay.revision)} &&
           event.page === ${cancelledPage} &&
-          event.cancelRequestedAt === ${viewportExit.cancelRequestedAt} &&
-          event.cancelRequestedAt >= ${viewportExitRequest.at} &&
-          event.at <= ${viewportExit.at}
+          event.cancelRequestedAt === cancelRequest.at &&
+          event.at >= cancelRequest.at
+        );
+        const resumedEarly = events.some((event) =>
+          event.type === 'continuation-resume' &&
+          event.renderAttemptId === ${renderAttemptId}
+        );
+        const block = document.querySelector('#pdf-page-${cancelledPage}');
+        const canvas = block?.querySelector('canvas') ?? null;
+        if (
+          !cancelRequest || !cancellationTerminal || resumedEarly || !block ||
+          block.dataset.pdfPageVisible !== 'false' || !canvas ||
+          canvas.width !== 0 || canvas.height !== 0 ||
+          !block.querySelector('.pdf-word-overlay')
+        ) return false;
+        return {
+          cancelRequest,
+          cancellationTerminal,
+          canvasHeight: canvas.height,
+          canvasWidth: canvas.width,
+          textOverlayCount: block.querySelectorAll('.pdf-word-overlay').length,
+          visible: false
+        };
+      `),
+      "the exact cancelled fallback attempt and released page backing",
+      SCENARIO_TIMEOUT_MS,
+    );
+  } catch (error) {
+    const diagnostic = await readFallbackCancellationTimeoutDiagnostic(cdp, {
+      abortSignalId: continuationDelay.abortSignalId,
+      documentKey: continuationDelay.documentKey,
+      page: cancelledPage,
+      renderAttemptId,
+      revision: continuationDelay.revision,
+    });
+    throw new Error(
+      `${error instanceof Error ? error.message : "Fallback cancellation timed out."}\n` +
+      `Fallback cancellation diagnostic: ${JSON.stringify(diagnostic)}`,
+    );
+  }
+  const cancellationTerminal = cancellationReady.cancellationTerminal;
+  const viewportExit = await evaluate(
+    cdp,
+    `globalThis.__lineLightIssue68.markFallbackViewportExit(${renderAttemptId})`,
+  );
+  const continuationMinimumElapsed = await waitForExpression(
+    cdp,
+    browserExpression(`
+      return globalThis.__lineLightIssue68.fallback.events.find(
+        (event) => event.type === 'continuation-minimum-elapsed' &&
+          event.abortSignalId === ${continuationDelay.abortSignalId} &&
+          event.renderAttemptId === ${renderAttemptId} &&
+          event.documentKey === ${JSON.stringify(continuationDelay.documentKey)} &&
+          event.revision === ${JSON.stringify(continuationDelay.revision)} &&
+          event.page === ${cancelledPage} &&
+          event.afterMs >= 1000
       ) || false;
     `),
-    `page ${cancelledPage} delayed attempt to reach its cancellation terminal`,
+    `page ${cancelledPage} continuation hold to reach one second`,
     SCENARIO_TIMEOUT_MS,
   );
   const continuationResume = await waitForExpression(
@@ -6167,8 +6542,10 @@ async function collectFallbackEvidence(
           event.renderAttemptId === ${renderAttemptId} &&
           event.documentKey === ${JSON.stringify(continuationDelay.documentKey)} &&
           event.revision === ${JSON.stringify(continuationDelay.revision)} &&
-          event.page === ${cancelledPage} && event.afterMs >= 950 &&
-          event.at > ${cancellationTerminal.at}
+          event.page === ${cancelledPage} && event.afterMs >= 1000 &&
+          event.releaseRequestedAt === ${viewportExit.at} &&
+          event.at >= ${continuationMinimumElapsed.at} &&
+          event.at >= ${viewportExit.at}
       ) || false;
     `),
     `page ${cancelledPage} delayed continuation to resume after one second`,
@@ -6254,9 +6631,12 @@ async function collectFallbackEvidence(
       continuationDelayObserved: true,
       continuationArmedAt: continuationArm.at,
       continuationArmPageDerivation: continuationArm.pageDerivation,
+      continuationMinimumElapsedAt: continuationMinimumElapsed.at,
+      continuationMinimumElapsedObserved: true,
       continuationResumeAt: continuationResume.at,
       continuationResumeObserved: true,
       continuationResumedAfterMs: continuationResume.afterMs,
+      continuationReleaseRequestedAt: viewportExit.at,
       documentKey: continuationDelay.documentKey,
       exitRequestedAt: viewportExitRequest.at,
       exitedAt: viewportExit.at,

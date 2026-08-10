@@ -111,16 +111,30 @@ validator additionally requires:
   both targets from measured CSS size, PDF page size, DPR, and visual-viewport
   scale, so no timing sleep or app-reported target stands in for either path;
 - the current viewport to compose first after a rapid scroll, with no stale
-  non-visible composition and no lower-resolution overwrite; before those
-  probes, the harness requires the exact six-page worker model to complete and
-  reaches distant virtualized shells through bounded half-viewport traversal,
-  without assuming offscreen pages are mounted or copying product offset math;
+  non-visible composition and no lower-resolution overwrite. The target shell
+  is mounted before the probe, then the causal boundary is recorded in the same
+  browser task immediately before the final `scrollIntoView`, so progressive
+  traversal and already-running background work cannot be mislabeled as
+  post-scroll priority. An exact cached bitmap that already satisfies the
+  target must compose without a redundant request; an undersized or missing
+  bitmap must instead produce the first post-action visible request, its later
+  exact bitmap, and the bound visible composition. The matrix must prove both
+  paths. Before those probes, the harness requires the exact six-page worker
+  model to complete and reaches distant virtualized shells through bounded
+  half-viewport traversal, without assuming offscreen pages are mounted or
+  copying product offset math;
   page/complete document keys and every page/progress/complete and
   preview/render/bitmap job/revision are bound to the latest exact import
   request so an earlier automatic library restore cannot satisfy or invalidate
   these gates;
-- count and total-pixel bitmap limits, temporary pinned-only overflow, and a
-  zero-sized offscreen canvas whose measured text/highlight shell remains;
+- count and total-pixel bitmap-cache limits, temporary pinned-only overflow,
+  and visible-canvas peak frames whose unique composed-page set exactly equals
+  the independently observed visible-page set. Every composed page must report
+  a positive exact backing and the frame's exact pixel sum must remain below
+  33,554,432; a tall mobile viewport may therefore retain three genuinely
+  visible canvases without being mistaken for offscreen leakage. A page that
+  leaves the viewport must still expose a zero-sized canvas while its measured
+  text/highlight shell remains;
 - one main-thread fallback staging render at a time, an injected first-render
   failure followed by recovery on the same document revision and target, and
   page-3 cancellation after its PDF.js continuation is delayed. The failure is
@@ -137,10 +151,15 @@ validator additionally requires:
   signal aborted before staging is explicitly retired instead of competing
   with the current attempt. The
   page-exit action, exact controller abort, cancelled terminal outcome, viewport
-  exit confirmation, delayed continuation resume, and no-late-compose proof must
-  share that signal/document/revision/attempt identity and occur in that order;
-  the terminal cancellation must happen before the held continuation resumes
-  more than one second later, while the zero-sized canvas and text shell remain;
+  exit confirmation, controlled continuation resume, and no-late-compose proof
+  must share that signal/document/revision/attempt identity and occur in that
+  order. The continuation is explicitly held rather than automatically released
+  by a one-second timer: DOM release may be observed before or after React's
+  passive cancellation cleanup, but resume is authorized only after the exact
+  cancelled terminal and the zero-sized canvas/text shell are both present, and
+  only after at least one second has elapsed. A timeout retains a fixed,
+  privacy-safe partial event/DOM summary with document and revision represented
+  only by match booleans;
 - deterministic local narration advancing a word inside its measured sentence
   highlight in every desktop/mobile/zoom scenario, with no Window Long Task
   above 50 ms;
