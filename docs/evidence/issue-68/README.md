@@ -30,7 +30,11 @@ The diagnostic binds only `linelight-desktop-dpr1-zoom100.png` from that
 external output directory and contains counts,
 per-command pending-attach status, inflight request metadata, recent stability
 samples/activity, detached target ancestry, opaque request/session/target IDs,
-and fixed URL classes. It never records URL paths or queries, raw error text,
+service-worker bypass state, and fixed URL classes. A reported fixed point is
+independently rejected when any attach error, incomplete target, failed or
+pending target command, pending request, or missing service-worker bypass is
+present, even if the recorded outcome says that the network became quiet. It
+never records URL paths or queries, raw error text,
 request bodies or headers, document text, or browser-profile paths. It is a
 diagnosis aid, not Issue 68 acceptance evidence.
 
@@ -117,9 +121,12 @@ validator additionally requires:
   evidence with a one-to-one `target-attached` terminal record. Each matrix
   phase requires both document- and parser-worker settlements. All remaining
   attachment promises and observed network requests must reach a quiet fixed
-  point before the privacy snapshot, with no attach error, external request,
-  request for the imported PDF source, or other network failure; and a local
-  `file:` reference comparison.
+  point before the privacy snapshot. Every stable sample independently requires
+  successful service-worker bypass, zero attach errors, and the exact completed
+  attach/resume command sequence for every observed target, so a timed-out
+  command cannot be mistaken for a quiet network. There must also be no external
+  request, request for the imported PDF source, or other network failure; and a
+  local `file:` reference comparison.
 
 The validator also requires the exact reviewed source-file key set and one
 unique, expected filename/path/hash/byte reference for every screenshot. A

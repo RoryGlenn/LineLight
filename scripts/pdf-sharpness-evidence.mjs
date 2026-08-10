@@ -1332,6 +1332,8 @@ export function validatePdfSharpnessEvidence(evidence) {
       expectedFixedPointLabels.join(",") ||
     fixedPoints.some(
       (point) =>
+        point?.attachErrorCount !== 0 ||
+        point?.attachmentReady !== true ||
         !nonNegativeInteger(point?.attachPromiseCount) ||
         !nonNegativeInteger(point?.completedRequestCount) ||
         point.completedRequestCount === 0 ||
@@ -1345,7 +1347,8 @@ export function validatePdfSharpnessEvidence(evidence) {
         !nonNegativeInteger(point?.targetBootstrapSettlementCount) ||
         point.targetBootstrapSettlementCount >
           targetBootstrapSettlements.length ||
-        point?.pendingAttachCount !== 0,
+        point?.pendingAttachCount !== 0 ||
+        point?.serviceWorkerBypassed !== true,
     ) ||
     finalFixedPoint?.requestCount !== network.localRequestCount ||
     finalFixedPoint?.completedRequestCount !== network.completedRequestCount ||

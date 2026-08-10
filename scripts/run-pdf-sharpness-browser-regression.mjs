@@ -295,10 +295,38 @@ export function completeCdpNetworkRequest(networkState, event, sessionId) {
   return networkState.byId.get(key) ?? null;
 }
 
-export function isCdpTargetBootstrapRequest(request, target) {
+export function isCdpTargetSetupComplete(target) {
+  const expectedCommands = [
+    "network-enable",
+    "runtime-enable",
+    "cache-disable",
+    "auto-attach",
+    ...(target?.waitingForDebugger === true ? ["resume"] : []),
+  ];
   return (
     target?.attachComplete === true &&
     target?.resumed === true &&
+    Array.isArray(target?.commands) &&
+    target.commands.map(({ name }) => name).join(",") ===
+      expectedCommands.join(",") &&
+    target.commands.every(({ status }) => status === "completed")
+  );
+}
+
+export function isCdpAttachmentStateHealthy(networkState) {
+  return (
+    networkState?.serviceWorkerBypassed === true &&
+    Array.isArray(networkState?.attachErrors) &&
+    networkState.attachErrors.length === 0 &&
+    Array.isArray(networkState?.targets) &&
+    networkState.targets.length > 0 &&
+    networkState.targets.every(isCdpTargetSetupComplete)
+  );
+}
+
+export function isCdpTargetBootstrapRequest(request, target) {
+  return (
+    isCdpTargetSetupComplete(target) &&
     target?.detached !== true &&
     target?.type === "worker" &&
     request?.method === "GET" &&
@@ -349,6 +377,7 @@ export function reconcileCdpTargetBootstrapRequests(networkState) {
 
 export function advanceCdpFixedPointStability(previous, sample) {
   const unchangedAndQuiet =
+    sample.attachmentReady === true &&
     sample.pendingAttachCount === 0 &&
     sample.inflightRequestCount === 0 &&
     sample.requestCount === previous.requestCount &&
@@ -514,6 +543,7 @@ export function buildCdpNetworkFixedPointDiagnostic(
     outcome,
     pendingAttaches,
     recentActivity,
+    serviceWorkerBypassed: networkState.serviceWorkerBypassed === true,
     targetBootstrapSettlements,
     targets,
     wait: {
@@ -522,10 +552,14 @@ export function buildCdpNetworkFixedPointDiagnostic(
         : 0,
       recentSamples: (waitState.recentSamples ?? []).slice(-12).map(
         (sample) => ({
+          attachErrorCount: sample.attachErrorCount,
+          attachmentReady: sample.attachmentReady === true,
           elapsedMs: sample.elapsedMs,
+          incompleteTargetCount: sample.incompleteTargetCount,
           inflightRequestCount: sample.inflightRequestCount,
           pendingAttachCount: sample.pendingAttachCount,
           requestCount: sample.requestCount,
+          serviceWorkerBypassed: sample.serviceWorkerBypassed === true,
           stableSamples: sample.stableSamples,
           targetCount: sample.targetCount,
         }),
@@ -539,6 +573,123 @@ export function buildCdpNetworkFixedPointDiagnostic(
         : 0,
     },
   };
+}
+
+export function isCdpFixedPointDiagnosticHealthy(networkDiagnostic) {
+  const targets = Array.isArray(networkDiagnostic?.targets)
+    ? networkDiagnostic.targets
+    : [];
+  const targetBySession = new Map(
+    targets.map((target) => [target?.sessionId, target]),
+  );
+  const targetBootstrapSettlements = Array.isArray(
+    networkDiagnostic?.targetBootstrapSettlements,
+  )
+    ? networkDiagnostic.targetBootstrapSettlements
+    : [];
+  const bootstrapTargetSessions = targetBootstrapSettlements.map(
+    (settlement) => settlement?.targetSessionId,
+  );
+  const bootstrapRequestIdentities = targetBootstrapSettlements.map(
+    (settlement) =>
+      `${settlement?.requestSessionId ?? "page"}:${settlement?.requestId}`,
+  );
+  const validBootstrapSettlements = targetBootstrapSettlements.every(
+    (settlement) => {
+      const target = targetBySession.get(settlement?.targetSessionId);
+      return (
+        isCdpTargetSetupComplete(target) &&
+        target?.targetId === settlement?.targetId &&
+        target?.parentSessionId === settlement?.targetParentSessionId &&
+        target?.parentSessionId === settlement?.requestSessionId &&
+        target?.phase === settlement?.phase &&
+        target?.phase === networkDiagnostic?.label &&
+        target?.type === "worker" &&
+        target?.type === settlement?.targetType &&
+        target?.urlClass === settlement?.urlClass &&
+        settlement?.method === "GET" &&
+        settlement?.resourceType === "Script" &&
+        settlement?.targetDetachedAtSettlement === false &&
+        settlement?.terminalReason === "target-attached"
+      );
+    },
+  );
+  const pdfTargets = targets.filter(
+    (target) =>
+      target?.phase === networkDiagnostic?.label &&
+      ["pdf-document-worker", "pdf-parser-worker"].includes(
+        target?.urlClass,
+      ),
+  );
+  const pdfBootstrapCoverage = [
+    "pdf-document-worker",
+    "pdf-parser-worker",
+  ].every((urlClass) => {
+    const matchingTargets = pdfTargets.filter(
+      (target) => target.urlClass === urlClass,
+    );
+    return (
+      matchingTargets.length > 0 &&
+      matchingTargets.every((target) =>
+        bootstrapTargetSessions.includes(target.sessionId)
+      )
+    );
+  });
+  const recentSamples = Array.isArray(networkDiagnostic?.wait?.recentSamples)
+    ? networkDiagnostic.wait.recentSamples
+    : [];
+  const requiredStableSamples = CDP_FIXED_POINT_STABLE_SAMPLES;
+  const stableTail = recentSamples.slice(-requiredStableSamples);
+  const counts = networkDiagnostic?.counts;
+  return (
+    networkDiagnostic?.outcome === "fixed-point-reached" &&
+    networkDiagnostic?.serviceWorkerBypassed === true &&
+    Array.isArray(networkDiagnostic?.attachErrors) &&
+    networkDiagnostic.attachErrors.length === 0 &&
+    Array.isArray(networkDiagnostic?.pendingAttaches) &&
+    networkDiagnostic.pendingAttaches.length === 0 &&
+    Array.isArray(networkDiagnostic?.inflightRequests) &&
+    networkDiagnostic.inflightRequests.length === 0 &&
+    counts?.attachErrorCount === 0 &&
+    counts?.pendingAttachCount === 0 &&
+    counts?.inflightRequestCount === 0 &&
+    counts?.targetBootstrapSettlementCount ===
+      targetBootstrapSettlements.length &&
+    Number.isInteger(counts?.attachPromiseCount) &&
+    counts.attachPromiseCount >= targets.length &&
+    Number.isInteger(counts?.completedRequestCount) &&
+    counts.completedRequestCount > 0 &&
+    Number.isInteger(counts?.requestCount) &&
+    counts.requestCount > 0 &&
+    counts.completedRequestCount <= counts.requestCount &&
+    Number.isInteger(counts?.targetCount) &&
+    counts.targetCount === targets.length &&
+    targets.length > 0 &&
+    targets.every(isCdpTargetSetupComplete) &&
+    validBootstrapSettlements &&
+    targetBootstrapSettlements.length > 0 &&
+    new Set(bootstrapTargetSessions).size ===
+      bootstrapTargetSessions.length &&
+    new Set(bootstrapRequestIdentities).size ===
+      bootstrapRequestIdentities.length &&
+    pdfBootstrapCoverage &&
+    networkDiagnostic?.wait?.requiredStableSamples === requiredStableSamples &&
+    Number.isInteger(networkDiagnostic?.wait?.stableSamples) &&
+    networkDiagnostic.wait.stableSamples >= requiredStableSamples &&
+    stableTail.length === requiredStableSamples &&
+    stableTail.every((sample, index) =>
+      sample?.attachmentReady === true &&
+      sample?.attachErrorCount === 0 &&
+      sample?.incompleteTargetCount === 0 &&
+      sample?.serviceWorkerBypassed === true &&
+      sample?.pendingAttachCount === 0 &&
+      sample?.inflightRequestCount === 0 &&
+      sample?.requestCount === counts.requestCount &&
+      sample?.targetCount === counts.targetCount &&
+      sample?.stableSamples ===
+        networkDiagnostic.wait.stableSamples - stableTail.length + index + 1
+    )
+  );
 }
 
 function resolveThroughExistingAncestor(candidatePath) {
@@ -619,6 +770,8 @@ export function buildFirstNetworkDiagnosticReport({
     teardown?.profilesRemoved !== true ||
     teardown?.serverClosed !== true ||
     teardown?.errors?.length > 0;
+  const fixedPointHealthy =
+    isCdpFixedPointDiagnosticHealthy(networkDiagnostic);
   const summarizeBrowserShutdown = (shutdown) => ({
     cdpClosed: shutdown?.cdpClosed === true,
     errorPresent: Boolean(shutdown?.error),
@@ -648,8 +801,7 @@ export function buildFirstNetworkDiagnosticReport({
     ...(!networkDiagnostic
       ? ["The bounded network diagnostic did not capture its fixed-point state."]
       : []),
-    ...(networkDiagnostic &&
-        networkDiagnostic.outcome !== "fixed-point-reached"
+    ...(networkDiagnostic && !fixedPointHealthy
       ? ["The bounded network diagnostic did not reach a fixed point."]
       : []),
     ...(!fixtureBound
@@ -679,8 +831,7 @@ export function buildFirstNetworkDiagnosticReport({
     diagnosticSchemaVersion: 1,
     failures,
     fixture: fixtureBound ? fixture : null,
-    fixedPointReached:
-      networkDiagnostic?.outcome === "fixed-point-reached",
+    fixedPointReached: fixedPointHealthy,
     mode: "first-network-fixed-point",
     network: networkDiagnostic,
     recordedAt: new Date().toISOString(),
@@ -2546,29 +2697,41 @@ async function waitForCdpNetworkFixedPoint(
     await delay(75);
     const requestCount = networkState.requests.length;
     const targetCount = networkState.targets.length;
+    const attachmentReady = isCdpAttachmentStateHealthy(networkState);
+    const incompleteTargetCount = networkState.targets.filter(
+      (target) => !isCdpTargetSetupComplete(target),
+    ).length;
     stability = advanceCdpFixedPointStability(stability, {
+      attachmentReady,
       inflightRequestCount: networkState.inflightRequests.size,
       pendingAttachCount: networkState.pendingAttachPromises.size,
       requestCount,
       targetCount,
     });
     recentSamples.push({
+      attachErrorCount: networkState.attachErrors.length,
+      attachmentReady,
       elapsedMs: Date.now() - startedAt,
+      incompleteTargetCount,
       inflightRequestCount: networkState.inflightRequests.size,
       pendingAttachCount: networkState.pendingAttachPromises.size,
       requestCount,
+      serviceWorkerBypassed: networkState.serviceWorkerBypassed === true,
       stableSamples: stability.stableSamples,
       targetCount,
     });
     if (recentSamples.length > 12) recentSamples.shift();
     if (stability.fixedPointReached) {
       const fixedPoint = {
+        attachErrorCount: networkState.attachErrors.length,
+        attachmentReady,
         attachPromiseCount: networkState.attachPromises.length,
         completedRequestCount: networkState.completedRequestCount,
         inflightRequestCount: 0,
         label,
         pendingAttachCount: 0,
         requestCount,
+        serviceWorkerBypassed: networkState.serviceWorkerBypassed === true,
         targetBootstrapSettlementCount:
           networkState.targetBootstrapSettlements.length,
         targetCount,

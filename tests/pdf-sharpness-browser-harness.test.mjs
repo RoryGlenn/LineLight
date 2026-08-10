@@ -25,7 +25,10 @@ import {
   classifyPdfRasterTransition,
   completeCdpNetworkRequest,
   decodePngScreenshot,
+  isCdpAttachmentStateHealthy,
+  isCdpFixedPointDiagnosticHealthy,
   isCdpTargetBootstrapRequest,
+  isCdpTargetSetupComplete,
   matchesPdfFallbackInjection,
   planPdfVirtualScroll,
   probePdfBitmapBudget,
@@ -682,12 +685,15 @@ function passingEvidence() {
           "forced-main-fallback",
           "final-network-privacy",
         ].map((label) => ({
+          attachErrorCount: 0,
+          attachmentReady: true,
           attachPromiseCount: targets.length,
           completedRequestCount: requestCount,
           inflightRequestCount: 0,
           label,
           pendingAttachCount: 0,
           requestCount,
+          serviceWorkerBypassed: true,
           targetBootstrapSettlementCount:
             targetBootstrapSettlements.length,
           targetCount: targets.length,
@@ -926,6 +932,7 @@ test("records fixed-point diagnostics without private URL or payload data", () =
       url: parserUrl,
     }],
     requests: [{ method: "GET", url: workerUrl }],
+    serviceWorkerBypassed: false,
     targetBootstrapSettlements: [{
       method: "GET",
       phase: "desktop-dpr1-zoom100",
@@ -967,10 +974,14 @@ test("records fixed-point diagnostics without private URL or payload data", () =
     capturedAtMs: diagnosticCapturedAt,
     elapsedMs: 10_001,
     recentSamples: [{
+      attachErrorCount: 1,
+      attachmentReady: false,
       elapsedMs: 9_950,
+      incompleteTargetCount: 2,
       inflightRequestCount: 1,
       pendingAttachCount: 1,
       requestCount: 1,
+      serviceWorkerBypassed: false,
       stableSamples: 0,
       targetCount: 2,
     }],
@@ -992,6 +1003,7 @@ test("records fixed-point diagnostics without private URL or payload data", () =
     "outcome",
     "pendingAttaches",
     "recentActivity",
+    "serviceWorkerBypassed",
     "targetBootstrapSettlements",
     "targets",
     "wait",
@@ -1017,6 +1029,7 @@ test("records fixed-point diagnostics without private URL or payload data", () =
     "pdf-document-worker",
   );
   assert.equal(diagnostic.wait.elapsedMs, 10_001);
+  assert.equal(diagnostic.serviceWorkerBypassed, false);
   assert.equal(diagnostic.wait.recentSamples[0].inflightRequestCount, 1);
   assert.match(diagnostic.inflightRequests[0].identityHash, /^[a-f0-9]{64}$/u);
   assert.deepEqual(diagnostic.counts, {
@@ -1124,6 +1137,70 @@ test("records fixed-point diagnostics without private URL or payload data", () =
     },
     serverClosed: true,
   };
+  const healthyDiagnostic = structuredClone(diagnostic);
+  healthyDiagnostic.attachErrors = [];
+  healthyDiagnostic.counts.attachErrorCount = 0;
+  healthyDiagnostic.counts.attachPromiseCount = 2;
+  healthyDiagnostic.counts.completedRequestCount = 2;
+  healthyDiagnostic.counts.inflightRequestCount = 0;
+  healthyDiagnostic.counts.pendingAttachCount = 0;
+  healthyDiagnostic.counts.requestCount = 2;
+  healthyDiagnostic.inflightRequests = [];
+  healthyDiagnostic.outcome = "fixed-point-reached";
+  healthyDiagnostic.pendingAttaches = [];
+  healthyDiagnostic.serviceWorkerBypassed = true;
+  healthyDiagnostic.targets = healthyDiagnostic.targets.map((target) => ({
+    ...target,
+    attachComplete: true,
+    commands: [
+      { name: "network-enable", status: "completed" },
+      { name: "runtime-enable", status: "completed" },
+      { name: "cache-disable", status: "completed" },
+      { name: "auto-attach", status: "completed" },
+      ...(target.waitingForDebugger
+        ? [{ name: "resume", status: "completed" }]
+        : []),
+    ],
+    resumed: true,
+  }));
+  healthyDiagnostic.targetBootstrapSettlements = [
+    {
+      ...healthyDiagnostic.targetBootstrapSettlements[0],
+      identityHash: SHA,
+    },
+    {
+      identityHash: "d".repeat(64),
+      method: "GET",
+      phase: "desktop-dpr1-zoom100",
+      requestId: "parser-bootstrap-request",
+      requestSessionId: "document-session",
+      resourceType: "Script",
+      targetDetachedAtSettlement: false,
+      targetId: "worker-target",
+      targetParentSessionId: "document-session",
+      targetSessionId: "worker-session",
+      targetType: "worker",
+      terminalReason: "target-attached",
+      urlClass: "pdf-parser-worker",
+    },
+  ];
+  healthyDiagnostic.counts.targetBootstrapSettlementCount = 2;
+  healthyDiagnostic.wait.recentSamples = [1, 2, 3].map(
+    (stableSamples) => ({
+      attachErrorCount: 0,
+      attachmentReady: true,
+      elapsedMs: 9_700 + stableSamples * 75,
+      incompleteTargetCount: 0,
+      inflightRequestCount: 0,
+      pendingAttachCount: 0,
+      requestCount: healthyDiagnostic.counts.requestCount,
+      serviceWorkerBypassed: true,
+      stableSamples,
+      targetCount: healthyDiagnostic.counts.targetCount,
+    }),
+  );
+  healthyDiagnostic.wait.stableSamples = 3;
+  assert.equal(isCdpFixedPointDiagnosticHealthy(healthyDiagnostic), true);
   const report = buildFirstNetworkDiagnosticReport({
     build: { localManifest: { deploymentId: DEPLOYMENT } },
     fixture: {
@@ -1131,7 +1208,7 @@ test("records fixed-point diagnostics without private URL or payload data", () =
       path: PUBLIC_PDF_FIXTURE,
       sha256: PUBLIC_PDF_FIXTURE_SHA256,
     },
-    networkDiagnostic: { ...diagnostic, outcome: "fixed-point-reached" },
+    networkDiagnostic: healthyDiagnostic,
     outputDirectory,
     runnerFailure: null,
     scenario: {
@@ -1165,6 +1242,63 @@ test("records fixed-point diagnostics without private URL or payload data", () =
   assert.equal("passed" in report, false);
   assert.equal("schemaVersion" in report, false);
   assert.deepEqual(report.failures, []);
+
+  for (const [name, mutate] of [
+    ["attach error", (value) => {
+      value.attachErrors.push({
+        category: "setup",
+        command: "network-enable",
+        identityHash: SHA,
+        sessionId: "worker-session",
+        targetId: "worker-target",
+        type: "service_worker",
+        urlClass: "app-asset",
+      });
+      value.counts.attachErrorCount = 1;
+    }],
+    ["incomplete target", (value) => {
+      value.targets[0].attachComplete = false;
+    }],
+    ["timed-out target command", (value) => {
+      value.targets[0].commands[0].status = "failed";
+    }],
+    ["service worker bypass disabled", (value) => {
+      value.serviceWorkerBypassed = false;
+    }],
+    ["missing parser bootstrap settlement", (value) => {
+      value.targetBootstrapSettlements.pop();
+      value.counts.targetBootstrapSettlementCount -= 1;
+    }],
+    ["unhealthy stable sample", (value) => {
+      value.wait.recentSamples.at(-1).attachmentReady = false;
+    }],
+  ]) {
+    const unhealthyDiagnostic = structuredClone(healthyDiagnostic);
+    mutate(unhealthyDiagnostic);
+    const unhealthyReport = buildFirstNetworkDiagnosticReport({
+      build: report.build,
+      fixture: report.fixture,
+      networkDiagnostic: unhealthyDiagnostic,
+      outputDirectory,
+      runnerFailure: null,
+      scenario: {
+        comparison: { lineLightScreenshot: screenshot },
+        id: "desktop-dpr1-zoom100",
+      },
+      source: report.source,
+      teardown: cleanDiagnosticTeardown,
+    });
+    assert.equal(
+      unhealthyReport.fixedPointReached,
+      false,
+      `${name} snapshot passed`,
+    );
+    assert.ok(unhealthyReport.failures.length > 0, `${name} exited green`);
+    assert.match(
+      unhealthyReport.failures.join("\n"),
+      /did not reach a fixed point/u,
+    );
+  }
 
   const missingScreenshot = buildFirstNetworkDiagnosticReport({
     build: report.build,
@@ -1440,6 +1574,13 @@ test("settles exact worker bootstraps one-to-one in either event order", () => {
   const target = {
     attachComplete: true,
     bootstrapRequestKey: null,
+    commands: [
+      { name: "network-enable", status: "completed" },
+      { name: "runtime-enable", status: "completed" },
+      { name: "cache-disable", status: "completed" },
+      { name: "auto-attach", status: "completed" },
+      { name: "resume", status: "completed" },
+    ],
     detached: false,
     parentSessionId: "document-session",
     phase: "desktop-dpr1-zoom100",
@@ -1448,6 +1589,7 @@ test("settles exact worker bootstraps one-to-one in either event order", () => {
     targetId: "parser-target",
     type: "worker",
     url: requestEvent.request.url,
+    waitingForDebugger: true,
   };
   const createState = () => ({
     byId: new Map(),
@@ -1498,6 +1640,12 @@ test("settles exact worker bootstraps one-to-one in either event order", () => {
     url: target.url,
   };
   assert.equal(isCdpTargetBootstrapRequest(matchingRequest, target), true);
+  assert.equal(isCdpTargetSetupComplete(target), true);
+  assert.equal(isCdpAttachmentStateHealthy({
+    attachErrors: [],
+    serviceWorkerBypassed: true,
+    targets: [target],
+  }), true);
   for (const [name, request, changedTarget] of [
     ["URL", { ...matchingRequest, url: `${target.url}?wrong=1` }, target],
     ["session", { ...matchingRequest, sessionId: "wrong-session" }, target],
@@ -1537,6 +1685,7 @@ test("bounds every flattened child-target CDP command", async () => {
 
 test("requires three unchanged quiet CDP samples for a fixed point", () => {
   const quiet = {
+    attachmentReady: true,
     inflightRequestCount: 0,
     pendingAttachCount: 0,
     requestCount: 4,
@@ -1563,6 +1712,10 @@ test("requires three unchanged quiet CDP samples for a fixed point", () => {
   assert.equal(stability.fixedPointReached, true);
 
   const almostStable = { ...stability, stableSamples: 2 };
+  assert.equal(advanceCdpFixedPointStability(almostStable, {
+    ...quiet,
+    attachmentReady: false,
+  }).stableSamples, 0);
   assert.equal(advanceCdpFixedPointStability(almostStable, {
     ...quiet,
     pendingAttachCount: 1,
@@ -2032,6 +2185,15 @@ test("rejects each material Issue 68 acceptance regression", async (t) => {
     }, /recursively attached worker network/u],
     ["service worker bypass", (value) => {
       value.network.serviceWorkerBypassed = false;
+    }, /recursively attached worker network/u],
+    ["fixed-point attach health", (value) => {
+      value.network.networkFixedPoints[0].attachmentReady = false;
+    }, /recursively attached worker network/u],
+    ["fixed-point attach error", (value) => {
+      value.network.networkFixedPoints[0].attachErrorCount = 1;
+    }, /recursively attached worker network/u],
+    ["fixed-point service worker bypass", (value) => {
+      value.network.networkFixedPoints[0].serviceWorkerBypassed = false;
     }, /recursively attached worker network/u],
     ["bootstrap settlement URL", (value) => {
       value.network.targetBootstrapSettlements[0].url += "?wrong=1";

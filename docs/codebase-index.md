@@ -267,7 +267,11 @@ exact `AbortSignal`- and attempt-bound cancellation terminals, per-scenario
 measured narration alignment, Long Tasks, per-scenario document/parser worker
 traffic settled to a network-quiet fixed point through bounded attach commands,
 service-worker bypass, and exact one-to-one attached-target bootstrap
-settlements, exact source/screenshot manifests, and owned-process teardown. Its
+settlements. Fixed-point stability also requires zero attach errors and every
+observed target's exact command sequence, attachment, and resume to complete;
+it cannot become quiet merely because a timed-out command left no pending
+promise. The harness also requires exact source/screenshot manifests and
+owned-process teardown. Its
 bounded first-scenario diagnostic
 mode persists privacy-safe pending-attach, inflight-request, and target-ancestry
 metadata on fixed-point timeouts without running fallback/reference work.
