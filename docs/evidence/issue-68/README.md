@@ -22,7 +22,8 @@ node scripts/run-pdf-sharpness-browser-regression.mjs \
 That mode runs only the first desktop scenario, skips fallback and reference
 capture, and still closes its owned browser, CDP connection, profile, and
 server. Its explicit output directory must resolve outside the source
-repository, including through existing symlinks. On
+repository, including through existing symlinks, and it accepts only the exact
+deterministic repository PDF fixture. On
 either success or timeout it writes a separate `diagnostic: true` schema with
 `completed` and `fixedPointReached` states, never a canonical `passed` result.
 The diagnostic binds only `linelight-desktop-dpr1-zoom100.png` from that

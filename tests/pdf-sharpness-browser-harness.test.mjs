@@ -45,6 +45,8 @@ const REVISION = "issue-68-revision";
 const FAILED_ABORT_SIGNAL_ID = 1;
 const RETRY_ABORT_SIGNAL_ID = 2;
 const CANCELLATION_ABORT_SIGNAL_ID = 3;
+const PUBLIC_PDF_FIXTURE =
+  "tests/fixtures/pdf-highlights/issue-60-geometry.pdf";
 
 function artifact(name, digit) {
   return {
@@ -991,7 +993,7 @@ test("records fixed-point diagnostics without private URL or payload data", () =
   };
   const report = buildFirstNetworkDiagnosticReport({
     build: { localManifest: { deploymentId: DEPLOYMENT } },
-    fixture: { bytes: 4096, path: "fixture.pdf", sha256: SHA },
+    fixture: { bytes: 4096, path: PUBLIC_PDF_FIXTURE, sha256: SHA },
     networkDiagnostic: { ...diagnostic, outcome: "fixed-point-reached" },
     outputDirectory,
     runnerFailure: null,
@@ -1107,6 +1109,35 @@ test("records fixed-point diagnostics without private URL or payload data", () =
   });
   assert.equal(repositoryOutput.completed, false);
   assert.equal(repositoryOutput.artifacts.screenshots.length, 0);
+
+  const privateFixturePath = "/tmp/private-reader-document.pdf";
+  const privateFixtureReport = buildFirstNetworkDiagnosticReport({
+    build: report.build,
+    fixture: {
+      bytes: 4096,
+      path: privateFixturePath,
+      sha256: SHA,
+    },
+    networkDiagnostic: report.network,
+    outputDirectory,
+    runnerFailure: null,
+    scenario: {
+      comparison: { lineLightScreenshot: screenshot },
+      id: "desktop-dpr1-zoom100",
+    },
+    source: report.source,
+    teardown: cleanDiagnosticTeardown,
+  });
+  assert.equal(privateFixtureReport.completed, false);
+  assert.equal(privateFixtureReport.fixture, null);
+  assert.match(
+    privateFixtureReport.failures.join("\n"),
+    /fixture is not the exact public fixture/u,
+  );
+  assert.doesNotMatch(
+    JSON.stringify(privateFixtureReport),
+    /private-reader-document/u,
+  );
 
   const privateTeardown = structuredClone(cleanDiagnosticTeardown);
   privateTeardown.app.error =
@@ -2199,6 +2230,21 @@ test("keeps the first-network diagnostic bounded and non-recording", async () =>
       { cwd: path.resolve(".") },
     ),
     /output must be outside the source repository/u,
+  );
+  await assert.rejects(
+    execFileAsync(
+      process.execPath,
+      [
+        "scripts/run-pdf-sharpness-browser-regression.mjs",
+        "--diagnose-first-network-fixed-point",
+        "--fixture",
+        path.join(os.tmpdir(), "private-reader-document.pdf"),
+        "--output",
+        path.join(os.tmpdir(), "issue-68-network-diagnostic"),
+      ],
+      { cwd: path.resolve(".") },
+    ),
+    /requires the exact repository PDF fixture/u,
   );
   const symlinkRoot = await mkdtemp(
     path.join(os.tmpdir(), "issue-68-output-guard-"),

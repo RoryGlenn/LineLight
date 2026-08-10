@@ -492,6 +492,15 @@ export function buildFirstNetworkDiagnosticReport({
   teardown,
 }) {
   const screenshot = scenario?.comparison?.lineLightScreenshot ?? null;
+  const expectedFixturePath = path.relative(
+    REPOSITORY_ROOT,
+    path.resolve(DEFAULT_PDF_HIGHLIGHT_FIXTURE),
+  );
+  const fixtureBound =
+    fixture?.path === expectedFixturePath &&
+    Number.isInteger(fixture?.bytes) &&
+    fixture.bytes > 0 &&
+    /^[a-f0-9]{64}$/u.test(fixture?.sha256 ?? "");
   const outputIsExternal = isOutsideRepository(outputDirectory);
   const expectedScreenshotPath = outputIsExternal
     ? path.relative(
@@ -558,6 +567,9 @@ export function buildFirstNetworkDiagnosticReport({
         networkDiagnostic.outcome !== "fixed-point-reached"
       ? ["The bounded network diagnostic did not reach a fixed point."]
       : []),
+    ...(!fixtureBound
+      ? ["The bounded network diagnostic fixture is not the exact public fixture."]
+      : []),
     ...(!screenshotBound
       ? ["The bounded network diagnostic screenshot manifest is not exact."]
       : []),
@@ -573,11 +585,15 @@ export function buildFirstNetworkDiagnosticReport({
       sourceTree: source?.tree ?? null,
     },
     build,
-    completed: Boolean(networkDiagnostic) && screenshotBound && !teardownFailed,
+    completed:
+      Boolean(networkDiagnostic) &&
+      fixtureBound &&
+      screenshotBound &&
+      !teardownFailed,
     diagnostic: true,
     diagnosticSchemaVersion: 1,
     failures,
-    fixture,
+    fixture: fixtureBound ? fixture : null,
     fixedPointReached:
       networkDiagnostic?.outcome === "fixed-point-reached",
     mode: "first-network-fixed-point",
@@ -681,6 +697,14 @@ function parseArguments(argv) {
   options.browser = path.resolve(options.browser);
   options.fixture = path.resolve(options.fixture);
   options.outputDirectory = path.resolve(options.outputDirectory);
+  if (
+    options.diagnoseFirstNetworkFixedPoint &&
+    options.fixture !== path.resolve(DEFAULT_PDF_HIGHLIGHT_FIXTURE)
+  ) {
+    throw new Error(
+      "First-network diagnostic mode requires the exact repository PDF fixture.",
+    );
+  }
   if (
     options.diagnoseFirstNetworkFixedPoint &&
     !isOutsideRepository(options.outputDirectory)
