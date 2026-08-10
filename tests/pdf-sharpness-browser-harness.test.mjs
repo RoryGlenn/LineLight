@@ -8294,6 +8294,7 @@ function passingAppMatrixRuntimeReleaseEvents(row) {
     activityId: 102,
     at: 350,
     direction: "to-worker",
+    documentKey: null,
     enabled: false,
     eventId: 20,
     jobId: row.modelIdentity.importJobId,
@@ -8305,6 +8306,7 @@ function passingAppMatrixRuntimeReleaseEvents(row) {
     activityId: 103,
     at: 360,
     direction: "from-worker",
+    documentKey: null,
     eventId: 21,
     height: row.priorityProbe.targetAfter.canvasHeight,
     jobId: row.modelIdentity.importJobId,
@@ -8655,6 +8657,22 @@ test("rejects isolated app-matrix runtime proof substitutions", () => {
         passingAppMatrixRuntimeReleaseEvents(input.rows[0]);
       input.rows[0].releaseSnapshot.workerEvents[0].revision = "forged";
     }],
+    ["worker document identity substitution", (input) => {
+      input.rows[0].releaseSnapshot.workerEvents =
+        passingAppMatrixRuntimeReleaseEvents(input.rows[0]);
+      input.rows[0].releaseSnapshot.workerEvents[0].documentKey =
+        "private-document";
+    }],
+    ["worker event before scenario", (input) => {
+      input.rows[0].releaseSnapshot.workerEvents =
+        passingAppMatrixRuntimeReleaseEvents(input.rows[0]);
+      input.rows[0].releaseSnapshot.workerEvents[0].at = 99;
+    }],
+    ["worker event after observation", (input) => {
+      input.rows[0].releaseSnapshot.workerEvents =
+        passingAppMatrixRuntimeReleaseEvents(input.rows[0]);
+      input.rows[0].releaseSnapshot.workerEvents[1].at = 501;
+    }],
     ["worker event order", (input) => {
       input.rows[0].releaseSnapshot.workerEvents =
         passingAppMatrixRuntimeReleaseEvents(input.rows[0]).reverse();
@@ -8682,6 +8700,12 @@ test("rejects isolated app-matrix runtime proof substitutions", () => {
           drawInvocationId: original.drawInvocationId + index,
         }),
       );
+    }],
+    ["release draw before scenario", (input) => {
+      input.rows[0].releaseSnapshot.draws[0].at = 99;
+    }],
+    ["release draw after observation", (input) => {
+      input.rows[0].releaseSnapshot.draws[0].at = 501;
     }],
     ["release snapshot error", (input) => {
       input.rows[0].releaseSnapshot.snapshotErrorPresent = true;
@@ -9042,6 +9066,38 @@ test("binds nonzero app-matrix Long Task and LoAF timing", () => {
       frame.scriptCount = 17;
       frame.scriptsTruncated = true;
     }],
+    ...[
+      "startTime",
+      "duration",
+      "blockingDuration",
+      "renderStart",
+      "styleAndLayoutStart",
+      "pauseDuration",
+    ].map((field, index) => [
+      `LoAF frame ${field} numeric type`,
+      (input) => {
+        input.rows[0].completedSnapshot.longAnimationFrames[0][field] =
+          index % 2 === 0 ? null : String(
+            input.rows[0].completedSnapshot.longAnimationFrames[0][field],
+          );
+      },
+    ]),
+    ...[
+      "startTime",
+      "duration",
+      "executionStart",
+      "forcedStyleAndLayoutDuration",
+      "pauseDuration",
+    ].map((field, index) => [
+      `LoAF script ${field} numeric type`,
+      (input) => {
+        input.rows[0].completedSnapshot.longAnimationFrames[0].scripts[0][field] =
+          index % 2 === 0 ? null : String(
+            input.rows[0].completedSnapshot.longAnimationFrames[0]
+              .scripts[0][field],
+          );
+      },
+    ]),
   ];
   for (const [label, mutate] of mutations) {
     const input = addRepresentativeAppMatrixRuntimeTiming(

@@ -3838,6 +3838,7 @@ function sanitizeAppMatrixRuntimeRelease(raw, row) {
   const eventsBound = identityBound && allEvents.every((event) =>
     event?.workerInstanceId === identity.workerInstanceId &&
     event?.jobId === identity.importJobId &&
+    event?.documentKey === null &&
     event?.revision === identity.revision &&
     [row.adjacentPage, row.priorityTarget].includes(event?.pageNumber) &&
     ["render", "bitmap"].includes(event?.type) &&
@@ -3846,7 +3847,8 @@ function sanitizeAppMatrixRuntimeRelease(raw, row) {
       : event.direction === "from-worker") &&
     Number.isInteger(event?.activityId) && event.activityId > 0 &&
     Number.isInteger(event?.eventId) && event.eventId > 0 &&
-    Number.isFinite(event?.at)
+    Number.isFinite(event?.at) &&
+    event.at >= row?.scenario?.startedAt && event.at <= raw.observedAt
   );
   const identityHash = identityBound
     ? cdpDiagnosticIdentity(
@@ -3905,6 +3907,7 @@ function sanitizeAppMatrixRuntimeRelease(raw, row) {
   }));
   const drawsBound = drawItems.every((draw, index) =>
     Number.isInteger(draw.activityId) && Number.isFinite(draw.at) &&
+    draw.at >= row?.scenario?.startedAt && draw.at <= raw.observedAt &&
     Number.isInteger(draw.compositionId) &&
     Number.isInteger(draw.drawInvocationId) &&
     [row.adjacentPage, row.priorityTarget].includes(draw.page) &&
@@ -4349,6 +4352,13 @@ function sanitizeAppMatrixRuntimeTiming(row) {
         rawScripts.length <= APP_MATRIX_RUNTIME_LOAF_SCRIPT_LIMIT &&
         frame?.scriptsTruncated === false &&
         scripts.every((script, index) =>
+          Number.isFinite(rawScripts[index]?.startTime) &&
+          Number.isFinite(rawScripts[index]?.duration) &&
+          Number.isFinite(rawScripts[index]?.executionStart) &&
+          Number.isFinite(
+            rawScripts[index]?.forcedStyleAndLayoutDuration,
+          ) &&
+          Number.isFinite(rawScripts[index]?.pauseDuration) &&
           Number.isFinite(script.startMs) && Number.isFinite(script.endMs) &&
           Number.isFinite(script.duration) && script.duration >= 0 &&
           script.endMs >= script.startMs &&
@@ -4435,7 +4445,13 @@ function sanitizeAppMatrixRuntimeTiming(row) {
           ? null
           : styleAndLayoutStart - startedAt,
       };
-      const valid = Number.isFinite(frameStart) &&
+      const valid = Number.isFinite(frame?.startTime) &&
+        Number.isFinite(frame?.duration) &&
+        Number.isFinite(frame?.blockingDuration) &&
+        Number.isFinite(frame?.renderStart) &&
+        Number.isFinite(frame?.styleAndLayoutStart) &&
+        Number.isFinite(frame?.pauseDuration) &&
+        Number.isFinite(frameStart) &&
         Number.isFinite(frameDuration) && frameDuration >= 50 &&
         Number.isFinite(frameEnd) &&
         Number.isFinite(blockingDuration) && blockingDuration >= 0 &&
