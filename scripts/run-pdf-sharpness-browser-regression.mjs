@@ -72,6 +72,28 @@ const FALLBACK_IMPORT_DIAGNOSTIC_RUN_TIMEOUT_MS = 180_000;
 const FALLBACK_IMPORT_DIAGNOSTIC_LABEL = "fallback-import-diagnostic";
 const FALLBACK_IMPORT_DIAGNOSTIC_SCREENSHOT =
   "linelight-fallback-import-diagnostic.png";
+export const FALLBACK_IMPORT_DIAGNOSTIC_STEPS = Object.freeze([
+  "connect",
+  "baseline",
+  "configure",
+  "setup-navigate",
+  "setup-file-select",
+  "setup-source-hash",
+  "setup-model-completion",
+  "setup-library-snapshot",
+  "setup-fixed-point",
+  "fallback-navigate",
+  "fallback-file-select",
+  "fallback-chain",
+  "fallback-network",
+  "fallback-screenshot",
+]);
+export const FALLBACK_IMPORT_DIAGNOSTIC_STAGES = Object.freeze(
+  FALLBACK_IMPORT_DIAGNOSTIC_STEPS.flatMap((step) => [
+    `${step}-started`,
+    `${step}-completed`,
+  ]),
+);
 const PUBLIC_PDF_FIXTURE_BYTES = 4_745;
 const PUBLIC_PDF_FIXTURE_SHA256 =
   "1addfceae4b869eec37dae4755d576ccd0fd7e1ce505dc856da3b96acbf3f06c";
@@ -80,6 +102,30 @@ const CDP_WORKER_TARGET_TYPES = new Set([
   "shared_worker",
   "worker",
 ]);
+
+export function createFallbackImportDiagnosticProgress() {
+  return { history: [], terminalStage: null };
+}
+
+export function markFallbackImportDiagnosticStage(progress, stage) {
+  if (!progress || !Array.isArray(progress.history)) {
+    throw new Error("Fallback diagnostic progress is unavailable.");
+  }
+  const expected = FALLBACK_IMPORT_DIAGNOSTIC_STAGES[progress.history.length];
+  if (stage !== expected) {
+    throw new Error("Fallback diagnostic stage ordering is invalid.");
+  }
+  progress.history.push(stage);
+  progress.terminalStage = stage;
+  return stage;
+}
+
+async function runFallbackImportDiagnosticStage(progress, step, operation) {
+  markFallbackImportDiagnosticStage(progress, `${step}-started`);
+  const result = await operation();
+  markFallbackImportDiagnosticStage(progress, `${step}-completed`);
+  return result;
+}
 
 export async function runBoundedDiagnosticOperation(
   operation,
@@ -1938,12 +1984,127 @@ export function isFallbackImportNetworkDiagnosticHealthy(
   );
 }
 
+function fixedSha256(value) {
+  return /^[a-f0-9]{64}$/u.test(value ?? "") ? value : null;
+}
+
+function fixedNonnegativeCount(value) {
+  return Number.isInteger(value) && value >= 0 ? value : null;
+}
+
+export function summarizeFallbackDiagnosticSetup(setup) {
+  const source = setup?.source ?? {};
+  const library = setup?.library ?? {};
+  const documentIdentityHash = fixedSha256(setup?.documentIdentityHash);
+  const sourceSummary = {
+    bytes: fixedNonnegativeCount(source?.bytes),
+    sha256: fixedSha256(source?.sha256),
+  };
+  const librarySummary = {
+    activeDocumentIdentityHash: fixedSha256(
+      library?.activeDocumentIdentityHash,
+    ),
+    activeDocumentPresent: library?.activeDocumentPresent === true,
+    available: library?.available === true,
+    documentCount: fixedNonnegativeCount(library?.documentCount),
+    entryCount: fixedNonnegativeCount(library?.entryCount),
+    errorCategory: library?.errorCategory === "indexeddb-read"
+      ? "indexeddb-read"
+      : "none",
+    pageCount: fixedNonnegativeCount(library?.pageCount),
+    pdfEntryCount: fixedNonnegativeCount(library?.pdfEntryCount),
+    sourceCount: fixedNonnegativeCount(library?.sourceCount),
+  };
+  const pageEventCount = fixedNonnegativeCount(setup?.pageEventCount);
+  const completeEventCount = fixedNonnegativeCount(setup?.completeEventCount);
+  const sourceSelectionCount = fixedNonnegativeCount(
+    setup?.sourceSelectionCount,
+  );
+  const conditions = {
+    fileSelected: setup?.fileSelected === true,
+    libraryBound: Boolean(
+      librarySummary.available &&
+      librarySummary.activeDocumentPresent &&
+      librarySummary.activeDocumentIdentityHash === documentIdentityHash &&
+      librarySummary.documentCount >= 1 &&
+      librarySummary.entryCount >= 1 &&
+      librarySummary.pageCount >= 6 &&
+      librarySummary.pdfEntryCount >= 1 &&
+      librarySummary.sourceCount >= 1
+    ),
+    librarySnapshotCompleted: setup?.librarySnapshotCompleted === true,
+    modelBound: Boolean(
+      pageEventCount === 6 &&
+      completeEventCount === 1 &&
+      documentIdentityHash
+    ),
+    navigationCompleted: setup?.navigationCompleted === true,
+    networkFixedPointReached: setup?.networkFixedPointReached === true,
+    sourceBound: Boolean(
+      sourceSelectionCount === 1 &&
+      sourceSummary.bytes === PUBLIC_PDF_FIXTURE_BYTES &&
+      sourceSummary.sha256 === PUBLIC_PDF_FIXTURE_SHA256
+    ),
+  };
+  return {
+    bound: Object.values(conditions).every(Boolean),
+    completeEventCount,
+    conditions,
+    documentIdentityHash,
+    library: librarySummary,
+    pageEventCount,
+    source: sourceSummary,
+    sourceSelectionCount,
+  };
+}
+
+export function summarizeFallbackDiagnosticProgress(progress, runnerFailure) {
+  const allowedStages = new Set(FALLBACK_IMPORT_DIAGNOSTIC_STAGES);
+  const rawHistory = Array.isArray(progress?.history) ? progress.history : [];
+  const history = rawHistory.map((stage) =>
+    allowedStages.has(stage) ? stage : "invalid"
+  );
+  const terminalStage = allowedStages.has(progress?.terminalStage)
+    ? progress.terminalStage
+    : progress?.terminalStage == null
+      ? null
+      : "invalid";
+  const sequenceComplete =
+    history.length === FALLBACK_IMPORT_DIAGNOSTIC_STAGES.length &&
+    history.every(
+      (stage, index) => stage === FALLBACK_IMPORT_DIAGNOSTIC_STAGES[index],
+    ) &&
+    terminalStage === FALLBACK_IMPORT_DIAGNOSTIC_STAGES.at(-1);
+  let errorCategory = "none";
+  if (runnerFailure) {
+    if (terminalStage === "invalid") {
+      errorCategory = "invalid-stage-failure";
+    } else if (terminalStage?.endsWith("-started")) {
+      errorCategory = `${terminalStage.slice(0, -"-started".length)}-failure`;
+    } else if (terminalStage === null) {
+      errorCategory = "pre-diagnostic-failure";
+    } else {
+      errorCategory = "stage-transition-failure";
+    }
+  } else if (!sequenceComplete) {
+    errorCategory = "missing-stage";
+  }
+  return {
+    errorCategory,
+    history,
+    sequenceComplete,
+    terminalStage,
+  };
+}
+
 export function buildFallbackImportDiagnosticReport({
   build,
   capture,
+  diagnosticProgress,
   fixture,
   networkDiagnostic,
   outputDirectory,
+  recordedAt = new Date().toISOString(),
   runnerFailure,
   setup,
   source,
@@ -1992,21 +2153,11 @@ export function buildFallbackImportDiagnosticReport({
     teardown?.profilesRemoved !== true ||
     teardown?.serverClosed !== true ||
     teardown?.errors?.length > 0;
-  const setupBound = Boolean(
-    setup?.source?.bytes === PUBLIC_PDF_FIXTURE_BYTES &&
-    setup?.source?.sha256 === PUBLIC_PDF_FIXTURE_SHA256 &&
-    setup?.pageEventCount === 6 &&
-    setup?.completeEventCount === 1 &&
-    /^[a-f0-9]{64}$/u.test(setup?.documentIdentityHash ?? "") &&
-    setup?.library?.activeDocumentIdentityHash ===
-      setup?.documentIdentityHash &&
-    setup?.library?.available === true &&
-    setup?.library?.activeDocumentPresent === true &&
-    setup?.library?.documentCount >= 1 &&
-    setup?.library?.entryCount >= 1 &&
-    setup?.library?.pageCount >= 6 &&
-    setup?.library?.pdfEntryCount >= 1 &&
-    setup?.library?.sourceCount >= 1,
+  const setupSummary = summarizeFallbackDiagnosticSetup(setup);
+  const setupBound = setupSummary.bound;
+  const progressSummary = summarizeFallbackDiagnosticProgress(
+    diagnosticProgress,
+    runnerFailure,
   );
   const lifecycle = summarizeFallbackImportLifecycle(capture, fixture);
   const networkHealthy = isFallbackImportNetworkDiagnosticHealthy(
@@ -2017,6 +2168,9 @@ export function buildFallbackImportDiagnosticReport({
   const failures = [
     ...(runnerFailure
       ? ["The bounded fallback-import diagnostic runner reported a failure."]
+      : []),
+    ...(!progressSummary.sequenceComplete
+      ? ["The fallback-import diagnostic stage sequence is incomplete or invalid."]
       : []),
     ...(!fixtureBound
       ? ["The fallback-import diagnostic fixture is not the exact public fixture."]
@@ -2045,9 +2199,14 @@ export function buildFallbackImportDiagnosticReport({
       sourceTree: source?.tree ?? null,
     },
     build,
-    completed: fixtureBound && screenshotBound && !teardownFailed,
+    completed:
+      progressSummary.sequenceComplete &&
+      fixtureBound &&
+      screenshotBound &&
+      !teardownFailed,
     diagnostic: true,
     diagnosticSchemaVersion: 1,
+    execution: progressSummary,
     failures,
     fixture: fixtureBound ? fixture : null,
     importCompleted: lifecycle.importCompleted,
@@ -2055,8 +2214,8 @@ export function buildFallbackImportDiagnosticReport({
     mode: "fallback-import-lifecycle",
     network: networkDiagnostic,
     networkSettled: networkHealthy,
-    recordedAt: new Date().toISOString(),
-    setup: setupBound ? setup : null,
+    recordedAt,
+    setup: setupSummary,
     source,
     teardown: {
       app: {
@@ -3745,6 +3904,10 @@ function browserExpression(expression) {
   return `(() => { ${expression} })()`;
 }
 
+export function asyncBrowserExpression(expression) {
+  return `(async () => { ${expression} })()`;
+}
+
 function pageCanvasExpression(pageNumber) {
   return browserExpression(`
     const block = document.querySelector('#pdf-page-${pageNumber}');
@@ -4425,7 +4588,7 @@ async function navigateToReader(cdp, appUrl, configuration, fallback = false) {
 async function readPrivateLibraryDiagnostic(cdp) {
   return evaluate(
     cdp,
-    browserExpression(`
+    asyncBrowserExpression(`
       const requestValue = (request) => new Promise((resolve, reject) => {
         request.onsuccess = () => resolve(request.result);
         request.onerror = () => reject(request.error);
@@ -4542,41 +4705,69 @@ async function collectPersistedFallbackDiagnosticSetup(
   cdp,
   appUrl,
   fixturePath,
+  progress,
+  setup,
 ) {
   const configuration = PDF_SHARPNESS_MATRIX[0];
-  await navigateToReader(cdp, appUrl, configuration);
-  await importFixture(cdp, fixturePath);
-  await waitForExpression(
-    cdp,
-    `globalThis.__lineLightIssue68.sourceFiles.length === 1`,
-    "the setup PDF source identity",
-    SCENARIO_TIMEOUT_MS,
+  await runFallbackImportDiagnosticStage(
+    progress,
+    "setup-navigate",
+    () => navigateToReader(cdp, appUrl, configuration),
   );
-  const model = await waitForPdfModelCompletion(cdp, 6);
-  const [snapshot, library] = await Promise.all([
-    evaluate(cdp, `globalThis.__lineLightIssue68.snapshot()`),
-    readPrivateLibraryDiagnostic(cdp),
-  ]);
+  setup.navigationCompleted = true;
+  await runFallbackImportDiagnosticStage(
+    progress,
+    "setup-file-select",
+    () => selectFixtureFile(cdp, fixturePath),
+  );
+  setup.fileSelected = true;
+  const source = await runFallbackImportDiagnosticStage(
+    progress,
+    "setup-source-hash",
+    () => waitForExpression(
+      cdp,
+      browserExpression(`
+        const sources = globalThis.__lineLightIssue68?.sourceFiles ?? [];
+        const source = sources[0];
+        return sources.length > 0 &&
+          Number.isInteger(source?.size) && source.size >= 0 &&
+          /^[a-f0-9]{64}$/u.test(source?.sha256 ?? '')
+          ? {
+              bytes: source.size,
+              sha256: source.sha256,
+              sourceSelectionCount: sources.length
+            }
+          : false;
+      `),
+      "the setup PDF source hash",
+      SCENARIO_TIMEOUT_MS,
+    ),
+  );
+  setup.source = { bytes: source.bytes, sha256: source.sha256 };
+  setup.sourceSelectionCount = source.sourceSelectionCount;
+  const model = await runFallbackImportDiagnosticStage(
+    progress,
+    "setup-model-completion",
+    () => waitForPdfModelCompletion(cdp, 6),
+  );
   const documentId =
     typeof model.documentKey === "string" &&
     typeof model.revision === "string" &&
     model.documentKey.endsWith(`:${model.revision}`)
       ? model.documentKey.slice(0, -(model.revision.length + 1))
       : null;
-  const source = snapshot.sourceFiles?.[0] ?? null;
-  return {
-    completeEventCount: model.completeEventCount,
-    documentIdentityHash: documentId
-      ? cdpDiagnosticIdentity(documentId)
-      : null,
-    library,
-    pageEventCount: model.pageEventCount,
-    source:
-      source?.size === PUBLIC_PDF_FIXTURE_BYTES &&
-      source?.sha256 === PUBLIC_PDF_FIXTURE_SHA256
-        ? { bytes: source.size, sha256: source.sha256 }
-        : null,
-  };
+  setup.completeEventCount = model.completeEventCount;
+  setup.documentIdentityHash = documentId
+    ? cdpDiagnosticIdentity(documentId)
+    : null;
+  setup.pageEventCount = model.pageEventCount;
+  setup.library = await runFallbackImportDiagnosticStage(
+    progress,
+    "setup-library-snapshot",
+    () => readPrivateLibraryDiagnostic(cdp),
+  );
+  setup.librarySnapshotCompleted = true;
+  return setup;
 }
 
 async function collectFallbackImportDiagnostic(
@@ -4584,119 +4775,132 @@ async function collectFallbackImportDiagnostic(
   appUrl,
   fixturePath,
   fixture,
-  outputDirectory,
   networkState,
+  progress,
 ) {
   const configuration = PDF_SHARPNESS_MATRIX[0];
-  await navigateToReader(cdp, appUrl, configuration, true);
-  const boundary = await evaluate(
-    cdp,
-    browserExpression(`
-      const state = globalThis.__lineLightIssue68;
+  await runFallbackImportDiagnosticStage(
+    progress,
+    "fallback-navigate",
+    () => navigateToReader(cdp, appUrl, configuration, true),
+  );
+  const { boundary, networkBoundary } =
+    await runFallbackImportDiagnosticStage(
+      progress,
+      "fallback-file-select",
+      async () => {
+        const value = await evaluate(
+          cdp,
+          browserExpression(`
+            const state = globalThis.__lineLightIssue68;
+            return {
+              sourceFileStart: state.sourceFiles.length,
+              startedAt: performance.now(),
+              workerEventStart: state.workerEvents.length,
+              workerLifecycleStart: state.workerLifecycle.length
+            };
+          `),
+        );
+        const network = {
+          attachPromiseCount: networkState.attachPromises.length,
+          requestCount: networkState.requests.length,
+          settlementCount: networkState.targetBootstrapSettlements.length,
+          targetCount: networkState.targets.length,
+        };
+        await selectFixtureFile(cdp, fixturePath);
+        return { boundary: value, networkBoundary: network };
+      },
+    );
+  return runFallbackImportDiagnosticStage(
+    progress,
+    "fallback-chain",
+    async () => {
+      let importRequest = null;
+      let outcome = "import-request-timeout";
+      try {
+        importRequest = await waitForExpression(
+          cdp,
+          browserExpression(`
+            return globalThis.__lineLightIssue68.workerEvents.find((event) =>
+              event.eventId > ${boundary.workerEventStart} &&
+              event.direction === 'to-worker' &&
+              event.type === 'import' &&
+              Number.isInteger(event.jobId) &&
+              typeof event.documentKey === 'string' && event.documentKey &&
+              typeof event.revision === 'string' && event.revision
+            ) || false;
+          `),
+          "the exact post-change fallback import request",
+          10_000,
+        );
+        outcome = "import-chain-timeout";
+        await waitForExpression(
+          cdp,
+          browserExpression(`
+            const state = globalThis.__lineLightIssue68;
+            const summarize = (${summarizePdfModelCompletion.toString()});
+            const importRequest = state.workerEvents.find((event) =>
+              event.eventId === ${importRequest.eventId} &&
+              event.direction === 'to-worker' && event.type === 'import'
+            );
+            if (!importRequest) return false;
+            const model = summarize(state.workerEvents.filter((event) =>
+              event.direction === 'to-worker' ||
+              event.workerInstanceId === importRequest.workerInstanceId
+            ), 6);
+            const laterStart = state.workerEvents.some((event) =>
+              event.eventId > importRequest.eventId &&
+              event.direction === 'to-worker' &&
+              ['import', 'open'].includes(event.type)
+            );
+            const fallback = state.workerEvents.find((event) =>
+              event.eventId > importRequest.eventId &&
+              event.direction === 'from-worker' &&
+              event.type === 'render-fallback' &&
+              event.jobId === importRequest.jobId &&
+              event.revision === importRequest.revision &&
+              event.workerInstanceId === importRequest.workerInstanceId
+            );
+            const source = state.sourceFiles[${boundary.sourceFileStart}];
+            const pageOne = document.querySelector('#pdf-page-1');
+            return Boolean(
+              model.complete &&
+              model.importJobId === importRequest.jobId &&
+              model.revision === importRequest.revision &&
+              model.documentKey === importRequest.documentKey &&
+              !laterStart && fallback &&
+              source?.size === ${PUBLIC_PDF_FIXTURE_BYTES} &&
+              source?.sha256 === ${JSON.stringify(PUBLIC_PDF_FIXTURE_SHA256)} &&
+              document.querySelector('.pdf-page-view')?.dataset.pdfRenderFallback === 'true' &&
+              pageOne?.querySelectorAll('.pdf-word-overlay').length >= 20
+            );
+          `),
+          "the exact fallback import model/DOM chain",
+          FALLBACK_IMPORT_DIAGNOSTIC_TIMEOUT_MS,
+        );
+        outcome = "import-chain-reached";
+      } catch {
+        // The report persists bounded fixed metadata that distinguishes the stage.
+      }
+      const [snapshot, dom, libraryAfter] = await Promise.all([
+        evaluate(cdp, `globalThis.__lineLightIssue68.snapshot()`),
+        readFallbackImportDomDiagnostic(cdp),
+        readPrivateLibraryDiagnostic(cdp),
+      ]);
       return {
-        sourceFileStart: state.sourceFiles.length,
-        startedAt: performance.now(),
-        workerEventStart: state.workerEvents.length,
-        workerLifecycleStart: state.workerLifecycle.length
+        boundary,
+        dom,
+        fixture: { bytes: fixture.bytes, sha256: fixture.sha256 },
+        importRequestObserved: Boolean(importRequest),
+        libraryAfter,
+        libraryBefore: null,
+        networkBoundary,
+        outcome,
+        screenshot: null,
+        snapshot,
       };
-    `),
+    },
   );
-  const networkBoundary = {
-    attachPromiseCount: networkState.attachPromises.length,
-    requestCount: networkState.requests.length,
-    settlementCount: networkState.targetBootstrapSettlements.length,
-    targetCount: networkState.targets.length,
-  };
-  await selectFixtureFile(cdp, fixturePath);
-  let importRequest = null;
-  let outcome = "import-request-timeout";
-  try {
-    importRequest = await waitForExpression(
-      cdp,
-      browserExpression(`
-        return globalThis.__lineLightIssue68.workerEvents.find((event) =>
-          event.eventId > ${boundary.workerEventStart} &&
-          event.direction === 'to-worker' &&
-          event.type === 'import' &&
-          Number.isInteger(event.jobId) &&
-          typeof event.documentKey === 'string' && event.documentKey &&
-          typeof event.revision === 'string' && event.revision
-        ) || false;
-      `),
-      "the exact post-change fallback import request",
-      10_000,
-    );
-    outcome = "import-chain-timeout";
-    await waitForExpression(
-      cdp,
-      browserExpression(`
-        const state = globalThis.__lineLightIssue68;
-        const summarize = (${summarizePdfModelCompletion.toString()});
-        const importRequest = state.workerEvents.find((event) =>
-          event.eventId === ${importRequest.eventId} &&
-          event.direction === 'to-worker' && event.type === 'import'
-        );
-        if (!importRequest) return false;
-        const model = summarize(state.workerEvents.filter((event) =>
-          event.direction === 'to-worker' ||
-          event.workerInstanceId === importRequest.workerInstanceId
-        ), 6);
-        const laterStart = state.workerEvents.some((event) =>
-          event.eventId > importRequest.eventId &&
-          event.direction === 'to-worker' &&
-          ['import', 'open'].includes(event.type)
-        );
-        const fallback = state.workerEvents.find((event) =>
-          event.eventId > importRequest.eventId &&
-          event.direction === 'from-worker' &&
-          event.type === 'render-fallback' &&
-          event.jobId === importRequest.jobId &&
-          event.revision === importRequest.revision &&
-          event.workerInstanceId === importRequest.workerInstanceId
-        );
-        const source = state.sourceFiles[${boundary.sourceFileStart}];
-        const pageOne = document.querySelector('#pdf-page-1');
-        return Boolean(
-          model.complete &&
-          model.importJobId === importRequest.jobId &&
-          model.revision === importRequest.revision &&
-          model.documentKey === importRequest.documentKey &&
-          !laterStart && fallback &&
-          source?.size === ${PUBLIC_PDF_FIXTURE_BYTES} &&
-          source?.sha256 === ${JSON.stringify(PUBLIC_PDF_FIXTURE_SHA256)} &&
-          document.querySelector('.pdf-page-view')?.dataset.pdfRenderFallback === 'true' &&
-          pageOne?.querySelectorAll('.pdf-word-overlay').length >= 20
-        );
-      `),
-      "the exact fallback import model/DOM chain",
-      FALLBACK_IMPORT_DIAGNOSTIC_TIMEOUT_MS,
-    );
-    outcome = "import-chain-reached";
-  } catch {
-    // The report persists bounded fixed metadata that distinguishes the stage.
-  }
-  const [snapshot, dom, libraryAfter] = await Promise.all([
-    evaluate(cdp, `globalThis.__lineLightIssue68.snapshot()`),
-    readFallbackImportDomDiagnostic(cdp),
-    readPrivateLibraryDiagnostic(cdp),
-  ]);
-  const screenshot = await writeScreenshot(
-    cdp,
-    outputDirectory,
-    FALLBACK_IMPORT_DIAGNOSTIC_SCREENSHOT,
-  );
-  return {
-    boundary,
-    dom,
-    fixture: { bytes: fixture.bytes, sha256: fixture.sha256 },
-    importRequestObserved: Boolean(importRequest),
-    libraryAfter,
-    libraryBefore: null,
-    networkBoundary,
-    outcome,
-    screenshot,
-    snapshot,
-  };
 }
 
 async function waitForPageShell(cdp, pageNumber) {
@@ -6325,7 +6529,23 @@ async function run(options) {
   let runnerFailure = null;
   let fallbackDiagnosticCapture = null;
   let fallbackDiagnosticNetwork = null;
-  let fallbackDiagnosticSetup = null;
+  const fallbackDiagnosticProgress = options.diagnoseFallbackImport
+    ? createFallbackImportDiagnosticProgress()
+    : null;
+  let fallbackDiagnosticSetup = options.diagnoseFallbackImport
+    ? {
+        completeEventCount: null,
+        documentIdentityHash: null,
+        fileSelected: false,
+        library: null,
+        librarySnapshotCompleted: false,
+        navigationCompleted: false,
+        networkFixedPointReached: false,
+        pageEventCount: null,
+        source: null,
+        sourceSelectionCount: null,
+      }
+    : null;
   let appShutdown = null;
   let referenceShutdown = null;
   let serverShutdown = null;
@@ -6380,54 +6600,108 @@ async function run(options) {
 
     appBrowser = await startBrowser(options.browser, true);
     const collectAppEvidence = async () => {
-      appCdp = await CdpSession.connect(appBrowser.webSocketDebuggerUrl);
-      const { targetInfos: initialTargetInfos } = await appCdp.send(
-        "Target.getTargets",
-        {
-          filter: [
-            { type: "page" },
-            { type: "worker" },
-            { type: "shared_worker" },
-            { type: "service_worker" },
-          ],
-        },
-      );
-      networkState.initialTargetBaseline =
-        validateCdpInitialTargetBaseline(initialTargetInfos);
-      await configureAppSession(appCdp, networkState);
+      if (options.diagnoseFallbackImport) {
+        appCdp = await runFallbackImportDiagnosticStage(
+          fallbackDiagnosticProgress,
+          "connect",
+          () => CdpSession.connect(appBrowser.webSocketDebuggerUrl),
+        );
+        networkState.initialTargetBaseline =
+          await runFallbackImportDiagnosticStage(
+            fallbackDiagnosticProgress,
+            "baseline",
+            async () => {
+              const { targetInfos } = await appCdp.send(
+                "Target.getTargets",
+                {
+                  filter: [
+                    { type: "page" },
+                    { type: "worker" },
+                    { type: "shared_worker" },
+                    { type: "service_worker" },
+                  ],
+                },
+              );
+              return validateCdpInitialTargetBaseline(targetInfos);
+            },
+          );
+        await runFallbackImportDiagnosticStage(
+          fallbackDiagnosticProgress,
+          "configure",
+          () => configureAppSession(appCdp, networkState),
+        );
+      } else {
+        appCdp = await CdpSession.connect(appBrowser.webSocketDebuggerUrl);
+        const { targetInfos: initialTargetInfos } = await appCdp.send(
+          "Target.getTargets",
+          {
+            filter: [
+              { type: "page" },
+              { type: "worker" },
+              { type: "shared_worker" },
+              { type: "service_worker" },
+            ],
+          },
+        );
+        networkState.initialTargetBaseline =
+          validateCdpInitialTargetBaseline(initialTargetInfos);
+        await configureAppSession(appCdp, networkState);
+      }
       const targetPages = new Map();
       if (options.diagnoseFallbackImport) {
         networkState.phase = "fallback-diagnostic-setup";
-        fallbackDiagnosticSetup = await collectPersistedFallbackDiagnosticSetup(
+        await collectPersistedFallbackDiagnosticSetup(
           appCdp,
           server.appUrl,
           options.fixture,
+          fallbackDiagnosticProgress,
+          fallbackDiagnosticSetup,
         );
-        await waitForCdpNetworkFixedPoint(
-          networkState,
-          server.appUrl,
-          "fallback-diagnostic-setup",
+        await runFallbackImportDiagnosticStage(
+          fallbackDiagnosticProgress,
+          "setup-fixed-point",
+          () => waitForCdpNetworkFixedPoint(
+            networkState,
+            server.appUrl,
+            "fallback-diagnostic-setup",
+          ),
         );
+        fallbackDiagnosticSetup.networkFixedPointReached = true;
         networkState.phase = FALLBACK_IMPORT_DIAGNOSTIC_LABEL;
         fallbackDiagnosticCapture = await collectFallbackImportDiagnostic(
           appCdp,
           server.appUrl,
           options.fixture,
           fixture,
-          options.outputDirectory,
           networkState,
+          fallbackDiagnosticProgress,
         );
-        try {
-          const fixedPoint = await waitForCdpNetworkFixedPoint(
-            networkState,
-            server.appUrl,
-            FALLBACK_IMPORT_DIAGNOSTIC_LABEL,
+        fallbackDiagnosticNetwork = await runFallbackImportDiagnosticStage(
+          fallbackDiagnosticProgress,
+          "fallback-network",
+          async () => {
+            try {
+              const fixedPoint = await waitForCdpNetworkFixedPoint(
+                networkState,
+                server.appUrl,
+                FALLBACK_IMPORT_DIAGNOSTIC_LABEL,
+              );
+              return fixedPoint.diagnostic;
+            } catch {
+              return networkState.fixedPointDiagnostics.at(-1) ?? null;
+            }
+          },
+        );
+        fallbackDiagnosticCapture.screenshot =
+          await runFallbackImportDiagnosticStage(
+            fallbackDiagnosticProgress,
+            "fallback-screenshot",
+            () => writeScreenshot(
+              appCdp,
+              options.outputDirectory,
+              FALLBACK_IMPORT_DIAGNOSTIC_SCREENSHOT,
+            ),
           );
-          fallbackDiagnosticNetwork = fixedPoint.diagnostic;
-        } catch {
-          fallbackDiagnosticNetwork =
-            networkState.fixedPointDiagnostics.at(-1) ?? null;
-        }
       } else {
         for (const configuration of PDF_SHARPNESS_MATRIX) {
           networkState.phase = configuration.id;
@@ -6565,6 +6839,7 @@ async function run(options) {
     const report = buildFallbackImportDiagnosticReport({
       build: evidence.build,
       capture: fallbackDiagnosticCapture,
+      diagnosticProgress: fallbackDiagnosticProgress,
       fixture,
       networkDiagnostic: fallbackDiagnosticNetwork,
       outputDirectory: options.outputDirectory,

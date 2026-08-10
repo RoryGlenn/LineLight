@@ -285,7 +285,10 @@ separate bounded fallback-import diagnostic persists the exact fixture once,
 reloads the same disposable profile under forced fallback, immediately
 re-imports, and binds success to that new import's worker/model/fallback chain,
 sanitized CDP lifecycle, external screenshot, and complete teardown; it is a
-noncanonical diagnostic and cannot satisfy acceptance.
+noncanonical diagnostic and cannot satisfy acceptance. Its exact before/after
+stage sequence and stage-derived fixed failure category retain partial,
+privacy-safe setup hash/count/condition evidence without serializing raw
+exceptions.
 The independently testable acceptance contract lives in
 [`scripts/pdf-sharpness-evidence.mjs`](../scripts/pdf-sharpness-evidence.mjs),
 its fast and opt-in browser gates live in

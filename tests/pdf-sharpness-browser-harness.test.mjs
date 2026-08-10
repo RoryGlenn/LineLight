@@ -18,7 +18,10 @@ import {
   validatePdfSharpnessEvidence,
 } from "../scripts/pdf-sharpness-evidence.mjs";
 import {
+  FALLBACK_IMPORT_DIAGNOSTIC_STAGES,
+  FALLBACK_IMPORT_DIAGNOSTIC_STEPS,
   analyzeReferencePixels,
+  asyncBrowserExpression,
   advanceCdpFixedPointStability,
   buildCdpNetworkFixedPointDiagnostic,
   buildFallbackImportDiagnosticReport,
@@ -26,6 +29,7 @@ import {
   classifyCdpDiagnosticUrl,
   classifyPdfRasterTransition,
   completeCdpNetworkRequest,
+  createFallbackImportDiagnosticProgress,
   decodePngScreenshot,
   dispatchPausedServiceWorkerCommands,
   dispatchToCdpSession,
@@ -37,6 +41,7 @@ import {
   isCdpTargetBootstrapRequest,
   isCdpTargetSetupComplete,
   matchesPdfFallbackInjection,
+  markFallbackImportDiagnosticStage,
   planPdfVirtualScroll,
   probePdfBitmapBudget,
   recordCdpNetworkRequest,
@@ -49,6 +54,8 @@ import {
   settleCdpCommandDispatches,
   summarizePdfModelCompletion,
   summarizeFallbackImportLifecycle,
+  summarizeFallbackDiagnosticProgress,
+  summarizeFallbackDiagnosticSetup,
   validateCdpInitialTargetBaseline,
 } from
   "../scripts/run-pdf-sharpness-browser-regression.mjs";
@@ -66,6 +73,10 @@ const REVISION = "issue-68-revision";
 const FAILED_ABORT_SIGNAL_ID = 1;
 const RETRY_ABORT_SIGNAL_ID = 2;
 const CANCELLATION_ABORT_SIGNAL_ID = 3;
+const passingFallbackDiagnosticProgress = () => ({
+  history: [...FALLBACK_IMPORT_DIAGNOSTIC_STAGES],
+  terminalStage: FALLBACK_IMPORT_DIAGNOSTIC_STAGES.at(-1),
+});
 const completedCdpTargetSetup = ({
   cdpIdStart = 1,
   serviceWorker = false,
@@ -702,6 +713,7 @@ test("builds a noncanonical privacy-safe fallback import diagnostic", () => {
   const input = {
     build: { localManifest: { deploymentId: DEPLOYMENT } },
     capture,
+    diagnosticProgress: passingFallbackDiagnosticProgress(),
     fixture: {
       bytes: PUBLIC_PDF_FIXTURE_BYTES,
       path: PUBLIC_PDF_FIXTURE,
@@ -709,16 +721,22 @@ test("builds a noncanonical privacy-safe fallback import diagnostic", () => {
     },
     networkDiagnostic: passingFallbackNetworkDiagnostic(),
     outputDirectory,
+    recordedAt: "2026-08-10T00:00:00.000Z",
     runnerFailure: null,
     setup: {
       completeEventCount: 1,
       documentIdentityHash: setupDocumentIdentity,
+      fileSelected: true,
       library: capture.libraryBefore,
+      librarySnapshotCompleted: true,
+      navigationCompleted: true,
+      networkFixedPointReached: true,
       pageEventCount: 6,
       source: {
         bytes: PUBLIC_PDF_FIXTURE_BYTES,
         sha256: PUBLIC_PDF_FIXTURE_SHA256,
       },
+      sourceSelectionCount: 1,
     },
     source: { commit: COMMIT, tree: TREE },
     teardown: cleanDiagnosticTeardown(),
@@ -728,8 +746,11 @@ test("builds a noncanonical privacy-safe fallback import diagnostic", () => {
   assert.equal(report.completed, true);
   assert.equal(report.importCompleted, true);
   assert.equal(report.networkSettled, true);
+  assert.equal(report.execution.sequenceComplete, true);
+  assert.equal(report.execution.errorCategory, "none");
   assert.equal(report.mode, "fallback-import-lifecycle");
   assert.deepEqual(report.failures, []);
+  assert.equal(report.setup.bound, true);
   assert.equal(
     report.artifacts.screenshots[0].path,
     "linelight-fallback-import-diagnostic.png",
@@ -752,6 +773,10 @@ test("builds a noncanonical privacy-safe fallback import diagnostic", () => {
   const mutations = [
     (value) => { value.fixture.bytes -= 1; },
     (value) => { value.setup.pageEventCount = 5; },
+    (value) => { value.diagnosticProgress.history.pop(); },
+    (value) => {
+      value.diagnosticProgress.history[4] = "fallback-chain-started";
+    },
     (value) => { value.capture.snapshot.fallback.signalAt = null; },
     (value) => { value.capture.screenshot.path = "substituted.png"; },
     (value) => { value.networkDiagnostic.counts.inflightRequestCount = 1; },
@@ -763,6 +788,110 @@ test("builds a noncanonical privacy-safe fallback import diagnostic", () => {
     const failed = buildFallbackImportDiagnosticReport(value);
     assert.ok(failed.failures.length > 0);
   }
+
+  const firstRawFailure = structuredClone(input);
+  firstRawFailure.runnerFailure = new Error(
+    "private /tmp/first-profile?secret=alpha",
+  );
+  firstRawFailure.diagnosticProgress.history =
+    FALLBACK_IMPORT_DIAGNOSTIC_STAGES.slice(0, 7);
+  firstRawFailure.diagnosticProgress.terminalStage =
+    FALLBACK_IMPORT_DIAGNOSTIC_STAGES[6];
+  const secondRawFailure = structuredClone(firstRawFailure);
+  secondRawFailure.runnerFailure = new Error(
+    "different private document text https://example.test/?secret=beta",
+  );
+  const firstFailureBytes = JSON.stringify(
+    buildFallbackImportDiagnosticReport(firstRawFailure),
+  );
+  const secondFailureBytes = JSON.stringify(
+    buildFallbackImportDiagnosticReport(secondRawFailure),
+  );
+  assert.equal(firstFailureBytes, secondFailureBytes);
+  assert.doesNotMatch(
+    firstFailureBytes,
+    /first-profile|secret|private document|example\.test/u,
+  );
+});
+
+test("uses executable async browser evaluation for private library snapshots", async () => {
+  const expression = asyncBrowserExpression(
+    "return await Promise.resolve({ available: true });",
+  );
+  const execute = new Function(`return ${expression};`);
+  assert.deepEqual(await execute(), { available: true });
+  const source = await readFile(
+    "scripts/run-pdf-sharpness-browser-regression.mjs",
+    "utf8",
+  );
+  assert.match(
+    source,
+    /readPrivateLibraryDiagnostic[\s\S]*asyncBrowserExpression\(`/u,
+  );
+});
+
+test("tracks exact fallback diagnostic stages and preserves partial setup facts", () => {
+  const progress = createFallbackImportDiagnosticProgress();
+  for (const stage of FALLBACK_IMPORT_DIAGNOSTIC_STAGES) {
+    assert.equal(markFallbackImportDiagnosticStage(progress, stage), stage);
+  }
+  assert.deepEqual(
+    summarizeFallbackDiagnosticProgress(progress, null),
+    {
+      errorCategory: "none",
+      history: [...FALLBACK_IMPORT_DIAGNOSTIC_STAGES],
+      sequenceComplete: true,
+      terminalStage: FALLBACK_IMPORT_DIAGNOSTIC_STAGES.at(-1),
+    },
+  );
+  assert.throws(
+    () => markFallbackImportDiagnosticStage(
+      createFallbackImportDiagnosticProgress(),
+      "baseline-started",
+    ),
+    /stage ordering is invalid/u,
+  );
+
+  const partial = summarizeFallbackDiagnosticSetup({
+    completeEventCount: 1,
+    documentIdentityHash: "d".repeat(64),
+    fileSelected: true,
+    library: {
+      activeDocumentIdentityHash: "private-local-id",
+      activeDocumentPresent: true,
+      available: true,
+      documentCount: 1,
+      entryCount: 1,
+      pageCount: 6,
+      pdfEntryCount: 1,
+      sourceCount: 1,
+    },
+    librarySnapshotCompleted: true,
+    navigationCompleted: true,
+    networkFixedPointReached: false,
+    pageEventCount: 6,
+    source: {
+      bytes: PUBLIC_PDF_FIXTURE_BYTES,
+      sha256: "e".repeat(64),
+    },
+    sourceSelectionCount: 1,
+  });
+  assert.equal(partial.bound, false);
+  assert.equal(partial.completeEventCount, 1);
+  assert.equal(partial.pageEventCount, 6);
+  assert.equal(partial.source.bytes, PUBLIC_PDF_FIXTURE_BYTES);
+  assert.equal(partial.source.sha256, "e".repeat(64));
+  assert.equal(partial.documentIdentityHash, "d".repeat(64));
+  assert.equal(partial.library.activeDocumentIdentityHash, null);
+  assert.deepEqual(partial.conditions, {
+    fileSelected: true,
+    libraryBound: false,
+    librarySnapshotCompleted: true,
+    modelBound: true,
+    navigationCompleted: true,
+    networkFixedPointReached: false,
+    sourceBound: false,
+  });
 });
 
 function passingEvidence() {
@@ -4326,6 +4455,13 @@ test("keeps the fallback-import diagnostic bounded and noncanonical", async () =
   );
 
   const source = await readFile(runner, "utf8");
+  for (const step of FALLBACK_IMPORT_DIAGNOSTIC_STEPS) {
+    assert.equal(
+      source.match(new RegExp(`"${step}"`, "gu"))?.length,
+      2,
+      `${step} must appear once in the fixed enum and once at its operation`,
+    );
+  }
   assert.match(
     source,
     /if \(options\.diagnoseFallbackImport\) \{[\s\S]*collectPersistedFallbackDiagnosticSetup[\s\S]*collectFallbackImportDiagnostic/u,

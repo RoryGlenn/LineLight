@@ -64,7 +64,13 @@ opaque local-library identities, fixed DOM/notice/error categories, wrapped
 worker lifecycle metadata, sanitized CDP target/network state, one bound
 external screenshot, and fail-closed owned teardown. It never stores document
 text, raw local document identities, worker payloads, URL paths or queries, raw
-errors, or profile paths.
+errors, or profile paths. The report also records a fixed before/after stage for
+each bounded connect, baseline, configuration, setup, fallback import, network,
+and screenshot step. A failure exposes only its fixed stage-derived category;
+raw exception text cannot affect the report. Setup evidence is retained as
+privacy-safe hashes, counts, and independently derived source/model/library
+condition booleans even when a later setup step fails, rather than being
+discarded as one null result.
 
 The runner always makes a fresh production build, serves that exact artifact on
 an owned loopback Wrangler process, and opens visible Brave windows. It refuses
