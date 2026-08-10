@@ -4737,15 +4737,21 @@ function appMatrixRuntimeTargetAncestryBound(targets) {
   const targetBySession = new Map(
     targets.map((target) => [target.sessionId, target]),
   );
-  return targets.every((target) => {
+  const targetIndexBySession = new Map(
+    targets.map((target, index) => [target.sessionId, index]),
+  );
+  return targets.every((target, targetIndex) => {
     const ancestry = [];
     const visited = new Set([target.sessionId]);
+    let childIndex = targetIndex;
     let parentSessionId = target?.parentSessionId;
     while (parentSessionId !== null) {
       if (visited.has(parentSessionId)) return false;
       const parent = targetBySession.get(parentSessionId);
-      if (!parent) return false;
+      const parentIndex = targetIndexBySession.get(parentSessionId);
+      if (!parent || parentIndex >= childIndex) return false;
       visited.add(parentSessionId);
+      childIndex = parentIndex;
       ancestry.push({
         phase: parent.phase,
         sessionId: parent.sessionId,

@@ -8671,6 +8671,19 @@ test("binds all six app-matrix runtime rows and the exact sixth timeout", () => 
       diagnostic.targets[0].parentSessionId = diagnostic.targets[0].sessionId;
       diagnostic.targets[0].ancestry = [];
     }],
+    ["parent after child", (diagnostic) => {
+      const childIndex = diagnostic.targets.findIndex((target) =>
+        target.phase === diagnostic.label &&
+        target.urlClass === "pdf-parser-worker"
+      );
+      const parentIndex = diagnostic.targets.findIndex((target) =>
+        target.sessionId === diagnostic.targets[childIndex].parentSessionId
+      );
+      [diagnostic.targets[parentIndex], diagnostic.targets[childIndex]] = [
+        diagnostic.targets[childIndex],
+        diagnostic.targets[parentIndex],
+      ];
+    }],
   ];
   for (const [label, mutate] of completedMetadataMutations) {
     const changed = structuredClone(completedInput);
@@ -8974,6 +8987,19 @@ test("retains a privacy-safe fixed-point timeout on the failed matrix row", () =
           urlClass: documentTarget.urlClass,
         }],
       );
+    }],
+    ["parent after child", (diagnostic) => {
+      const childIndex = diagnostic.targets.findIndex((target) =>
+        target.phase === diagnostic.label &&
+        target.urlClass === "pdf-parser-worker"
+      );
+      const parentIndex = diagnostic.targets.findIndex((target) =>
+        target.sessionId === diagnostic.targets[childIndex].parentSessionId
+      );
+      [diagnostic.targets[parentIndex], diagnostic.targets[childIndex]] = [
+        diagnostic.targets[childIndex],
+        diagnostic.targets[parentIndex],
+      ];
     }],
   ];
   for (const [label, mutate] of firstRowAncestryMutations) {
@@ -10015,6 +10041,20 @@ test("retains a privacy-safe fixed-point timeout on the failed matrix row", () =
     ["timeout prior target order", (value) => {
       const targets = timeoutDiagnostic(value).targets;
       [targets[0], targets[1]] = [targets[1], targets[0]];
+    }],
+    ["timeout current parent after child", (value) => {
+      const diagnostic = timeoutDiagnostic(value);
+      const childIndex = diagnostic.targets.findIndex((target) =>
+        target.phase === diagnostic.label &&
+        target.urlClass === "pdf-parser-worker"
+      );
+      const parentIndex = diagnostic.targets.findIndex((target) =>
+        target.sessionId === diagnostic.targets[childIndex].parentSessionId
+      );
+      [diagnostic.targets[parentIndex], diagnostic.targets[childIndex]] = [
+        diagnostic.targets[childIndex],
+        diagnostic.targets[parentIndex],
+      ];
     }],
     ["timeout prior settlement order", (value) => {
       const settlements = timeoutDiagnostic(value).targetBootstrapSettlements;
