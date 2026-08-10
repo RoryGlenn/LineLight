@@ -1,3 +1,7 @@
+import { PDF_RASTER_MAX_PIXELS } from "./pdf-raster-scale.mjs";
+
+export const PDF_BITMAP_CACHE_MAX_PIXELS = PDF_RASTER_MAX_PIXELS * 2;
+
 /**
  * A paged external store keeps large text-content records and raster handles
  * outside React state. Consumers subscribe to one numeric revision and select
@@ -13,6 +17,7 @@ function scheduleStoreNotification(callback) {
 
 export function createPdfPageStore({
   maxBitmaps = 8,
+  maxBitmapPixels = PDF_BITMAP_CACHE_MAX_PIXELS,
   scheduleNotification = scheduleStoreNotification,
 } = {}) {
   /** @type {Map<number, any>} */
@@ -52,9 +57,18 @@ export function createPdfPageStore({
   };
 
   const evictBitmaps = () => {
-    const limit = Math.max(1, Math.trunc(maxBitmaps));
+    const countLimit = Math.max(1, Math.trunc(maxBitmaps));
+    const pixelLimit = Math.max(1, Math.trunc(maxBitmapPixels));
+    const totalPixels = () =>
+      [...bitmaps.values()].reduce(
+        (sum, bitmap) =>
+          sum +
+          Math.max(0, Number(bitmap?.width) || 0) *
+            Math.max(0, Number(bitmap?.height) || 0),
+        0,
+      );
     let changed = false;
-    while (bitmaps.size > limit) {
+    while (bitmaps.size > countLimit || totalPixels() > pixelLimit) {
       const oldestUnpinned = [...bitmaps.keys()].find(
         (pageNumber) => !bitmapPins.has(pageNumber),
       );
@@ -81,11 +95,21 @@ export function createPdfPageStore({
       return true;
     },
     setBitmap(pageNumber, bitmap) {
-      bitmaps.get(pageNumber)?.bitmap?.close?.();
+      const current = bitmaps.get(pageNumber);
+      if (
+        current &&
+        Number(current.width) >= Number(bitmap?.width) &&
+        Number(current.height) >= Number(bitmap?.height)
+      ) {
+        bitmap?.bitmap?.close?.();
+        return false;
+      }
+      current?.bitmap?.close?.();
       bitmaps.delete(pageNumber);
       bitmaps.set(pageNumber, bitmap);
       evictBitmaps();
       notify();
+      return bitmaps.has(pageNumber);
     },
     pinBitmap(pageNumber) {
       bitmapPins.set(pageNumber, (bitmapPins.get(pageNumber) ?? 0) + 1);
@@ -101,6 +125,18 @@ export function createPdfPageStore({
     },
     getBitmap(pageNumber) {
       return bitmaps.get(pageNumber);
+    },
+    getBitmapStats() {
+      return {
+        count: bitmaps.size,
+        pixels: [...bitmaps.values()].reduce(
+          (sum, bitmap) =>
+            sum +
+            Math.max(0, Number(bitmap?.width) || 0) *
+              Math.max(0, Number(bitmap?.height) || 0),
+          0,
+        ),
+      };
     },
     getPage(pageNumber) {
       return pages.get(pageNumber);

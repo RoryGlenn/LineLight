@@ -129,9 +129,16 @@ gating, and truthful terminal outcomes; and
 [`app/pdf-raster-scheduler.mjs`](../app/pdf-raster-scheduler.mjs) owns
 single-flight raster serialization.
 [`app/pdf-document-model.mjs`](../app/pdf-document-model.mjs) builds page-local
-semantic chunks that preserve the shared global indices,
+semantic chunks that preserve the shared global indices and reconciles each
+page's current worker-queue priority without retaining stale visibility; the
+first fallback signal closes that revision's worker raster queue immediately,
+[`app/pdf-raster-scale.mjs`](../app/pdf-raster-scale.mjs) maps responsive page
+geometry, device-pixel ratio, and pinch zoom to bounded physical-pixel raster
+targets and the visible/adjacent preview policy,
+[`app/pdf-fallback-scheduler.mjs`](../app/pdf-fallback-scheduler.mjs) serializes
+and cancels the document-scoped main-thread fallback queue,
 [`app/pdf-page-store.mjs`](../app/pdf-page-store.mjs) is the paged external UI
-store and bounded bitmap cache, and
+store and count-plus-pixel-budgeted bitmap cache, and
 [`app/pdf-progressive-navigation.mjs`](../app/pdf-progressive-navigation.mjs)
 keeps late progress, outline, and bookmark destinations pending until their
 chunk exists. [`app/pdf-terminal-reconciliation.mjs`](../app/pdf-terminal-reconciliation.mjs)
@@ -146,8 +153,11 @@ the persisted PDF text-model version/migration contract. Legacy PDF records are
 rebuilt locally from their stored bytes; no network source or manual re-import
 is used.
 [`app/pdf-page-view.tsx`](../app/pdf-page-view.tsx) owns true range-virtualized
-canvas pages, bitmap composition, the measured PDF.js text/highlight layers,
-and the visible-page fallback. [`app/pdf-outline.mjs`](../app/pdf-outline.mjs)
+canvas pages, progressive preview-to-sharp bitmap upgrades across responsive
+size, DPR, and visual-viewport changes, releases raster backing outside the
+actual viewport while retaining measured text/highlight shells, and owns the
+visible/adjacent/cancel worker state plus the visible-page fallback.
+[`app/pdf-outline.mjs`](../app/pdf-outline.mjs)
 maps PDF destinations to document token indices.
 [`app/reader-virtualization.mjs`](../app/reader-virtualization.mjs) selects the
 bounded page and paragraph render windows and notifies only the PDF or Focus
@@ -172,9 +182,10 @@ page one commits and publishes its semantic model before initial rasterization
 or background extraction. Ready documents stream page one directly and then
 bounded batches, and v3 documents migrate lazily while their recoverable record
 remains intact. The main thread retains the progressive semantic reader model,
-bounded page selectors, and at most eight worker bitmaps. Browser evidence uses
-actual worker bitmap ordering as the page-priority gate; transparent measured
-overlay and background-shell timings remain diagnostic.
+bounded page selectors, and worker bitmaps bounded by both count and total
+physical pixels, with temporary overflow only for pinned visible pages. Browser
+evidence uses actual worker bitmap ordering as the page-priority gate;
+transparent measured overlay and background-shell timings remain diagnostic.
 
 **Verification:** Parser and ordering behavior is covered by
 [`tests/epub-parser.test.mjs`](../tests/epub-parser.test.mjs) and
@@ -182,11 +193,20 @@ overlay and background-shell timings remain diagnostic.
 selection is covered by
 [`tests/reader-virtualization.test.mjs`](../tests/reader-virtualization.test.mjs).
 Incremental semantic equivalence, worker protocol ordering, parser readiness,
-render coalescing, cancellation, stale bitmap disposal, and confirmed terminal
-outcomes are covered by
+current-state queue reprioritization, active cancellation, stale bitmap
+disposal, and confirmed terminal outcomes are covered by
 [`tests/pdf-document-model.test.mjs`](../tests/pdf-document-model.test.mjs).
 Bounded external-store selectors and bitmap disposal are covered by
 [`tests/pdf-page-store.test.mjs`](../tests/pdf-page-store.test.mjs); late
+lower-resolution rejection is covered there, while responsive physical-pixel
+targets, zoom handling, integer canvas caps, and visible/adjacent request policy
+are covered by
+[`tests/pdf-raster-scale.test.mjs`](../tests/pdf-raster-scale.test.mjs).
+Fallback serialization and cancellation are covered by
+[`tests/pdf-fallback-scheduler.test.mjs`](../tests/pdf-fallback-scheduler.test.mjs),
+and [`tests/pdf-raster-lifecycle.test.mjs`](../tests/pdf-raster-lifecycle.test.mjs)
+locks the viewport ownership, document-revision reset, retry, and worker recovery
+integration points. Late
 progress/outline/bookmark targets and explicit playback races are covered by
 [`tests/pdf-progressive-navigation.test.mjs`](../tests/pdf-progressive-navigation.test.mjs);
 and generation-safe terminal UI reconciliation is covered by
@@ -232,6 +252,21 @@ records first-page ordering, Window Long Tasks, control latency, attached worker
 network traffic, resumable cancellation/replacement state, screenshots, and a
 DevTools trace. Review records live in
 [`docs/evidence/issue-56/`](evidence/issue-56/).
+[`scripts/run-pdf-sharpness-browser-regression.mjs`](../scripts/run-pdf-sharpness-browser-regression.mjs)
+builds and serves one clean source commit, then uses headed Brave to pair the
+same local PDF page in the browser viewer and LineLight across desktop DPR,
+effective browser-zoom metrics, mobile DPR, and visual-viewport pinch. It
+requires decoded reference pixels to prove a rendered page, and records
+preview-to-sharp backing targets, current viewport priority, bitmap/canvas
+budgets, offscreen release, identity-bound serialized fallback
+failure/retry/cancellation, measured narration alignment, Long Tasks,
+attached-worker network traffic, artifact hashes, and owned-process teardown.
+The independently testable acceptance contract lives in
+[`scripts/pdf-sharpness-evidence.mjs`](../scripts/pdf-sharpness-evidence.mjs),
+its fast and opt-in browser gates live in
+[`tests/pdf-sharpness-browser-harness.test.mjs`](../tests/pdf-sharpness-browser-harness.test.mjs),
+and review records belong in
+[`docs/evidence/issue-68/`](evidence/issue-68/).
 The packaged page is checked by
 [`tests/rendered-html.test.mjs`](../tests/rendered-html.test.mjs). PDF geometry,
 complex reading order, and highlight alignment require representative browser

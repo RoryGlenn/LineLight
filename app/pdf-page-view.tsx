@@ -19,9 +19,18 @@ import type {
   RenderTask,
 } from "pdfjs-dist";
 import type { StoredPdfPage } from "./pdf-document-types";
+import { createPdfFallbackScheduler } from "./pdf-fallback-scheduler.mjs";
 import { createPdfPageStore } from "./pdf-page-store.mjs";
+import {
+  constrainPdfRasterScale,
+  isPdfRasterSufficient,
+  pdfPageRasterDirectiveKey,
+  resolvePdfPageRasterDirective,
+  resolvePdfRasterTarget,
+} from "./pdf-raster-scale.mjs";
 import { mergePdfHighlightLineRects } from "./pdf-text-model.mjs";
 import {
+  distanceFromViewport,
   findPageIndexForWord,
   selectVirtualizedRanges,
 } from "./reader-virtualization.mjs";
@@ -61,6 +70,15 @@ type PdfBitmap = {
   width: number;
 };
 
+type PdfRasterTarget = {
+  capped: boolean;
+  height: number;
+  scale: number;
+  width: number;
+};
+
+type PdfFallbackScheduler = ReturnType<typeof createPdfFallbackScheduler>;
+
 type HighlightScope = "sentence" | "paragraph";
 type HighlightKind = HighlightScope;
 
@@ -77,7 +95,7 @@ type PdfPageViewProps = {
   requestRender: (
     pageNumber: number,
     scale: number,
-    options?: { visible?: boolean; distance?: number },
+    options?: { enabled?: boolean; visible?: boolean; distance?: number },
   ) => void;
   onSelectWord: (index: number) => void;
   onRenderError: (message: string) => void;
@@ -125,6 +143,21 @@ const PDF_RANGE_OVERSCAN = 2;
 const PDF_PAGE_GAP = 38;
 const PDF_PAGE_CHROME = 22;
 const PDF_DOM_MEASURE_BUDGET_MS = 8;
+const PDF_FALLBACK_RETRY_DELAY_MS = 250;
+const PDF_FALLBACK_MAX_ATTEMPTS = 2;
+
+function isPdfRenderCancellation(error: unknown) {
+  return (
+    error instanceof Error &&
+    ["AbortError", "RenderingCancelledException"].includes(error.name)
+  );
+}
+
+function throwIfPdfRenderAborted(signal: AbortSignal) {
+  if (signal.aborted) {
+    throw new DOMException("The PDF fallback render was cancelled.", "AbortError");
+  }
+}
 
 function relativeStyle(rectangle: {
   left: number;
@@ -515,9 +548,13 @@ function PdfMeasuredTextLayer({
 function useFallbackDocument(
   source: Blob | undefined,
   enabled: boolean,
+  documentKey: string,
   onRenderError: (message: string) => void,
 ) {
-  const [documentProxy, setDocumentProxy] = useState<PDFDocumentProxy | null>(null);
+  const [loaded, setLoaded] = useState<{
+    documentKey: string;
+    document: PDFDocumentProxy;
+  } | null>(null);
   useEffect(() => {
     if (!enabled || !source) return;
     let cancelled = false;
@@ -530,7 +567,7 @@ function useFallbackDocument(
         if (cancelled) return;
         loadingTask = pdfjs.getDocument({ data: bytes });
         const document = await loadingTask.promise;
-        if (!cancelled) setDocumentProxy(document);
+        if (!cancelled) setLoaded({ documentKey, document });
       } catch {
         if (!cancelled) {
           onRenderError(
@@ -542,16 +579,82 @@ function useFallbackDocument(
     void load();
     return () => {
       cancelled = true;
-      setDocumentProxy(null);
       void loadingTask?.destroy();
     };
-  }, [enabled, onRenderError, source]);
-  return documentProxy;
+  }, [documentKey, enabled, onRenderError, source]);
+  return enabled && source && loaded?.documentKey === documentKey
+    ? loaded.document
+    : null;
+}
+
+function usePdfRasterTarget(
+  canvasRef: React.RefObject<HTMLCanvasElement | null>,
+  page: PdfPageLayout,
+) {
+  const [target, setTarget] = useState<PdfRasterTarget | null>(null);
+
+  useLayoutEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    let resolutionQuery: MediaQueryList | undefined;
+    const visualViewport = window.visualViewport;
+    const refresh = () => {
+      const bounds = canvas.getBoundingClientRect();
+      if (bounds.width <= 0 || bounds.height <= 0) return;
+      const next = resolvePdfRasterTarget({
+        pageWidth: page.width,
+        pageHeight: page.height,
+        cssWidth: bounds.width,
+        cssHeight: bounds.height,
+        devicePixelRatio: window.devicePixelRatio || 1,
+        visualViewportScale: visualViewport?.scale ?? 1,
+      }) as PdfRasterTarget;
+      setTarget((current) =>
+        current &&
+        current.capped === next.capped &&
+        current.height === next.height &&
+        current.scale === next.scale &&
+        current.width === next.width
+          ? current
+          : next,
+      );
+    };
+    const bindResolutionQuery = () => {
+      resolutionQuery?.removeEventListener("change", handleResolutionChange);
+      resolutionQuery = window.matchMedia(
+        `(resolution: ${window.devicePixelRatio || 1}dppx)`,
+      );
+      resolutionQuery.addEventListener("change", handleResolutionChange);
+    };
+    function handleResolutionChange() {
+      bindResolutionQuery();
+      refresh();
+    }
+    const resizeObserver =
+      typeof ResizeObserver === "undefined"
+        ? undefined
+        : new ResizeObserver(refresh);
+    resizeObserver?.observe(canvas);
+    window.addEventListener("resize", refresh);
+    visualViewport?.addEventListener("resize", refresh);
+    bindResolutionQuery();
+    refresh();
+    return () => {
+      resizeObserver?.disconnect();
+      window.removeEventListener("resize", refresh);
+      visualViewport?.removeEventListener("resize", refresh);
+      resolutionQuery?.removeEventListener("change", handleResolutionChange);
+    };
+  }, [canvasRef, page.height, page.width]);
+
+  return target;
 }
 
 const PdfRenderedPage = memo(function PdfRenderedPage({
   bitmap,
+  distance,
   fallbackDocument,
+  fallbackScheduler,
   pageRecord,
   tokenSentences,
   tokenParagraphs,
@@ -559,11 +662,15 @@ const PdfRenderedPage = memo(function PdfRenderedPage({
   registerWord,
   requestRender,
   pinBitmap,
+  visible,
+  workerFallbackActive,
   onSelectWord,
   onRenderError,
 }: {
   bitmap?: PdfBitmap;
+  distance: number;
   fallbackDocument: PDFDocumentProxy | null;
+  fallbackScheduler: PdfFallbackScheduler;
   pageRecord: StoredPdfPage;
   tokenSentences: number[];
   tokenParagraphs: number[];
@@ -571,94 +678,290 @@ const PdfRenderedPage = memo(function PdfRenderedPage({
   registerWord: PdfPageViewProps["registerWord"];
   requestRender: PdfPageViewProps["requestRender"];
   pinBitmap: (pageNumber: number) => () => void;
+  visible: boolean;
+  workerFallbackActive: boolean;
   onSelectWord: PdfPageViewProps["onSelectWord"];
   onRenderError: PdfPageViewProps["onRenderError"];
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const requestedRef = useRef("");
-  const [isRendered, setIsRendered] = useState(false);
-
-  useEffect(
-    () => pinBitmap(pageRecord.pageNumber),
-    [pageRecord.pageNumber, pinBitmap],
+  const loadingRef = useRef<HTMLDivElement>(null);
+  const visibleRef = useRef(visible);
+  const requestRenderRef = useRef(requestRender);
+  const publishedDirectiveRef = useRef("");
+  const requestedScaleRef = useRef(0);
+  const fallbackRenderedRef = useRef({
+    height: 0,
+    targetKey: "",
+    width: 0,
+  });
+  const fallbackAttemptRef = useRef({ attempts: 0, targetKey: "" });
+  const [fallbackRetry, setFallbackRetry] = useState(0);
+  const rasterTarget = usePdfRasterTarget(canvasRef, pageRecord.layout);
+  const bitmapSatisfiesRasterTarget = Boolean(
+    rasterTarget && isPdfRasterSufficient(bitmap, rasterTarget),
   );
+  const targetKey = rasterTarget
+    ? `${rasterTarget.width}x${rasterTarget.height}@${rasterTarget.scale}`
+    : "";
+
+  useLayoutEffect(() => {
+    visibleRef.current = visible;
+  }, [visible]);
+
+  useLayoutEffect(() => {
+    requestRenderRef.current = requestRender;
+  }, [requestRender]);
 
   useEffect(() => {
+    if (!visible) return;
+    return pinBitmap(pageRecord.pageNumber);
+  }, [pageRecord.pageNumber, pinBitmap, visible]);
+
+  useLayoutEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas || !bitmap) return;
+    if (!canvas) return;
+    if (!visible) {
+      canvas.width = 0;
+      canvas.height = 0;
+      delete canvas.dataset.pdfRenderSource;
+      delete canvas.dataset.pdfRasterScale;
+      fallbackRenderedRef.current = { height: 0, targetKey: "", width: 0 };
+      return;
+    }
+    if (!bitmap) return;
+    if (
+      canvas.dataset.pdfRenderSource === "main-fallback" &&
+      canvas.width >= bitmap.width &&
+      canvas.height >= bitmap.height
+    ) {
+      return;
+    }
     const context = canvas.getContext("2d", { alpha: false });
     if (!context) return;
     canvas.width = bitmap.width;
     canvas.height = bitmap.height;
     context.drawImage(bitmap.bitmap, 0, 0);
     canvas.dataset.pdfRenderSource = "worker-bitmap";
-    requestedRef.current = "";
-    setIsRendered(true);
-    return () => {
+    canvas.dataset.pdfRasterScale = String(bitmap.scale);
+    if (loadingRef.current) loadingRef.current.style.display = "none";
+  }, [bitmap, visible]);
+
+  useLayoutEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    if (!visible || !rasterTarget) {
+      delete canvas.dataset.pdfRasterTargetScale;
+      delete canvas.dataset.pdfRasterTargetWidth;
+      delete canvas.dataset.pdfRasterTargetHeight;
+      delete canvas.dataset.pdfRasterCapped;
+      return;
+    }
+    canvas.dataset.pdfRasterTargetScale = String(rasterTarget.scale);
+    canvas.dataset.pdfRasterTargetWidth = String(rasterTarget.width);
+    canvas.dataset.pdfRasterTargetHeight = String(rasterTarget.height);
+    canvas.dataset.pdfRasterCapped = String(rasterTarget.capped);
+  }, [rasterTarget, visible]);
+
+  useEffect(
+    () => () => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
       delete canvas.dataset.pdfRenderSource;
+      delete canvas.dataset.pdfRasterScale;
+      delete canvas.dataset.pdfRasterTargetScale;
+      delete canvas.dataset.pdfRasterTargetWidth;
+      delete canvas.dataset.pdfRasterTargetHeight;
+      delete canvas.dataset.pdfRasterCapped;
       canvas.width = 0;
       canvas.height = 0;
-    };
-  }, [bitmap]);
+    },
+    [],
+  );
+
+  useEffect(
+    () => () => {
+      requestRenderRef.current(pageRecord.pageNumber, 0, {
+        enabled: false,
+        visible: false,
+        distance: Number.MAX_SAFE_INTEGER,
+      });
+    },
+    [pageRecord.pageNumber],
+  );
 
   useEffect(() => {
-    if (bitmap || fallbackDocument) return;
-    const scale = Math.min(2, Math.max(1.25, window.devicePixelRatio || 1));
-    const key = `${pageRecord.pageNumber}:${scale}`;
-    if (requestedRef.current === key) return;
-    requestedRef.current = key;
-    requestRender(pageRecord.pageNumber, scale, { visible: true, distance: 0 });
-  }, [bitmap, fallbackDocument, pageRecord.pageNumber, requestRender]);
+    if (bitmap && Number(bitmap.scale) >= requestedScaleRef.current) {
+      requestedScaleRef.current = 0;
+    }
+    const directive = resolvePdfPageRasterDirective({
+      bitmap,
+      visible,
+      distance,
+      fallbackActive: workerFallbackActive,
+      pageWidth: pageRecord.layout.width,
+      pageHeight: pageRecord.layout.height,
+      target: rasterTarget,
+    });
+    if (!directive) return;
+    const directiveKey = pdfPageRasterDirectiveKey(directive);
+    if (publishedDirectiveRef.current === directiveKey) return;
+    publishedDirectiveRef.current = directiveKey;
+    requestedScaleRef.current = directive.enabled ? directive.scale : 0;
+    requestRender(pageRecord.pageNumber, directive.scale, {
+      enabled: directive.enabled,
+      visible: directive.visible,
+      distance: directive.distance,
+    });
+  }, [
+    bitmap,
+    distance,
+    pageRecord.layout.height,
+    pageRecord.layout.width,
+    pageRecord.pageNumber,
+    rasterTarget,
+    requestRender,
+    visible,
+    workerFallbackActive,
+  ]);
 
   useEffect(() => {
-    if (bitmap || !fallbackDocument) return;
+    if (!visible) {
+      fallbackAttemptRef.current = { attempts: 0, targetKey: "" };
+      return;
+    }
+    if (!rasterTarget || !fallbackDocument) return;
+    if (
+      bitmapSatisfiesRasterTarget ||
+      fallbackRenderedRef.current.targetKey === targetKey
+    ) {
+      return;
+    }
+    if (fallbackAttemptRef.current.targetKey !== targetKey) {
+      fallbackAttemptRef.current = { attempts: 0, targetKey };
+    }
+    const attempt = fallbackAttemptRef.current.attempts + 1;
+    fallbackAttemptRef.current = { attempts: attempt, targetKey };
+
     let cancelled = false;
-    let pageProxy: PDFPageProxy | undefined;
-    let renderTask: RenderTask | undefined;
-    const canvas = canvasRef.current;
-    const render = async () => {
-      try {
-        pageProxy = await fallbackDocument.getPage(pageRecord.pageNumber);
-        if (cancelled || !canvas) return;
-        const scale = Math.min(2, Math.max(1.25, window.devicePixelRatio || 1));
-        const viewport = pageProxy.getViewport({ scale });
-        const context = canvas.getContext("2d", { alpha: false });
-        if (!context) return;
-        canvas.width = Math.ceil(viewport.width);
-        canvas.height = Math.ceil(viewport.height);
-        renderTask = pageProxy.render({ canvas, canvasContext: context, viewport });
-        renderTask.onContinue = (continueRendering: () => void) => {
-          requestAnimationFrame(continueRendering);
-        };
-        await renderTask.promise;
-        if (!cancelled) {
-          canvas.dataset.pdfRenderSource = "main-fallback";
-          setIsRendered(true);
+    let retryTimeout: number | undefined;
+    const visibleCanvas = canvasRef.current;
+    if (!visibleCanvas) return;
+    const ticket = fallbackScheduler.schedule({
+      key: `${pageRecord.documentId}:${pageRecord.revision}:${pageRecord.pageNumber}`,
+      visible: true,
+      distance,
+      async run(signal: AbortSignal) {
+        let pageProxy: PDFPageProxy | undefined;
+        let renderTask: RenderTask | undefined;
+        let stagingCanvas: HTMLCanvasElement | undefined;
+        const cancelRender = () => renderTask?.cancel();
+        signal.addEventListener("abort", cancelRender);
+        try {
+          throwIfPdfRenderAborted(signal);
+          pageProxy = await fallbackDocument.getPage(pageRecord.pageNumber);
+          throwIfPdfRenderAborted(signal);
+          const baseViewport = pageProxy.getViewport({ scale: 1 });
+          const safeTarget = constrainPdfRasterScale({
+            pageWidth: baseViewport.width,
+            pageHeight: baseViewport.height,
+            scale: rasterTarget.scale,
+          });
+          const viewport = pageProxy.getViewport({ scale: safeTarget.scale });
+          stagingCanvas = document.createElement("canvas");
+          stagingCanvas.width = Math.ceil(viewport.width);
+          stagingCanvas.height = Math.ceil(viewport.height);
+          const context = stagingCanvas.getContext("2d", { alpha: false });
+          if (!context) {
+            throw new Error("The PDF fallback canvas could not be created.");
+          }
+          renderTask = pageProxy.render({
+            canvas: stagingCanvas,
+            canvasContext: context,
+            viewport,
+          });
+          renderTask.onContinue = (continueRendering: () => void) => {
+            if (signal.aborted) renderTask?.cancel();
+            else requestAnimationFrame(continueRendering);
+          };
+          await renderTask.promise;
+          throwIfPdfRenderAborted(signal);
+          return { canvas: stagingCanvas, scale: safeTarget.scale };
+        } catch (error) {
+          if (stagingCanvas) {
+            stagingCanvas.width = 0;
+            stagingCanvas.height = 0;
+          }
+          throw error;
+        } finally {
+          signal.removeEventListener("abort", cancelRender);
+          pageProxy?.cleanup();
         }
-      } catch (error) {
-        if (
-          !cancelled &&
-          (!(error instanceof Error) ||
-            error.name !== "RenderingCancelledException")
-        ) {
-          onRenderError(
-            "The original PDF page could not be drawn. Focus view is still available.",
-          );
-        }
+      },
+    });
+
+    const handleFallbackFailure = (error: unknown) => {
+      if (cancelled || isPdfRenderCancellation(error)) return;
+      if (attempt < PDF_FALLBACK_MAX_ATTEMPTS) {
+        retryTimeout = window.setTimeout(
+          () => setFallbackRetry((value) => value + 1),
+          PDF_FALLBACK_RETRY_DELAY_MS,
+        );
+        return;
       }
+      onRenderError(
+        "The original PDF page could not be drawn after a retry. Focus view is still available.",
+      );
     };
-    void render();
+
+    void ticket.promise.then(
+      ({ canvas: stagingCanvas, scale }: { canvas: HTMLCanvasElement; scale: number }) => {
+        try {
+          if (cancelled || !visibleRef.current) return;
+          const visibleContext = visibleCanvas.getContext("2d", { alpha: false });
+          if (!visibleContext) {
+            throw new Error("The visible PDF canvas could not be created.");
+          }
+          visibleCanvas.width = stagingCanvas.width;
+          visibleCanvas.height = stagingCanvas.height;
+          visibleContext.drawImage(stagingCanvas, 0, 0);
+          fallbackRenderedRef.current = {
+            height: stagingCanvas.height,
+            targetKey,
+            width: stagingCanvas.width,
+          };
+          fallbackAttemptRef.current = { attempts: 0, targetKey };
+          visibleCanvas.dataset.pdfRenderSource = "main-fallback";
+          visibleCanvas.dataset.pdfRasterScale = String(scale);
+          if (loadingRef.current) loadingRef.current.style.display = "none";
+        } catch (error) {
+          handleFallbackFailure(error);
+        } finally {
+          stagingCanvas.width = 0;
+          stagingCanvas.height = 0;
+        }
+      },
+      handleFallbackFailure,
+    );
+
     return () => {
       cancelled = true;
-      renderTask?.cancel();
-      pageProxy?.cleanup();
-      if (canvas) {
-        delete canvas.dataset.pdfRenderSource;
-        canvas.width = 0;
-        canvas.height = 0;
-      }
+      if (retryTimeout !== undefined) window.clearTimeout(retryTimeout);
+      ticket.cancel();
     };
-  }, [bitmap, fallbackDocument, onRenderError, pageRecord.pageNumber]);
+  }, [
+    bitmapSatisfiesRasterTarget,
+    distance,
+    fallbackDocument,
+    fallbackRetry,
+    fallbackScheduler,
+    onRenderError,
+    pageRecord.documentId,
+    pageRecord.pageNumber,
+    pageRecord.revision,
+    rasterTarget,
+    targetKey,
+    visible,
+  ]);
 
   return (
     <>
@@ -672,8 +975,8 @@ const PdfRenderedPage = memo(function PdfRenderedPage({
         onSelectWord={onSelectWord}
         onRenderError={onRenderError}
       />
-      {!isRendered && (
-        <div className="pdf-page-loading" role="status">
+      {visible && (
+        <div className="pdf-page-loading" ref={loadingRef} role="status">
           <span aria-hidden="true">•••</span>
           Drawing page {pageRecord.pageNumber}
         </div>
@@ -721,9 +1024,23 @@ function usePdfRange(
   activePageIndex: number,
   listRef: React.RefObject<HTMLDivElement | null>,
   storeVersion: number,
+  documentKey: string,
 ) {
-  const [width, setWidth] = useState(0);
-  const [range, setRange] = useState({ start: 0, end: 0 });
+  const [measuredWidth, setMeasuredWidth] = useState({
+    documentKey,
+    width: 0,
+  });
+  const [measuredRange, setMeasuredRange] = useState({
+    documentKey,
+    start: 0,
+    end: 0,
+  });
+  const width =
+    measuredWidth.documentKey === documentKey ? measuredWidth.width : 0;
+  const range =
+    measuredRange.documentKey === documentKey
+      ? measuredRange
+      : { documentKey, start: 0, end: 0 };
   const offsets = useMemo(
     () => {
       void storeVersion;
@@ -747,18 +1064,19 @@ function usePdfRange(
         const endOffset = startOffset + root.clientHeight;
         const visibleStart = findOffsetIndex(offsets, startOffset);
         const visibleEnd = findOffsetIndex(offsets, endOffset);
-        setRange({
+        setMeasuredRange({
+          documentKey,
           start: visibleStart,
           end: Math.min(pages.length - 1, visibleEnd),
         });
       });
     };
     const observer = new ResizeObserver(() => {
-      setWidth(list.clientWidth);
+      setMeasuredWidth({ documentKey, width: list.clientWidth });
       update();
     });
     observer.observe(list);
-    setWidth(list.clientWidth);
+    setMeasuredWidth({ documentKey, width: list.clientWidth });
     root.addEventListener("scroll", update, { passive: true });
     update();
     return () => {
@@ -766,7 +1084,7 @@ function usePdfRange(
       observer.disconnect();
       root.removeEventListener("scroll", update);
     };
-  }, [listRef, offsets, pages.length, storeVersion]);
+  }, [documentKey, listRef, offsets, pages.length, storeVersion]);
 
   return {
     offsets,
@@ -777,6 +1095,8 @@ function usePdfRange(
       activePageIndex,
       PDF_RANGE_OVERSCAN,
     ) as Array<{ start: number; end: number }>,
+    viewportStart: range.start,
+    viewportEnd: range.end,
   };
 }
 
@@ -820,6 +1140,20 @@ export function PdfPageView({
     store.getSnapshot,
   );
   const summaries = store.getSummaries() as PdfPageSummary[];
+  const firstPage = summaries[0]
+    ? (store.getPage(summaries[0].pageNumber) as StoredPdfPage | undefined)
+    : undefined;
+  const documentKey = firstPage
+    ? `${firstPage.documentId}:${firstPage.revision}`
+    : "pdf-empty";
+  const fallbackScheduler = useMemo(() => {
+    void documentKey;
+    return createPdfFallbackScheduler();
+  }, [documentKey]);
+  useEffect(
+    () => () => fallbackScheduler.dispose(),
+    [fallbackScheduler],
+  );
   const pageWordStarts = summaries.map((page) => page.wordStart);
   const activePageIndex = findPageIndexForWord(pageWordStarts, activeWord);
   const range = usePdfRange(
@@ -827,10 +1161,18 @@ export function PdfPageView({
     activePageIndex,
     listRef,
     storeVersion,
+    documentKey,
   );
   const rangeRows: Array<
     | { kind: "spacer"; height: number; key: string }
-    | { kind: "page"; page: StoredPdfPage; key: string }
+    | {
+        kind: "page";
+        page: StoredPdfPage;
+        pageIndex: number;
+        visible: boolean;
+        distance: number;
+        key: string;
+      }
   > = [];
   let rangeCursor = 0;
   for (const mountedRange of range.ranges) {
@@ -841,14 +1183,32 @@ export function PdfPageView({
       rangeRows.push({
         kind: "spacer",
         height: spacerHeight,
-        key: `spacer-${rangeCursor}-${mountedRange.start}`,
+        key: `${documentKey}:spacer-${rangeCursor}-${mountedRange.start}`,
       });
     }
-    for (const page of store.getPageRange(
-      mountedRange.start,
-      mountedRange.end,
-    ) as StoredPdfPage[]) {
-      rangeRows.push({ kind: "page", page, key: `page-${page.pageNumber}` });
+    for (
+      let pageIndex = mountedRange.start;
+      pageIndex <= mountedRange.end;
+      pageIndex += 1
+    ) {
+      const summary = summaries[pageIndex];
+      const page = summary
+        ? (store.getPage(summary.pageNumber) as StoredPdfPage | undefined)
+        : undefined;
+      if (!page) continue;
+      const distance = distanceFromViewport(
+        pageIndex,
+        range.viewportStart,
+        range.viewportEnd,
+      );
+      rangeRows.push({
+        kind: "page",
+        page,
+        pageIndex,
+        visible: distance === 0,
+        distance,
+        key: `${documentKey}:page-${page.pageNumber}`,
+      });
     }
     rangeCursor = mountedRange.end + 1;
   }
@@ -858,12 +1218,13 @@ export function PdfPageView({
     rangeRows.push({
       kind: "spacer",
       height: trailingHeight,
-      key: `spacer-${rangeCursor}-end`,
+      key: `${documentKey}:spacer-${rangeCursor}-end`,
     });
   }
   const fallbackDocument = useFallbackDocument(
     fallbackSource,
     renderFallback,
+    documentKey,
     onRenderError,
   );
 
@@ -946,8 +1307,10 @@ export function PdfPageView({
           <section
             className="pdf-page-block"
             id={`pdf-page-${row.page.pageNumber}`}
-            data-pdf-page-index={row.page.pageNumber - 1}
+            data-pdf-page-index={row.pageIndex}
             data-pdf-page-rendered="true"
+            data-pdf-page-visible={row.visible ? "true" : "false"}
+            data-pdf-page-distance={row.distance}
             key={row.key}
           >
             <div
@@ -960,7 +1323,9 @@ export function PdfPageView({
                 bitmap={store.getBitmap(row.page.pageNumber) as
                   | PdfBitmap
                   | undefined}
+                distance={row.distance}
                 fallbackDocument={fallbackDocument}
+                fallbackScheduler={fallbackScheduler}
                 pageRecord={row.page}
                 tokenSentences={tokenSentences}
                 tokenParagraphs={tokenParagraphs}
@@ -968,6 +1333,8 @@ export function PdfPageView({
                 registerWord={registerWord}
                 requestRender={requestRender}
                 pinBitmap={store.pinBitmap}
+                visible={row.visible}
+                workerFallbackActive={renderFallback}
                 onSelectWord={onSelectWord}
                 onRenderError={onRenderError}
               />

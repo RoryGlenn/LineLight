@@ -95,6 +95,7 @@ export type PdfWorkerRequest =
       revision: string;
       pageNumber: number;
       scale: number;
+      enabled?: boolean;
       visible?: boolean;
       distance?: number;
     }

@@ -14,9 +14,12 @@ import {
 import {
   PDF_DOCUMENT_STORAGE_VERSION,
   buildPdfDocumentChunk,
-  coalescePdfRenderRequests,
   createPdfModelCursor,
   prioritizePdfRenderRequests,
+  reconcilePdfActiveRenderRequest,
+  resolvePdfRenderFallbackQueueActivation,
+  retainPdfRenderUpgrades,
+  updatePdfRenderQueue,
 } from "./pdf-document-model.mjs";
 import { buildPdfOutline } from "./pdf-outline.mjs";
 import {
@@ -32,6 +35,7 @@ import type {
 } from "./pdf-document-types";
 import type { PdfPageLayout } from "./pdf-page-view";
 import { createPdfRasterScheduler } from "./pdf-raster-scheduler.mjs";
+import { constrainPdfRasterScale } from "./pdf-raster-scale.mjs";
 import { applyPdfWorkerFilter } from "./pdf-worker-filters.mjs";
 import {
   canStartPdfInitialRaster,
@@ -62,7 +66,9 @@ type ActiveContext = {
   parserWorker: pdfjs.PDFWorker | null;
   parserAbort: AbortController;
   renderTask: pdfjs.RenderTask | null;
+  renderRequestSequence: number | null;
   rasterScheduler: ReturnType<typeof createPdfRasterScheduler>;
+  renderFallbackActive: boolean;
   cancelled: boolean;
 };
 
@@ -74,6 +80,8 @@ const workerScope = globalThis as unknown as WorkerScope;
 let active: ActiveContext | null = null;
 let renderSequence = 0;
 let renderQueue: RenderRequest[] = [];
+let activeRenderRequest: RenderRequest | null = null;
+const cancelledRenderSequences = new Set<number>();
 let drainingRenders = false;
 let fallbackReportedForRevision = "";
 
@@ -269,6 +277,19 @@ function assertCurrent(context: ActiveContext) {
   }
 }
 
+function assertRenderRequestCurrent(
+  context: ActiveContext,
+  requestSequence?: number,
+) {
+  assertCurrent(context);
+  if (
+    requestSequence !== undefined &&
+    cancelledRenderSequences.has(requestSequence)
+  ) {
+    throw new DOMException("The PDF page raster was cancelled.", "AbortError");
+  }
+}
+
 function yieldToMessages() {
   return new Promise<void>((resolve) => setTimeout(resolve, 0));
 }
@@ -278,6 +299,7 @@ async function disposeContext(context: ActiveContext | null) {
   context.cancelled = true;
   context.renderTask?.cancel();
   context.renderTask = null;
+  context.renderRequestSequence = null;
   await context.loadingTask?.destroy().catch(() => undefined);
   if (context.document) {
     await context.document.destroy().catch(() => undefined);
@@ -301,6 +323,8 @@ async function replaceContext(
   active = null;
   await disposeContext(previous);
   renderQueue = [];
+  activeRenderRequest = null;
+  cancelledRenderSequences.clear();
   const context: ActiveContext = {
     jobId,
     revision,
@@ -312,14 +336,16 @@ async function replaceContext(
     parserWorker: null,
     parserAbort: new AbortController(),
     renderTask: null,
+    renderRequestSequence: null,
     rasterScheduler: null as unknown as ReturnType<
       typeof createPdfRasterScheduler
     >,
+    renderFallbackActive: false,
     cancelled: false,
   };
   context.rasterScheduler = createPdfRasterScheduler(
-    (pageNumber: number, scale: number) =>
-      performPdfPageRender(context, pageNumber, scale),
+    (pageNumber: number, scale: number, requestSequence?: number) =>
+      performPdfPageRender(context, pageNumber, scale, requestSequence),
   );
   active = context;
   return context;
@@ -471,6 +497,18 @@ async function hasUnsupportedWorkerFilters(page: pdfjs.PDFPageProxy) {
 }
 
 function reportRenderFallback(context: ActiveContext, reason: string) {
+  if (active !== context || context.cancelled) return;
+  const activation = resolvePdfRenderFallbackQueueActivation(
+    activeRenderRequest,
+  );
+  context.renderFallbackActive = activation.fallbackActive;
+  renderQueue = activation.requests;
+  if (activation.cancelSequence !== null) {
+    cancelledRenderSequences.add(activation.cancelSequence);
+    if (context.renderRequestSequence === activation.cancelSequence) {
+      context.renderTask?.cancel();
+    }
+  }
   if (fallbackReportedForRevision === context.revision) return;
   fallbackReportedForRevision = context.revision;
   post({
@@ -485,10 +523,11 @@ async function performPdfPageRender(
   context: ActiveContext,
   pageNumber: number,
   scale: number,
+  requestSequence?: number,
 ) {
-  assertCurrent(context);
+  assertRenderRequestCurrent(context, requestSequence);
   const document = await waitForPdfDocumentReady(context);
-  assertCurrent(context);
+  assertRenderRequestCurrent(context, requestSequence);
   if (!document) {
     throw new Error("The PDF parser did not become ready for rendering.");
   }
@@ -500,64 +539,114 @@ async function performPdfPageRender(
     return;
   }
   const page = await document.getPage(pageNumber);
-  assertCurrent(context);
-  if (await hasUnsupportedWorkerFilters(page)) {
-    reportRenderFallback(
-      context,
-      "This PDF page uses filters that require the browser DOM; LineLight will render visible pages cooperatively.",
+  assertRenderRequestCurrent(context, requestSequence);
+  try {
+    const unsupportedWorkerFilters = await hasUnsupportedWorkerFilters(page);
+    assertRenderRequestCurrent(context, requestSequence);
+    if (unsupportedWorkerFilters) {
+      reportRenderFallback(
+        context,
+        "This PDF page uses filters that require the browser DOM; LineLight will render visible pages cooperatively.",
+      );
+      return;
+    }
+    const baseViewport = page.getViewport({ scale: 1 });
+    const { scale: safeScale } = constrainPdfRasterScale({
+      pageWidth: baseViewport.width,
+      pageHeight: baseViewport.height,
+      scale,
+    });
+    const viewport = page.getViewport({ scale: safeScale });
+    const canvas = new OffscreenCanvas(
+      Math.ceil(viewport.width),
+      Math.ceil(viewport.height),
     );
+    const rawCanvasContext = canvas.getContext("2d", { alpha: false });
+    const canvasContext = rawCanvasContext
+      ? createFilteredCanvasContext(rawCanvasContext)
+      : null;
+    if (!canvasContext) throw new Error("The PDF canvas could not be created.");
+    mark(context, `page-${pageNumber}-raster-start`);
+    const renderTask = page.render({
+      canvas: canvas as unknown as HTMLCanvasElement,
+      canvasContext: canvasContext as unknown as CanvasRenderingContext2D,
+      viewport,
+    });
+    context.renderTask = renderTask;
+    context.renderRequestSequence = requestSequence ?? null;
+    renderTask.onContinue = (continueRendering: () => void) => {
+      setTimeout(continueRendering, 0);
+    };
+    try {
+      await renderTask.promise;
+    } finally {
+      if (context.renderTask === renderTask) {
+        context.renderTask = null;
+        context.renderRequestSequence = null;
+      }
+    }
+    assertRenderRequestCurrent(context, requestSequence);
+    const bitmap = canvas.transferToImageBitmap();
+    mark(context, `page-${pageNumber}-raster-end`);
+    post(
+      {
+        type: "bitmap",
+        jobId: context.jobId,
+        revision: context.revision,
+        pageNumber,
+        scale: safeScale,
+        width: canvas.width,
+        height: canvas.height,
+        bitmap,
+      },
+      [bitmap],
+    );
+  } finally {
     page.cleanup();
-    return;
   }
-  const safeScale = Math.min(2, Math.max(1, Number(scale) || 1));
-  const viewport = page.getViewport({ scale: safeScale });
-  const canvas = new OffscreenCanvas(
-    Math.ceil(viewport.width),
-    Math.ceil(viewport.height),
-  );
-  const rawCanvasContext = canvas.getContext("2d", { alpha: false });
-  const canvasContext = rawCanvasContext
-    ? createFilteredCanvasContext(rawCanvasContext)
-    : null;
-  if (!canvasContext) throw new Error("The PDF canvas could not be created.");
-  mark(context, `page-${pageNumber}-raster-start`);
-  const renderTask = page.render({
-    canvas: canvas as unknown as HTMLCanvasElement,
-    canvasContext: canvasContext as unknown as CanvasRenderingContext2D,
-    viewport,
-  });
-  context.renderTask = renderTask;
-  renderTask.onContinue = (continueRendering: () => void) => {
-    setTimeout(continueRendering, 0);
-  };
-  await renderTask.promise;
-  context.renderTask = null;
-  assertCurrent(context);
-  const bitmap = canvas.transferToImageBitmap();
-  mark(context, `page-${pageNumber}-raster-end`);
-  post(
-    {
-      type: "bitmap",
-      jobId: context.jobId,
-      revision: context.revision,
-      pageNumber,
-      scale: safeScale,
-      width: canvas.width,
-      height: canvas.height,
-      bitmap,
-    },
-    [bitmap],
-  );
-  page.cleanup();
 }
 
 async function renderPdfPage(
   context: ActiveContext,
   pageNumber: number,
   scale: number,
+  requestSequence?: number,
 ) {
-  const safeScale = Math.min(2, Math.max(1, Number(scale) || 1));
-  await context.rasterScheduler.run(pageNumber, safeScale);
+  const requestedScale = Number(scale);
+  await context.rasterScheduler.run(
+    pageNumber,
+    Number.isFinite(requestedScale) && requestedScale > 0
+      ? requestedScale
+      : 1,
+    requestSequence,
+  );
+  assertRenderRequestCurrent(context, requestSequence);
+}
+
+function isPdfRenderCancellation(error: unknown) {
+  return (
+    error instanceof Error &&
+    ["AbortError", "RenderingCancelledException"].includes(error.name)
+  );
+}
+
+async function renderPdfPageOrFallback(
+  context: ActiveContext,
+  pageNumber: number,
+  scale: number,
+  requestSequence?: number,
+) {
+  try {
+    await renderPdfPage(context, pageNumber, scale, requestSequence);
+    return true;
+  } catch (error) {
+    if (isPdfRenderCancellation(error)) throw error;
+    reportRenderFallback(
+      context,
+      "A sharp PDF page could not be rendered off-thread; LineLight will retry visible pages cooperatively.",
+    );
+    return false;
+  }
 }
 
 async function drainRenderQueue(context: ActiveContext) {
@@ -569,12 +658,23 @@ async function drainRenderQueue(context: ActiveContext) {
       renderQueue = remaining.filter(
         (request) => request.pageNumber !== next.pageNumber,
       );
-      await renderPdfPage(context, next.pageNumber, next.scale).catch((error) => {
-        if (error instanceof Error && error.name === "RenderingCancelledException") {
-          return;
+      activeRenderRequest = next;
+      try {
+        const rendered = await renderPdfPageOrFallback(
+          context,
+          next.pageNumber,
+          next.scale,
+          next.sequence,
+        );
+        if (!rendered) renderQueue = [];
+      } catch (error) {
+        if (!isPdfRenderCancellation(error)) throw error;
+      } finally {
+        cancelledRenderSequences.delete(next.sequence);
+        if (activeRenderRequest?.sequence === next.sequence) {
+          activeRenderRequest = null;
         }
-        throw error;
-      });
+      }
       await yieldToMessages();
     }
   } finally {
@@ -681,10 +781,12 @@ async function processSource(
         if (!canStartPdfInitialRaster(milestones)) {
           throw new Error("PDF page-one raster started before its model was published.");
         }
-        await renderPdfPage(context, 1, request.scale);
+        await renderPdfPageOrFallback(context, 1, request.scale);
         milestones.pageOneRasterSettled = true;
-        renderQueue = renderQueue.filter(
-          (queued) => queued.pageNumber !== 1,
+        renderQueue = retainPdfRenderUpgrades(
+          renderQueue,
+          1,
+          request.scale,
         );
       } else {
         manifest = (await appendReaderPdfPage(
@@ -887,7 +989,10 @@ async function openStoredPdf(
     await repairStoredDocument(true);
     return;
   }
-  await renderPdfPage(context, 1, request.scale);
+  await renderPdfPageOrFallback(context, 1, request.scale);
+  renderQueue = retainPdfRenderUpgrades(renderQueue, 1, request.scale);
+  await yieldToMessages();
+  await drainRenderQueue(context);
   for (let startPage = 2; startPage <= document.numPages; startPage += 12) {
     const pages = (await getReaderPdfPageBatch(
       request.documentId,
@@ -937,16 +1042,50 @@ workerScope.addEventListener("message", (event) => {
     ) {
       return;
     }
-    renderQueue = coalescePdfRenderRequests(renderQueue, {
+    const context = active;
+    const incoming = {
       ...request,
+      enabled: request.enabled !== false,
       sequence: renderSequence++,
-    });
-    void drainRenderQueue(active).catch((error) => {
-      if (!active) return;
+    } satisfies RenderRequest;
+    if (context.renderFallbackActive) {
+      renderQueue = updatePdfRenderQueue(renderQueue, incoming, {
+        fallbackActive: true,
+      });
+      return;
+    }
+    const currentActive = activeRenderRequest;
+    const activeCancelled = Boolean(
+      currentActive && cancelledRenderSequences.has(currentActive.sequence),
+    );
+    const reconciliation = reconcilePdfActiveRenderRequest(
+      currentActive,
+      incoming,
+      { activeCancelled },
+    );
+    if (
+      currentActive &&
+      reconciliation.updatedActive?.sequence === currentActive.sequence
+    ) {
+      activeRenderRequest = reconciliation.updatedActive;
+    }
+    if (currentActive && reconciliation.cancelActive) {
+      cancelledRenderSequences.add(currentActive.sequence);
+      if (context.renderRequestSequence === currentActive.sequence) {
+        context.renderTask?.cancel();
+      }
+    }
+    renderQueue = updatePdfRenderQueue(
+      renderQueue,
+      reconciliation.enqueue ? incoming : { ...incoming, enabled: false },
+      { fallbackActive: context.renderFallbackActive },
+    );
+    void drainRenderQueue(context).catch((error) => {
+      if (active !== context) return;
       post({
         type: "error",
-        jobId: active.jobId,
-        revision: active.revision,
+        jobId: context.jobId,
+        revision: context.revision,
         message:
           error instanceof Error
             ? error.message

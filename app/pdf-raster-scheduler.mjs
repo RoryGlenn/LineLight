@@ -4,7 +4,7 @@ export function createPdfRasterScheduler(render) {
   let pendingKey = "";
 
   return {
-    async run(pageNumber, scale) {
+    async run(pageNumber, scale, metadata) {
       const key = `${pageNumber}:${Number(scale).toFixed(3)}`;
       while (pending) {
         const activeTask = pending;
@@ -14,7 +14,9 @@ export function createPdfRasterScheduler(render) {
         }
         await activeTask.catch(() => undefined);
       }
-      const task = Promise.resolve().then(() => render(pageNumber, scale));
+      const task = Promise.resolve().then(() =>
+        render(pageNumber, scale, metadata),
+      );
       pending = task;
       pendingKey = key;
       try {
