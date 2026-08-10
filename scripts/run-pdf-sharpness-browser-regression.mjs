@@ -120,6 +120,25 @@ export function markFallbackImportDiagnosticStage(progress, stage) {
   return stage;
 }
 
+export function buildFallbackWorkerModuleSource(
+  resolvedWorkerUrl,
+  workerInstanceId,
+) {
+  if (
+    typeof resolvedWorkerUrl !== "string" ||
+    !resolvedWorkerUrl ||
+    !Number.isInteger(workerInstanceId) ||
+    workerInstanceId <= 0
+  ) {
+    throw new Error("Fallback worker identity is invalid.");
+  }
+  return [
+    "import " + JSON.stringify(resolvedWorkerUrl) + ";",
+    "try { Object.defineProperty(globalThis, 'OffscreenCanvas', { configurable: true, value: undefined }); } catch {}",
+    "console.debug('__linelight_issue68_worker__', " + workerInstanceId + ");",
+  ].join("\n");
+}
+
 async function runFallbackImportDiagnosticStage(progress, step, operation) {
   markFallbackImportDiagnosticStage(progress, `${step}-started`);
   const result = await operation();
@@ -1779,13 +1798,8 @@ export function isFallbackImportNetworkDiagnosticHealthy(
     settlementStart <= settlements.length &&
     requestStart <= counts.requestCount;
   const newTargets = validBoundary ? targets.slice(targetStart) : [];
-  const newTargetSessions = new Set(
-    newTargets.map((target) => target?.sessionId),
-  );
   const newSettlements = validBoundary
-    ? settlements.filter((entry) =>
-        newTargetSessions.has(entry?.targetSessionId)
-      )
+    ? settlements.slice(settlementStart)
     : [];
   const blobTargets = newTargets.filter(
     (target) => target?.type === "worker" && target?.urlClass === "blob",
@@ -1872,21 +1886,43 @@ export function isFallbackImportNetworkDiagnosticHealthy(
         entry.terminalAt >= entry.requestStartedAt
       );
     });
+  const bootstrapTargets = [...blobTargets, ...parserTargets];
   const validNewSettlements =
-    newSettlements.length === parserTargets.length &&
+    newSettlements.length === bootstrapTargets.length &&
     new Set(newSettlements.map((entry) => entry?.targetSessionId)).size ===
       newSettlements.length &&
     new Set(
       newSettlements.map(
-        (entry) => `${entry?.requestSessionId}:${entry?.requestId}`,
+        (entry) => JSON.stringify([
+          entry?.requestSessionId ?? null,
+          entry?.requestId,
+        ]),
       ),
     ).size === newSettlements.length &&
+    bootstrapTargets.every(
+      (target) =>
+        newSettlements.filter(
+          (entry) => entry?.targetSessionId === target.sessionId,
+        ).length === 1,
+    ) &&
     newSettlements.every((entry) => {
       const target = targetBySession.get(entry?.targetSessionId);
+      const blobTarget = blobTargets.includes(target);
+      const parserTarget = parserTargets.includes(target);
+      const parentBound = blobTarget
+        ? target?.parentSessionId === null &&
+          entry?.targetParentSessionId === null &&
+          entry?.requestSessionId === null
+        : parserTarget &&
+          nonEmptyString(target?.parentSessionId) &&
+          entry?.targetParentSessionId === target.parentSessionId &&
+          entry?.requestSessionId === target.parentSessionId &&
+          blobTargets.some(
+            (candidate) => candidate.sessionId === target.parentSessionId,
+          );
       return (
-        parserTargets.includes(target) &&
+        (blobTarget || parserTarget) &&
         nonEmptyString(entry?.requestId) &&
-        nonEmptyString(entry?.requestSessionId) &&
         entry?.identityHash === cdpDiagnosticIdentity(
           entry.requestSessionId,
           entry.requestId,
@@ -1894,14 +1930,13 @@ export function isFallbackImportNetworkDiagnosticHealthy(
           entry.targetId,
         ) &&
         entry?.targetId === target.targetId &&
-        entry?.targetParentSessionId === target.parentSessionId &&
-        entry?.requestSessionId === target.parentSessionId &&
+        parentBound &&
         entry?.phase === FALLBACK_IMPORT_DIAGNOSTIC_LABEL &&
         entry?.phase === target.phase &&
         entry?.method === "GET" &&
         entry?.resourceType === "Script" &&
         entry?.targetType === "worker" &&
-        entry?.urlClass === "pdf-parser-worker" &&
+        entry?.urlClass === target.urlClass &&
         entry?.targetDetachedAtSettlement === false &&
         entry?.terminalReason === "target-attached"
       );
@@ -2908,6 +2943,7 @@ const INSTRUMENTATION_SOURCE = String.raw`
 
   const forceFallback = new URL(location.href).searchParams.has("issue68Fallback");
   const NativeWorker = globalThis.Worker;
+  const buildFallbackWorkerModuleSource = (${buildFallbackWorkerModuleSource.toString()});
   const workerEvents = [];
   const workerLifecycle = [];
   let workerInstanceSequence = 0;
@@ -2919,11 +2955,10 @@ const INSTRUMENTATION_SOURCE = String.raw`
       const wrapped = forceFallback && pdfWorker;
       let workerUrl = url;
       if (wrapped) {
-        const source = [
-          "try { Object.defineProperty(globalThis, 'OffscreenCanvas', { configurable: true, value: undefined }); } catch {}",
-          "console.debug('__linelight_issue68_worker__', " + workerInstanceId + ");",
-          "await import(" + JSON.stringify(resolved) + ");"
-        ].join("\n");
+        const source = buildFallbackWorkerModuleSource(
+          resolved,
+          workerInstanceId
+        );
         workerUrl = URL.createObjectURL(
           new Blob([source], { type: "text/javascript" })
         );

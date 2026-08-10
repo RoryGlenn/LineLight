@@ -284,11 +284,16 @@ metadata on fixed-point timeouts without running fallback/reference work. A
 separate bounded fallback-import diagnostic persists the exact fixture once,
 reloads the same disposable profile under forced fallback, immediately
 re-imports, and binds success to that new import's worker/model/fallback chain,
-sanitized CDP lifecycle, external screenshot, and complete teardown; it is a
-noncanonical diagnostic and cannot satisfy acceptance. Its exact before/after
-stage sequence and stage-derived fixed failure category retain partial,
-privacy-safe setup hash/count/condition evidence without serializing raw
-exceptions.
+sanitized CDP lifecycle, external screenshot, and complete teardown. Its
+generated module wrapper statically imports the document worker so the real
+message listener is installed before the worker port queue opens; the wrapper
+body then disables `OffscreenCanvas` and emits its fixed identity sentinel. The
+network proof requires one exact bootstrap settlement for every post-boundary
+wrapper blob and parser target, including a null-parent root blob and exact
+parser-to-wrapper ancestry. The mode is noncanonical and cannot satisfy
+acceptance. Its exact before/after stage sequence and stage-derived fixed
+failure category retain partial, privacy-safe setup hash/count/condition
+evidence without serializing raw exceptions.
 The independently testable acceptance contract lives in
 [`scripts/pdf-sharpness-evidence.mjs`](../scripts/pdf-sharpness-evidence.mjs),
 its fast and opt-in browser gates live in

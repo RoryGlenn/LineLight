@@ -24,6 +24,7 @@ import {
   asyncBrowserExpression,
   advanceCdpFixedPointStability,
   buildCdpNetworkFixedPointDiagnostic,
+  buildFallbackWorkerModuleSource,
   buildFallbackImportDiagnosticReport,
   buildFirstNetworkDiagnosticReport,
   classifyCdpDiagnosticUrl,
@@ -440,6 +441,11 @@ function passingFallbackNetworkDiagnostic() {
       target: setupParser,
     }),
     settlement({
+      requestId: "fallback-blob-request",
+      requestSessionId: null,
+      target: blobTarget,
+    }),
+    settlement({
       requestId: "fallback-parser-request",
       requestSessionId: blobTarget.sessionId,
       target: parserTarget,
@@ -520,6 +526,42 @@ function passingFallbackNetworkDiagnostic() {
   };
 }
 
+test("builds the forced fallback worker with one static dependency import", async () => {
+  const source = buildFallbackWorkerModuleSource(
+    "https://local.test/pdf-document.worker.js",
+    2,
+  );
+  const staticImport = 'import "https://local.test/pdf-document.worker.js";';
+  assert.equal(source.split("\n")[0], staticImport);
+  assert.equal(source.match(/^import\s+/gmu)?.length, 1);
+  assert.doesNotMatch(source, /\bawait\s+import\s*\(/u);
+  assert.doesNotMatch(source, /\bimport\s*\(/u);
+  assert.ok(source.indexOf("OffscreenCanvas") > source.indexOf(staticImport));
+  assert.ok(
+    source.indexOf("__linelight_issue68_worker__") >
+      source.indexOf("OffscreenCanvas"),
+  );
+  assert.match(source, /__linelight_issue68_worker__', 2\);/u);
+  assert.throws(
+    () => buildFallbackWorkerModuleSource("", 2),
+    /Fallback worker identity is invalid/u,
+  );
+  assert.throws(
+    () => buildFallbackWorkerModuleSource("https://local.test/worker.js", 0),
+    /Fallback worker identity is invalid/u,
+  );
+
+  const runnerSource = await readFile(
+    new URL("../scripts/run-pdf-sharpness-browser-regression.mjs", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    runnerSource,
+    /const source = buildFallbackWorkerModuleSource\(\s*resolved,\s*workerInstanceId\s*\);/u,
+  );
+  assert.doesNotMatch(runnerSource, /await\s+import\s*\(/u);
+});
+
 test("binds fallback import completion to the exact post-change worker chain", () => {
   const capture = passingFallbackImportCapture();
   capture.snapshot.workerEvents.unshift({
@@ -547,6 +589,50 @@ test("binds fallback import completion to the exact post-change worker chain", (
   const serialized = JSON.stringify(summary);
   assert.doesNotMatch(serialized, /fallback-import-revision/u);
   assert.doesNotMatch(serialized, /pdf-current-public-fixture/u);
+});
+
+test("binds one wrapped import post to six pages and its exact parser child", () => {
+  const capture = passingFallbackImportCapture();
+  const summary = summarizeFallbackImportLifecycle(capture, {
+    bytes: PUBLIC_PDF_FIXTURE_BYTES,
+    sha256: PUBLIC_PDF_FIXTURE_SHA256,
+  });
+  const network = passingFallbackNetworkDiagnostic();
+  const importBlob = network.targets.find(
+    (target) => target.urlClass === "blob" && target.workerInstanceId === 2,
+  );
+  const importParsers = network.targets.filter(
+    (target) =>
+      target.urlClass === "pdf-parser-worker" &&
+      target.parentSessionId === importBlob?.sessionId,
+  );
+  const importPosts = capture.snapshot.workerLifecycle.filter(
+    (event) =>
+      event.type === "post-message" &&
+      event.messageType === "import" &&
+      event.workerInstanceId === summary.importIdentity.workerInstanceId,
+  );
+
+  assert.equal(summary.importCompleted, true);
+  assert.equal(summary.importRequestCount, 1);
+  assert.equal(importPosts.length, 1);
+  assert.equal(summary.worker.firstMessageType, "page");
+  assert.equal(summary.chain.pageEventCount, 6);
+  assert.deepEqual(summary.chain.pageNumbers, [1, 2, 3, 4, 5, 6]);
+  assert.equal(summary.chain.progressEventCount, 6);
+  assert.deepEqual(summary.chain.progressPages, [1, 2, 3, 4, 5, 6]);
+  assert.equal(summary.chain.fallbackEventCount, 1);
+  assert.equal(summary.chain.completeEventCount, 1);
+  assert.equal(summary.laterStartCount, 0);
+  assert.equal(importParsers.length, 1);
+  assert.equal(
+    isFallbackImportNetworkDiagnosticHealthy(
+      network,
+      capture.networkBoundary,
+      summary.importIdentity.workerInstanceId,
+    ),
+    true,
+  );
 });
 
 test("fallback import lifecycle mutations fail closed", () => {
@@ -621,6 +707,59 @@ test("fallback import lifecycle mutations fail closed", () => {
       );
     },
     (capture) => {
+      capture.snapshot.workerLifecycle = capture.snapshot.workerLifecycle.filter(
+        (event) => event.type !== "post-message",
+      );
+    },
+    (capture) => {
+      capture.snapshot.workerLifecycle.push(
+        structuredClone(
+          capture.snapshot.workerLifecycle.find(
+            (event) => event.type === "post-message",
+          ),
+        ),
+      );
+    },
+    (capture) => {
+      capture.snapshot.workerLifecycle = capture.snapshot.workerLifecycle.filter(
+        (event) => event.type !== "first-message",
+      );
+    },
+    (capture) => {
+      capture.snapshot.workerLifecycle.push(
+        structuredClone(
+          capture.snapshot.workerLifecycle.find(
+            (event) => event.type === "first-message",
+          ),
+        ),
+      );
+    },
+    (capture) => {
+      capture.snapshot.workerLifecycle.find(
+        (event) => event.type === "first-message",
+      ).workerInstanceId = 99;
+    },
+    (capture) => {
+      capture.snapshot.workerLifecycle.find(
+        (event) => event.type === "first-message",
+      ).jobId = 99;
+    },
+    (capture) => {
+      capture.snapshot.workerLifecycle.find(
+        (event) => event.type === "first-message",
+      ).revision = "wrong-revision";
+    },
+    (capture) => {
+      capture.snapshot.workerLifecycle.find(
+        (event) => event.type === "first-message",
+      ).documentKey = "wrong-document:wrong-revision";
+    },
+    (capture) => {
+      capture.snapshot.workerLifecycle.find(
+        (event) => event.type === "first-message",
+      ).at = 9;
+    },
+    (capture) => {
       capture.snapshot.workerLifecycle.find(
         (event) => event.type === "first-message",
       ).pageNumber = 2;
@@ -631,6 +770,28 @@ test("fallback import lifecycle mutations fail closed", () => {
     (capture) => {
       capture.dom.pageOneCanvasSource = null;
     },
+    (capture) => {
+      const duplicate = structuredClone(
+        capture.snapshot.workerEvents.find(
+          (event) => event.direction === "to-worker" && event.type === "import",
+        ),
+      );
+      duplicate.at = 100;
+      duplicate.eventId = 100;
+      capture.snapshot.workerEvents.push(duplicate);
+    },
+    ...["page", "progress", "complete", "render-fallback"].map(
+      (type) => (capture) => {
+        const duplicate = structuredClone(
+          capture.snapshot.workerEvents.find(
+            (event) => event.direction === "from-worker" && event.type === type,
+          ),
+        );
+        duplicate.at = 100;
+        duplicate.eventId = 100;
+        capture.snapshot.workerEvents.push(duplicate);
+      },
+    ),
     ...["page", "progress", "complete", "render-fallback"].map(
       (type) => (capture) => {
         capture.snapshot.workerEvents.find(
@@ -666,6 +827,95 @@ test("requires a clean fallback blob/parser CDP lifecycle after the setup bounda
     (value) => { value.targets.at(-1).attachComplete = false; },
     (value) => { value.targets.at(-1).parentSessionId = "wrong-parent"; },
     (value) => { value.targetBootstrapSettlements = []; },
+    (value) => {
+      const blobSettlement = value.targetBootstrapSettlements.find(
+        (entry) => entry.urlClass === "blob",
+      );
+      value.targetBootstrapSettlements = value.targetBootstrapSettlements.filter(
+        (entry) => entry !== blobSettlement,
+      );
+      value.counts.targetBootstrapSettlementCount -= 1;
+    },
+    (value) => {
+      const blobSettlement = value.targetBootstrapSettlements.find(
+        (entry) => entry.urlClass === "blob",
+      );
+      value.targetBootstrapSettlements.push(structuredClone(blobSettlement));
+      value.counts.targetBootstrapSettlementCount += 1;
+    },
+    (value) => {
+      const blobSettlement = value.targetBootstrapSettlements.find(
+        (entry) => entry.urlClass === "blob",
+      );
+      blobSettlement.requestSessionId = "wrong-root-parent";
+      blobSettlement.identityHash = diagnosticIdentity(
+        blobSettlement.requestSessionId,
+        blobSettlement.requestId,
+        blobSettlement.targetSessionId,
+        blobSettlement.targetId,
+      );
+    },
+    (value) => {
+      const blobSettlement = value.targetBootstrapSettlements.find(
+        (entry) => entry.urlClass === "blob",
+      );
+      blobSettlement.targetSessionId = "wrong-blob-session";
+      blobSettlement.identityHash = diagnosticIdentity(
+        blobSettlement.requestSessionId,
+        blobSettlement.requestId,
+        blobSettlement.targetSessionId,
+        blobSettlement.targetId,
+      );
+    },
+    (value) => {
+      const parserSettlement = value.targetBootstrapSettlements.find(
+        (entry) => entry.urlClass === "pdf-parser-worker" &&
+          entry.phase === "fallback-import-diagnostic",
+      );
+      parserSettlement.requestSessionId = "wrong-parser-parent";
+      parserSettlement.targetParentSessionId = "wrong-parser-parent";
+      parserSettlement.identityHash = diagnosticIdentity(
+        parserSettlement.requestSessionId,
+        parserSettlement.requestId,
+        parserSettlement.targetSessionId,
+        parserSettlement.targetId,
+      );
+    },
+    (value) => {
+      const blobSettlement = value.targetBootstrapSettlements.find(
+        (entry) => entry.urlClass === "blob",
+      );
+      blobSettlement.targetId = "wrong-blob-target";
+      blobSettlement.identityHash = diagnosticIdentity(
+        blobSettlement.requestSessionId,
+        blobSettlement.requestId,
+        blobSettlement.targetSessionId,
+        blobSettlement.targetId,
+      );
+    },
+    (value) => {
+      value.targetBootstrapSettlements.find(
+        (entry) => entry.urlClass === "blob",
+      ).urlClass = "pdf-document-worker";
+    },
+    (value) => {
+      value.targetBootstrapSettlements.push({
+        ...structuredClone(value.targetBootstrapSettlements.at(-1)),
+        identityHash: diagnosticIdentity(
+          null,
+          "orphan-request",
+          "orphan-session",
+          "orphan-target",
+        ),
+        requestId: "orphan-request",
+        requestSessionId: null,
+        targetId: "orphan-target",
+        targetParentSessionId: null,
+        targetSessionId: "orphan-session",
+        urlClass: "blob",
+      });
+      value.counts.targetBootstrapSettlementCount += 1;
+    },
     (value) => { value.targets = value.targets.filter((target) => target.urlClass !== "blob"); },
     (value) => { value.wait.stableSamples = 2; },
     (value) => { value.targets.at(-1).identityHash = "0".repeat(64); },
@@ -695,6 +945,89 @@ test("requires a clean fallback blob/parser CDP lifecycle after the setup bounda
       { ...boundary, targetCount: boundary.targetCount + 1 },
       2,
     ),
+    false,
+  );
+});
+
+test("rejects a fallback parser attached to a different wrapped worker", () => {
+  const diagnostic = passingFallbackNetworkDiagnostic();
+  const boundary = passingFallbackImportCapture().networkBoundary;
+  const parserTarget = diagnostic.targets.find(
+    (target) =>
+      target.phase === "fallback-import-diagnostic" &&
+      target.urlClass === "pdf-parser-worker",
+  );
+  const parserSettlement = diagnostic.targetBootstrapSettlements.find(
+    (entry) =>
+      entry.phase === "fallback-import-diagnostic" &&
+      entry.urlClass === "pdf-parser-worker",
+  );
+  const restoredBlob = {
+    ancestry: [],
+    attachComplete: true,
+    ...completedCdpTargetSetup({ cdpIdStart: 70 }),
+    identityHash: diagnosticIdentity(
+      "restored-blob-session",
+      "restored-blob-target",
+    ),
+    parentSessionId: null,
+    phase: "fallback-import-diagnostic",
+    resumed: true,
+    sessionId: "restored-blob-session",
+    targetId: "restored-blob-target",
+    type: "worker",
+    urlClass: "blob",
+    waitingForDebugger: true,
+    workerInstanceId: 1,
+  };
+  diagnostic.targets.push(restoredBlob);
+  parserTarget.parentSessionId = restoredBlob.sessionId;
+  parserTarget.ancestry = [{
+    phase: restoredBlob.phase,
+    sessionId: restoredBlob.sessionId,
+    type: restoredBlob.type,
+    urlClass: restoredBlob.urlClass,
+  }];
+  parserSettlement.requestSessionId = restoredBlob.sessionId;
+  parserSettlement.targetParentSessionId = restoredBlob.sessionId;
+  parserSettlement.identityHash = diagnosticIdentity(
+    parserSettlement.requestSessionId,
+    parserSettlement.requestId,
+    parserSettlement.targetSessionId,
+    parserSettlement.targetId,
+  );
+  diagnostic.targetBootstrapSettlements.push({
+    identityHash: diagnosticIdentity(
+      null,
+      "restored-blob-request",
+      restoredBlob.sessionId,
+      restoredBlob.targetId,
+    ),
+    method: "GET",
+    phase: restoredBlob.phase,
+    requestId: "restored-blob-request",
+    requestSessionId: null,
+    resourceType: "Script",
+    targetDetachedAtSettlement: false,
+    targetId: restoredBlob.targetId,
+    targetParentSessionId: null,
+    targetSessionId: restoredBlob.sessionId,
+    targetType: "worker",
+    terminalReason: "target-attached",
+    urlClass: "blob",
+  });
+  diagnostic.counts.attachPromiseCount += 1;
+  diagnostic.counts.completedRequestCount += 1;
+  diagnostic.counts.requestCount += 1;
+  diagnostic.counts.targetBootstrapSettlementCount += 1;
+  diagnostic.counts.targetCount += 1;
+  for (const sample of diagnostic.wait.recentSamples) {
+    sample.requestCount += 1;
+    sample.targetCount += 1;
+  }
+
+  assert.equal(
+    isFallbackImportNetworkDiagnosticHealthy(diagnostic, boundary, 2),
     false,
   );
 });

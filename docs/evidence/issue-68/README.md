@@ -172,6 +172,17 @@ validator additionally requires:
   request, request for the imported PDF source, or other network failure; and a
   local `file:` reference comparison.
 
+The forced-fallback diagnostic generates a module wrapper whose first statement
+is a static import of the resolved document-worker module. That dependency
+installs the real worker message listener before the worker port queue opens;
+the wrapper body then disables `OffscreenCanvas` and emits the fixed,
+integer-only worker sentinel before any import message can dispatch. Its CDP
+proof requires exactly one bootstrap settlement for every post-file-selection
+blob and parser target. Root blob settlements have no parent/request session,
+while every parser settlement and ancestry entry must bind to its exact wrapper
+blob; the parser for another restored wrapper cannot satisfy the selected
+import.
+
 The validator also requires the exact reviewed source-file key set and one
 unique, expected filename/path/hash/byte reference for every screenshot. A
 partial or substituted manifest cannot preserve a passing record.
