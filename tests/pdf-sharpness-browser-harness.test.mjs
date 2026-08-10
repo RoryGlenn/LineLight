@@ -1442,6 +1442,58 @@ test("builds a noncanonical privacy-safe reference-capture diagnostic", () => {
     assert.equal(failed.completed, false);
   }
 
+  const impossibleStableAnalyses = [
+    (analysis) => {
+      analysis.winnerWhiteArea = analysis.runnerUpWhiteArea;
+      analysis.winnerDominanceRatio = 1;
+    },
+    (analysis) => {
+      analysis.substantialComponentCount = 0;
+      analysis.winnerWhiteArea = 0;
+      analysis.runnerUpWhiteArea = 0;
+      analysis.winnerDominanceRatio = null;
+    },
+    (analysis) => {
+      analysis.inkRowBands = 1;
+    },
+  ];
+  for (const mutate of impossibleStableAnalyses) {
+    const value = structuredClone(input);
+    for (const candidate of value.capture.candidates) {
+      mutate(candidate.analysis);
+    }
+    const failed = buildReferenceCaptureDiagnosticReport(value);
+    assert.equal(failed.completed, false);
+    assert.ok(failed.failures.length > 0);
+    assert.deepEqual(failed.artifacts.candidates, []);
+  }
+
+  const tiedObservation = structuredClone(input);
+  for (const candidate of tiedObservation.capture.candidates) {
+    Object.assign(candidate.analysis, {
+      inkPixels: 0,
+      inkRatio: 0,
+      inkRowBands: 0,
+      inkSpanRatio: 0,
+      pageBounds: null,
+      pagePixels: 0,
+      pageWhitePixels: 0,
+      pageWhiteRatio: 0,
+      renderedPage: false,
+      runnerUpWhiteArea: 36_000,
+      substantialComponentCount: 2,
+      winnerDominanceRatio: 1,
+      winnerWhiteArea: 36_000,
+    });
+  }
+  const tiedReport = buildReferenceCaptureDiagnosticReport(tiedObservation);
+  assert.equal(tiedReport.completed, true);
+  assert.deepEqual(tiedReport.failures, []);
+  assert.equal(
+    tiedReport.artifacts.candidates[0].analysis.renderedPage,
+    false,
+  );
+
   const repositoryOutput = structuredClone(input);
   repositoryOutput.outputDirectory = path.join(
     path.resolve("."),

@@ -1587,45 +1587,124 @@ function sanitizeReferenceDiagnosticAnalysis(analysis) {
     Number.isFinite(value) && value >= 0;
   const ratio = (value) =>
     Number.isFinite(value) && value >= 0 && value <= 1;
+  const closeTo = (left, right) =>
+    Number.isFinite(left) &&
+    Number.isFinite(right) &&
+    Math.abs(left - right) <= 1e-9;
   const bounds = analysis?.pageBounds;
-  const segmentationValid =
+  const dimensionsValid =
+    Number.isInteger(analysis?.height) &&
+    analysis.height > 0 &&
+    Number.isInteger(analysis?.width) &&
+    analysis.width > 0;
+  const metricsValid =
+    nonNegativeInteger(analysis?.inkPixels) &&
+    ratio(analysis?.inkRatio) &&
+    nonNegativeInteger(analysis?.inkRowBands) &&
+    ratio(analysis?.inkSpanRatio) &&
+    nonNegativeInteger(analysis?.pagePixels) &&
+    nonNegativeInteger(analysis?.pageWhitePixels) &&
+    ratio(analysis?.pageWhiteRatio);
+  const segmentationShapeValid =
     analysis?.segmentationVersion === 2 &&
     nonNegativeInteger(analysis?.substantialComponentCount) &&
     nonNegativeInteger(analysis?.winnerWhiteArea) &&
-    nonNegativeInteger(analysis?.runnerUpWhiteArea) &&
-    (analysis.substantialComponentCount === 0
-      ? analysis.winnerWhiteArea === 0 &&
-        analysis.runnerUpWhiteArea === 0 &&
-        analysis.winnerDominanceRatio === null
-      : analysis.winnerWhiteArea > 0 &&
-        (analysis.runnerUpWhiteArea === 0
-          ? analysis.winnerDominanceRatio === null
-          : nonNegativeFinite(analysis.winnerDominanceRatio) &&
-            Math.abs(
-              analysis.winnerDominanceRatio -
-                analysis.winnerWhiteArea / analysis.runnerUpWhiteArea,
-            ) <= 1e-9));
-  const boundsValid = bounds === null || (
-    bounds &&
-    nonNegativeFinite(bounds.height) &&
-    nonNegativeFinite(bounds.width) &&
-    nonNegativeFinite(bounds.x) &&
-    nonNegativeFinite(bounds.y)
-  );
+    nonNegativeInteger(analysis?.runnerUpWhiteArea);
+  const boundsValid = bounds &&
+    nonNegativeInteger(bounds.height) &&
+    nonNegativeInteger(bounds.width) &&
+    nonNegativeInteger(bounds.x) &&
+    nonNegativeInteger(bounds.y) &&
+    bounds.height > 0 &&
+    bounds.width > 0 &&
+    dimensionsValid &&
+    bounds.x + bounds.width <= analysis.width &&
+    bounds.y + bounds.height <= analysis.height;
+  const noSubstantialComponent =
+    analysis?.substantialComponentCount === 0;
+  const uniqueWinner =
+    analysis?.substantialComponentCount > 0 &&
+    analysis?.winnerWhiteArea > analysis?.runnerUpWhiteArea;
+  const dominanceValid = uniqueWinner
+    ? analysis.runnerUpWhiteArea === 0
+      ? analysis.winnerDominanceRatio === null
+      : nonNegativeFinite(analysis.winnerDominanceRatio) &&
+        analysis.winnerDominanceRatio > 1 &&
+        closeTo(
+          analysis.winnerDominanceRatio,
+          analysis.winnerWhiteArea / analysis.runnerUpWhiteArea,
+        )
+    : analysis?.winnerWhiteArea > 0 &&
+      analysis?.runnerUpWhiteArea > 0 &&
+      nonNegativeFinite(analysis?.winnerDominanceRatio) &&
+      closeTo(
+        analysis.winnerDominanceRatio,
+        analysis.winnerWhiteArea / analysis.runnerUpWhiteArea,
+      );
+  const emptyAnalysis =
+    analysis?.renderedPage === false &&
+    bounds === null &&
+    analysis?.pagePixels === 0 &&
+    analysis?.pageWhitePixels === 0 &&
+    analysis?.pageWhiteRatio === 0 &&
+    analysis?.inkPixels === 0 &&
+    analysis?.inkRatio === 0 &&
+    analysis?.inkRowBands === 0 &&
+    analysis?.inkSpanRatio === 0;
+  const noWinnerStateValid = noSubstantialComponent
+    ? analysis?.winnerWhiteArea === 0 &&
+      analysis?.runnerUpWhiteArea === 0 &&
+      analysis?.winnerDominanceRatio === null &&
+      emptyAnalysis
+    : !uniqueWinner && dominanceValid && emptyAnalysis;
+  let uniqueWinnerStateValid = false;
   if (
-    !nonNegativeInteger(analysis?.height) ||
-    !nonNegativeInteger(analysis?.width) ||
-    !nonNegativeInteger(analysis?.inkPixels) ||
-    !ratio(analysis?.inkRatio) ||
-    !nonNegativeInteger(analysis?.inkRowBands) ||
-    !ratio(analysis?.inkSpanRatio) ||
-    !nonNegativeInteger(analysis?.pagePixels) ||
-    !nonNegativeInteger(analysis?.pageWhitePixels) ||
-    !ratio(analysis?.pageWhiteRatio) ||
+    uniqueWinner &&
+    dominanceValid &&
+    boundsValid &&
+    metricsValid &&
+    analysis.winnerWhiteArea <= bounds.width * bounds.height &&
+    analysis.runnerUpWhiteArea <= analysis.width * analysis.height &&
+    (analysis.substantialComponentCount === 1 ||
+      analysis.runnerUpWhiteArea > 0) &&
+    bounds.width >= Math.max(120, Math.ceil(analysis.width * 0.25)) &&
+    bounds.height >= Math.max(80, Math.ceil(analysis.height * 0.25))
+  ) {
+    const insetX = Math.max(2, Math.floor(bounds.width * 0.01));
+    const insetY = Math.max(2, Math.floor(bounds.height * 0.01));
+    const expectedPagePixels =
+      (bounds.width - insetX * 2) * (bounds.height - insetY * 2);
+    const renderedPage =
+      analysis.pageWhiteRatio >= PDF_SHARPNESS_REFERENCE_MIN_WHITE_RATIO &&
+      analysis.inkPixels >= PDF_SHARPNESS_REFERENCE_MIN_INK_PIXELS &&
+      analysis.inkRatio <= PDF_SHARPNESS_REFERENCE_MAX_INK_RATIO &&
+      analysis.inkRowBands >= PDF_SHARPNESS_REFERENCE_MIN_INK_ROW_BANDS &&
+      analysis.inkSpanRatio >= PDF_SHARPNESS_REFERENCE_MIN_INK_SPAN_RATIO;
+    uniqueWinnerStateValid =
+      expectedPagePixels > 0 &&
+      analysis.pagePixels === expectedPagePixels &&
+      analysis.pageWhitePixels <= analysis.pagePixels &&
+      analysis.pageWhitePixels <= analysis.winnerWhiteArea &&
+      closeTo(
+        analysis.pageWhiteRatio,
+        analysis.pageWhitePixels / analysis.pagePixels,
+      ) &&
+      analysis.inkPixels <= analysis.pagePixels &&
+      closeTo(
+        analysis.inkRatio,
+        analysis.inkPixels / analysis.pagePixels,
+      ) &&
+      analysis.renderedPage === renderedPage;
+  }
+  const analysisStateValid =
+    dimensionsValid &&
+    metricsValid &&
+    segmentationShapeValid &&
+    (noWinnerStateValid || uniqueWinnerStateValid);
+  if (
     analysis?.proof !== "white-page-with-rendered-ink" ||
     typeof analysis?.renderedPage !== "boolean" ||
-    !segmentationValid ||
-    !boundsValid
+    !analysisStateValid
   ) {
     return null;
   }
