@@ -91,13 +91,22 @@ network fixed point, and a basename/hash-bound screenshot when that stage
 completed. A release failure retains one privacy-safe snapshot of the source
 and priority page shells, canvas state, visibility classes, independently
 recomputed reader/layout/visual intersections, mounted range, viewport, and
-bounded import-bound worker/draw activity. Bounded phase, draw-hook, canvas
-sampler, worker-dispatch, and Long Task records expose interval correlations
-without claiming causation. Raw errors, document identities, URLs, profile
-paths, and arbitrary local output paths are not serialized. The report is
-`diagnostic: true`, has `completed` rather than `passed`, and cannot satisfy
-canonical acceptance; exact clean source/build/fixture/session bindings and
-app/CDP/process/profile/server teardown remain mandatory.
+bounded import-bound worker/draw activity. The polled DOM, geometry, canvas,
+and viewport state is authoritative for release, so no repeated post-boundary
+worker disable message is required; any event that is present remains bound to
+the current worker, job, revision, page, type, and order. Later rows retain
+cumulative CDP history, validate every historical target/settlement against its
+own phase, and require exactly one document worker/parser pair with one
+settlement each for the current phase. Bounded phase, draw-hook, canvas sampler,
+worker-dispatch, Long Task, and diagnostic-only Long Animation Frame records
+expose interval overlap without claiming causation. Long Animation Frame
+support may be unavailable; when available, frame and script timing is bounded
+and only fixed source/invoker classes plus function-name presence are retained.
+Raw errors, function names, document identities, URLs, profile paths, and
+arbitrary local output paths are not serialized. Its version-2 noncanonical
+report is `diagnostic: true`, has `completed` rather than `passed`, and cannot
+satisfy canonical acceptance; exact clean source/build/fixture/session bindings
+and app/CDP/process/profile/server teardown remain mandatory.
 
 When the native PDF-viewer readiness classifier itself needs diagnosis, use
 the distinct reference-capture mode with a fresh, absent external output

@@ -331,9 +331,17 @@ in order with one disposable app browser/profile, but skips fallback and native
 reference capture. It retains a completed prefix plus at most one terminal
 partial row, including the exact public-file observation, priority proof,
 offscreen-release DOM/canvas/geometry snapshot, phase boundaries, bounded
-draw/sampler/worker timing rings, Long Task correlations, and the row's CDP
-fixed point. Its fresh-build/source, external-output, privacy, single-session,
-and full app/server teardown bindings are fail-closed. The report is explicitly
+draw/sampler/worker timing rings, Long Task correlations, and diagnostic-only
+Long Animation Frame timing when that browser API is available. Long Animation
+Frame scripts retain only fixed source/invoker classes and function-name
+presence; raw URLs and names never enter the report. Release proof is anchored
+to the polled DOM/geometry/canvas state, so an empty post-boundary worker-event
+list is valid; any retained event must still match the current worker, job,
+revision, page, type, and order. Each cumulative CDP fixed point validates
+historical targets and settlements against their own phase and requires exactly
+one current document worker/parser pair with one settlement each. Its
+fresh-build/source, external-output, privacy, single-session, and full
+app/server teardown bindings are fail-closed. The report is explicitly
 noncanonical and cannot satisfy Issue 68 acceptance.
 A third, reference-only diagnostic allowlists the first desktop/page-2 and
 mobile-DPR-3/page-3 native-viewer configurations for the exact public fixture

@@ -5380,14 +5380,21 @@ test("selects drained Long Tasks by entry start time", () => {
   );
 });
 
-test("drains the Long Task observer before scenario snapshots", async () => {
+test("drains runtime observers before scenario snapshots", async () => {
   const source = await readFile(
     "scripts/run-pdf-sharpness-browser-regression.mjs",
     "utf8",
   );
   assert.match(source, /longTaskObserver\.takeRecords\(\)/u);
-  assert.match(source, /finishScenario[\s\S]*finishedAt = performance\.now\(\);[\s\S]*drainLongTasks\(\)/u);
-  assert.match(source, /state\.snapshot = \(\) => \{\s*drainLongTasks\(\)/u);
+  assert.match(source, /longAnimationFrameObserver\.takeRecords\(\)/u);
+  assert.match(
+    source,
+    /finishScenario[\s\S]*finishedAt = performance\.now\(\);\s*if \(runtimeDiagnosticsEnabled\) drainLongAnimationFrames\(\);\s*drainLongTasks\(\)/u,
+  );
+  assert.match(
+    source,
+    /state\.snapshot = \(\) => \{\s*if \(runtimeDiagnosticsEnabled\) drainLongAnimationFrames\(\);\s*drainLongTasks\(\)/u,
+  );
   assert.doesNotMatch(source, /longTaskStart|longTaskEnd/u);
 });
 
@@ -7756,6 +7763,9 @@ function passingAppMatrixRuntimeFailureInput(outputDirectory) {
     completedSnapshot: {
       drawHookTimingCount: 0,
       drawHookTimings: [],
+      longAnimationFrameCount: 0,
+      longAnimationFrameObserverAvailable: false,
+      longAnimationFrames: [],
       longTasks: [],
       phaseMarkers: phaseStages.map((stage, index) => ({
         activityId: index + 1,
@@ -7837,19 +7847,7 @@ function passingAppMatrixRuntimeFailureInput(outputDirectory) {
       },
       visiblePages: [priorityTarget],
       waitOutcome: "timeout",
-      workerEvents: [{
-        activityId: 102,
-        at: 350,
-        direction: "to-worker",
-        documentKey,
-        enabled: false,
-        eventId: 20,
-        jobId: 1,
-        pageNumber: adjacentPage,
-        revision,
-        type: "render",
-        workerInstanceId: 1,
-      }],
+      workerEvents: [],
     },
     scenario: { finishedAt: 500, startedAt: 100 },
     scenarioFinalized: true,
@@ -7935,13 +7933,19 @@ function passingAppMatrixRuntimeFailureInput(outputDirectory) {
   };
 }
 
-function passingAppMatrixNetworkDiagnostic(label) {
-  const documentSetup = completedCdpTargetSetup({ cdpIdStart: 1, startedAt: 10 });
-  const parserSetup = completedCdpTargetSetup({ cdpIdStart: 11, startedAt: 30 });
+function passingAppMatrixNetworkDiagnostic(label, commandOffset = 0) {
+  const documentSetup = completedCdpTargetSetup({
+    cdpIdStart: commandOffset + 1,
+    startedAt: commandOffset + 10,
+  });
+  const parserSetup = completedCdpTargetSetup({
+    cdpIdStart: commandOffset + 11,
+    startedAt: commandOffset + 30,
+  });
   const serviceSetup = completedCdpTargetSetup({
-    cdpIdStart: 21,
+    cdpIdStart: commandOffset + 21,
     serviceWorker: true,
-    startedAt: 50,
+    startedAt: commandOffset + 50,
   });
   const documentTarget = {
     ancestry: [],
@@ -8092,8 +8096,122 @@ function passingAppMatrixNetworkDiagnostic(label) {
   };
 }
 
+function passingCumulativeAppMatrixNetworkDiagnostics() {
+  let cumulative = null;
+  return PDF_SHARPNESS_MATRIX.map((configuration, index) => {
+    const current = passingAppMatrixNetworkDiagnostic(
+      configuration.id,
+      index * 100,
+    );
+    if (cumulative === null) {
+      cumulative = current;
+    } else {
+      const targets = [
+        ...cumulative.targets,
+        ...current.targets.filter((target) => target.type === "worker"),
+      ];
+      const targetBootstrapSettlements = [
+        ...cumulative.targetBootstrapSettlements,
+        ...current.targetBootstrapSettlements,
+      ];
+      const requestCount = cumulative.counts.requestCount + 2;
+      const counts = {
+        ...current.counts,
+        attachPromiseCount: targets.length,
+        completedRequestCount: requestCount,
+        requestCount,
+        serviceWorkerBootstrapObservationCount:
+          cumulative.serviceWorkerBootstrapObservations.length,
+        targetBootstrapSettlementCount: targetBootstrapSettlements.length,
+        targetCount: targets.length,
+      };
+      cumulative = {
+        ...current,
+        counts,
+        serviceWorkerBootstrapObservations:
+          cumulative.serviceWorkerBootstrapObservations,
+        targetBootstrapSettlements,
+        targets,
+        wait: {
+          ...current.wait,
+          recentSamples: [1, 2, 3].map((stableSamples) => ({
+            attachErrorCount: 0,
+            attachmentReady: true,
+            incompleteTargetCount: 0,
+            inflightRequestCount: 0,
+            pendingAttachCount: 0,
+            requestCount,
+            serviceWorkerBypassed: true,
+            stableSamples,
+            targetCount: targets.length,
+          })),
+        },
+      };
+    }
+    return structuredClone(cumulative);
+  });
+}
+
+test("validates cumulative fixed-point history and exact current PDF coverage", () => {
+  const diagnostics = passingCumulativeAppMatrixNetworkDiagnostics();
+  assert.equal(isCdpFixedPointDiagnosticHealthy(diagnostics[1]), true);
+  assert.equal(isCdpFixedPointDiagnosticHealthy(diagnostics[5]), true);
+
+  const mutations = [
+    ["historical settlement phase", (diagnostic) => {
+      diagnostic.targetBootstrapSettlements[0].phase = diagnostic.label;
+    }],
+    ["historical parser ancestry", (diagnostic) => {
+      diagnostic.targets.find((target) =>
+        target.urlClass === "pdf-parser-worker" &&
+        target.phase !== diagnostic.label
+      ).ancestry[0].phase = diagnostic.label;
+    }],
+    ["historical service-worker phase", (diagnostic) => {
+      diagnostic.serviceWorkerBootstrapObservations[0].phase = diagnostic.label;
+    }],
+    ["missing current phase coverage", (diagnostic) => {
+      const priorPhase = PDF_SHARPNESS_MATRIX.at(-2).id;
+      const currentTargets = diagnostic.targets.filter((target) =>
+        target.phase === diagnostic.label && target.type === "worker"
+      );
+      for (const target of currentTargets) target.phase = priorPhase;
+      const currentSessions = new Set(currentTargets.map((target) =>
+        target.sessionId
+      ));
+      for (const target of currentTargets) {
+        for (const ancestor of target.ancestry) ancestor.phase = priorPhase;
+      }
+      for (const settlement of diagnostic.targetBootstrapSettlements) {
+        if (currentSessions.has(settlement.targetSessionId)) {
+          settlement.phase = priorPhase;
+        }
+      }
+    }],
+    ["duplicate current document class", (diagnostic) => {
+      const parser = diagnostic.targets.find((target) =>
+        target.phase === diagnostic.label &&
+        target.urlClass === "pdf-parser-worker"
+      );
+      parser.urlClass = "pdf-document-worker";
+      diagnostic.targetBootstrapSettlements.find((settlement) =>
+        settlement.targetSessionId === parser.sessionId
+      ).urlClass = "pdf-document-worker";
+    }],
+    ["stale cumulative stable tail", (diagnostic) => {
+      diagnostic.wait.recentSamples.at(-1).targetCount -= 1;
+    }],
+  ];
+  for (const [label, mutate] of mutations) {
+    const diagnostic = structuredClone(diagnostics[5]);
+    mutate(diagnostic);
+    assert.equal(isCdpFixedPointDiagnosticHealthy(diagnostic), false, label);
+  }
+});
+
 function passingAppMatrixRuntimeCompletedInput(outputDirectory) {
   const base = passingAppMatrixRuntimeFailureInput(outputDirectory);
+  const networkDiagnostics = passingCumulativeAppMatrixNetworkDiagnostics();
   const rows = PDF_SHARPNESS_MATRIX.map((configuration, index) => {
     const row = structuredClone(base.rows[0]);
     const adjacentPage = index < 4 ? 2 : 3;
@@ -8111,7 +8229,7 @@ function passingAppMatrixRuntimeCompletedInput(outputDirectory) {
       revision,
       workerInstanceId: index + 1,
     };
-    row.networkFixedPoint = passingAppMatrixNetworkDiagnostic(configuration.id);
+    row.networkFixedPoint = networkDiagnostics[index];
     row.priorityProbe.targetPage = priorityTarget;
     row.priorityProbe.scrollAction.targetPage = priorityTarget;
     row.priorityProbe.compositions[0].page = priorityTarget;
@@ -8140,14 +8258,6 @@ function passingAppMatrixRuntimeCompletedInput(outputDirectory) {
           configuration.pinchZoom,
     };
     row.releaseSnapshot.waitOutcome = "released";
-    row.releaseSnapshot.workerEvents[0] = {
-      ...row.releaseSnapshot.workerEvents[0],
-      documentKey,
-      jobId: index + 1,
-      pageNumber: adjacentPage,
-      revision,
-      workerInstanceId: index + 1,
-    };
     row.screenshot.path = path.relative(
       path.resolve("."),
       path.join(outputDirectory, `linelight-${configuration.id}.png`),
@@ -8177,6 +8287,34 @@ function passingAppMatrixRuntimeCompletedInput(outputDirectory) {
     runnerFailure: null,
     runnerFailureStage: null,
   };
+}
+
+function passingAppMatrixRuntimeReleaseEvents(row) {
+  return [{
+    activityId: 102,
+    at: 350,
+    direction: "to-worker",
+    enabled: false,
+    eventId: 20,
+    jobId: row.modelIdentity.importJobId,
+    pageNumber: row.adjacentPage,
+    revision: row.modelIdentity.revision,
+    type: "render",
+    workerInstanceId: row.modelIdentity.workerInstanceId,
+  }, {
+    activityId: 103,
+    at: 360,
+    direction: "from-worker",
+    eventId: 21,
+    height: row.priorityProbe.targetAfter.canvasHeight,
+    jobId: row.modelIdentity.importJobId,
+    pageNumber: row.priorityTarget,
+    revision: row.modelIdentity.revision,
+    scale: 1.25,
+    type: "bitmap",
+    width: row.priorityProbe.targetAfter.canvasWidth,
+    workerInstanceId: row.modelIdentity.workerInstanceId,
+  }];
 }
 
 function addRepresentativeAppMatrixRuntimeTiming(input, rowIndex = 0) {
@@ -8228,6 +8366,28 @@ function addRepresentativeAppMatrixRuntimeTiming(input, rowIndex = 0) {
     name: "self",
     startTime: 200,
   }];
+  row.completedSnapshot.longAnimationFrameCount = 1;
+  row.completedSnapshot.longAnimationFrameObserverAvailable = true;
+  row.completedSnapshot.longAnimationFrames = [{
+    blockingDuration: 1_000,
+    duration: 1_020,
+    pauseDuration: 0,
+    renderStart: 1_200,
+    scriptCount: 1,
+    scripts: [{
+      duration: 1_004,
+      executionStart: 200,
+      forcedStyleAndLayoutDuration: 2,
+      functionNamePresent: true,
+      invokerTypeClass: "event-listener",
+      pauseDuration: 0,
+      sourceUrlClass: "same-origin",
+      startTime: 200,
+    }],
+    scriptsTruncated: false,
+    startTime: 190,
+    styleAndLayoutStart: 1_202,
+  }];
   return input;
 }
 
@@ -8237,6 +8397,7 @@ test("builds a fail-closed privacy-safe app-matrix runtime diagnostic", () => {
   );
   const report = buildAppMatrixRuntimeDiagnosticReport(input);
   assert.equal(report.diagnostic, true);
+  assert.equal(report.diagnosticSchemaVersion, 2);
   assert.equal(report.mode, "app-matrix-runtime");
   assert.equal(report.completed, false);
   assert.equal(report.execution.orderExact, true);
@@ -8303,6 +8464,24 @@ test("binds all six app-matrix runtime rows and the exact sixth timeout", () => 
   assert.ok(completed.rows.every((row) =>
     row.timing.phaseMarkers[0].sequence === 1
   ));
+  assert.ok(completed.rows.every((row) => row.release.events.total === 0));
+  assert.ok(completed.rows.every((row) =>
+    row.timing.longAnimationFrames.availability === "unavailable" &&
+    row.timing.longAnimationFrames.total === 0
+  ));
+
+  const retainedEventsInput = structuredClone(completedInput);
+  retainedEventsInput.rows[0].releaseSnapshot.workerEvents =
+    passingAppMatrixRuntimeReleaseEvents(retainedEventsInput.rows[0]);
+  const retainedEvents = buildAppMatrixRuntimeDiagnosticReport(
+    retainedEventsInput,
+  );
+  assert.equal(
+    retainedEvents.completed,
+    true,
+    retainedEvents.failures.join("\n"),
+  );
+  assert.equal(retainedEvents.rows[0].release.events.total, 2);
 
   const failedInput = structuredClone(completedInput);
   const failed = failedInput.rows[5];
@@ -8462,10 +8641,35 @@ test("rejects isolated app-matrix runtime proof substitutions", () => {
       input.rows[0].releaseSnapshot.pages[1].canvas.width -= 1;
     }],
     ["worker identity substitution", (input) => {
+      input.rows[0].releaseSnapshot.workerEvents =
+        passingAppMatrixRuntimeReleaseEvents(input.rows[0]);
       input.rows[0].releaseSnapshot.workerEvents[0].jobId += 1;
     }],
     ["worker direction substitution", (input) => {
+      input.rows[0].releaseSnapshot.workerEvents =
+        passingAppMatrixRuntimeReleaseEvents(input.rows[0]);
       input.rows[0].releaseSnapshot.workerEvents[0].direction = "from-worker";
+    }],
+    ["worker revision substitution", (input) => {
+      input.rows[0].releaseSnapshot.workerEvents =
+        passingAppMatrixRuntimeReleaseEvents(input.rows[0]);
+      input.rows[0].releaseSnapshot.workerEvents[0].revision = "forged";
+    }],
+    ["worker event order", (input) => {
+      input.rows[0].releaseSnapshot.workerEvents =
+        passingAppMatrixRuntimeReleaseEvents(input.rows[0]).reverse();
+    }],
+    ["worker event truncation", (input) => {
+      const event = passingAppMatrixRuntimeReleaseEvents(input.rows[0])[0];
+      input.rows[0].releaseSnapshot.workerEvents = Array.from(
+        { length: 33 },
+        (_, index) => ({
+          ...event,
+          activityId: event.activityId + index,
+          at: event.at + index,
+          eventId: event.eventId + index,
+        }),
+      );
     }],
     ["release draw truncation", (input) => {
       const original = input.rows[0].releaseSnapshot.draws[0];
@@ -8537,7 +8741,7 @@ test("rejects isolated app-matrix runtime proof substitutions", () => {
   }
 });
 
-test("binds nonzero app-matrix Long Task timing rings and chronology", () => {
+test("binds nonzero app-matrix Long Task and LoAF timing", () => {
   const outputDirectory = path.join(
     os.tmpdir(),
     "issue-68-app-matrix-runtime-timing",
@@ -8553,6 +8757,73 @@ test("binds nonzero app-matrix Long Task timing rings and chronology", () => {
   );
   assert.equal(valid.rows[0].timing.workerMessages.total, 1);
   assert.equal(valid.rows[0].timing.drawHooks.total, 1);
+  const longAnimationFrame = valid.rows[0].timing.longAnimationFrames.items[0];
+  assert.equal(
+    valid.rows[0].timing.longAnimationFrames.availability,
+    "available",
+  );
+  assert.deepEqual(longAnimationFrame.overlaps, {
+    drawHooks: [0],
+    longTasks: [0],
+    samplers: [0],
+    workerMessages: [0],
+  });
+  assert.equal(
+    longAnimationFrame.scripts.items[0].sourceUrlClass,
+    "same-origin",
+  );
+  assert.equal(
+    longAnimationFrame.scripts.items[0].invokerTypeClass,
+    "event-listener",
+  );
+
+  const boundaryInput = addRepresentativeAppMatrixRuntimeTiming(
+    passingAppMatrixRuntimeCompletedInput(outputDirectory),
+  );
+  Object.assign(boundaryInput.rows[0].completedSnapshot, {
+    longAnimationFrameCount: 1,
+    longAnimationFrames: [{
+      blockingDuration: 0,
+      duration: 60,
+      pauseDuration: 0,
+      renderStart: 0,
+      scriptCount: 0,
+      scripts: [],
+      scriptsTruncated: false,
+      startTime: 1_210,
+      styleAndLayoutStart: 0,
+    }],
+  });
+  const boundaryReport = buildAppMatrixRuntimeDiagnosticReport(boundaryInput);
+  assert.equal(
+    boundaryReport.completed,
+    true,
+    boundaryReport.failures.join("\n"),
+  );
+  assert.deepEqual(
+    boundaryReport.rows[0].timing.longAnimationFrames.items[0].overlaps,
+    { drawHooks: [], longTasks: [], samplers: [], workerMessages: [] },
+  );
+
+  const privateInput = structuredClone(validInput);
+  const privateFrame = privateInput.rows[0].completedSnapshot
+    .longAnimationFrames[0];
+  privateFrame.observerError = "/home/private/observer-stack";
+  Object.assign(privateFrame.scripts[0], {
+    invoker: "private-element#identifier",
+    sourceFunctionName: "privateFunctionName",
+    sourceURL: "file:///home/private/document.pdf?secret=true",
+  });
+  const privateReport = buildAppMatrixRuntimeDiagnosticReport(privateInput);
+  assert.equal(privateReport.completed, true, privateReport.failures.join("\n"));
+  assert.deepEqual(
+    privateReport.rows[0].timing.longAnimationFrames,
+    valid.rows[0].timing.longAnimationFrames,
+  );
+  assert.doesNotMatch(
+    JSON.stringify(privateReport.rows[0].timing.longAnimationFrames),
+    /home|private|file:|"sourceFunctionName"|"sourceURL"|"invoker":/u,
+  );
 
   const thrownHook = structuredClone(validInput);
   thrownHook.rows[0].completedSnapshot.drawHookTimings[0].nativeDrawThrew = true;
@@ -8703,6 +8974,73 @@ test("binds nonzero app-matrix Long Task timing rings and chronology", () => {
         }),
       );
       input.rows[0].completedSnapshot.workerMessageTimingCount = 65;
+    }],
+    ["LoAF unavailable with entry", (input) => {
+      input.rows[0].completedSnapshot.longAnimationFrameObserverAvailable =
+        false;
+    }],
+    ["null LoAF", (input) => {
+      input.rows[0].completedSnapshot.longAnimationFrames[0] = null;
+    }],
+    ["short LoAF", (input) => {
+      input.rows[0].completedSnapshot.longAnimationFrames[0].duration = 49;
+    }],
+    ["LoAF blocking overflow", (input) => {
+      const frame = input.rows[0].completedSnapshot.longAnimationFrames[0];
+      frame.blockingDuration = frame.duration + 1;
+    }],
+    ["LoAF render order", (input) => {
+      const frame = input.rows[0].completedSnapshot.longAnimationFrames[0];
+      frame.styleAndLayoutStart = frame.renderStart - 1;
+    }],
+    ["LoAF outside scenario", (input) => {
+      const frame = input.rows[0].completedSnapshot.longAnimationFrames[0];
+      const offset = 1_200;
+      frame.startTime += offset;
+      frame.renderStart += offset;
+      frame.styleAndLayoutStart += offset;
+      for (const script of frame.scripts) {
+        script.startTime += offset;
+        script.executionStart += offset;
+      }
+    }],
+    ["overlapping LoAFs", (input) => {
+      const frame = input.rows[0].completedSnapshot.longAnimationFrames[0];
+      input.rows[0].completedSnapshot.longAnimationFrames.push({ ...frame });
+      input.rows[0].completedSnapshot.longAnimationFrameCount = 2;
+    }],
+    ["LoAF script outside frame", (input) => {
+      const script = input.rows[0].completedSnapshot.longAnimationFrames[0]
+        .scripts[0];
+      script.startTime = 189;
+      script.executionStart = 189;
+    }],
+    ["LoAF execution start outside script", (input) => {
+      input.rows[0].completedSnapshot.longAnimationFrames[0].scripts[0]
+        .executionStart = 199;
+    }],
+    ["LoAF pause overflow", (input) => {
+      const frame = input.rows[0].completedSnapshot.longAnimationFrames[0];
+      frame.scripts[0].pauseDuration = frame.scripts[0].duration + 1;
+      frame.pauseDuration = frame.scripts[0].pauseDuration;
+    }],
+    ["LoAF pause aggregate", (input) => {
+      input.rows[0].completedSnapshot.longAnimationFrames[0].pauseDuration = 1;
+    }],
+    ["LoAF source class", (input) => {
+      input.rows[0].completedSnapshot.longAnimationFrames[0].scripts[0]
+        .sourceUrlClass = "private-url";
+    }],
+    ["LoAF count mismatch", (input) => {
+      input.rows[0].completedSnapshot.longAnimationFrameCount = 2;
+    }],
+    ["LoAF ring truncation", (input) => {
+      input.rows[0].completedSnapshot.longAnimationFrameCount = 33;
+    }],
+    ["LoAF script truncation", (input) => {
+      const frame = input.rows[0].completedSnapshot.longAnimationFrames[0];
+      frame.scriptCount = 17;
+      frame.scriptsTruncated = true;
     }],
   ];
   for (const [label, mutate] of mutations) {

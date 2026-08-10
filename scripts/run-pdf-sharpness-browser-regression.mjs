@@ -76,6 +76,8 @@ const FALLBACK_IMPORT_DIAGNOSTIC_SCREENSHOT =
 const APP_MATRIX_RUNTIME_DIAGNOSTIC_REPORT =
   "pdf-sharpness-app-matrix-runtime-diagnostic.json";
 const APP_MATRIX_RUNTIME_DIAGNOSTIC_RUN_TIMEOUT_MS = 360_000;
+const APP_MATRIX_RUNTIME_LOAF_LIMIT = 32;
+const APP_MATRIX_RUNTIME_LOAF_SCRIPT_LIMIT = 16;
 const REFERENCE_CAPTURE_DIAGNOSTIC_TIMEOUT_MS = 120_000;
 const REFERENCE_CAPTURE_DIAGNOSTIC_DEFAULT_CONFIGURATION =
   "desktop-dpr1-zoom100";
@@ -1060,10 +1062,10 @@ export function hasCdpPhasePdfBootstrapCoverage(networkState, appUrl, label) {
   }
   const counts = cdpPhasePdfBootstrapCounts(networkState, appUrl, label);
   return (
-    counts.documentTargetCount > 0 &&
-    counts.parserTargetCount > 0 &&
-    counts.documentBootstrapSettlementCount === counts.documentTargetCount &&
-    counts.parserBootstrapSettlementCount === counts.parserTargetCount
+    counts.documentTargetCount === 1 &&
+    counts.parserTargetCount === 1 &&
+    counts.documentBootstrapSettlementCount === 1 &&
+    counts.parserBootstrapSettlementCount === 1
   );
 }
 
@@ -1540,7 +1542,6 @@ export function isCdpFixedPointDiagnosticHealthy(networkDiagnostic) {
         target?.parentSessionId === settlement?.targetParentSessionId &&
         target?.parentSessionId === settlement?.requestSessionId &&
         target?.phase === settlement?.phase &&
-        target?.phase === networkDiagnostic?.label &&
         target?.type === "worker" &&
         target?.type === settlement?.targetType &&
         target?.urlClass === settlement?.urlClass &&
@@ -1565,14 +1566,12 @@ export function isCdpFixedPointDiagnosticHealthy(networkDiagnostic) {
     const matchingTargets = pdfTargets.filter(
       (target) => target.urlClass === urlClass,
     );
-    return (
-      matchingTargets.length > 0 &&
-      matchingTargets.every((target) =>
-        bootstrapTargetSessions.includes(target.sessionId)
-      )
-    );
+    return matchingTargets.length === 1 &&
+      targetBootstrapSettlements.filter((settlement) =>
+        settlement.targetSessionId === matchingTargets[0].sessionId
+      ).length === 1;
   });
-  const parserTargetsBoundToDocumentWorker = pdfTargets
+  const parserTargetsBoundToDocumentWorker = targets
     .filter((target) => target.urlClass === "pdf-parser-worker")
     .every((target) => {
       const parent = targetBySession.get(target.parentSessionId);
@@ -1615,7 +1614,6 @@ export function isCdpFixedPointDiagnosticHealthy(networkDiagnostic) {
       return (
         isCdpTargetSetupComplete(target) &&
         target?.type === "service_worker" &&
-        target?.phase === networkDiagnostic?.label &&
         observation?.identityHash === cdpDiagnosticIdentity(
           observation.requestSessionId,
           observation.requestId,
@@ -3840,7 +3838,6 @@ function sanitizeAppMatrixRuntimeRelease(raw, row) {
   const eventsBound = identityBound && allEvents.every((event) =>
     event?.workerInstanceId === identity.workerInstanceId &&
     event?.jobId === identity.importJobId &&
-    event?.documentKey === identity.documentKey &&
     event?.revision === identity.revision &&
     [row.adjacentPage, row.priorityTarget].includes(event?.pageNumber) &&
     ["render", "bitmap"].includes(event?.type) &&
@@ -3882,10 +3879,6 @@ function sanitizeAppMatrixRuntimeRelease(raw, row) {
       event.activityId > eventItems[index - 1].activityId &&
       event.at >= eventItems[index - 1].at
     )
-  );
-  const disableObserved = eventItems.some((event) =>
-    event.page === row.adjacentPage && event.direction === "to-worker" &&
-    event.type === "render" && event.enabled === false
   );
   const bitmapEventsBound = eventItems.filter((event) =>
     event.type === "bitmap"
@@ -3966,7 +3959,7 @@ function sanitizeAppMatrixRuntimeRelease(raw, row) {
       visiblePages.includes(row.adjacentPage) &&
     (target.datasetVisibleClass === "true") ===
       visiblePages.includes(row.priorityTarget) &&
-    eventsBound && eventOrderBound && bitmapEventsBound && disableObserved &&
+    eventsBound && eventOrderBound && bitmapEventsBound &&
     !eventTruncated && waitOutcome !== "invalid" &&
     (waitOutcome !== "released" || releasePredicateSatisfied);
   return {
@@ -4219,6 +4212,8 @@ function sanitizeAppMatrixRuntimeTiming(row) {
     Number.isFinite(start) && Number.isFinite(end) &&
     Number.isFinite(left) && Number.isFinite(right) &&
     start < right && end > left;
+  const phaseAt = (time) => phases.findLast((phase) => phase.atMs <= time)
+    ?.stage ?? null;
   const longTasks = Array.isArray(raw.longTasks)
     ? raw.longTasks.map((task) => {
         const taskStart = task?.startTime;
@@ -4263,8 +4258,6 @@ function sanitizeAppMatrixRuntimeTiming(row) {
         ];
         const taskStartMs = taskStart - startedAt;
         const taskEndMs = taskEnd - startedAt;
-        const phaseAt = (time) => phases.findLast((phase) => phase.atMs <= time)
-          ?.stage ?? null;
         const attributionItems = Array.isArray(task?.attribution)
           ? task.attribution.map((item) => ({
               containerIdPresent: item?.containerIdPresent === true,
@@ -4293,6 +4286,203 @@ function sanitizeAppMatrixRuntimeTiming(row) {
         };
       })
     : [];
+  const rawLongAnimationFrames = Array.isArray(raw.longAnimationFrames)
+    ? raw.longAnimationFrames
+    : null;
+  const longAnimationFrameSourceClasses = new Set([
+    "none",
+    "blob",
+    "data",
+    "extension",
+    "same-origin",
+    "external",
+    "invalid",
+  ]);
+  const longAnimationFrameInvokerTypes = new Set([
+    "classic-script",
+    "module-script",
+    "event-listener",
+    "user-callback",
+    "resolve-promise",
+    "reject-promise",
+    "other",
+  ]);
+  const longAnimationFrameResults = (rawLongAnimationFrames ?? []).map(
+    (frame) => {
+      const frameStart = Number(frame?.startTime);
+      const frameDuration = Number(frame?.duration);
+      const frameEnd = frameStart + frameDuration;
+      const blockingDuration = Number(frame?.blockingDuration);
+      const renderStart = Number(frame?.renderStart);
+      const styleAndLayoutStart = Number(frame?.styleAndLayoutStart);
+      const rawScripts = Array.isArray(frame?.scripts) ? frame.scripts : null;
+      const scripts = (rawScripts ?? []).map((script) => {
+        const scriptStart = Number(script?.startTime);
+        const scriptDuration = Number(script?.duration);
+        const scriptEnd = scriptStart + scriptDuration;
+        const executionStart = Number(script?.executionStart);
+        return {
+          duration: appMatrixRuntimeNumber(script?.duration),
+          endMs: scriptEnd - startedAt,
+          executionStartMs: executionStart === 0
+            ? null
+            : executionStart - startedAt,
+          forcedStyleAndLayoutDuration: appMatrixRuntimeNumber(
+            script?.forcedStyleAndLayoutDuration,
+          ),
+          functionNamePresent: typeof script?.functionNamePresent === "boolean"
+            ? script.functionNamePresent
+            : null,
+          invokerTypeClass: longAnimationFrameInvokerTypes.has(
+            script?.invokerTypeClass,
+          ) ? script.invokerTypeClass : "invalid",
+          pauseDuration: appMatrixRuntimeNumber(script?.pauseDuration),
+          sourceUrlClass: longAnimationFrameSourceClasses.has(
+            script?.sourceUrlClass,
+          ) ? script.sourceUrlClass : "invalid",
+          startMs: scriptStart - startedAt,
+        };
+      });
+      const scriptsBound = rawScripts !== null &&
+        Number.isInteger(frame?.scriptCount) && frame.scriptCount >= 0 &&
+        frame.scriptCount === rawScripts.length &&
+        rawScripts.length <= APP_MATRIX_RUNTIME_LOAF_SCRIPT_LIMIT &&
+        frame?.scriptsTruncated === false &&
+        scripts.every((script, index) =>
+          Number.isFinite(script.startMs) && Number.isFinite(script.endMs) &&
+          Number.isFinite(script.duration) && script.duration >= 0 &&
+          script.endMs >= script.startMs &&
+          script.startMs >= frameStart - startedAt &&
+          script.endMs <= frameEnd - startedAt + 1e-7 &&
+          (script.executionStartMs === null || (
+            Number.isFinite(script.executionStartMs) &&
+            script.executionStartMs >= script.startMs &&
+            script.executionStartMs <= script.endMs
+          )) &&
+          Number.isFinite(script.forcedStyleAndLayoutDuration) &&
+          script.forcedStyleAndLayoutDuration >= 0 &&
+          script.forcedStyleAndLayoutDuration <= script.duration &&
+          Number.isFinite(script.pauseDuration) &&
+          script.pauseDuration >= 0 && script.pauseDuration <= script.duration &&
+          script.functionNamePresent !== null &&
+          script.invokerTypeClass !== "invalid" &&
+          script.sourceUrlClass !== "invalid" &&
+          (index === 0 || script.startMs >= scripts[index - 1].startMs)
+        );
+      const pauseDuration = Number(frame?.pauseDuration);
+      const scriptPauseDuration = scripts.reduce(
+        (total, script) => total + Number(script.pauseDuration),
+        0,
+      );
+      const noRendering = renderStart === 0 && styleAndLayoutStart === 0;
+      const renderingBound = noRendering || (
+        renderStart >= frameStart && renderStart <= frameEnd &&
+        (styleAndLayoutStart === 0 || (
+          styleAndLayoutStart >= renderStart &&
+          styleAndLayoutStart <= frameEnd
+        ))
+      );
+      const publicFrame = {
+        blockingDuration: appMatrixRuntimeNumber(frame?.blockingDuration),
+        duration: appMatrixRuntimeNumber(frame?.duration),
+        endMs: frameEnd - startedAt,
+        overlaps: {
+          drawHooks: drawHooks.flatMap((hook, index) =>
+            intervalOverlaps(
+              frameStart - startedAt,
+              frameEnd - startedAt,
+              hook.enteredMs,
+              hook.threw ? hook.nativeEndedMs : hook.settledMs,
+            ) ? [index] : []
+          ),
+          longTasks: longTasks.flatMap((task, index) =>
+            intervalOverlaps(
+              frameStart - startedAt,
+              frameEnd - startedAt,
+              task.startMs,
+              task.endMs,
+            ) ? [index] : []
+          ),
+          samplers: samplers.flatMap((sample, index) =>
+            intervalOverlaps(
+              frameStart - startedAt,
+              frameEnd - startedAt,
+              sample.startedMs,
+              sample.endedMs,
+            ) ? [index] : []
+          ),
+          workerMessages: workerMessages.flatMap((message, index) =>
+            intervalOverlaps(
+              frameStart - startedAt,
+              frameEnd - startedAt,
+              message.receivedMs,
+              message.settledMs,
+            ) ? [index] : []
+          ),
+        },
+        pauseDuration: appMatrixRuntimeNumber(frame?.pauseDuration),
+        phaseAtEnd: phaseAt(frameEnd - startedAt),
+        phaseAtStart: phaseAt(frameStart - startedAt),
+        renderStartMs: renderStart === 0 ? null : renderStart - startedAt,
+        scripts: {
+          items: scripts,
+          retained: scripts.length,
+          total: appMatrixRuntimeInteger(frame?.scriptCount),
+          truncated: frame?.scriptsTruncated === true,
+        },
+        startMs: frameStart - startedAt,
+        styleAndLayoutStartMs: styleAndLayoutStart === 0
+          ? null
+          : styleAndLayoutStart - startedAt,
+      };
+      const valid = Number.isFinite(frameStart) &&
+        Number.isFinite(frameDuration) && frameDuration >= 50 &&
+        Number.isFinite(frameEnd) &&
+        Number.isFinite(blockingDuration) && blockingDuration >= 0 &&
+        blockingDuration <= frameDuration &&
+        Number.isFinite(renderStart) && renderStart >= 0 &&
+        Number.isFinite(styleAndLayoutStart) && styleAndLayoutStart >= 0 &&
+        renderingBound && scriptsBound &&
+        Number.isFinite(pauseDuration) && pauseDuration >= 0 &&
+        pauseDuration <= frameDuration &&
+        Math.abs(pauseDuration - scriptPauseDuration) <= 1e-7 &&
+        frameStart < finishedAt && frameEnd > startedAt &&
+        frameEnd <= finishedAt + 1e-7;
+      return { publicFrame, valid };
+    },
+  );
+  const longAnimationFrameItems = longAnimationFrameResults.map(
+    (result) => result.publicFrame,
+  );
+  const longAnimationFrameTotal = appMatrixRuntimeInteger(
+    raw.longAnimationFrameCount,
+  );
+  const longAnimationFrameTruncated = Number.isInteger(
+    raw.longAnimationFrameCount,
+  ) && raw.longAnimationFrameCount > longAnimationFrameItems.length;
+  const longAnimationFrameAvailability =
+    raw.longAnimationFrameObserverAvailable === true
+      ? "available"
+      : raw.longAnimationFrameObserverAvailable === false
+        ? "unavailable"
+        : "invalid";
+  const longAnimationFramesBound = rawLongAnimationFrames !== null &&
+    Number.isInteger(raw.longAnimationFrameCount) &&
+    raw.longAnimationFrameCount >= 0 &&
+    rawLongAnimationFrames.length <= APP_MATRIX_RUNTIME_LOAF_LIMIT &&
+    raw.longAnimationFrameCount === rawLongAnimationFrames.length &&
+    longAnimationFrameResults.every((result) => result.valid) &&
+    longAnimationFrameResults.every((result, index) =>
+      index === 0 || (
+        result.publicFrame.startMs >=
+          longAnimationFrameResults[index - 1].publicFrame.endMs
+      )
+    ) &&
+    !longAnimationFrameTruncated &&
+    (longAnimationFrameAvailability === "available" || (
+      longAnimationFrameAvailability === "unavailable" &&
+      raw.longAnimationFrameCount === 0 && rawLongAnimationFrames.length === 0
+    ));
   const drawTruncated = raw.drawHookTimingCount > drawHooks.length;
   const samplerTruncated = raw.samplerTimingCount > samplers.length;
   const workerTruncated = raw.workerMessageTimingCount > workerMessages.length;
@@ -4348,9 +4538,11 @@ function sanitizeAppMatrixRuntimeTiming(row) {
     );
   const timingArraysPresent = Array.isArray(raw.drawHookTimings) &&
     Array.isArray(raw.samplerTimings) &&
-    Array.isArray(raw.workerMessageTimings) && Array.isArray(raw.longTasks) &&
+    Array.isArray(raw.workerMessageTimings) &&
+    Array.isArray(raw.longAnimationFrames) && Array.isArray(raw.longTasks) &&
     Array.isArray(raw.phaseMarkers);
   const integrity = bounded && timingArraysPresent && phaseBound &&
+    longAnimationFramesBound &&
     Number.isInteger(raw.drawHookTimingCount) && raw.drawHookTimingCount >= 0 &&
     Number.isInteger(raw.samplerTimingCount) && raw.samplerTimingCount >= 0 &&
     Number.isInteger(raw.workerMessageTimingCount) && raw.workerMessageTimingCount >= 0 &&
@@ -4410,6 +4602,13 @@ function sanitizeAppMatrixRuntimeTiming(row) {
       truncated: drawTruncated,
     },
     integrity,
+    longAnimationFrames: {
+      availability: longAnimationFrameAvailability,
+      items: longAnimationFrameItems,
+      retained: longAnimationFrameItems.length,
+      total: longAnimationFrameTotal,
+      truncated: longAnimationFrameTruncated,
+    },
     longTasks,
     phaseMarkers: phases,
     samplers: {
@@ -4707,7 +4906,7 @@ export function buildAppMatrixRuntimeDiagnosticReport({
       rowOrderBound && phaseSequenceBound && runnerFailureBound &&
       !teardownFailed && !runnerFailure,
     diagnostic: true,
-    diagnosticSchemaVersion: 1,
+    diagnosticSchemaVersion: 2,
     execution: {
       attemptedConfigurationCount: publicRows.length,
       completedConfigurationCount,
@@ -5822,6 +6021,9 @@ const INSTRUMENTATION_SOURCE = String.raw`
       signalAt: null,
       stagingStarted: 0
     },
+    longAnimationFrameCount: 0,
+    longAnimationFrameObserverAvailable: false,
+    longAnimationFrames: [],
     longTasks: [],
     notices: [],
     phaseMarkers: [],
@@ -6003,6 +6205,94 @@ const INSTRUMENTATION_SOURCE = String.raw`
     longTaskObserver.observe({ type: "longtask", buffered: true });
   } catch (error) {
     recordError("Long Task observer unavailable: " + error.message);
+  }
+
+  const longAnimationFrameSourceUrlClass = (sourceURL) => {
+    if (typeof sourceURL !== 'string' || sourceURL.length === 0) return 'none';
+    try {
+      const source = new URL(sourceURL, location.href);
+      if (source.protocol === 'blob:') return 'blob';
+      if (source.protocol === 'data:') return 'data';
+      if (source.protocol === 'chrome-extension:') return 'extension';
+      return source.origin === location.origin ? 'same-origin' : 'external';
+    } catch {
+      return 'invalid';
+    }
+  };
+  const longAnimationFrameInvokerTypeClass = (invokerType) => [
+    'classic-script',
+    'module-script',
+    'event-listener',
+    'user-callback',
+    'resolve-promise',
+    'reject-promise',
+    'other'
+  ].includes(invokerType) ? invokerType : 'other';
+  const recordLongAnimationFrameEntries = (entries) => {
+    if (!runtimeDiagnosticsEnabled) return;
+    for (const entry of entries) {
+      if (!currentScenario) continue;
+      const rawScriptCount = Number(entry.scripts?.length) || 0;
+      const scripts = Array.prototype.slice.call(
+        entry.scripts ?? [],
+        0,
+        ${APP_MATRIX_RUNTIME_LOAF_SCRIPT_LIMIT}
+      ).map(
+        (script) => ({
+          duration: script.duration,
+          executionStart: script.executionStart,
+          forcedStyleAndLayoutDuration: script.forcedStyleAndLayoutDuration,
+          functionNamePresent: Boolean(script.sourceFunctionName),
+          invokerTypeClass: longAnimationFrameInvokerTypeClass(script.invokerType),
+          pauseDuration: script.pauseDuration,
+          sourceUrlClass: longAnimationFrameSourceUrlClass(script.sourceURL),
+          startTime: script.startTime
+        })
+      );
+      state.longAnimationFrameCount += 1;
+      state.longAnimationFrames.push({
+        blockingDuration: entry.blockingDuration,
+        duration: entry.duration,
+        pauseDuration: scripts.reduce(
+          (total, script) => total + (Number(script.pauseDuration) || 0),
+          0
+        ),
+        renderStart: entry.renderStart,
+        scriptCount: rawScriptCount,
+        scripts,
+        scriptsTruncated: rawScriptCount > scripts.length,
+        startTime: entry.startTime,
+        styleAndLayoutStart: entry.styleAndLayoutStart
+      });
+      if (state.longAnimationFrames.length > ${APP_MATRIX_RUNTIME_LOAF_LIMIT}) {
+        state.longAnimationFrames.shift();
+      }
+    }
+  };
+  let longAnimationFrameObserver = null;
+  const drainLongAnimationFrames = () => {
+    if (longAnimationFrameObserver) {
+      recordLongAnimationFrameEntries(longAnimationFrameObserver.takeRecords());
+    }
+  };
+  state.drainLongAnimationFrames = drainLongAnimationFrames;
+  if (
+    runtimeDiagnosticsEnabled &&
+    PerformanceObserver.supportedEntryTypes?.includes('long-animation-frame')
+  ) {
+    try {
+      longAnimationFrameObserver = new PerformanceObserver((list) => {
+        recordLongAnimationFrameEntries(list.getEntries());
+      });
+      longAnimationFrameObserver.observe({
+        type: 'long-animation-frame',
+        buffered: true
+      });
+      state.longAnimationFrameObserverAvailable = true;
+    } catch {
+      longAnimationFrameObserver = null;
+      state.longAnimationFrameObserverAvailable = false;
+    }
   }
 
   let previousNotice = null;
@@ -6677,8 +6967,11 @@ const INSTRUMENTATION_SOURCE = String.raw`
 
   state.beginScenario = (id) => {
     if (runtimeDiagnosticsEnabled) {
+      drainLongAnimationFrames();
       state.drawHookTimingCount = 0;
       state.drawHookTimings.length = 0;
+      state.longAnimationFrameCount = 0;
+      state.longAnimationFrames.length = 0;
       state.samplerTimingCount = 0;
       state.samplerTimings.length = 0;
       state.workerMessageTimingCount = 0;
@@ -6702,6 +6995,7 @@ const INSTRUMENTATION_SOURCE = String.raw`
   state.finishScenario = () => {
     if (!currentScenario) return null;
     currentScenario.finishedAt = performance.now();
+    if (runtimeDiagnosticsEnabled) drainLongAnimationFrames();
     drainLongTasks();
     currentScenario.drawEnd = state.draws.length;
     currentScenario.sampleEnd = state.samples.length;
@@ -7013,6 +7307,7 @@ const INSTRUMENTATION_SOURCE = String.raw`
     return structuredClone(marker);
   };
   state.snapshot = () => {
+    if (runtimeDiagnosticsEnabled) drainLongAnimationFrames();
     drainLongTasks();
     return structuredClone({
       drawHookTimingCount: state.drawHookTimingCount,
@@ -7020,6 +7315,12 @@ const INSTRUMENTATION_SOURCE = String.raw`
       draws: state.draws,
       errors: state.errors,
       fallback: state.fallback,
+      ...(runtimeDiagnosticsEnabled ? {
+        longAnimationFrameCount: state.longAnimationFrameCount,
+        longAnimationFrameObserverAvailable:
+          state.longAnimationFrameObserverAvailable,
+        longAnimationFrames: state.longAnimationFrames
+      } : {}),
       longTasks: state.longTasks,
       notices: state.notices,
       phaseMarkers: state.phaseMarkers,
@@ -7138,7 +7439,6 @@ async function readAppMatrixRuntimeSnapshot(
   targetPage,
   modelCompletion,
   scenarioStart,
-  priorityProbe,
 ) {
   return evaluate(
     cdp,
@@ -7206,12 +7506,12 @@ async function readAppMatrixRuntimeSnapshot(
         [${sourcePage}, ${targetPage}].includes(event.pageNumber) &&
         event.workerInstanceId === ${modelCompletion?.workerInstanceId ?? "null"} &&
         event.jobId === ${modelCompletion?.importJobId ?? "null"} &&
-        event.documentKey === ${JSON.stringify(modelCompletion?.documentKey ?? null)} &&
         event.revision === ${JSON.stringify(modelCompletion?.revision ?? null)};
-      const workerEvents = (state?.workerEvents ?? []).filter((event) =>
+      const workerEvents = (state?.workerEvents ?? []).slice(
+        ${Number.isInteger(scenarioStart?.workerEventStart) ? scenarioStart.workerEventStart : 0}
+      ).filter((event) =>
         eventMatchesIdentity(event) &&
-        ['render', 'bitmap'].includes(event.type) &&
-        event.activityId > ${priorityProbe?.scrollAction?.activityId ?? 0}
+        ['render', 'bitmap'].includes(event.type)
       );
       const draws = (state?.draws ?? []).slice(
         ${Number.isInteger(scenarioStart?.drawStart) ? scenarioStart.drawStart : 0}
@@ -7307,7 +7607,6 @@ async function waitForAppMatrixPageRelease(
       targetPage,
       modelCompletion,
       scenarioStart,
-      runtimeDiagnostic?.priorityProbe,
     );
   } catch {
     snapshotErrorPresent = true;
@@ -9027,6 +9326,10 @@ function rememberAppMatrixRuntimeSnapshot(runtimeDiagnostic, snapshot, scenario)
   runtimeDiagnostic.completedSnapshot = {
     drawHookTimingCount: snapshot.drawHookTimingCount,
     drawHookTimings: snapshot.drawHookTimings,
+    longAnimationFrameCount: snapshot.longAnimationFrameCount,
+    longAnimationFrameObserverAvailable:
+      snapshot.longAnimationFrameObserverAvailable,
+    longAnimationFrames: snapshot.longAnimationFrames,
     longTasks: selectPdfLongTasksForWindow(snapshot.longTasks, scenario),
     phaseMarkers: snapshot.phaseMarkers,
     samplerTimingCount: snapshot.samplerTimingCount,
