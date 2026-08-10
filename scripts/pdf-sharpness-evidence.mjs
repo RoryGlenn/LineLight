@@ -124,16 +124,26 @@ function emptyArray(value) {
   return Array.isArray(value) && value.length === 0;
 }
 
-function validLongTasks(value) {
-  return (
-    Array.isArray(value) &&
-    value.every(
+function classifyLongTasks(value) {
+  if (value === undefined) return "missing";
+  if (!Array.isArray(value)) return "malformed";
+  if (
+    value.some(
       (task) =>
-        finite(task?.duration) &&
-        Number(task.duration) >= 0 &&
-        Number(task.duration) <= PDF_SHARPNESS_MAX_LONG_TASK_MS,
+        !finite(task?.duration) ||
+        Number(task.duration) < 0 ||
+        !finite(task?.startTime) ||
+        Number(task.startTime) < 0 ||
+        !nonEmptyString(task?.name),
     )
-  );
+  ) {
+    return "malformed";
+  }
+  return value.some(
+    (task) => Number(task.duration) > PDF_SHARPNESS_MAX_LONG_TASK_MS,
+  )
+    ? "over-threshold"
+    : "valid";
 }
 
 function validAlignment(value, configurationId) {
@@ -172,6 +182,9 @@ function validComposedCanvasFrame(frame, { count = null, pixels = null } = {}) {
   const visiblePages = Array.isArray(frame?.visiblePages)
     ? frame.visiblePages
     : [];
+  const geometryVisiblePages = Array.isArray(frame?.geometryVisiblePages)
+    ? frame.geometryVisiblePages
+    : [];
   const composedIds = composedPages.map((entry) => entry?.page);
   const validPageIds = (pages) =>
     pages.length > 0 &&
@@ -183,6 +196,18 @@ function validComposedCanvasFrame(frame, { count = null, pixels = null } = {}) {
     (sum, entry) => sum + Number(entry?.pixels ?? 0),
     0,
   );
+  const viewport = frame?.readerViewport;
+  const validRect = (rect) =>
+    [rect?.bottom, rect?.left, rect?.right, rect?.top].every(finite) &&
+    rect.bottom >= rect.top &&
+    rect.right >= rect.left;
+  const intersectsViewport = (rect) =>
+    validRect(viewport) &&
+    validRect(rect) &&
+    rect.bottom > viewport.top &&
+    rect.top < viewport.bottom &&
+    rect.right > viewport.left &&
+    rect.left < viewport.right;
   return (
     finite(frame?.at) &&
     nonNegativeInteger(frame?.composedCount) &&
@@ -195,11 +220,16 @@ function validComposedCanvasFrame(frame, { count = null, pixels = null } = {}) {
     frame.composedPixels <= PDF_SHARPNESS_MAX_BITMAP_PIXELS &&
     validPageIds(composedIds) &&
     validPageIds(visiblePages) &&
+    validPageIds(geometryVisiblePages) &&
     composedIds.length === visiblePages.length &&
+    composedIds.length === geometryVisiblePages.length &&
     composedIds.every((page) => visiblePages.includes(page)) &&
+    composedIds.every((page) => geometryVisiblePages.includes(page)) &&
     composedPages.every(
       (entry) =>
         entry?.visible === true &&
+        entry?.geometryVisible === true &&
+        intersectsViewport(entry?.geometry) &&
         Number.isInteger(entry?.width) &&
         entry.width > 0 &&
         Number.isInteger(entry?.height) &&
@@ -622,6 +652,12 @@ export function validatePdfSharpnessEvidence(evidence) {
     const priorityComposition = priority?.targetComposition;
     const priorityRequest = priority?.targetVisibleRequest;
     const priorityBitmap = priority?.targetBitmapAfterVisibleRequest;
+    const priorityRequests = Array.isArray(priority?.targetRenderRequests)
+      ? priority.targetRenderRequests
+      : [];
+    const priorityBitmaps = Array.isArray(priority?.targetBitmaps)
+      ? priority.targetBitmaps
+      : [];
     const priorityVisiblePages = priorityComposition?.visiblePages;
     const priorityBaseValid =
       Number.isInteger(priorityTarget) &&
@@ -631,6 +667,7 @@ export function validatePdfSharpnessEvidence(evidence) {
       priorityAction?.targetPage === priorityTarget &&
       finite(priorityAction?.at) &&
       nonNegativeInteger(priorityAction?.eventId) &&
+      nonNegativeInteger(priorityAction?.drawBoundary) &&
       priorityBefore?.visible === false &&
       priorityBefore?.distance === 1 &&
       priorityBefore?.canvasWidth === 0 &&
@@ -653,7 +690,7 @@ export function validatePdfSharpnessEvidence(evidence) {
       finite(priorityComposition?.at) &&
       priorityComposition.at >= priorityAction.at &&
       Number.isInteger(priorityComposition?.compositionId) &&
-      priorityComposition.compositionId > 0 &&
+      priorityComposition.compositionId > priorityAction.drawBoundary &&
       Number.isInteger(priorityComposition?.bitmapEventId) &&
       priorityComposition.bitmapEventId > 0 &&
       priorityComposition?.width === priorityAfter.targetWidth &&
@@ -681,6 +718,10 @@ export function validatePdfSharpnessEvidence(evidence) {
       ) &&
       priorityComposition?.bitmapEventId ===
         priorityBefore?.latestBitmapEventId &&
+      priority?.targetRenderRequestCount === 0 &&
+      priority?.targetBitmapCount === 0 &&
+      priorityRequests.length === 0 &&
+      priorityBitmaps.length === 0 &&
       priorityRequest === null &&
       priorityBitmap === null;
     const beforeBitmapMissing =
@@ -703,6 +744,10 @@ export function validatePdfSharpnessEvidence(evidence) {
     const renderedPriority =
       priority?.targetPath === "render-required" &&
       (beforeBitmapMissing || beforeBitmapUndersized) &&
+      priority?.targetRenderRequestCount === 1 &&
+      priority?.targetBitmapCount === 1 &&
+      priorityRequests.length === 1 &&
+      priorityBitmaps.length === 1 &&
       priorityRequest?.type === "render" &&
       priorityRequest?.pageNumber === priorityTarget &&
       priorityRequest?.enabled === true &&
@@ -713,6 +758,8 @@ export function validatePdfSharpnessEvidence(evidence) {
       Number.isInteger(priorityRequest?.eventId) &&
       priorityRequest.eventId > priorityAction?.eventId &&
       SHA256_PATTERN.test(priorityRequest?.identityHash ?? "") &&
+      priorityRequests[0]?.eventId === priorityRequest.eventId &&
+      priorityRequests[0]?.identityHash === priorityRequest.identityHash &&
       priority?.firstPostScrollVisibleRequestPage === priorityTarget &&
       priorityBitmap?.type === "bitmap" &&
       priorityBitmap?.pageNumber === priorityTarget &&
@@ -722,6 +769,8 @@ export function validatePdfSharpnessEvidence(evidence) {
       Number.isInteger(priorityBitmap?.eventId) &&
       priorityBitmap.eventId > priorityRequest?.eventId &&
       SHA256_PATTERN.test(priorityBitmap?.identityHash ?? "") &&
+      priorityBitmaps[0]?.eventId === priorityBitmap.eventId &&
+      priorityBitmaps[0]?.identityHash === priorityBitmap.identityHash &&
       priorityComposition?.bitmapEventId === priorityBitmap?.eventId;
     if (!priorityBaseValid || (!cachedPriority && !renderedPriority)) {
       fail(`${expected.id} did not render the current viewport first`);
@@ -752,11 +801,20 @@ export function validatePdfSharpnessEvidence(evidence) {
       !validComposedCanvasFrame(
         run?.canvasBudget?.maximumPixelsFrame,
         { pixels: run?.canvasBudget?.maximumPixels },
-      )
+      ) ||
+      run?.canvasBudget?.maximumCountFrame?.composedPixels >
+        run?.canvasBudget?.maximumPixels ||
+      run?.canvasBudget?.maximumPixelsFrame?.composedCount >
+        run?.canvasBudget?.maximumCount
     ) {
       fail(`${expected.id} exceeded the visible composed-canvas budget`);
     }
-    if (!validLongTasks(run?.longTasks)) {
+    const longTaskStatus = classifyLongTasks(run?.longTasks);
+    if (longTaskStatus === "missing") {
+      fail(`${expected.id} Long Task evidence is missing`);
+    } else if (longTaskStatus === "malformed") {
+      fail(`${expected.id} Long Task evidence is malformed`);
+    } else if (longTaskStatus === "over-threshold") {
       fail(`${expected.id} recorded a Long Task over ${PDF_SHARPNESS_MAX_LONG_TASK_MS}ms`);
     }
     if (!emptyArray(run?.runtimeErrors)) {
@@ -857,12 +915,22 @@ export function validatePdfSharpnessEvidence(evidence) {
       event?.renderAttemptId === renderAttemptId,
   );
   const continuationResumeEvent = continuationResumeEvents[0];
+  const lateComposeBoundaryAt = Math.min(
+    Number(viewportExitRequestEvents[0]?.at ?? Number.POSITIVE_INFINITY),
+    Number(
+      stagingEvents.find(
+        (event) =>
+          event?.type === "cancel-request" &&
+          event?.renderAttemptId === renderAttemptId,
+      )?.at ?? Number.POSITIVE_INFINITY,
+    ),
+  );
   const lateComposesForAttempt = stagingEvents.filter(
     (event) =>
       event?.type === "visible-compose" &&
       event?.renderAttemptId === renderAttemptId &&
-      finite(viewportExitEvent?.at) &&
-      event?.at > viewportExitEvent.at,
+      finite(lateComposeBoundaryAt) &&
+      event?.at >= lateComposeBoundaryAt,
   );
   const uniqueStagingIdentities =
     stagingStartEvents.length > 0 &&
@@ -1088,6 +1156,12 @@ export function validatePdfSharpnessEvidence(evidence) {
     continuationDelayEvent?.at <= continuationMinimumElapsedEvent?.at &&
     continuationMinimumElapsedEvent?.at <= continuationResumeEvent?.at &&
     continuationMinimumElapsedEvent?.afterMs >= 1_000 &&
+    continuationMinimumElapsedEvent?.at - continuationDelayEvent?.at >= 1_000 &&
+    continuationMinimumElapsedEvent?.afterMs ===
+      continuationMinimumElapsedEvent?.at - continuationDelayEvent?.at &&
+    continuationResumeEvent?.at - continuationDelayEvent?.at >= 1_000 &&
+    continuationResumeEvent?.afterMs ===
+      continuationResumeEvent?.at - continuationDelayEvent?.at &&
     continuationResumeEvent?.releaseRequestedAt === viewportExitEvent?.at &&
     cancellationEventOrder.every((index) => index >= 0) &&
     cancellationEventOrder.every(
@@ -1237,7 +1311,12 @@ export function validatePdfSharpnessEvidence(evidence) {
   ) {
     fail("serialized fallback cancellation/retry evidence failed");
   }
-  if (!validLongTasks(fallback?.longTasks)) {
+  const fallbackLongTaskStatus = classifyLongTasks(fallback?.longTasks);
+  if (fallbackLongTaskStatus === "missing") {
+    fail("fallback Long Task evidence is missing");
+  } else if (fallbackLongTaskStatus === "malformed") {
+    fail("fallback Long Task evidence is malformed");
+  } else if (fallbackLongTaskStatus === "over-threshold") {
     fail(`fallback recorded a Long Task over ${PDF_SHARPNESS_MAX_LONG_TASK_MS}ms`);
   }
 

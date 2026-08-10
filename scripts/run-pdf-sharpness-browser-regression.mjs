@@ -318,6 +318,14 @@ const PDF_FALLBACK_DIAGNOSTIC_EVENT_TYPES = new Set([
   "viewport-exit",
   "viewport-exit-request",
 ]);
+const PDF_FALLBACK_DIAGNOSTIC_STAGES = new Set([
+  "viewport-exit-request",
+  "page-traversal",
+  "cancellation-ready",
+  "viewport-exit-confirmation",
+  "minimum-elapsed",
+  "continuation-resume",
+]);
 
 /**
  * Reduce a failed cancellation probe to fixed metadata. Document identities and
@@ -404,7 +412,29 @@ export function summarizePdfFallbackCancellationDiagnostic(raw, expected) {
       resumed: raw?.held?.resumed === true,
       signalMatches: raw?.held?.abortSignalId === expectedSignal,
     },
+    stage: PDF_FALLBACK_DIAGNOSTIC_STAGES.has(expected?.stage)
+      ? expected.stage
+      : null,
   };
+}
+
+export function selectPdfLongTasksForWindow(
+  entries,
+  { finishedAt, startedAt },
+) {
+  if (
+    !Array.isArray(entries) ||
+    !Number.isFinite(startedAt) ||
+    !Number.isFinite(finishedAt) ||
+    finishedAt < startedAt
+  ) {
+    throw new TypeError("Long Task selection requires an array and a valid window.");
+  }
+  return entries.filter(
+    (entry) =>
+      !Number.isFinite(entry?.startTime) ||
+      (entry.startTime >= startedAt && entry.startTime < finishedAt),
+  );
 }
 
 export function classifyPdfRasterTransition(previewComposition, sharpTarget) {
@@ -3093,6 +3123,7 @@ const INSTRUMENTATION_SOURCE = String.raw`
   const buildFallbackWorkerModuleSource = (${buildFallbackWorkerModuleSource.toString()});
   const workerEvents = [];
   const workerLifecycle = [];
+  const bitmapEventByObject = new WeakMap();
   let workerInstanceSequence = 0;
   globalThis.Worker = class Issue68Worker extends NativeWorker {
     constructor(url, options) {
@@ -3143,7 +3174,7 @@ const INSTRUMENTATION_SOURCE = String.raw`
               workerInstanceId
             });
           }
-          workerEvents.push({
+          const workerEvent = {
             at: performance.now(),
             completedPages: Number(message.completedPages) || null,
             direction: "from-worker",
@@ -3164,7 +3195,15 @@ const INSTRUMENTATION_SOURCE = String.raw`
             type: message.type || null,
             workerInstanceId,
             width: Number(message.width) || null
-          });
+          };
+          workerEvents.push(workerEvent);
+          if (
+            workerEvent.type === "bitmap" &&
+            message.bitmap &&
+            (typeof message.bitmap === "object" || typeof message.bitmap === "function")
+          ) {
+            bitmapEventByObject.set(message.bitmap, workerEvent.eventId);
+          }
         });
         this.addEventListener("error", () => {
           workerLifecycle.push({
@@ -3381,16 +3420,24 @@ const INSTRUMENTATION_SOURCE = String.raw`
       });
     }).catch(recordError);
   }, true);
+  const recordLongTaskEntries = (entries) => {
+    for (const entry of entries) {
+      state.longTasks.push({
+        duration: entry.duration,
+        name: entry.name,
+        startTime: entry.startTime
+      });
+    }
+  };
+  let longTaskObserver = null;
+  const drainLongTasks = () => {
+    if (longTaskObserver) recordLongTaskEntries(longTaskObserver.takeRecords());
+  };
   try {
-    new PerformanceObserver((list) => {
-      for (const entry of list.getEntries()) {
-        state.longTasks.push({
-          duration: entry.duration,
-          name: entry.name,
-          startTime: entry.startTime
-        });
-      }
-    }).observe({ type: "longtask", buffered: true });
+    longTaskObserver = new PerformanceObserver((list) => {
+      recordLongTaskEntries(list.getEntries());
+    });
+    longTaskObserver.observe({ type: "longtask", buffered: true });
   } catch (error) {
     recordError("Long Task observer unavailable: " + error.message);
   }
@@ -3722,28 +3769,13 @@ const INSTRUMENTATION_SOURCE = String.raw`
       const destination = this.canvas;
       const fallbackAttempt = args[0]?.[stagingSymbol] ?? null;
       const fallbackCompose = Boolean(fallbackAttempt);
+      const transferredBitmapEventId = bitmapEventByObject.get(args[0]) ?? null;
       queueMicrotask(() => {
         const block = destination.closest(".pdf-page-block");
         const page = Number(block?.dataset.pdfPageIndex || -1) + 1;
-        const latestImport = latestValidatedPdfImport();
-        const bitmapEvent = workerEvents.findLast((event) =>
-          latestImport &&
-          event.direction === "from-worker" &&
-          event.type === "bitmap" &&
-          event.pageNumber === page &&
-          event.jobId === latestImport?.jobId &&
-          event.revision === latestImport?.revision &&
-          event.at >= latestImport.at &&
-          event.width === destination.width &&
-          event.height === destination.height &&
-          Math.abs(
-            Number(event.scale) -
-              (Number(destination.dataset.pdfRasterScale) || 0)
-          ) <= 1e-7
-        ) ?? null;
         const draw = {
           at: performance.now(),
-          bitmapEventId: bitmapEvent?.eventId ?? null,
+          bitmapEventId: transferredBitmapEventId,
           compositionId: state.draws.length + 1,
           distance: Number(block?.dataset.pdfPageDistance),
           height: destination.height,
@@ -3794,16 +3826,44 @@ const INSTRUMENTATION_SOURCE = String.raw`
     let composedCount = 0;
     let composedPixels = 0;
     const composedPages = [];
+    const geometryVisiblePages = [];
     const visiblePages = [];
+    const reader = document.querySelector('.reader-scroll');
+    const readerRect = reader?.getBoundingClientRect() ?? null;
+    const readerViewport = readerRect
+      ? {
+          bottom: readerRect.bottom,
+          left: readerRect.left,
+          right: readerRect.right,
+          top: readerRect.top
+        }
+      : null;
     for (const block of document.querySelectorAll(".pdf-page-block")) {
+      const page = Number(block.dataset.pdfPageIndex || -1) + 1;
+      const blockRect = block.getBoundingClientRect();
+      const geometry = {
+        bottom: blockRect.bottom,
+        left: blockRect.left,
+        right: blockRect.right,
+        top: blockRect.top
+      };
+      const geometryVisible = Boolean(
+        readerRect &&
+        blockRect.bottom > readerRect.top &&
+        blockRect.top < readerRect.bottom &&
+        blockRect.right > readerRect.left &&
+        blockRect.left < readerRect.right
+      );
+      if (geometryVisible) geometryVisiblePages.push(page);
       const canvas = block.querySelector("canvas");
       if (!canvas) continue;
-      const page = Number(block.dataset.pdfPageIndex || -1) + 1;
       const sample = {
         at: now,
         capped: canvas.dataset.pdfRasterCapped === "true",
         distance: Number(block.dataset.pdfPageDistance),
         height: canvas.height,
+        geometry,
+        geometryVisible,
         page,
         scale: Number(canvas.dataset.pdfRasterScale) || null,
         source: canvas.dataset.pdfRenderSource || null,
@@ -3818,6 +3878,8 @@ const INSTRUMENTATION_SOURCE = String.raw`
         composedPixels += sample.width * sample.height;
         composedPages.push({
           height: sample.height,
+          geometry: sample.geometry,
+          geometryVisible: sample.geometryVisible,
           page,
           pixels: sample.width * sample.height,
           visible: sample.visible,
@@ -3846,6 +3908,8 @@ const INSTRUMENTATION_SOURCE = String.raw`
         composedCount,
         composedPages,
         composedPixels,
+        geometryVisiblePages,
+        readerViewport,
         visiblePages
       };
       if (composedCount > currentScenario.maximumCanvasCount) {
@@ -3871,7 +3935,6 @@ const INSTRUMENTATION_SOURCE = String.raw`
     const scenario = {
       id,
       drawStart: state.draws.length,
-      longTaskStart: state.longTasks.length,
       maximumCanvasCount: 0,
       maximumCanvasPixels: 0,
       maximumCountFrame: null,
@@ -3887,17 +3950,20 @@ const INSTRUMENTATION_SOURCE = String.raw`
   state.finishScenario = () => {
     if (!currentScenario) return null;
     currentScenario.finishedAt = performance.now();
+    drainLongTasks();
     currentScenario.drawEnd = state.draws.length;
-    currentScenario.longTaskEnd = state.longTasks.length;
     currentScenario.sampleEnd = state.samples.length;
     currentScenario.workerEventEnd = workerEvents.length;
     const result = structuredClone(currentScenario);
     currentScenario = null;
     return result;
   };
-  state.beginPriorityProbe = (targetPage) => {
+  state.beginPriorityScroll = (targetPage) => {
     const latestImport = latestValidatedPdfImport();
     const block = document.querySelector('#pdf-page-' + targetPage);
+    if (!block) {
+      throw new Error('The mounted priority target disappeared.');
+    }
     const canvas = block?.querySelector('canvas') ?? null;
     const latestBitmap = workerEvents.findLast((event) =>
       event.direction === 'from-worker' &&
@@ -3907,9 +3973,17 @@ const INSTRUMENTATION_SOURCE = String.raw`
       event.revision === latestImport?.revision &&
       event.at >= latestImport.at
     ) ?? null;
+    const action = {
+      at: performance.now(),
+      drawBoundary: state.draws.length,
+      eventId: workerEvents.length,
+      targetPage,
+      type: 'rapid-scroll-action'
+    };
     currentPriorityProbe = {
       compositions: [],
-      startedAt: performance.now(),
+      scrollAction: action,
+      startedAt: action.at,
       targetBefore: {
         canvasHeight: canvas?.height ?? null,
         canvasWidth: canvas?.width ?? null,
@@ -3924,21 +3998,10 @@ const INSTRUMENTATION_SOURCE = String.raw`
         visible: block?.dataset.pdfPageVisible === 'true'
       },
       targetPage,
-      workerEventStart: workerEvents.length
+      workerEventStart: action.eventId
     };
-  };
-  state.markPriorityScrollAction = (targetPage) => {
-    if (!currentPriorityProbe || currentPriorityProbe.targetPage !== targetPage) {
-      throw new Error('Priority scroll action does not match the active target.');
-    }
-    const event = {
-      at: performance.now(),
-      eventId: workerEvents.length,
-      targetPage,
-      type: 'rapid-scroll-action'
-    };
-    currentPriorityProbe.scrollAction = event;
-    return structuredClone(event);
+    block.scrollIntoView({ behavior: 'auto', block: 'center' });
+    return structuredClone(action);
   };
   state.finishPriorityProbe = () => {
     if (currentPriorityProbe) {
@@ -4162,19 +4225,22 @@ const INSTRUMENTATION_SOURCE = String.raw`
         resumed: heldContinuation.resumed
       }
     : null;
-  state.snapshot = () => structuredClone({
-    draws: state.draws,
-    errors: state.errors,
-    fallback: state.fallback,
-    longTasks: state.longTasks,
-    notices: state.notices,
-    samples: state.samples,
-    scenarios: state.scenarios,
-    sourceFiles: state.sourceFiles,
-    spoken: state.spoken,
-    workerEvents: state.workerEvents,
-    workerLifecycle: state.workerLifecycle
-  });
+  state.snapshot = () => {
+    drainLongTasks();
+    return structuredClone({
+      draws: state.draws,
+      errors: state.errors,
+      fallback: state.fallback,
+      longTasks: state.longTasks,
+      notices: state.notices,
+      samples: state.samples,
+      scenarios: state.scenarios,
+      sourceFiles: state.sourceFiles,
+      spoken: state.spoken,
+      workerEvents: state.workerEvents,
+      workerLifecycle: state.workerLifecycle
+    });
+  };
 })();
 `;
 
@@ -5812,20 +5878,31 @@ async function collectMatrixRun(
   const priorityTarget = Math.min(6, adjacent.page + 2);
   await scrollPageIntoView(cdp, intermediatePage);
   await waitForPageShell(cdp, priorityTarget);
-  await evaluate(
+  await waitForExpression(
     cdp,
-    `globalThis.__lineLightIssue68.beginPriorityProbe(${priorityTarget}); true`,
+    browserExpression(`
+      const events = globalThis.__lineLightIssue68.workerEvents;
+      const previewRequest = events.find((event) =>
+        event.direction === 'to-worker' && event.type === 'render' &&
+        event.enabled === true && event.visible === false &&
+        event.distance === 1 && event.pageNumber === ${priorityTarget} &&
+        event.jobId === ${modelCompletion.importJobId} &&
+        event.revision === ${JSON.stringify(modelCompletion.revision)}
+      );
+      return previewRequest && events.find((event) =>
+        event.direction === 'from-worker' && event.type === 'bitmap' &&
+        event.pageNumber === ${priorityTarget} &&
+        event.jobId === ${modelCompletion.importJobId} &&
+        event.revision === ${JSON.stringify(modelCompletion.revision)} &&
+        event.eventId > previewRequest.eventId
+      ) || false;
+    `),
+    `page ${priorityTarget} adjacent preview to settle before priority action`,
+    SCENARIO_TIMEOUT_MS,
   );
   const priorityScrollAction = await evaluate(
     cdp,
-    browserExpression(`
-      const shell = document.querySelector('#pdf-page-${priorityTarget}');
-      if (!shell) throw new Error('The mounted priority target disappeared.');
-      const action = globalThis.__lineLightIssue68
-        .markPriorityScrollAction(${priorityTarget});
-      shell.scrollIntoView({ behavior: 'auto', block: 'center' });
-      return action;
-    `),
+    `globalThis.__lineLightIssue68.beginPriorityScroll(${priorityTarget})`,
   );
   await waitForExpression(
     cdp,
@@ -5844,7 +5921,7 @@ async function collectMatrixRun(
     browserExpression(`
       return globalThis.__lineLightIssue68.draws.find((draw) =>
         draw.page === ${priorityTarget} &&
-        draw.at >= ${priorityScrollAction.at} &&
+        draw.compositionId > ${priorityScrollAction.drawBoundary} &&
         draw.visible === true &&
         draw.visiblePages.includes(${priorityTarget}) &&
         draw.source === 'worker-bitmap' &&
@@ -5948,8 +6025,18 @@ async function collectMatrixRun(
   const postScrollBitmaps = postScrollWorkerEvents.filter(
     (event) => event.direction === "from-worker" && event.type === "bitmap",
   );
-  const targetVisibleRequest = visibleRenderRequests.find(
+  const targetRenderRequests = postScrollWorkerEvents.filter(
+    (event) =>
+      event.direction === "to-worker" &&
+      event.type === "render" &&
+      event.enabled === true &&
+      event.pageNumber === priorityTarget,
+  );
+  const targetBitmaps = postScrollBitmaps.filter(
     (event) => event.pageNumber === priorityTarget,
+  );
+  const targetVisibleRequest = targetRenderRequests.find(
+    (event) => event.visible === true,
   ) ?? null;
   const targetBitmapAfterVisibleRequest = targetVisibleRequest
     ? postScrollBitmaps.find(
@@ -5961,7 +6048,8 @@ async function collectMatrixRun(
   const postScrollCompositions = (priorityProbe?.compositions ?? []).filter(
     (composition) =>
       Number.isInteger(composition?.compositionId) &&
-      Number(composition?.at) >= Number(priorityProbe?.scrollAction?.at),
+      composition.compositionId >
+        Number(priorityProbe?.scrollAction?.drawBoundary),
   );
   const targetComposition = postScrollCompositions.find(
     (composition) =>
@@ -6050,10 +6138,7 @@ async function collectMatrixRun(
     },
     id: configuration.id,
     importedSource: snapshot.sourceFiles[0] ?? null,
-    longTasks: snapshot.longTasks.slice(
-      scenario.longTaskStart,
-      scenario.longTaskEnd,
-    ),
+    longTasks: selectPdfLongTasksForWindow(snapshot.longTasks, scenario),
     raster: {
       noLateLowOverwrite: hasNoResolutionRegression(pageDraws),
       noResolutionRegression:
@@ -6113,11 +6198,15 @@ async function collectMatrixRun(
       targetBitmapAfterVisibleRequest: summarizePriorityEvent(
         targetBitmapAfterVisibleRequest,
       ),
+      targetBitmapCount: targetBitmaps.length,
+      targetBitmaps: targetBitmaps.map(summarizePriorityEvent),
       targetComposition: summarizePriorityComposition(targetComposition),
       targetPage: priorityTarget,
       targetPath: cachedTargetSatisfied
         ? "cached-target"
         : "render-required",
+      targetRenderRequestCount: targetRenderRequests.length,
+      targetRenderRequests: targetRenderRequests.map(summarizePriorityEvent),
       targetVisibleRequest: summarizePriorityEvent(targetVisibleRequest),
       firstPostScrollBitmapPage: postScrollBitmaps[0]?.pageNumber ?? null,
       firstPostScrollVisibleRequestPage:
@@ -6248,6 +6337,9 @@ async function readFallbackCancellationTimeoutDiagnostic(cdp, expected) {
           : null,
       },
       held: null,
+      stage: PDF_FALLBACK_DIAGNOSTIC_STAGES.has(expected?.stage)
+        ? expected.stage
+        : null,
     };
   }
 }
@@ -6443,13 +6535,21 @@ async function collectFallbackEvidence(
   }
   const cancelledPage = continuationDelay.page;
   const renderAttemptId = continuationDelay.renderAttemptId;
-  const viewportExitRequest = await evaluate(
-    cdp,
-    `globalThis.__lineLightIssue68.markFallbackViewportExitRequest(${renderAttemptId}, 5)`,
-  );
-  await scrollPageIntoView(cdp, 5);
+  let viewportExitRequest;
   let cancellationReady;
+  let cancellationTerminal;
+  let viewportExit;
+  let continuationMinimumElapsed;
+  let continuationResume;
+  let cancellationStage = "viewport-exit-request";
   try {
+    viewportExitRequest = await evaluate(
+      cdp,
+      `globalThis.__lineLightIssue68.markFallbackViewportExitRequest(${renderAttemptId}, 5)`,
+    );
+    cancellationStage = "page-traversal";
+    await scrollPageIntoView(cdp, 5);
+    cancellationStage = "cancellation-ready";
     cancellationReady = await waitForExpression(
       cdp,
       browserExpression(`
@@ -6499,58 +6599,65 @@ async function collectFallbackEvidence(
       "the exact cancelled fallback attempt and released page backing",
       SCENARIO_TIMEOUT_MS,
     );
-  } catch (error) {
+    cancellationTerminal = cancellationReady.cancellationTerminal;
+    cancellationStage = "viewport-exit-confirmation";
+    viewportExit = await evaluate(
+      cdp,
+      `globalThis.__lineLightIssue68.markFallbackViewportExit(${renderAttemptId})`,
+    );
+    cancellationStage = "minimum-elapsed";
+    continuationMinimumElapsed = await waitForExpression(
+      cdp,
+      browserExpression(`
+        return globalThis.__lineLightIssue68.fallback.events.find(
+          (event) => event.type === 'continuation-minimum-elapsed' &&
+            event.abortSignalId === ${continuationDelay.abortSignalId} &&
+            event.renderAttemptId === ${renderAttemptId} &&
+            event.documentKey === ${JSON.stringify(continuationDelay.documentKey)} &&
+            event.revision === ${JSON.stringify(continuationDelay.revision)} &&
+            event.page === ${cancelledPage} &&
+            event.at - ${continuationDelay.at} >= 1000 &&
+            event.afterMs === event.at - ${continuationDelay.at}
+        ) || false;
+      `),
+      `page ${cancelledPage} continuation hold to reach one second`,
+      SCENARIO_TIMEOUT_MS,
+    );
+    cancellationStage = "continuation-resume";
+    continuationResume = await waitForExpression(
+      cdp,
+      browserExpression(`
+        return globalThis.__lineLightIssue68.fallback.events.find(
+          (event) => event.type === 'continuation-resume' &&
+            event.abortSignalId === ${continuationDelay.abortSignalId} &&
+            event.renderAttemptId === ${renderAttemptId} &&
+            event.documentKey === ${JSON.stringify(continuationDelay.documentKey)} &&
+            event.revision === ${JSON.stringify(continuationDelay.revision)} &&
+            event.page === ${cancelledPage} &&
+            event.afterMs === event.at - ${continuationDelay.at} &&
+            event.at - ${continuationDelay.at} >= 1000 &&
+            event.releaseRequestedAt === ${viewportExit.at} &&
+            event.at >= ${continuationMinimumElapsed.at} &&
+            event.at >= ${viewportExit.at}
+        ) || false;
+      `),
+      `page ${cancelledPage} delayed continuation to resume after one second`,
+      SCENARIO_TIMEOUT_MS,
+    );
+  } catch {
     const diagnostic = await readFallbackCancellationTimeoutDiagnostic(cdp, {
       abortSignalId: continuationDelay.abortSignalId,
       documentKey: continuationDelay.documentKey,
       page: cancelledPage,
       renderAttemptId,
       revision: continuationDelay.revision,
+      stage: cancellationStage,
     });
     throw new Error(
-      `${error instanceof Error ? error.message : "Fallback cancellation timed out."}\n` +
+      `Fallback cancellation lifecycle failed at ${cancellationStage}.\n` +
       `Fallback cancellation diagnostic: ${JSON.stringify(diagnostic)}`,
     );
   }
-  const cancellationTerminal = cancellationReady.cancellationTerminal;
-  const viewportExit = await evaluate(
-    cdp,
-    `globalThis.__lineLightIssue68.markFallbackViewportExit(${renderAttemptId})`,
-  );
-  const continuationMinimumElapsed = await waitForExpression(
-    cdp,
-    browserExpression(`
-      return globalThis.__lineLightIssue68.fallback.events.find(
-        (event) => event.type === 'continuation-minimum-elapsed' &&
-          event.abortSignalId === ${continuationDelay.abortSignalId} &&
-          event.renderAttemptId === ${renderAttemptId} &&
-          event.documentKey === ${JSON.stringify(continuationDelay.documentKey)} &&
-          event.revision === ${JSON.stringify(continuationDelay.revision)} &&
-          event.page === ${cancelledPage} &&
-          event.afterMs >= 1000
-      ) || false;
-    `),
-    `page ${cancelledPage} continuation hold to reach one second`,
-    SCENARIO_TIMEOUT_MS,
-  );
-  const continuationResume = await waitForExpression(
-    cdp,
-    browserExpression(`
-      return globalThis.__lineLightIssue68.fallback.events.find(
-        (event) => event.type === 'continuation-resume' &&
-          event.abortSignalId === ${continuationDelay.abortSignalId} &&
-          event.renderAttemptId === ${renderAttemptId} &&
-          event.documentKey === ${JSON.stringify(continuationDelay.documentKey)} &&
-          event.revision === ${JSON.stringify(continuationDelay.revision)} &&
-          event.page === ${cancelledPage} && event.afterMs >= 1000 &&
-          event.releaseRequestedAt === ${viewportExit.at} &&
-          event.at >= ${continuationMinimumElapsed.at} &&
-          event.at >= ${viewportExit.at}
-      ) || false;
-    `),
-    `page ${cancelledPage} delayed continuation to resume after one second`,
-    SCENARIO_TIMEOUT_MS,
-  );
   await waitForSharpCanvas(cdp, 5, "main-fallback", modelCompletion);
   await waitForExpression(
     cdp,
@@ -6610,7 +6717,10 @@ async function collectFallbackEvidence(
     (event) =>
       event.type === "visible-compose" &&
       event.renderAttemptId === renderAttemptId &&
-      event.at > viewportExit.at,
+      event.at >= Math.min(
+        viewportExitRequest.at,
+        cancellationTerminal.cancelRequestedAt,
+      ),
   );
   const releasedCancelledPage = await evaluate(
     cdp,
@@ -6650,10 +6760,7 @@ async function collectFallbackEvidence(
       viewportExit,
       viewportExitRequest,
     },
-    longTasks: snapshot.longTasks.slice(
-      scenario.longTaskStart,
-      scenario.longTaskEnd,
-    ),
+    longTasks: selectPdfLongTasksForWindow(snapshot.longTasks, scenario),
     maximumConcurrentStaging,
     noLateLowOverwrite:
       workerBitmapsAfterSignal.length === 0 &&

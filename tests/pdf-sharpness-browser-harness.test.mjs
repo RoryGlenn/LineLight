@@ -50,6 +50,7 @@ import {
   reconcileCdpServiceWorkerBootstraps,
   reconcileCdpTargetBootstrapRequests,
   runBoundedDiagnosticOperation,
+  selectPdfLongTasksForWindow,
   selectPdfFallbackAbortCandidate,
   selectPdfFallbackScenarioEvents,
   sendToCdpSession,
@@ -1549,7 +1550,14 @@ function passingEvidence() {
     const composedPageIds = configuration.kind === "mobile"
       ? [2, 3, 4]
       : [1, 2];
-    const composedPages = composedPageIds.map((page) => ({
+    const composedPages = composedPageIds.map((page, index) => ({
+      geometry: {
+        bottom: 180 + index * 120,
+        left: 20,
+        right: 620,
+        top: 80 + index * 120,
+      },
+      geometryVisible: true,
       height: targetHeight,
       page,
       pixels: targetWidth * targetHeight,
@@ -1565,6 +1573,8 @@ function passingEvidence() {
       composedCount: composedPages.length,
       composedPages,
       composedPixels,
+      geometryVisiblePages: [...composedPageIds],
+      readerViewport: { bottom: 700, left: 0, right: 700, top: 0 },
       visiblePages: [...composedPageIds],
     };
     const priorityTarget = 4;
@@ -1710,6 +1720,7 @@ function passingEvidence() {
         firstWorkerBitmapPage: priorityTarget,
         scrollAction: {
           at: 100,
+          drawBoundary: 89,
           eventId: 100,
           targetPage: priorityTarget,
           type: "rapid-scroll-action",
@@ -1741,6 +1752,8 @@ function passingEvidence() {
           visible: false,
         },
         targetBitmapAfterVisibleRequest: priorityBitmap,
+        targetBitmapCount: priorityCached ? 0 : 1,
+        targetBitmaps: priorityCached ? [] : [structuredClone(priorityBitmap)],
         targetComposition: {
           at: 110,
           bitmapEventId: priorityBitmapEventId,
@@ -1755,6 +1768,9 @@ function passingEvidence() {
         },
         targetPage: priorityTarget,
         targetPath: priorityCached ? "cached-target" : "render-required",
+        targetRenderRequestCount: priorityCached ? 0 : 1,
+        targetRenderRequests:
+          priorityCached ? [] : [structuredClone(priorityRequest)],
         targetVisibleRequest: priorityRequest,
       },
     };
@@ -4122,6 +4138,7 @@ test("sanitizes partial fallback cancellation timeout state", () => {
     page: 3,
     renderAttemptId: 7,
     revision: privateRevision,
+    stage: "minimum-elapsed",
   };
   const raw = {
     dom: {
@@ -4164,6 +4181,7 @@ test("sanitizes partial fallback cancellation timeout state", () => {
   assert.equal(diagnostic.events[0].documentMatches, true);
   assert.equal(diagnostic.events[0].revisionMatches, true);
   assert.equal(diagnostic.held.minimumElapsed, true);
+  assert.equal(diagnostic.stage, "minimum-elapsed");
   const serialized = JSON.stringify(diagnostic);
   assert.doesNotMatch(serialized, /private|secret|\/tmp\//u);
   assert.equal(
@@ -4175,6 +4193,27 @@ test("sanitizes partial fallback cancellation timeout state", () => {
   );
 });
 
+test("sanitizes every held fallback lifecycle failure stage", async () => {
+  const source = await readFile(
+    "scripts/run-pdf-sharpness-browser-regression.mjs",
+    "utf8",
+  );
+  for (const stage of [
+    "viewport-exit-request",
+    "page-traversal",
+    "cancellation-ready",
+    "viewport-exit-confirmation",
+    "minimum-elapsed",
+    "continuation-resume",
+  ]) {
+    assert.match(source, new RegExp(`cancellationStage = "${stage}"`, "u"));
+  }
+  assert.match(
+    source,
+    /cancellationStage = "viewport-exit-request";[\s\S]*try \{[\s\S]*markFallbackViewportExitRequest[\s\S]*scrollPageIntoView\(cdp, 5\)[\s\S]*markFallbackViewportExit[\s\S]*continuation-minimum-elapsed[\s\S]*continuation-resume[\s\S]*catch \{[\s\S]*readFallbackCancellationTimeoutDiagnostic/u,
+  );
+});
+
 test("marks priority in the same task as the final mounted target scroll", async () => {
   const source = await readFile(
     "scripts/run-pdf-sharpness-browser-regression.mjs",
@@ -4182,15 +4221,16 @@ test("marks priority in the same task as the final mounted target scroll", async
   );
   assert.match(
     source,
-    /scrollPageIntoView\(cdp, intermediatePage\);[\s\S]*waitForPageShell\(cdp, priorityTarget\);[\s\S]*markPriorityScrollAction\([^)]*priorityTarget[^)]*\);[\s\S]*shell\.scrollIntoView/u,
+    /scrollPageIntoView\(cdp, intermediatePage\);[\s\S]*waitForPageShell\(cdp, priorityTarget\);[\s\S]*beginPriorityScroll\([^)]*priorityTarget[^)]*\)/u,
   );
+  assert.match(source, /adjacent preview to settle before priority action/u);
   assert.doesNotMatch(
     source,
-    /mountPdfPageByTraversal\(cdp, priorityTarget\)/u,
+    /mountPdfPageByTraversal\(cdp, priorityTarget\)|beginPriorityProbe|markPriorityScrollAction/u,
   );
   assert.match(
     source,
-    /event\.width === destination\.width[\s\S]*event\.height === destination\.height[\s\S]*pdfRasterScale/u,
+    /bitmapEventByObject\.set\(message\.bitmap, workerEvent\.eventId\)[\s\S]*bitmapEventByObject\.get\(args\[0\]\)/u,
   );
 });
 
@@ -4199,6 +4239,35 @@ test("uses composition and bitmap sequence when timer samples tie", () => {
   const upgraded = evidence.matrix[2].raster;
   upgraded.sharp.composedAt = upgraded.preview.composedAt;
   assert.deepEqual(validatePdfSharpnessEvidence(evidence), []);
+});
+
+test("selects drained Long Tasks by entry start time", () => {
+  const malformed = { duration: 1, name: "self", startTime: null };
+  assert.deepEqual(
+    selectPdfLongTasksForWindow([
+      { duration: 1, name: "self", startTime: 9.99 },
+      { duration: 1, name: "self", startTime: 10 },
+      { duration: 1, name: "self", startTime: 19.99 },
+      { duration: 1, name: "self", startTime: 20 },
+      malformed,
+    ], { finishedAt: 20, startedAt: 10 }),
+    [
+      { duration: 1, name: "self", startTime: 10 },
+      { duration: 1, name: "self", startTime: 19.99 },
+      malformed,
+    ],
+  );
+});
+
+test("drains the Long Task observer before scenario snapshots", async () => {
+  const source = await readFile(
+    "scripts/run-pdf-sharpness-browser-regression.mjs",
+    "utf8",
+  );
+  assert.match(source, /longTaskObserver\.takeRecords\(\)/u);
+  assert.match(source, /finishScenario[\s\S]*finishedAt = performance\.now\(\);[\s\S]*drainLongTasks\(\)/u);
+  assert.match(source, /state\.snapshot = \(\) => \{\s*drainLongTasks\(\)/u);
+  assert.doesNotMatch(source, /longTaskStart|longTaskEnd/u);
 });
 
 test("independently validates a safety-capped physical-pixel target", () => {
@@ -4232,6 +4301,8 @@ test("independently validates a safety-capped physical-pixel target", () => {
     at: 50,
     composedCount: 1,
     composedPages: [{
+      geometry: { bottom: 200, left: 20, right: 620, top: 80 },
+      geometryVisible: true,
       height: 4096,
       page: 1,
       pixels: PDF_SHARPNESS_MAX_RASTER_PIXELS,
@@ -4239,6 +4310,8 @@ test("independently validates a safety-capped physical-pixel target", () => {
       width: 4096,
     }],
     composedPixels: PDF_SHARPNESS_MAX_RASTER_PIXELS,
+    geometryVisiblePages: [1],
+    readerViewport: { bottom: 700, left: 0, right: 700, top: 0 },
     visiblePages: [1],
   };
   run.canvasBudget.maximumCount = 1;
@@ -4372,14 +4445,41 @@ test("rejects each material Issue 68 acceptance regression", async (t) => {
         value.matrix[2].visibleFirst.targetVisibleRequest,
       );
     }, /current viewport first/u],
+    ["cached priority hidden redundant target chain", (value) => {
+      const cached = value.matrix[0].visibleFirst;
+      const rendered = value.matrix[2].visibleFirst;
+      const request = structuredClone(rendered.targetVisibleRequest);
+      request.visible = false;
+      cached.targetRenderRequestCount = 1;
+      cached.targetRenderRequests = [request];
+      cached.targetBitmapCount = 1;
+      cached.targetBitmaps = [structuredClone(
+        rendered.targetBitmapAfterVisibleRequest,
+      )];
+    }, /current viewport first/u],
     ["render priority wrong first visible request", (value) => {
       value.matrix[2].visibleFirst.firstPostScrollVisibleRequestPage = 5;
     }, /current viewport first/u],
     ["render priority wrong target bitmap", (value) => {
       value.matrix[2].visibleFirst.targetBitmapAfterVisibleRequest.pageNumber = 5;
     }, /current viewport first/u],
+    ["render priority duplicate target chain", (value) => {
+      const priority = value.matrix[2].visibleFirst;
+      priority.targetRenderRequestCount = 2;
+      priority.targetRenderRequests.push(structuredClone(
+        priority.targetRenderRequests[0],
+      ));
+      priority.targetBitmapCount = 2;
+      priority.targetBitmaps.push(structuredClone(priority.targetBitmaps[0]));
+    }, /current viewport first/u],
     ["priority composition before scroll action", (value) => {
       value.matrix[2].visibleFirst.targetComposition.at = 99;
+    }, /current viewport first/u],
+    ["priority equal-time pre-boundary composition", (value) => {
+      const priority = value.matrix[2].visibleFirst;
+      priority.targetComposition.at = priority.scrollAction.at;
+      priority.targetComposition.compositionId =
+        priority.scrollAction.drawBoundary;
     }, /current viewport first/u],
     ["priority non-visible composition", (value) => {
       value.matrix[2].visibleFirst.staleNonVisibleCompositions.push({
@@ -4411,6 +4511,48 @@ test("rejects each material Issue 68 acceptance regression", async (t) => {
     ["visible canvas per-page pixel mismatch", (value) => {
       value.matrix[0].canvasBudget.maximumCountFrame.composedPages[0].pixels += 1;
     }, /visible composed-canvas budget/u],
+    ["visible canvas correlated false geometry", (value) => {
+      const frame = value.matrix[4].canvasBudget.maximumCountFrame;
+      frame.composedPages[2].geometry = {
+        bottom: 900,
+        left: 20,
+        right: 620,
+        top: 800,
+      };
+    }, /visible composed-canvas budget/u],
+    ["visible canvas count-peak contradicts pixel peak", (value) => {
+      const run = value.matrix[0];
+      const frame = run.canvasBudget.maximumCountFrame;
+      frame.composedPages[0].width += 1;
+      frame.composedPages[0].pixels =
+        frame.composedPages[0].width * frame.composedPages[0].height;
+      frame.composedPixels = frame.composedPages.reduce(
+        (sum, page) => sum + page.pixels,
+        0,
+      );
+    }, /visible composed-canvas budget/u],
+    ["visible canvas pixel-peak contradicts count peak", (value) => {
+      const run = value.matrix[0];
+      const frame = run.canvasBudget.maximumPixelsFrame;
+      const firstPixels = frame.composedPages[0].pixels;
+      Object.assign(frame.composedPages[0], {
+        height: 1,
+        pixels: firstPixels - 1,
+        width: firstPixels - 1,
+      });
+      frame.composedPages.push({
+        geometry: { bottom: 540, left: 20, right: 620, top: 440 },
+        geometryVisible: true,
+        height: 1,
+        page: 3,
+        pixels: 1,
+        visible: true,
+        width: 1,
+      });
+      frame.composedCount = 3;
+      frame.geometryVisiblePages.push(3);
+      frame.visiblePages.push(3);
+    }, /visible composed-canvas budget/u],
     ["visible canvas pixel cap", (value) => {
       const run = value.matrix[5];
       run.canvasBudget.maximumPixels = PDF_SHARPNESS_MAX_BITMAP_PIXELS + 1;
@@ -4423,6 +4565,12 @@ test("rejects each material Issue 68 acceptance regression", async (t) => {
     ["long task", (value) => {
       value.matrix[0].longTasks[0].duration = 50.01;
     }, /Long Task over 50ms/u],
+    ["missing matrix Long Task evidence", (value) => {
+      delete value.matrix[0].longTasks;
+    }, /Long Task evidence is missing/u],
+    ["malformed matrix Long Task evidence", (value) => {
+      value.matrix[0].longTasks[0].startTime = null;
+    }, /Long Task evidence is malformed/u],
     ["per-scenario alignment", (value) => {
       value.matrix[5].alignment.configurationId = value.matrix[0].id;
     }, /highlight\/narration alignment/u],
@@ -4508,6 +4656,12 @@ test("rejects each material Issue 68 acceptance regression", async (t) => {
       value.fallback.stagingEvents.find(
         (event) => event.type === "continuation-minimum-elapsed",
       ).afterMs = 999;
+    }, /fallback cancellation\/retry/u],
+    ["fallback minimum hold inconsistent clock", (value) => {
+      value.fallback.stagingEvents.find(
+        (event) => event.type === "continuation-minimum-elapsed",
+      ).at = 1099;
+      value.fallback.invisibleCancellation.continuationMinimumElapsedAt = 1099;
     }, /fallback cancellation\/retry/u],
     ["fallback cancellation signal mismatch", (value) => {
       value.fallback.stagingEvents.find(
@@ -4615,12 +4769,39 @@ test("rejects each material Issue 68 acceptance regression", async (t) => {
       value.fallback.invisibleCancellation.viewportExitRequest.at = 141;
       value.fallback.invisibleCancellation.exitRequestedAt = 141;
     }, /fallback cancellation\/retry/u],
+    ["fallback compose after cancel before exit observation", (value) => {
+      const cancellation = value.fallback.invisibleCancellation;
+      const exitIndex = value.fallback.stagingEvents.findIndex(
+        (event) => event.type === "viewport-exit",
+      );
+      value.fallback.stagingEvents.splice(exitIndex, 0, {
+        abortSignalId: cancellation.abortSignalId,
+        at: 147,
+        documentKey: cancellation.documentKey,
+        page: cancellation.page,
+        pageDerivation: cancellation.pageDerivation,
+        pageMatchesAttempt: true,
+        renderAttemptId: cancellation.renderAttemptId,
+        revision: cancellation.revision,
+        sourcePage: cancellation.page,
+        type: "visible-compose",
+      });
+    }, /fallback cancellation\/retry/u],
     ["fallback continuation resume", (value) => {
       value.fallback.invisibleCancellation.continuationResumeObserved = false;
     }, /fallback cancellation\/retry/u],
     ["fallback continuation resume timing", (value) => {
       value.fallback.invisibleCancellation.continuationResumedAfterMs = 500;
     }, /fallback cancellation\/retry/u],
+    ["missing fallback Long Task evidence", (value) => {
+      delete value.fallback.longTasks;
+    }, /fallback Long Task evidence is missing/u],
+    ["malformed fallback Long Task evidence", (value) => {
+      value.fallback.longTasks[0].name = "";
+    }, /fallback Long Task evidence is malformed/u],
+    ["fallback Long Task threshold", (value) => {
+      value.fallback.longTasks[0].duration = 50.01;
+    }, /fallback recorded a Long Task over 50ms/u],
     ["network privacy", (value) => {
       value.network.externalRequests.push({ url: "https://example.test/pdf" });
     }, /recursively attached worker network/u],

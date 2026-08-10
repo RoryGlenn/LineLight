@@ -262,9 +262,12 @@ backing without a redundant draw or upgrade through distinct bitmap/composition
 identities, current viewport priority after import-bound worker completion and
 bounded traversal of virtualized page shells. The priority boundary is recorded
 atomically with the final target scroll after mounting, and distinguishes an
-exact cache-satisfied composition from a new visible request/bitmap chain.
-Peak canvas frames bind every composed page to the exact independently visible
-page set and pixel sum rather than imposing a fixed page count, while the store
+exact cache-satisfied composition with zero new target requests/bitmaps from
+one exact request/bitmap/composition chain bound to the transferred bitmap
+object. Peak canvas frames bind every composed page to a scroll-root/page-rect
+intersection that is recomputed independently from the product visibility flag,
+cross-check both recorded maxima, and retain the exact visible page set and
+pixel sum rather than imposing a fixed page count, while the store
 probe separately enforces count-plus-pixel bitmap-cache limits. The runner also
 records offscreen release,
 latest-import/page-bound serialized fallback injection, retry, and delayed
@@ -273,7 +276,8 @@ exact `AbortSignal`- and attempt-bound cancellation terminals. A proof-held
 PDF.js continuation resumes only after that terminal, an invisible zero-sized
 canvas with retained text, and a one-second minimum; sanitized partial state is
 preserved on timeout without document identities. It also records per-scenario
-measured narration alignment, Long Tasks, per-scenario document/parser worker
+measured narration alignment and drained Long Tasks selected by entry start
+time inside each scenario, per-scenario document/parser worker
 traffic settled to a network-quiet fixed point through bounded attach commands,
 an exact clean pre-navigation target baseline, service-worker bypass, and exact
 one-to-one attached-target bootstrap settlements. Paused service-worker setup

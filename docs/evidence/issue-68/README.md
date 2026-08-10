@@ -116,9 +116,12 @@ validator additionally requires:
   browser task immediately before the final `scrollIntoView`, so progressive
   traversal and already-running background work cannot be mislabeled as
   post-scroll priority. An exact cached bitmap that already satisfies the
-  target must compose without a redundant request; an undersized or missing
-  bitmap must instead produce the first post-action visible request, its later
-  exact bitmap, and the bound visible composition. The matrix must prove both
+  target must compose with exactly zero new target requests or bitmaps; an
+  undersized or missing bitmap must instead produce exactly one first
+  post-action visible request, exactly one later target bitmap, and the bound
+  visible composition. The composition records the actual transferred
+  `ImageBitmap` event identity rather than inferring it from equal dimensions.
+  The matrix must prove both
   paths. Before those probes, the harness requires the exact six-page worker
   model to complete and reaches distant virtualized shells through bounded
   half-viewport traversal, without assuming offscreen pages are mounted or
@@ -129,7 +132,10 @@ validator additionally requires:
   these gates;
 - count and total-pixel bitmap-cache limits, temporary pinned-only overflow,
   and visible-canvas peak frames whose unique composed-page set exactly equals
-  the independently observed visible-page set. Every composed page must report
+  both the product-visible set and an independently recomputed intersection of
+  each page rectangle with the reader scroll-root rectangle. Both retained peak
+  frames are cross-checked against the observed count and pixel maxima. Every
+  composed page must report
   a positive exact backing and the frame's exact pixel sum must remain below
   33,554,432; a tall mobile viewport may therefore retain three genuinely
   visible canvases without being mistaken for offscreen leakage. A page that
@@ -157,12 +163,15 @@ validator additionally requires:
   by a one-second timer: DOM release may be observed before or after React's
   passive cancellation cleanup, but resume is authorized only after the exact
   cancelled terminal and the zero-sized canvas/text shell are both present, and
-  only after at least one second has elapsed. A timeout retains a fixed,
-  privacy-safe partial event/DOM summary with document and revision represented
-  only by match booleans;
+  only after timestamps prove at least one second has elapsed. No composition
+  for that attempt may occur from the exit request onward. A failure anywhere
+  from the exit request through traversal, cancellation, release, minimum hold,
+  or resume retains a fixed, privacy-safe partial event/DOM summary with
+  document and revision represented only by match booleans;
 - deterministic local narration advancing a word inside its measured sentence
-  highlight in every desktop/mobile/zoom scenario, with no Window Long Task
-  above 50 ms;
+  highlight in every desktop/mobile/zoom scenario, with the retained Long Task
+  observer drained at scenario close and entries selected by `startTime`; a
+  missing or malformed trace is distinct from an observed task above 50 ms;
 - recursive CDP attachment to a fixed point covering normal document/parser
   workers and the forced blob-wrapper/parser chain, with their session ancestry
   and non-page request counts in every one of the six matrix phases; attachment
