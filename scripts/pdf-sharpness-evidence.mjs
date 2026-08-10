@@ -1,4 +1,4 @@
-export const PDF_SHARPNESS_SCHEMA_VERSION = 1;
+export const PDF_SHARPNESS_SCHEMA_VERSION = 2;
 export const PDF_SHARPNESS_MAX_LONG_TASK_MS = 50;
 export const PDF_SHARPNESS_PREVIEW_SCALE = 1.25;
 export const PDF_SHARPNESS_MAX_BITMAP_COUNT = 8;
@@ -11,6 +11,8 @@ export const PDF_SHARPNESS_REFERENCE_MIN_INK_PIXELS = 100;
 export const PDF_SHARPNESS_REFERENCE_MAX_INK_RATIO = 0.2;
 export const PDF_SHARPNESS_REFERENCE_MIN_INK_ROW_BANDS = 2;
 export const PDF_SHARPNESS_REFERENCE_MIN_INK_SPAN_RATIO = 0.2;
+const PDF_SHARPNESS_RASTER_SCALE_STEP = 0.25;
+const PDF_SHARPNESS_SCALE_EPSILON = 1e-7;
 
 export const PDF_SHARPNESS_MATRIX = Object.freeze([
   {
@@ -100,6 +102,28 @@ function validLongTasks(value) {
   );
 }
 
+function validAlignment(value, configurationId) {
+  return (
+    value?.configurationId === configurationId &&
+    value?.passed === true &&
+    value?.activeWordInsideHighlight === true &&
+    value?.narrationAdvanced === true &&
+    nonNegativeInteger(value?.activeWordBefore) &&
+    nonNegativeInteger(value?.activeWordAfter) &&
+    value.activeWordAfter !== value.activeWordBefore &&
+    nonNegativeInteger(value?.highlightRectangles) &&
+    value.highlightRectangles > 0 &&
+    Array.isArray(value?.spoken) &&
+    value.spoken.length > 0 &&
+    value.spoken.every(
+      (entry) =>
+        nonNegativeInteger(entry?.characters) &&
+        entry.characters > 0 &&
+        !Object.hasOwn(entry ?? {}, "text"),
+    )
+  );
+}
+
 function validBitmapStats(value) {
   return (
     nonNegativeInteger(value?.count) &&
@@ -113,6 +137,71 @@ function closeTo(actual, expected, tolerance = 0.02) {
 
 function withinPixels(actual, expected, tolerance = 2) {
   return finite(actual) && Math.abs(Number(actual) - expected) <= tolerance;
+}
+
+function expectedRasterTarget(sharp, viewport) {
+  const values = [
+    sharp?.cssWidth,
+    sharp?.cssHeight,
+    sharp?.pageWidth,
+    sharp?.pageHeight,
+    viewport?.devicePixelRatio,
+    viewport?.visualViewportScale,
+  ];
+  if (values.some((value) => !finite(value) || Number(value) <= 0)) {
+    return null;
+  }
+  const pageWidth = Number(sharp.pageWidth);
+  const pageHeight = Number(sharp.pageHeight);
+  const physicalPixelRatio =
+    Number(viewport.devicePixelRatio) *
+    Number(viewport.visualViewportScale);
+  const requiredScale = Math.max(
+    Number(sharp.cssWidth) / pageWidth,
+    Number(sharp.cssHeight) / pageHeight,
+  ) * physicalPixelRatio;
+  const requestedScale =
+    Math.ceil(
+      (Math.max(1, requiredScale) - PDF_SHARPNESS_SCALE_EPSILON) /
+        PDF_SHARPNESS_RASTER_SCALE_STEP,
+    ) * PDF_SHARPNESS_RASTER_SCALE_STEP;
+  const maximumScale = Math.max(
+    Number.EPSILON,
+    Math.min(
+      PDF_SHARPNESS_MAX_RASTER_DIMENSION / pageWidth,
+      PDF_SHARPNESS_MAX_RASTER_DIMENSION / pageHeight,
+      Math.sqrt(
+        PDF_SHARPNESS_MAX_RASTER_PIXELS / (pageWidth * pageHeight),
+      ),
+    ),
+  );
+  let scale = Math.min(requestedScale, maximumScale);
+  const dimensions = (candidate) => ({
+    height: Math.max(1, Math.ceil(pageHeight * candidate)),
+    width: Math.max(1, Math.ceil(pageWidth * candidate)),
+  });
+  const fits = (candidate) =>
+    candidate.width <= PDF_SHARPNESS_MAX_RASTER_DIMENSION &&
+    candidate.height <= PDF_SHARPNESS_MAX_RASTER_DIMENSION &&
+    candidate.width * candidate.height <= PDF_SHARPNESS_MAX_RASTER_PIXELS;
+  let target = dimensions(scale);
+  if (!fits(target)) {
+    let lower = 0;
+    let upper = scale;
+    for (let index = 0; index < 64; index += 1) {
+      const middle = (lower + upper) / 2;
+      if (fits(dimensions(middle))) lower = middle;
+      else upper = middle;
+    }
+    scale = lower;
+    target = dimensions(scale);
+  }
+  return {
+    capped: scale + PDF_SHARPNESS_SCALE_EPSILON < requestedScale,
+    height: target.height,
+    scale,
+    width: target.width,
+  };
 }
 
 function artifactIsBound(artifact) {
@@ -334,9 +423,15 @@ export function validatePdfSharpnessEvidence(evidence) {
       fail(`${expected.id} did not preserve the adjacent 1.25x preview policy`);
     }
     const sharp = run?.raster?.sharp;
+    const independentlyExpected = expectedRasterTarget(sharp, run?.viewport);
     if (
+      !independentlyExpected ||
       !finite(sharp?.actualWidth) ||
       !finite(sharp?.actualHeight) ||
+      !finite(sharp?.cssWidth) ||
+      !finite(sharp?.cssHeight) ||
+      !finite(sharp?.pageWidth) ||
+      !finite(sharp?.pageHeight) ||
       !finite(sharp?.targetWidth) ||
       !finite(sharp?.targetHeight) ||
       !finite(sharp?.targetScale) ||
@@ -348,9 +443,17 @@ export function validatePdfSharpnessEvidence(evidence) {
       !nonNegativeInteger(sharp?.targetHeight) ||
       sharp.actualWidth === 0 ||
       sharp.actualHeight === 0 ||
-      sharp.actualWidth < sharp.targetWidth ||
-      sharp.actualHeight < sharp.targetHeight ||
+      sharp.cssWidth <= 0 ||
+      sharp.cssHeight <= 0 ||
+      sharp.pageWidth <= 0 ||
+      sharp.pageHeight <= 0 ||
+      sharp.actualWidth < (independentlyExpected?.width ?? Infinity) ||
+      sharp.actualHeight < (independentlyExpected?.height ?? Infinity) ||
+      sharp.targetWidth !== independentlyExpected?.width ||
+      sharp.targetHeight !== independentlyExpected?.height ||
+      !closeTo(sharp.targetScale, independentlyExpected?.scale, 1e-6) ||
       typeof sharp?.targetCapped !== "boolean" ||
+      sharp.targetCapped !== independentlyExpected?.capped ||
       sharp.actualWidth > PDF_SHARPNESS_MAX_RASTER_DIMENSION ||
       sharp.actualHeight > PDF_SHARPNESS_MAX_RASTER_DIMENSION ||
       sharp.actualWidth * sharp.actualHeight > PDF_SHARPNESS_MAX_RASTER_PIXELS
@@ -399,6 +502,9 @@ export function validatePdfSharpnessEvidence(evidence) {
     }
     if (!emptyArray(run?.runtimeErrors)) {
       fail(`${expected.id} recorded a browser runtime error`);
+    }
+    if (!validAlignment(run?.alignment, expected.id)) {
+      fail(`${expected.id} highlight/narration alignment evidence failed`);
     }
     if (
       run?.release?.shellRetained !== true ||
@@ -498,6 +604,72 @@ export function validatePdfSharpnessEvidence(evidence) {
         event?.page === event?.sourcePage,
     );
   const recordedViewportExit = invisibleCancellation?.viewportExit;
+  const retry = fallback?.retry;
+  const failedAttemptId = retry?.failedAttemptId;
+  const retryAttemptId = retry?.retryAttemptId;
+  const failedStart = stagingStartEvents.find(
+    (event) => event?.renderAttemptId === failedAttemptId,
+  );
+  const failedFinishEvents = stagingEvents.filter(
+    (event) =>
+      event?.type === "staging-finish" &&
+      event?.outcome === "injected-failure",
+  );
+  const failedFinish = failedFinishEvents.find(
+    (event) => event?.renderAttemptId === failedAttemptId,
+  );
+  const retryStart = stagingStartEvents.find(
+    (event) => event?.renderAttemptId === retryAttemptId,
+  );
+  const retryCompose = stagingEvents.find(
+    (event) =>
+      event?.type === "visible-compose" &&
+      event?.renderAttemptId === retryAttemptId,
+  );
+  const failedAttemptComposes = stagingEvents.filter(
+    (event) =>
+      event?.type === "visible-compose" &&
+      event?.renderAttemptId === failedAttemptId,
+  );
+  const retryTargetKey = `${retry?.targetWidth}x${retry?.targetHeight}`;
+  const retryIdentityBound =
+    Number.isInteger(failedAttemptId) &&
+    failedAttemptId > 0 &&
+    Number.isInteger(retryAttemptId) &&
+    retryAttemptId > 0 &&
+    retryAttemptId !== failedAttemptId &&
+    Number.isInteger(retry?.page) &&
+    retry.page > 0 &&
+    retry?.pageDerivation === "sole-visible-unsatisfied-page" &&
+    Number.isInteger(retry?.targetWidth) &&
+    retry.targetWidth > 0 &&
+    Number.isInteger(retry?.targetHeight) &&
+    retry.targetHeight > 0 &&
+    retry?.targetKey === retryTargetKey &&
+    failedFinishEvents.length === 1 &&
+    [failedStart, failedFinish, retryStart, retryCompose].every(
+      (event) =>
+        event?.page === retry.page &&
+        event?.pageDerivation === retry.pageDerivation &&
+        event?.targetWidth === retry.targetWidth &&
+        event?.targetHeight === retry.targetHeight &&
+        event?.targetKey === retry.targetKey,
+    ) &&
+    [failedStart, retryStart].every(
+      (event) =>
+        Array.isArray(event?.candidatePages) &&
+        event.candidatePages.length === 1 &&
+        event.candidatePages[0] === retry.page,
+    ) &&
+    failedFinish?.outcome === "injected-failure" &&
+    failedStart?.at <= failedFinish?.at &&
+    failedFinish?.at === retry?.failedAt &&
+    failedFinish?.at < retryStart?.at &&
+    retryStart?.at === retry?.retryStartedAt &&
+    retryStart?.at <= retryCompose?.at &&
+    retryCompose?.at === retry?.composedAt &&
+    retryCompose?.pageMatchesAttempt === true &&
+    failedAttemptComposes.length === 0;
   const matchingIdentity = [
     cancelledStagingStart,
     continuationDelayEvent,
@@ -518,6 +690,7 @@ export function validatePdfSharpnessEvidence(evidence) {
     fallback?.importedSource?.sha256 !== fixture?.sha256 ||
     fallback?.importedSource?.size !== fixture?.bytes ||
     fallback?.retrySucceeded !== true ||
+    !retryIdentityBound ||
     !Number.isInteger(renderAttemptId) ||
     renderAttemptId < 1 ||
     cancelledPage !== 3 ||
@@ -582,27 +755,6 @@ export function validatePdfSharpnessEvidence(evidence) {
   }
   if (!validLongTasks(fallback?.longTasks)) {
     fail(`fallback recorded a Long Task over ${PDF_SHARPNESS_MAX_LONG_TASK_MS}ms`);
-  }
-
-  if (
-    evidence?.alignment?.passed !== true ||
-    evidence?.alignment?.activeWordInsideHighlight !== true ||
-    evidence?.alignment?.narrationAdvanced !== true ||
-    !nonNegativeInteger(evidence?.alignment?.activeWordBefore) ||
-    !nonNegativeInteger(evidence?.alignment?.activeWordAfter) ||
-    evidence.alignment.activeWordAfter === evidence.alignment.activeWordBefore ||
-    !nonNegativeInteger(evidence?.alignment?.highlightRectangles) ||
-    evidence.alignment.highlightRectangles === 0 ||
-    !Array.isArray(evidence?.alignment?.spoken) ||
-    evidence.alignment.spoken.length === 0 ||
-    evidence.alignment.spoken.some(
-      (entry) =>
-        !nonNegativeInteger(entry?.characters) ||
-        entry.characters === 0 ||
-        Object.hasOwn(entry ?? {}, "text"),
-    )
-  ) {
-    fail("highlight/narration alignment evidence failed");
   }
 
   const network = evidence?.network;
@@ -690,7 +842,12 @@ export function validatePdfSharpnessEvidence(evidence) {
   const expectedFixedPointLabels = [
     ...PDF_SHARPNESS_MATRIX.map(({ id }) => id),
     "forced-main-fallback",
+    "final-network-privacy",
   ];
+  const fixedPoints = Array.isArray(network?.networkFixedPoints)
+    ? network.networkFixedPoints
+    : [];
+  const finalFixedPoint = fixedPoints.at(-1);
   if (
     network?.sourceSha256 !== fixture?.sha256 ||
     network?.sourceStayedLocal !== true ||
@@ -698,6 +855,9 @@ export function validatePdfSharpnessEvidence(evidence) {
     network?.sourceRequest !== null ||
     !nonNegativeInteger(network?.localRequestCount) ||
     network.localRequestCount === 0 ||
+    !nonNegativeInteger(network?.completedRequestCount) ||
+    network.completedRequestCount === 0 ||
+    network?.inflightRequestCount !== 0 ||
     !emptyArray(network?.externalRequests) ||
     !emptyArray(network?.failures) ||
     !emptyArray(network?.attachErrors) ||
@@ -723,17 +883,25 @@ export function validatePdfSharpnessEvidence(evidence) {
     requestCounts.total !== network.nonPageRequests.length ||
     !coverageComplete ||
     !requestCoverageComplete ||
-    !Array.isArray(network?.attachFixedPoints) ||
-    network.attachFixedPoints.map(({ label }) => label).join(",") !==
+    !Array.isArray(network?.networkFixedPoints) ||
+    fixedPoints.map(({ label }) => label).join(",") !==
       expectedFixedPointLabels.join(",") ||
-    network.attachFixedPoints.some(
+    fixedPoints.some(
       (point) =>
         !nonNegativeInteger(point?.attachPromiseCount) ||
+        !nonNegativeInteger(point?.completedRequestCount) ||
+        point.completedRequestCount === 0 ||
+        point?.inflightRequestCount !== 0 ||
+        !nonNegativeInteger(point?.requestCount) ||
+        point.requestCount === 0 ||
+        point.completedRequestCount > point.requestCount ||
         !nonNegativeInteger(point?.targetCount) ||
         point.targetCount === 0 ||
         point.attachPromiseCount < point.targetCount ||
         point?.pendingAttachCount !== 0,
-    )
+    ) ||
+    finalFixedPoint?.requestCount !== network.localRequestCount ||
+    finalFixedPoint?.completedRequestCount !== network.completedRequestCount
   ) {
     fail("PDF source or recursively attached worker network evidence failed");
   }

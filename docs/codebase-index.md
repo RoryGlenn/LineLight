@@ -257,10 +257,12 @@ builds and serves one clean source commit, then uses headed Brave to pair the
 same local PDF page in the browser viewer and LineLight across desktop DPR,
 effective browser-zoom metrics, mobile DPR, and visual-viewport pinch. It
 requires decoded reference pixels to prove a rendered page, and records
-preview-to-sharp backing targets, current viewport priority, bitmap/canvas
+independently recomputed preview-to-sharp backing targets, current viewport
+priority, bitmap/canvas
 budgets, offscreen release, identity-bound serialized fallback
-failure/retry/cancellation, measured narration alignment, Long Tasks,
-attached-worker network traffic, artifact hashes, and owned-process teardown.
+failure/retry/cancellation, per-scenario measured narration alignment, Long
+Tasks, recursively attached worker traffic settled to a network-quiet fixed
+point, artifact hashes, and owned-process teardown.
 The independently testable acceptance contract lives in
 [`scripts/pdf-sharpness-evidence.mjs`](../scripts/pdf-sharpness-evidence.mjs),
 its fast and opt-in browser gates live in

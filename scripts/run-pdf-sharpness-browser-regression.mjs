@@ -133,6 +133,15 @@ function parseArguments(argv) {
   options.browser = path.resolve(options.browser);
   options.fixture = path.resolve(options.fixture);
   options.outputDirectory = path.resolve(options.outputDirectory);
+  if (
+    options.record &&
+    options.fixture !== path.resolve(DEFAULT_PDF_HIGHLIGHT_FIXTURE)
+  ) {
+    throw new Error(
+      "Recorded Issue #68 evidence requires the exact repository PDF fixture; " +
+      "use --output (without --record) for a private local PDF.",
+    );
+  }
   return options;
 }
 
@@ -688,7 +697,9 @@ const INSTRUMENTATION_SOURCE = String.raw`
             at: performance.now(),
             direction: "from-worker",
             height: Number(message.height) || null,
-            pageNumber: Number(message.pageNumber) || null,
+            pageHeight: Number(message.page?.layout?.height) || null,
+            pageNumber: Number(message.pageNumber || message.page?.pageNumber) || null,
+            pageWidth: Number(message.page?.layout?.width) || null,
             scale: Number(message.scale) || null,
             type: message.type || null,
             width: Number(message.width) || null
@@ -922,6 +933,9 @@ const INSTRUMENTATION_SOURCE = String.raw`
       page: staging.page,
       pageDerivation: staging.pageDerivation,
       renderAttemptId: staging.renderAttemptId,
+      targetHeight: staging.targetHeight,
+      targetKey: staging.targetKey,
+      targetWidth: staging.targetWidth,
       type: "staging-finish"
     });
   };
@@ -975,7 +989,10 @@ const INSTRUMENTATION_SOURCE = String.raw`
         ...derivedPage,
         finished: false,
         id,
-        renderAttemptId: id
+        renderAttemptId: id,
+        targetHeight: this.height,
+        targetKey: this.width + "x" + this.height,
+        targetWidth: this.width
       };
       this[stagingSymbol] = attempt;
       fallbackAttempts.set(id, attempt);
@@ -992,6 +1009,9 @@ const INSTRUMENTATION_SOURCE = String.raw`
         page: derivedPage.page,
         pageDerivation: derivedPage.pageDerivation,
         renderAttemptId: id,
+        targetHeight: attempt.targetHeight,
+        targetKey: attempt.targetKey,
+        targetWidth: attempt.targetWidth,
         type: "staging-start",
         width: this.width
       });
@@ -1034,6 +1054,9 @@ const INSTRUMENTATION_SOURCE = String.raw`
             pageMatchesAttempt: draw.page === fallbackAttempt.page,
             renderAttemptId: fallbackAttempt.renderAttemptId,
             sourcePage: fallbackAttempt.page,
+            targetHeight: fallbackAttempt.targetHeight,
+            targetKey: fallbackAttempt.targetKey,
+            targetWidth: fallbackAttempt.targetWidth,
             type: "visible-compose"
           });
         }
@@ -1251,6 +1274,13 @@ async function configureAppSession(cdp, networkState) {
     };
     networkState.requests.push(request);
     networkState.byId.set(key, request);
+    networkState.inflightRequests.add(key);
+  };
+  const completeRequest = (event, sessionId) => {
+    const key = `${sessionId ?? "page"}:${event.requestId}`;
+    if (networkState.inflightRequests.delete(key)) {
+      networkState.completedRequestCount += 1;
+    }
   };
   const recordFailure = (event, sessionId) => {
     const request = networkState.byId.get(
@@ -1284,6 +1314,9 @@ async function configureAppSession(cdp, networkState) {
       recordRequest(event, message.sessionId);
     } else if (message.method === "Network.loadingFailed") {
       recordFailure(event, message.sessionId);
+      completeRequest(event, message.sessionId);
+    } else if (message.method === "Network.loadingFinished") {
+      completeRequest(event, message.sessionId);
     } else if (message.method === "Network.responseReceived") {
       recordResponse(event, message.sessionId);
     } else if (message.method === "Target.targetInfoChanged") {
@@ -1392,12 +1425,13 @@ async function configureAppSession(cdp, networkState) {
   });
 }
 
-async function waitForCdpAttachFixedPoint(
+async function waitForCdpNetworkFixedPoint(
   networkState,
   label,
   timeoutMs = 10_000,
 ) {
   const startedAt = Date.now();
+  let previousRequestCount = -1;
   let previousTargetCount = -1;
   let stableSamples = 0;
   while (Date.now() - startedAt < timeoutMs) {
@@ -1409,29 +1443,36 @@ async function waitForCdpAttachFixedPoint(
       ]);
     }
     await delay(75);
+    const requestCount = networkState.requests.length;
     const targetCount = networkState.targets.length;
     if (
       networkState.pendingAttachPromises.size === 0 &&
+      networkState.inflightRequests.size === 0 &&
+      requestCount === previousRequestCount &&
       targetCount === previousTargetCount
     ) {
       stableSamples += 1;
     } else {
       stableSamples = 0;
     }
+    previousRequestCount = requestCount;
     previousTargetCount = targetCount;
     if (stableSamples >= 3) {
       const fixedPoint = {
         attachPromiseCount: networkState.attachPromises.length,
+        completedRequestCount: networkState.completedRequestCount,
+        inflightRequestCount: 0,
         label,
         pendingAttachCount: 0,
+        requestCount,
         targetCount,
       };
-      networkState.attachFixedPoints.push(fixedPoint);
+      networkState.networkFixedPoints.push(fixedPoint);
       return fixedPoint;
     }
   }
   throw new Error(
-    `CDP worker attachment did not reach a fixed point for ${label}.`,
+    `CDP worker attachment and network activity did not reach a fixed point for ${label}.`,
   );
 }
 
@@ -1481,14 +1522,25 @@ async function waitForSharpCanvas(cdp, pageNumber, source = null) {
       const block = document.querySelector('#pdf-page-${pageNumber}');
       const canvas = block?.querySelector('canvas');
       if (!canvas || block?.dataset.pdfPageVisible !== 'true') return false;
+      const bounds = canvas.getBoundingClientRect();
+      const pageEvent = globalThis.__lineLightIssue68.workerEvents.findLast(
+        (event) => event.direction === 'from-worker' &&
+          event.type === 'page' && event.pageNumber === ${pageNumber}
+      );
       const targetWidth = Number(canvas.dataset.pdfRasterTargetWidth);
       const targetHeight = Number(canvas.dataset.pdfRasterTargetHeight);
       const renderSource = canvas.dataset.pdfRenderSource || null;
       if (${JSON.stringify(source)} && renderSource !== ${JSON.stringify(source)}) return false;
-      return targetWidth > 0 && targetHeight > 0 &&
+      return bounds.width > 0 && bounds.height > 0 &&
+        pageEvent?.pageWidth > 0 && pageEvent?.pageHeight > 0 &&
+        targetWidth > 0 && targetHeight > 0 &&
         canvas.width >= targetWidth && canvas.height >= targetHeight && {
           actualHeight: canvas.height,
           actualWidth: canvas.width,
+          cssHeight: bounds.height,
+          cssWidth: bounds.width,
+          pageHeight: pageEvent.pageHeight,
+          pageWidth: pageEvent.pageWidth,
           renderSource,
           scale: Number(canvas.dataset.pdfRasterScale),
           targetCapped: canvas.dataset.pdfRasterCapped === 'true',
@@ -1647,7 +1699,7 @@ function hasNoResolutionRegression(samples) {
   return true;
 }
 
-async function collectAlignmentEvidence(cdp) {
+async function collectAlignmentEvidence(cdp, configurationId) {
   await scrollPageIntoView(cdp, 2);
   const before = await evaluate(
     cdp,
@@ -1709,6 +1761,7 @@ async function collectAlignmentEvidence(cdp) {
   );
   return {
     ...measurement,
+    configurationId,
     passed:
       measurement.activeWordInsideHighlight && measurement.narrationAdvanced,
   };
@@ -1841,9 +1894,7 @@ async function collectMatrixRun(
     `linelight-${configuration.id}.png`,
   );
 
-  const alignment = configuration.id === PDF_SHARPNESS_MATRIX[0].id
-    ? await collectAlignmentEvidence(cdp)
-    : null;
+  const alignment = await collectAlignmentEvidence(cdp, configuration.id);
   const intermediatePage = Math.min(6, adjacent.page + 1);
   const priorityTarget = Math.min(6, adjacent.page + 2);
   await scrollPageIntoView(cdp, intermediatePage);
@@ -1980,6 +2031,10 @@ async function collectMatrixRun(
         actualHeight: sharp.actualHeight,
         actualWidth: sharp.actualWidth,
         composedAt: sharpComposition.at,
+        cssHeight: sharp.cssHeight,
+        cssWidth: sharp.cssWidth,
+        pageHeight: sharp.pageHeight,
+        pageWidth: sharp.pageWidth,
         source: sharp.renderSource,
         targetCapped: sharp.targetCapped,
         targetHeight: sharp.targetHeight,
@@ -2117,6 +2172,54 @@ async function collectFallbackEvidence(
   );
   await scrollPageIntoView(cdp, 1);
   await waitForSharpCanvas(cdp, 1, "main-fallback");
+  const retry = await waitForExpression(
+    cdp,
+    browserExpression(`
+      const events = globalThis.__lineLightIssue68.fallback.events;
+      const failure = events.find((event) =>
+        event.type === 'staging-finish' &&
+        event.outcome === 'injected-failure' &&
+        Number.isInteger(event.renderAttemptId) &&
+        Number.isInteger(event.page) &&
+        event.targetKey
+      );
+      const failedStart = failure && events.find((event) =>
+        event.type === 'staging-start' &&
+        event.renderAttemptId === failure.renderAttemptId &&
+        event.page === failure.page &&
+        event.targetKey === failure.targetKey &&
+        event.at <= failure.at
+      );
+      const retryStart = failure && events.find((event) =>
+        event.type === 'staging-start' &&
+        event.renderAttemptId !== failure.renderAttemptId &&
+        event.page === failure.page &&
+        event.targetKey === failure.targetKey &&
+        event.at > failure.at
+      );
+      const retryCompose = retryStart && events.find((event) =>
+        event.type === 'visible-compose' &&
+        event.renderAttemptId === retryStart.renderAttemptId &&
+        event.page === retryStart.page &&
+        event.targetKey === retryStart.targetKey &&
+        event.at >= retryStart.at
+      );
+      return failure && failedStart && retryStart && retryCompose && {
+        composedAt: retryCompose.at,
+        failedAttemptId: failure.renderAttemptId,
+        failedAt: failure.at,
+        page: failure.page,
+        pageDerivation: failure.pageDerivation,
+        retryAttemptId: retryStart.renderAttemptId,
+        retryStartedAt: retryStart.at,
+        targetHeight: failure.targetHeight,
+        targetKey: failure.targetKey,
+        targetWidth: failure.targetWidth
+      };
+    `),
+    "the failed fallback attempt to retry and compose the same page target",
+    SCENARIO_TIMEOUT_MS,
+  );
 
   await evaluate(
     cdp,
@@ -2255,9 +2358,8 @@ async function collectFallbackEvidence(
     noLateLowOverwrite:
       workerBitmapsAfterSignal.length === 0 &&
       hasNoResolutionRegression(pageOneDraws),
-    retrySucceeded:
-      snapshot.fallback.injectedFailures === 1 &&
-      pageOneDraws.some((draw) => draw.source === "main-fallback"),
+    retry,
+    retrySucceeded: Boolean(retry),
     runtimeErrors: snapshot.errors,
     signaledBeforeDocumentReady: Boolean(
       snapshot.fallback.signalAt !== null &&
@@ -2393,11 +2495,13 @@ function summarizeNetwork(
   };
   return {
     attachErrors: [...networkState.attachErrors],
-    attachFixedPoints: [...networkState.attachFixedPoints],
+    networkFixedPoints: [...networkState.networkFixedPoints],
+    completedRequestCount: networkState.completedRequestCount,
     coverageTargets,
     externalRequests,
     failures,
     localRequestCount: networkState.requests.length - externalRequests.length,
+    inflightRequestCount: networkState.inflightRequests.size,
     nonPageRequestCounts,
     nonPageRequests,
     referenceScheme,
@@ -2549,10 +2653,12 @@ async function run(options) {
   };
   const networkState = {
     attachErrors: [],
-    attachFixedPoints: [],
     attachPromises: [],
     byId: new Map(),
+    completedRequestCount: 0,
     failures: [],
+    inflightRequests: new Set(),
+    networkFixedPoints: [],
     phase: "startup",
     pendingAttachPromises: new Set(),
     requests: [],
@@ -2572,7 +2678,6 @@ async function run(options) {
     appBrowser = await startBrowser(options.browser, true);
     appCdp = await CdpSession.connect(appBrowser.webSocketDebuggerUrl);
     await configureAppSession(appCdp, networkState);
-    let alignment = null;
     const targetPages = new Map();
     for (const configuration of PDF_SHARPNESS_MATRIX) {
       networkState.phase = configuration.id;
@@ -2583,15 +2688,11 @@ async function run(options) {
         options.outputDirectory,
         configuration,
       );
-      await waitForCdpAttachFixedPoint(networkState, configuration.id);
-      if (matrixRun.alignment) alignment = matrixRun.alignment;
-      delete matrixRun.alignment;
+      await waitForCdpNetworkFixedPoint(networkState, configuration.id);
       matrixRun.comparison.sourceSha256 = fixture.sha256;
       targetPages.set(configuration.id, matrixRun.comparison.targetPage);
       evidence.matrix.push(matrixRun);
     }
-    evidence.alignment = alignment;
-
     networkState.phase = "forced-main-fallback";
     evidence.fallback = await collectFallbackEvidence(
       appCdp,
@@ -2599,7 +2700,7 @@ async function run(options) {
       options.fixture,
       options.outputDirectory,
     );
-    await waitForCdpAttachFixedPoint(
+    await waitForCdpNetworkFixedPoint(
       networkState,
       "forced-main-fallback",
     );
@@ -2626,6 +2727,10 @@ async function run(options) {
         referenceCapture?.readiness ?? null;
       matrixRun.comparison.paired = true;
     }
+    await waitForCdpNetworkFixedPoint(
+      networkState,
+      "final-network-privacy",
+    );
     evidence.network = summarizeNetwork(
       networkState,
       server.appUrl,

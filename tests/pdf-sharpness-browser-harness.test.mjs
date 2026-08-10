@@ -44,7 +44,33 @@ function passingEvidence() {
   const matrix = PDF_SHARPNESS_MATRIX.map((configuration, index) => {
     const referenceScreenshot = artifact(`reference-${index}.png`, index + 1);
     const lineLightScreenshot = artifact(`linelight-${index}.png`, index + 2);
+    const pageWidth = 600;
+    const pageHeight = 800;
+    const cssWidth = configuration.kind === "mobile" ? 300 : 600;
+    const cssHeight = configuration.kind === "mobile" ? 400 : 800;
+    const physicalRatio =
+      configuration.baseDevicePixelRatio *
+      configuration.browserZoom *
+      configuration.pinchZoom;
+    const targetScale = Math.ceil(
+      Math.max(
+        1,
+        Math.max(cssWidth / pageWidth, cssHeight / pageHeight) * physicalRatio,
+      ) / 0.25,
+    ) * 0.25;
+    const targetWidth = Math.ceil(pageWidth * targetScale);
+    const targetHeight = Math.ceil(pageHeight * targetScale);
     return {
+      alignment: {
+        activeWordAfter: 2,
+        activeWordBefore: 1,
+        activeWordInsideHighlight: true,
+        configurationId: configuration.id,
+        highlightRectangles: 1,
+        narrationAdvanced: true,
+        passed: true,
+        spoken: [{ characters: 23 }],
+      },
       canvasBudget: { maximumCount: 2, maximumPixels: 4_000_000 },
       comparison: {
         lineLightScreenshot,
@@ -84,14 +110,18 @@ function passingEvidence() {
         },
         previewBeforeSharp: true,
         sharp: {
-          actualHeight: 1600,
-          actualWidth: 1200,
+          actualHeight: targetHeight,
+          actualWidth: targetWidth,
           composedAt: 20,
+          cssHeight,
+          cssWidth,
+          pageHeight,
+          pageWidth,
           source: "worker-bitmap",
           targetCapped: false,
-          targetHeight: 1600,
-          targetScale: 2,
-          targetWidth: 1200,
+          targetHeight,
+          targetScale,
+          targetWidth,
         },
       },
       release: {
@@ -130,15 +160,6 @@ function passingEvidence() {
   });
   const fallbackArtifact = artifact("fallback.png", 9);
   return {
-    alignment: {
-      activeWordAfter: 2,
-      activeWordBefore: 1,
-      activeWordInsideHighlight: true,
-      highlightRectangles: 1,
-      narrationAdvanced: true,
-      passed: true,
-      spoken: [{ characters: 23 }],
-    },
     artifacts: {
       deploymentId: DEPLOYMENT,
       screenshots: [
@@ -211,16 +232,76 @@ function passingEvidence() {
       longTasks: [{ duration: 49.9, name: "self", startTime: 1 }],
       maximumConcurrentStaging: 1,
       noLateLowOverwrite: true,
+      retry: {
+        composedAt: 20,
+        failedAttemptId: 1,
+        failedAt: 11,
+        page: 1,
+        pageDerivation: "sole-visible-unsatisfied-page",
+        retryAttemptId: 2,
+        retryStartedAt: 12,
+        targetHeight: 800,
+        targetKey: "600x800",
+        targetWidth: 600,
+      },
       retrySucceeded: true,
       runtimeErrors: [],
       signaledBeforeDocumentReady: true,
       stagingEvents: [
+        {
+          at: 10,
+          candidatePages: [1],
+          page: 1,
+          pageDerivation: "sole-visible-unsatisfied-page",
+          renderAttemptId: 1,
+          targetHeight: 800,
+          targetKey: "600x800",
+          targetWidth: 600,
+          type: "staging-start",
+        },
+        {
+          at: 11,
+          outcome: "injected-failure",
+          page: 1,
+          pageDerivation: "sole-visible-unsatisfied-page",
+          renderAttemptId: 1,
+          targetHeight: 800,
+          targetKey: "600x800",
+          targetWidth: 600,
+          type: "staging-finish",
+        },
+        {
+          at: 12,
+          candidatePages: [1],
+          page: 1,
+          pageDerivation: "sole-visible-unsatisfied-page",
+          renderAttemptId: 2,
+          targetHeight: 800,
+          targetKey: "600x800",
+          targetWidth: 600,
+          type: "staging-start",
+        },
+        {
+          at: 20,
+          page: 1,
+          pageDerivation: "sole-visible-unsatisfied-page",
+          pageMatchesAttempt: true,
+          renderAttemptId: 2,
+          sourcePage: 1,
+          targetHeight: 800,
+          targetKey: "600x800",
+          targetWidth: 600,
+          type: "visible-compose",
+        },
         {
           at: 90,
           candidatePages: [3],
           page: 3,
           pageDerivation: "sole-visible-unsatisfied-page",
           renderAttemptId: 7,
+          targetHeight: 800,
+          targetKey: "600x800",
+          targetWidth: 600,
           type: "staging-start",
         },
         {
@@ -305,24 +386,30 @@ function passingEvidence() {
       }));
       return {
         attachErrors: [],
-        attachFixedPoints: [
+        networkFixedPoints: [
           ...PDF_SHARPNESS_MATRIX.map(({ id }) => id),
           "forced-main-fallback",
+          "final-network-privacy",
         ].map((label) => ({
           attachPromiseCount: targets.length,
+          completedRequestCount: 12,
+          inflightRequestCount: 0,
           label,
           pendingAttachCount: 0,
+          requestCount: 12,
           targetCount: targets.length,
         })),
+        completedRequestCount: 12,
         coverageTargets: {
           forcedBlobWrapper: [forcedWrapper],
           forcedParserWorker: [forcedParser],
           normalDocumentWorker: [normalDocument],
           normalParserWorker: [normalParser],
         },
-      externalRequests: [],
-      failures: [],
-      localRequestCount: 12,
+        externalRequests: [],
+        failures: [],
+        inflightRequestCount: 0,
+        localRequestCount: 12,
         nonPageRequestCounts: {
           forcedBlobWrapper: 2,
           forcedParserWorker: 1,
@@ -331,10 +418,10 @@ function passingEvidence() {
           total: nonPageRequests.length,
         },
         nonPageRequests,
-      referenceScheme: "file:",
-      sourceRequest: null,
-      sourceSha256: SHA,
-      sourceStayedLocal: true,
+        referenceScheme: "file:",
+        sourceRequest: null,
+        sourceSha256: SHA,
+        sourceStayedLocal: true,
         targets,
       };
     })(),
@@ -386,7 +473,15 @@ test("rejects each material Issue 68 acceptance regression", async (t) => {
       value.matrix[1].viewport.transition = "normal";
     }, /live zoom transition/u],
     ["undersampled backing", (value) => {
-      value.matrix[0].raster.sharp.actualWidth = 1199;
+      value.matrix[0].raster.sharp.actualWidth =
+        value.matrix[0].raster.sharp.targetWidth - 1;
+    }, /computed capped target/u],
+    ["self-reported raster target", (value) => {
+      value.matrix[5].raster.sharp.targetWidth = 600;
+    }, /computed capped target/u],
+    ["independent CSS raster dimensions", (value) => {
+      value.matrix[2].raster.sharp.cssWidth = 300;
+      value.matrix[2].raster.sharp.cssHeight = 400;
     }, /computed capped target/u],
     ["preview policy", (value) => {
       value.matrix[0].raster.preview.scale = 1.5;
@@ -411,11 +506,22 @@ test("rejects each material Issue 68 acceptance regression", async (t) => {
     ["long task", (value) => {
       value.matrix[0].longTasks[0].duration = 50.01;
     }, /Long Task over 50ms/u],
+    ["per-scenario alignment", (value) => {
+      value.matrix[5].alignment.configurationId = value.matrix[0].id;
+    }, /highlight\/narration alignment/u],
     ["pinned overflow probe", (value) => {
       value.bitmapBudget.pinnedPeak = { count: 8, pixels: 32_000_000 };
     }, /bitmap budget probe failed/u],
     ["fallback serialization", (value) => {
       value.fallback.maximumConcurrentStaging = 2;
+    }, /fallback cancellation\/retry/u],
+    ["fallback retry identity", (value) => {
+      value.fallback.retry.retryAttemptId = 3;
+    }, /fallback cancellation\/retry/u],
+    ["fallback missing injected outcome", (value) => {
+      value.fallback.stagingEvents = value.fallback.stagingEvents.filter(
+        (event) => event.outcome !== "injected-failure",
+      );
     }, /fallback cancellation\/retry/u],
     ["fallback cancellation", (value) => {
       value.fallback.invisibleCancellation.completedAfterExit = true;
@@ -454,7 +560,10 @@ test("rejects each material Issue 68 acceptance regression", async (t) => {
       value.network.coverageTargets.forcedParserWorker = [];
     }, /recursively attached worker network/u],
     ["recursive attach fixed point", (value) => {
-      value.network.attachFixedPoints.pop();
+      value.network.networkFixedPoints.pop();
+    }, /recursively attached worker network/u],
+    ["network still in flight", (value) => {
+      value.network.inflightRequestCount = 1;
     }, /recursively attached worker network/u],
     ["actual network arrays", (value) => {
       delete value.network.failures;
@@ -630,6 +739,22 @@ test("documents a headed, fresh-build-only command without launching it", async 
   assert.match(stdout, /fresh production build/u);
   assert.match(stdout, /visible browser/u);
   assert.doesNotMatch(stdout, /headless/u);
+});
+
+test("refuses to record screenshots from a private fixture", async () => {
+  await assert.rejects(
+    execFileAsync(
+      process.execPath,
+      [
+        "scripts/run-pdf-sharpness-browser-regression.mjs",
+        "--record",
+        "--fixture",
+        path.join(os.tmpdir(), "private-reader-document.pdf"),
+      ],
+      { cwd: path.resolve(".") },
+    ),
+    /requires the exact repository PDF fixture/u,
+  );
 });
 
 test(
