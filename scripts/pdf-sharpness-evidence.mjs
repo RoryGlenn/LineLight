@@ -752,6 +752,10 @@ export function validatePdfSharpnessEvidence(evidence) {
   const retrySignalRegistrations = signalRegistrationEvents.filter(
     (event) => event?.abortSignalId === retry?.retryAbortSignalId,
   );
+  const injectionArmEvents = stagingEvents.filter(
+    (event) => event?.type === "injection-armed",
+  );
+  const injectionArmEvent = injectionArmEvents[0];
   const retryIdentityBound =
     Number.isInteger(retry?.failedAbortSignalId) &&
     retry.failedAbortSignalId > 0 &&
@@ -767,6 +771,9 @@ export function validatePdfSharpnessEvidence(evidence) {
     retry.page > 0 &&
     nonEmptyString(retry?.documentKey) &&
     nonEmptyString(retry?.revision) &&
+    finite(retry?.injectionArmedAt) &&
+    retry?.injectionPageDerivation ===
+      "validated-adjacent-unsatisfied-page" &&
     retry?.pageDerivation === "sole-visible-unsatisfied-page" &&
     Number.isInteger(retry?.targetWidth) &&
     retry.targetWidth > 0 &&
@@ -775,7 +782,14 @@ export function validatePdfSharpnessEvidence(evidence) {
     retry?.targetKey === retryTargetKey &&
     failedSignalRegistrations.length === 1 &&
     retrySignalRegistrations.length === 1 &&
+    injectionArmEvents.length === 1 &&
     failedFinishEvents.length === 1 &&
+    injectionArmEvent?.documentKey === retry.documentKey &&
+    injectionArmEvent?.revision === retry.revision &&
+    injectionArmEvent?.page === retry.page &&
+    injectionArmEvent?.pageDerivation === retry.injectionPageDerivation &&
+    injectionArmEvent?.at === retry.injectionArmedAt &&
+    injectionArmEvent?.at <= failedStart?.at &&
     [failedStart, failedFinish, retryStart, retryCompose].every(
       (event) =>
         event?.page === retry.page &&
@@ -832,6 +846,10 @@ export function validatePdfSharpnessEvidence(evidence) {
   const cancellationSignalRegistrations = signalRegistrationEvents.filter(
     (event) => event?.abortSignalId === cancellationSignalId,
   );
+  const continuationArmEvents = stagingEvents.filter(
+    (event) => event?.type === "continuation-armed",
+  );
+  const continuationArmEvent = continuationArmEvents[0];
   const cancellationIdentityBound =
     Number.isInteger(cancellationSignalId) &&
     cancellationSignalId > 0 &&
@@ -839,6 +857,9 @@ export function validatePdfSharpnessEvidence(evidence) {
     cancellationSignalId !== retry?.retryAbortSignalId &&
     nonEmptyString(invisibleCancellation?.documentKey) &&
     nonEmptyString(invisibleCancellation?.revision) &&
+    finite(invisibleCancellation?.continuationArmedAt) &&
+    invisibleCancellation?.continuationArmPageDerivation ===
+      "next-page-from-sole-visible-page" &&
     cancelledStagingStart?.abortSignalCandidateCount === 1 &&
     cancelledStagingStart?.abortSignalId === cancellationSignalId &&
     finite(cancelledStagingStart?.abortSignalRegisteredAt) &&
@@ -846,11 +867,26 @@ export function validatePdfSharpnessEvidence(evidence) {
     cancellationSignalRegistrations[0]?.at ===
       cancelledStagingStart?.abortSignalRegisteredAt &&
     cancellationSignalRegistrations[0]?.at <= cancelledStagingStart?.at &&
+    continuationArmEvents.length === 1 &&
+    continuationArmEvent?.documentKey ===
+      invisibleCancellation.documentKey &&
+    continuationArmEvent?.revision === invisibleCancellation.revision &&
+    continuationArmEvent?.page === cancelledPage &&
+    continuationArmEvent?.pageDerivation ===
+      invisibleCancellation.continuationArmPageDerivation &&
+    Array.isArray(continuationArmEvent?.candidatePages) &&
+    continuationArmEvent.candidatePages.length === 1 &&
+    continuationArmEvent.candidatePages[0] === cancelledPage &&
+    continuationArmEvent?.armedAt === continuationArmEvent?.at &&
+    continuationArmEvent?.at ===
+      invisibleCancellation.continuationArmedAt &&
+    continuationArmEvent?.at <= cancelledStagingStart?.at &&
     continuationDelayEvents.length === 1 &&
     viewportExitRequestEvents.length === 1 &&
     viewportExitEvents.length === 1 &&
     continuationResumeEvents.length === 1 &&
     cancellationTerminalEvents.length === 1 &&
+    continuationDelayEvent?.armedAt === continuationArmEvent?.at &&
     cancellationTerminalEvent?.outcome === "cancelled" &&
     cancellationTerminalEvent?.documentKey ===
     invisibleCancellation.documentKey &&

@@ -20,6 +20,7 @@ import {
   analyzeReferencePixels,
   classifyPdfRasterTransition,
   decodePngScreenshot,
+  matchesPdfFallbackInjection,
   planPdfVirtualScroll,
   probePdfBitmapBudget,
   selectPdfFallbackScenarioEvents,
@@ -261,6 +262,8 @@ function passingEvidence() {
         canvasWidthAfterExit: 0,
         cancellationTerminal,
         completedAfterExit: false,
+        continuationArmedAt: 80,
+        continuationArmPageDerivation: "next-page-from-sole-visible-page",
         continuationDelayAt: 100,
         continuationDelayObserved: true,
         continuationResumeAt: 1100,
@@ -313,7 +316,9 @@ function passingEvidence() {
         failedAbortSignalId: FAILED_ABORT_SIGNAL_ID,
         failedAttemptId: 1,
         failedAt: 11,
-        page: 1,
+        injectionArmedAt: 8,
+        injectionPageDerivation: "validated-adjacent-unsatisfied-page",
+        page: 2,
         pageDerivation: "sole-visible-unsatisfied-page",
         retryAttemptId: 2,
         retryAbortSignalId: RETRY_ABORT_SIGNAL_ID,
@@ -328,6 +333,14 @@ function passingEvidence() {
       signaledBeforeDocumentReady: true,
       stagingEvents: [
         {
+          at: 8,
+          documentKey: DOCUMENT_KEY,
+          page: 2,
+          pageDerivation: "validated-adjacent-unsatisfied-page",
+          revision: REVISION,
+          type: "injection-armed",
+        },
+        {
           abortSignalId: FAILED_ABORT_SIGNAL_ID,
           at: 9,
           type: "abort-signal-registered",
@@ -337,9 +350,9 @@ function passingEvidence() {
           abortSignalId: FAILED_ABORT_SIGNAL_ID,
           abortSignalRegisteredAt: 9,
           at: 10,
-          candidatePages: [1],
+          candidatePages: [2],
           documentKey: DOCUMENT_KEY,
-          page: 1,
+          page: 2,
           pageDerivation: "sole-visible-unsatisfied-page",
           renderAttemptId: 1,
           revision: REVISION,
@@ -354,7 +367,7 @@ function passingEvidence() {
           cancelRequestedAt: null,
           documentKey: DOCUMENT_KEY,
           outcome: "injected-failure",
-          page: 1,
+          page: 2,
           pageDerivation: "sole-visible-unsatisfied-page",
           renderAttemptId: 1,
           revision: REVISION,
@@ -373,9 +386,9 @@ function passingEvidence() {
           abortSignalId: RETRY_ABORT_SIGNAL_ID,
           abortSignalRegisteredAt: 11.5,
           at: 12,
-          candidatePages: [1],
+          candidatePages: [2],
           documentKey: DOCUMENT_KEY,
-          page: 1,
+          page: 2,
           pageDerivation: "sole-visible-unsatisfied-page",
           renderAttemptId: 2,
           revision: REVISION,
@@ -388,16 +401,26 @@ function passingEvidence() {
           abortSignalId: RETRY_ABORT_SIGNAL_ID,
           at: 20,
           documentKey: DOCUMENT_KEY,
-          page: 1,
+          page: 2,
           pageDerivation: "sole-visible-unsatisfied-page",
           pageMatchesAttempt: true,
           renderAttemptId: 2,
           revision: REVISION,
-          sourcePage: 1,
+          sourcePage: 2,
           targetHeight: 800,
           targetKey: "600x800",
           targetWidth: 600,
           type: "visible-compose",
+        },
+        {
+          armedAt: 80,
+          at: 80,
+          candidatePages: [3],
+          documentKey: DOCUMENT_KEY,
+          page: 3,
+          pageDerivation: "next-page-from-sole-visible-page",
+          revision: REVISION,
+          type: "continuation-armed",
         },
         {
           abortSignalId: CANCELLATION_ABORT_SIGNAL_ID,
@@ -728,6 +751,52 @@ test("filters fallback proof to the current imported document and signals", () =
   assert.equal(maximumConcurrentStaging, 1);
 });
 
+test("keeps fallback probes armed through restored and wrong-page staging", async () => {
+  const armed = {
+    documentKey: DOCUMENT_KEY,
+    page: 2,
+    revision: REVISION,
+  };
+  const attempts = [
+    {
+      documentKey: "restored-document:restored-revision",
+      page: 2,
+      revision: "restored-revision",
+    },
+    {
+      documentKey: DOCUMENT_KEY,
+      page: 1,
+      revision: REVISION,
+    },
+    {
+      documentKey: DOCUMENT_KEY,
+      page: 2,
+      revision: REVISION,
+    },
+  ];
+  assert.deepEqual(
+    attempts.map((attempt) => matchesPdfFallbackInjection(armed, attempt)),
+    [false, false, true],
+  );
+
+  const source = await readFile(
+    "scripts/run-pdf-sharpness-browser-regression.mjs",
+    "utf8",
+  );
+  assert.match(
+    source,
+    /if \(matchesArmedFallbackInjection\(failNextFallback, attempt\)\) \{\s*failNextFallback = null;/u,
+  );
+  assert.match(
+    source,
+    /latestImport\?\.documentKey !== documentKey/u,
+  );
+  assert.match(
+    source,
+    /latestImport\?\.jobId !== fallbackProofIdentity\.importJobId/u,
+  );
+});
+
 test("accepts synchronous cancellation before a delayed PDF.js continuation resumes", () => {
   const evidence = passingEvidence();
   const cancellation = evidence.fallback.invisibleCancellation;
@@ -912,7 +981,9 @@ test("rejects each material Issue 68 acceptance regression", async (t) => {
     }, /fallback cancellation\/retry/u],
     ["fallback retry abort signal", (value) => {
       value.fallback.stagingEvents.find(
-        (event) => event.type === "visible-compose" && event.page === 1,
+        (event) =>
+          event.type === "visible-compose" &&
+          event.renderAttemptId === value.fallback.retry.retryAttemptId,
       ).abortSignalId = 99;
     }, /fallback cancellation\/retry/u],
     ["fallback retry ambiguous signal binding", (value) => {
@@ -925,6 +996,21 @@ test("rejects each material Issue 68 acceptance regression", async (t) => {
       value.fallback.stagingEvents = value.fallback.stagingEvents.filter(
         (event) => event.outcome !== "injected-failure",
       );
+    }, /fallback cancellation\/retry/u],
+    ["fallback missing injection arm", (value) => {
+      value.fallback.stagingEvents = value.fallback.stagingEvents.filter(
+        (event) => event.type !== "injection-armed",
+      );
+    }, /fallback cancellation\/retry/u],
+    ["fallback injection arm wrong document", (value) => {
+      value.fallback.stagingEvents.find(
+        (event) => event.type === "injection-armed",
+      ).documentKey = "restored-document:restored-revision";
+    }, /fallback cancellation\/retry/u],
+    ["fallback injection arm wrong page", (value) => {
+      value.fallback.stagingEvents.find(
+        (event) => event.type === "injection-armed",
+      ).page = 1;
     }, /fallback cancellation\/retry/u],
     ["fallback cancellation", (value) => {
       value.fallback.invisibleCancellation.completedAfterExit = true;
@@ -981,6 +1067,21 @@ test("rejects each material Issue 68 acceptance regression", async (t) => {
     }, /fallback cancellation\/retry/u],
     ["fallback continuation delay", (value) => {
       value.fallback.invisibleCancellation.continuationDelayObserved = false;
+    }, /fallback cancellation\/retry/u],
+    ["fallback missing continuation arm", (value) => {
+      value.fallback.stagingEvents = value.fallback.stagingEvents.filter(
+        (event) => event.type !== "continuation-armed",
+      );
+    }, /fallback cancellation\/retry/u],
+    ["fallback continuation arm wrong document", (value) => {
+      value.fallback.stagingEvents.find(
+        (event) => event.type === "continuation-armed",
+      ).documentKey = "restored-document:restored-revision";
+    }, /fallback cancellation\/retry/u],
+    ["fallback continuation arm wrong page", (value) => {
+      value.fallback.stagingEvents.find(
+        (event) => event.type === "continuation-armed",
+      ).page = 4;
     }, /fallback cancellation\/retry/u],
     ["fallback continuation callback", (value) => {
       value.fallback.stagingEvents.find(
@@ -1216,8 +1317,12 @@ test("binds fallback delay to a real attempt instead of a caller page", async ()
     "scripts/run-pdf-sharpness-browser-regression.mjs",
     "utf8",
   );
-  assert.match(source, /delayNextContinuation\(1000\);/u);
+  assert.match(source, /delayNextContinuation\(1000\)/u);
   assert.match(source, /arguments\.length !== 1/u);
+  assert.match(
+    source,
+    /matchesArmedFallbackInjection\(delayNextContinuation, attempt\)/u,
+  );
   assert.doesNotMatch(source, /delayNextContinuation\(1000,\s*3\)/u);
 });
 

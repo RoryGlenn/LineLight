@@ -62,10 +62,17 @@ validator additionally requires:
   zero-sized offscreen canvas whose measured text/highlight shell remains;
 - one main-thread fallback staging render at a time, an injected first-render
   failure followed by recovery on the same document revision and target, and
-  page-3 cancellation after its PDF.js continuation is delayed; page 3 and a
-  unique attempt ID are derived from the sole real visible, unsatisfied fallback
-  flow rather than supplied by the test caller. Each attempt is bound to the
-  unique `AbortSignal` registered by its production PDF.js cancel listener. The
+  page-3 cancellation after its PDF.js continuation is delayed. The failure is
+  armed only after the latest import completes, against its validated adjacent
+  unsatisfied page, so an automatic persisted-document restore cannot consume
+  it. The one-argument continuation arm internally derives the next adjacent
+  unsatisfied page from the sole visible page and keeps waiting through any
+  wrong-document or wrong-page staging. The arm, consumption, failure/retry,
+  and continuation events must retain that exact document/revision/page
+  identity. Page 3 and a unique attempt ID are therefore derived from the real
+  fallback flow rather than supplied by the delay caller. Each attempt is bound
+  to the unique `AbortSignal` registered by its production PDF.js cancel
+  listener. The
   page-exit action, exact controller abort, cancelled terminal outcome, viewport
   exit confirmation, delayed continuation resume, and no-late-compose proof must
   share that signal/document/revision/attempt identity and occur in that order;

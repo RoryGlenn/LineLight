@@ -198,6 +198,22 @@ export function selectPdfFallbackScenarioEvents(
   return { events, maximumConcurrentStaging };
 }
 
+export function matchesPdfFallbackInjection(armed, attempt) {
+  return Boolean(
+    armed &&
+    attempt &&
+    typeof armed.documentKey === "string" &&
+    armed.documentKey.length > 0 &&
+    typeof armed.revision === "string" &&
+    armed.revision.length > 0 &&
+    Number.isInteger(armed.page) &&
+    armed.page > 0 &&
+    attempt.documentKey === armed.documentKey &&
+    attempt.revision === armed.revision &&
+    attempt.page === armed.page,
+  );
+}
+
 export function planPdfVirtualScroll({
   clientHeight,
   mountedPages,
@@ -903,8 +919,18 @@ const INSTRUMENTATION_SOURCE = String.raw`
   };
   let currentScenario = null;
   let currentPriorityProbe = null;
-  let failNextFallback = false;
+  let failNextFallback = null;
+  let fallbackProofIdentity = null;
   let delayNextContinuation = null;
+  const matchesArmedFallbackInjection = (${matchesPdfFallbackInjection.toString()});
+  const latestValidatedPdfImport = () => workerEvents.findLast((event) =>
+    event.direction === 'to-worker' &&
+    event.type === 'import' &&
+    Number.isFinite(event.at) &&
+    Number.isInteger(event.jobId) &&
+    typeof event.documentKey === 'string' && event.documentKey &&
+    typeof event.revision === 'string' && event.revision
+  ) ?? null;
   const fallbackAttempts = new Map();
   const stagingSymbol = Symbol("issue68FallbackStaging");
   const fallbackAbortCandidates = [];
@@ -1095,15 +1121,17 @@ const INSTRUMENTATION_SOURCE = String.raw`
     if (
       delayNextContinuation?.delay > 0 &&
       forceFallback &&
-      state.fallback.activeStaging > 0 &&
       /scheduleNext/i.test(callback?.name || "")
     ) {
-      const { armedAt, delay } = delayNextContinuation;
-      delayNextContinuation = null;
       const activeAttempts = Array.from(fallbackAttempts.values()).filter(
-        (attempt) => !attempt.finished
+        (attempt) =>
+          !attempt.finished &&
+          matchesArmedFallbackInjection(delayNextContinuation, attempt)
       );
       const attempt = activeAttempts.length === 1 ? activeAttempts[0] : null;
+      if (!attempt) return nativeRequestAnimationFrame(callback);
+      const { armedAt, delay } = delayNextContinuation;
+      delayNextContinuation = null;
       const delayedAt = performance.now();
       state.fallback.events.push({
         abortSignalId: attempt?.abortSignalId ?? null,
@@ -1273,8 +1301,8 @@ const INSTRUMENTATION_SOURCE = String.raw`
         type: "staging-start",
         width: this.width
       });
-      if (failNextFallback) {
-        failNextFallback = false;
+      if (matchesArmedFallbackInjection(failNextFallback, attempt)) {
+        failNextFallback = null;
         state.fallback.injectedFailures += 1;
         finishStaging(this, "injected-failure");
         return null;
@@ -1435,17 +1463,116 @@ const INSTRUMENTATION_SOURCE = String.raw`
     currentPriorityProbe = null;
     return result;
   };
-  state.failNextFallback = () => {
-    failNextFallback = true;
+  state.failNextFallback = (documentKey, revision, pageNumber) => {
+    const page = Number(pageNumber);
+    const latestImport = latestValidatedPdfImport();
+    const block = Number.isInteger(page)
+      ? document.querySelector('#pdf-page-' + page)
+      : null;
+    const canvas = block?.querySelector('canvas') ?? null;
+    const pageEvent = Number.isInteger(page)
+      ? workerEvents.findLast((event) =>
+          event.direction === 'from-worker' &&
+          event.type === 'page' &&
+          event.pageNumber === page &&
+          event.documentKey === documentKey &&
+          event.revision === revision &&
+          event.jobId === latestImport?.jobId &&
+          event.at >= latestImport.at
+        )
+      : null;
+    if (
+      !forceFallback ||
+      typeof documentKey !== 'string' || !documentKey ||
+      typeof revision !== 'string' || !revision ||
+      !Number.isInteger(page) || page < 1 ||
+      latestImport?.documentKey !== documentKey ||
+      latestImport?.revision !== revision ||
+      !pageEvent ||
+      !block || block.dataset.pdfPageVisible !== 'false' ||
+      Number(block.dataset.pdfPageDistance) !== 1 ||
+      !canvas || canvas.width !== 0 || canvas.height !== 0
+    ) {
+      throw new Error('Fallback failure arm requires one exact adjacent unsatisfied import page.');
+    }
+    const event = {
+      at: performance.now(),
+      documentKey,
+      page,
+      pageDerivation: 'validated-adjacent-unsatisfied-page',
+      revision,
+      type: 'injection-armed'
+    };
+    failNextFallback = { documentKey, page, revision };
+    fallbackProofIdentity = {
+      documentKey,
+      importJobId: latestImport.jobId,
+      revision
+    };
+    state.fallback.events.push(event);
+    return structuredClone(event);
   };
   state.delayNextContinuation = function issue68DelayNextContinuation(milliseconds) {
     if (arguments.length !== 1) {
       throw new Error("Fallback continuation delay accepts only a duration.");
     }
+    const visibleBlocks = Array.from(document.querySelectorAll(
+      '.pdf-page-block[data-pdf-page-visible="true"]'
+    ));
+    const visiblePages = visibleBlocks.map(
+      (block) => Number(block.dataset.pdfPageIndex) + 1
+    ).filter(Number.isInteger);
+    const page = visiblePages.length === 1 ? visiblePages[0] + 1 : null;
+    const latestImport = latestValidatedPdfImport();
+    const block = Number.isInteger(page)
+      ? document.querySelector('#pdf-page-' + page)
+      : null;
+    const canvas = block?.querySelector('canvas') ?? null;
+    const pageEvent = Number.isInteger(page) && fallbackProofIdentity
+      ? workerEvents.findLast((event) =>
+          event.direction === 'from-worker' &&
+          event.type === 'page' &&
+          event.pageNumber === page &&
+          event.documentKey === fallbackProofIdentity.documentKey &&
+          event.revision === fallbackProofIdentity.revision &&
+          event.jobId === fallbackProofIdentity.importJobId &&
+          event.at >= latestImport.at
+        )
+      : null;
+    if (
+      !forceFallback ||
+      !fallbackProofIdentity ||
+      latestImport?.documentKey !== fallbackProofIdentity.documentKey ||
+      latestImport?.revision !== fallbackProofIdentity.revision ||
+      latestImport?.jobId !== fallbackProofIdentity.importJobId ||
+      !Number.isInteger(page) || page < 1 ||
+      !pageEvent ||
+      !block || block.dataset.pdfPageVisible !== 'false' ||
+      Number(block.dataset.pdfPageDistance) !== 1 ||
+      !canvas || canvas.width !== 0 || canvas.height !== 0
+    ) {
+      throw new Error('Fallback continuation arm requires the next exact unsatisfied import page.');
+    }
+    const armedAt = performance.now();
     delayNextContinuation = {
-      armedAt: performance.now(),
-      delay: Math.max(0, Number(milliseconds) || 0)
+      armedAt,
+      delay: Math.max(0, Number(milliseconds) || 0),
+      documentKey: fallbackProofIdentity.documentKey,
+      page,
+      revision: fallbackProofIdentity.revision
     };
+    const event = {
+      armedAt,
+      at: armedAt,
+      candidatePages: [page],
+      documentKey: fallbackProofIdentity.documentKey,
+      page,
+      pageDerivation: 'next-page-from-sole-visible-page',
+      revision: fallbackProofIdentity.revision,
+      type: 'continuation-armed'
+    };
+    state.fallback.events.push(event);
+    return structuredClone(event);
   };
   state.markFallbackViewportExitRequest = (renderAttemptId, destinationPage) => {
     const attempt = fallbackAttempts.get(Number(renderAttemptId));
@@ -2667,8 +2794,7 @@ async function collectFallbackEvidence(
   await navigateToReader(cdp, appUrl, configuration, true);
   await evaluate(
     cdp,
-    `globalThis.__lineLightIssue68.failNextFallback();
-      globalThis.__lineLightIssue68.beginScenario('forced-main-fallback'); true`,
+    `globalThis.__lineLightIssue68.beginScenario('forced-main-fallback'); true`,
   );
   await importFixture(cdp, fixture);
   await waitForExpression(
@@ -2684,14 +2810,49 @@ async function collectFallbackEvidence(
     "the immediate worker fallback signal",
     SCENARIO_TIMEOUT_MS,
   );
-  await waitForExpression(
+  await scrollPageIntoView(cdp, 1);
+  await waitForSharpCanvas(cdp, 1, "main-fallback", modelCompletion);
+  const injectionTarget = await selectAdjacentPreviewTarget(cdp);
+  if (
+    injectionTarget.page !== 2 ||
+    injectionTarget.distance !== 1 ||
+    injectionTarget.canvasWidth !== 0 ||
+    injectionTarget.canvasHeight !== 0
+  ) {
+    throw new Error(
+      "Fallback injection page 2 was not the exact adjacent unsatisfied page.",
+    );
+  }
+  const injectionArm = await evaluate(
     cdp,
-    `globalThis.__lineLightIssue68.fallback.injectedFailures === 1`,
+    `globalThis.__lineLightIssue68.failNextFallback(
+      ${JSON.stringify(modelCompletion.documentKey)},
+      ${JSON.stringify(modelCompletion.revision)},
+      ${injectionTarget.page}
+    )`,
+  );
+  await scrollPageIntoView(cdp, injectionTarget.page);
+  const injectedFailure = await waitForExpression(
+    cdp,
+    browserExpression(`
+      return globalThis.__lineLightIssue68.fallback.events.find((event) =>
+        event.type === 'staging-finish' &&
+        event.outcome === 'injected-failure' &&
+        event.documentKey === ${JSON.stringify(modelCompletion.documentKey)} &&
+        event.revision === ${JSON.stringify(modelCompletion.revision)} &&
+        event.page === ${injectionTarget.page} &&
+        event.at >= ${injectionArm.at}
+      ) || false;
+    `),
     "the injected first fallback failure",
     SCENARIO_TIMEOUT_MS,
   );
-  await scrollPageIntoView(cdp, 1);
-  await waitForSharpCanvas(cdp, 1, "main-fallback", modelCompletion);
+  await waitForSharpCanvas(
+    cdp,
+    injectionTarget.page,
+    "main-fallback",
+    modelCompletion,
+  );
   const retry = await waitForExpression(
     cdp,
     browserExpression(`
@@ -2699,11 +2860,21 @@ async function collectFallbackEvidence(
       const failure = events.find((event) =>
         event.type === 'staging-finish' &&
         event.outcome === 'injected-failure' &&
-        event.documentKey && event.revision &&
+        event.documentKey === ${JSON.stringify(modelCompletion.documentKey)} &&
+        event.revision === ${JSON.stringify(modelCompletion.revision)} &&
+        event.page === ${injectionTarget.page} &&
+        event.at === ${injectedFailure.at} &&
         Number.isInteger(event.abortSignalId) &&
         Number.isInteger(event.renderAttemptId) &&
-        Number.isInteger(event.page) &&
         event.targetKey
+      );
+      const injectionArm = failure && events.find((event) =>
+        event.type === 'injection-armed' &&
+        event.documentKey === failure.documentKey &&
+        event.page === failure.page &&
+        event.revision === failure.revision &&
+        event.at === ${injectionArm.at} &&
+        event.at <= failure.at
       );
       const failedStart = failure && events.find((event) =>
         event.type === 'staging-start' &&
@@ -2738,12 +2909,14 @@ async function collectFallbackEvidence(
         event.targetKey === retryStart.targetKey &&
         event.at >= retryStart.at
       );
-      return failure && failedStart && retryStart && retryCompose && {
+      return failure && injectionArm && failedStart && retryStart && retryCompose && {
         composedAt: retryCompose.at,
         documentKey: failure.documentKey,
         failedAbortSignalId: failure.abortSignalId,
         failedAttemptId: failure.renderAttemptId,
         failedAt: failure.at,
+        injectionArmedAt: injectionArm.at,
+        injectionPageDerivation: injectionArm.pageDerivation,
         page: failure.page,
         pageDerivation: failure.pageDerivation,
         retryAttemptId: retryStart.renderAttemptId,
@@ -2759,17 +2932,31 @@ async function collectFallbackEvidence(
     SCENARIO_TIMEOUT_MS,
   );
 
-  await evaluate(
+  const continuationArm = await evaluate(
     cdp,
-    `globalThis.__lineLightIssue68.delayNextContinuation(1000); true`,
+    `globalThis.__lineLightIssue68.delayNextContinuation(1000)`,
   );
+  if (
+    continuationArm.page !== 3 ||
+    continuationArm.documentKey !== modelCompletion.documentKey ||
+    continuationArm.revision !== modelCompletion.revision ||
+    continuationArm.pageDerivation !== "next-page-from-sole-visible-page"
+  ) {
+    throw new Error(
+      "The delayed fallback arm did not derive current import page 3.",
+    );
+  }
   await scrollPageIntoView(cdp, 3);
   const continuationDelay = await waitForExpression(
     cdp,
     browserExpression(`
       return globalThis.__lineLightIssue68.fallback.events.find(
         (event) => event.type === 'continuation-delay' &&
-          Number.isInteger(event.renderAttemptId)
+          Number.isInteger(event.renderAttemptId) &&
+          event.documentKey === ${JSON.stringify(modelCompletion.documentKey)} &&
+          event.revision === ${JSON.stringify(modelCompletion.revision)} &&
+          event.page === ${continuationArm.page} &&
+          event.armedAt === ${continuationArm.at}
       ) || false;
     `),
     "a real fallback render attempt to enter the one-second continuation delay",
@@ -2922,6 +3109,8 @@ async function collectFallbackEvidence(
       completedAfterExit: cancelledAttemptLateComposes.length > 0,
       continuationDelayAt: continuationDelay.at,
       continuationDelayObserved: true,
+      continuationArmedAt: continuationArm.at,
+      continuationArmPageDerivation: continuationArm.pageDerivation,
       continuationResumeAt: continuationResume.at,
       continuationResumeObserved: true,
       continuationResumedAfterMs: continuationResume.afterMs,
