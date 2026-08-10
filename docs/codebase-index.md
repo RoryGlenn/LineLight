@@ -257,9 +257,10 @@ builds and serves one clean source commit, then uses headed Brave to pair the
 same local PDF page in the browser viewer and LineLight across desktop DPR,
 effective browser-zoom metrics, mobile DPR, and visual-viewport pinch. It
 requires decoded reference pixels to prove a rendered page, and records
-independently recomputed preview-to-sharp backing targets, current viewport
-priority after import-bound worker completion and bounded traversal of
-virtualized page shells, bitmap/canvas budgets, offscreen release,
+independently recomputed preview targets that either exactly satisfy the final
+backing without a redundant draw or upgrade through distinct bitmap/composition
+identities, current viewport priority after import-bound worker completion and
+bounded traversal of virtualized page shells, bitmap/canvas budgets, offscreen release,
 identity-bound serialized fallback failure/retry,
 exact `AbortSignal`- and attempt-bound cancellation terminals, per-scenario
 measured narration alignment, Long Tasks, per-scenario document/parser worker

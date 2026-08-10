@@ -1,6 +1,10 @@
 export const PDF_SHARPNESS_SCHEMA_VERSION = 2;
 export const PDF_SHARPNESS_MAX_LONG_TASK_MS = 50;
 export const PDF_SHARPNESS_PREVIEW_SCALE = 1.25;
+export const PDF_SHARPNESS_RASTER_TRANSITIONS = Object.freeze([
+  "preview-satisfied-target",
+  "preview-to-sharp-upgrade",
+]);
 export const PDF_SHARPNESS_MAX_BITMAP_COUNT = 8;
 export const PDF_SHARPNESS_MAX_BITMAP_PIXELS = 33_554_432;
 export const PDF_SHARPNESS_MAX_COMPOSED_CANVASES = 2;
@@ -334,6 +338,7 @@ export function validatePdfSharpnessEvidence(evidence) {
   if (runs.map((run) => run.id).join(",") !== expectedIds.join(",")) {
     fail("matrix IDs/order do not match the required desktop/mobile matrix");
   }
+  let strictRasterUpgradeCount = 0;
   for (const [index, run] of runs.entries()) {
     const expected = PDF_SHARPNESS_MATRIX[index];
     if (!expected) continue;
@@ -454,6 +459,14 @@ export function validatePdfSharpnessEvidence(evidence) {
       preview?.workerObserved !== true ||
       preview?.connectedCanvas !== true ||
       preview?.distance !== 1 ||
+      !Number.isInteger(preview?.actualWidth) ||
+      !Number.isInteger(preview?.actualHeight) ||
+      preview.actualWidth < 1 ||
+      preview.actualHeight < 1 ||
+      !Number.isInteger(preview?.bitmapEventId) ||
+      preview.bitmapEventId < 1 ||
+      !Number.isInteger(preview?.compositionId) ||
+      preview.compositionId < 1 ||
       !finite(preview?.scale) ||
       Number(preview.scale) <= 0 ||
       preview.scale > PDF_SHARPNESS_PREVIEW_SCALE + 1e-7 ||
@@ -475,7 +488,10 @@ export function validatePdfSharpnessEvidence(evidence) {
       !finite(sharp?.targetHeight) ||
       !finite(sharp?.targetScale) ||
       !finite(sharp?.composedAt) ||
-      Number(sharp?.composedAt) <= Number(preview?.composedAt) ||
+      !Number.isInteger(sharp?.bitmapEventId) ||
+      sharp.bitmapEventId < 1 ||
+      !Number.isInteger(sharp?.compositionId) ||
+      sharp.compositionId < 1 ||
       !nonNegativeInteger(sharp?.actualWidth) ||
       !nonNegativeInteger(sharp?.actualHeight) ||
       !nonNegativeInteger(sharp?.targetWidth) ||
@@ -499,9 +515,49 @@ export function validatePdfSharpnessEvidence(evidence) {
     ) {
       fail(`${expected.id} sharp backing did not reach its computed capped target`);
     }
+    const expectedPreviewScale = Math.min(
+      Number(independentlyExpected?.scale),
+      PDF_SHARPNESS_PREVIEW_SCALE,
+    );
+    const expectedPreviewWidth = Math.ceil(
+      Number(sharp?.pageWidth) * expectedPreviewScale,
+    );
+    const expectedPreviewHeight = Math.ceil(
+      Number(sharp?.pageHeight) * expectedPreviewScale,
+    );
+    if (
+      !closeTo(preview?.scale, expectedPreviewScale, 1e-7) ||
+      preview?.actualWidth !== expectedPreviewWidth ||
+      preview?.actualHeight !== expectedPreviewHeight
+    ) {
+      fail(`${expected.id} preview backing did not match its worker scale`);
+    }
+    const transition = run?.raster?.transition;
+    const previewSatisfiedTarget =
+      transition === PDF_SHARPNESS_RASTER_TRANSITIONS[0] &&
+      run?.raster?.previewBeforeSharp === false &&
+      preview?.actualWidth === independentlyExpected?.width &&
+      preview?.actualHeight === independentlyExpected?.height &&
+      preview?.bitmapEventId === sharp?.bitmapEventId &&
+      preview?.compositionId === sharp?.compositionId &&
+      preview?.composedAt === sharp?.composedAt;
+    const previewUpgradedToSharp =
+      transition === PDF_SHARPNESS_RASTER_TRANSITIONS[1] &&
+      run?.raster?.previewBeforeSharp === true &&
+      Number(preview?.scale) + 1e-7 < Number(independentlyExpected?.scale) &&
+      preview?.actualWidth <= independentlyExpected?.width &&
+      preview?.actualHeight <= independentlyExpected?.height &&
+      (preview?.actualWidth < independentlyExpected?.width ||
+        preview?.actualHeight < independentlyExpected?.height) &&
+      preview?.bitmapEventId < sharp?.bitmapEventId &&
+      preview?.compositionId < sharp?.compositionId &&
+      Number(preview?.composedAt) <= Number(sharp?.composedAt);
+    if (!previewSatisfiedTarget && !previewUpgradedToSharp) {
+      fail(`${expected.id} preview-to-sharp transition proof is inconsistent`);
+    }
+    if (previewUpgradedToSharp) strictRasterUpgradeCount += 1;
     if (
       sharp?.source !== "worker-bitmap" ||
-      run?.raster?.previewBeforeSharp !== true ||
       run?.raster?.noResolutionRegression !== true ||
       run?.raster?.noLateLowOverwrite !== true
     ) {
@@ -553,6 +609,9 @@ export function validatePdfSharpnessEvidence(evidence) {
     ) {
       fail(`${expected.id} did not retain its offscreen text/highlight shell`);
     }
+  }
+  if (strictRasterUpgradeCount < 1) {
+    fail("matrix did not prove any strict preview-to-sharp raster upgrade");
   }
 
   const budget = evidence?.bitmapBudget;

@@ -152,6 +152,52 @@ export function summarizePdfModelCompletion(workerEvents, expectedPageCount) {
   };
 }
 
+export function classifyPdfRasterTransition(previewComposition, sharpTarget) {
+  return previewComposition?.width === sharpTarget?.targetWidth &&
+      previewComposition?.height === sharpTarget?.targetHeight &&
+      Math.abs(
+        Number(previewComposition?.scale) - Number(sharpTarget?.targetScale),
+      ) <= 1e-7
+    ? "preview-satisfied-target"
+    : "preview-to-sharp-upgrade";
+}
+
+export function selectPdfFallbackScenarioEvents(
+  fallbackEvents,
+  { documentKey, revision, startedAt },
+) {
+  const scenarioEvents = (fallbackEvents ?? []).filter(
+    (event) => Number.isFinite(event?.at) && event.at >= startedAt,
+  );
+  const signalIds = new Set(
+    scenarioEvents
+      .filter(
+        (event) =>
+          event.documentKey === documentKey &&
+          event.revision === revision &&
+          Number.isInteger(event.abortSignalId),
+      )
+      .map((event) => event.abortSignalId),
+  );
+  const events = scenarioEvents.filter(
+    (event) =>
+      (event.documentKey === documentKey && event.revision === revision) ||
+      (Number.isInteger(event.abortSignalId) &&
+        signalIds.has(event.abortSignalId)),
+  );
+  let active = 0;
+  let maximumConcurrentStaging = 0;
+  for (const event of events) {
+    if (event.type === "staging-start") {
+      active += 1;
+      maximumConcurrentStaging = Math.max(maximumConcurrentStaging, active);
+    } else if (event.type === "staging-finish") {
+      active = Math.max(0, active - 1);
+    }
+  }
+  return { events, maximumConcurrentStaging };
+}
+
 export function planPdfVirtualScroll({
   clientHeight,
   mountedPages,
@@ -791,6 +837,7 @@ const INSTRUMENTATION_SOURCE = String.raw`
               ? documentId + ":" + revision
               : null,
             height: Number(message.height) || null,
+            eventId: workerEvents.length + 1,
             jobId: Number(message.jobId) || null,
             pageHeight: Number(message.page?.layout?.height) || null,
             pageCount: Number(
@@ -819,6 +866,7 @@ const INSTRUMENTATION_SOURCE = String.raw`
             ? documentId + ":" + revision
             : null,
           enabled: message?.enabled,
+          eventId: workerEvents.length + 1,
           jobId: Number(message?.jobId) || null,
           pageNumber: Number(message?.pageNumber) || null,
           revision,
@@ -1245,6 +1293,7 @@ const INSTRUMENTATION_SOURCE = String.raw`
         const block = destination.closest(".pdf-page-block");
         const draw = {
           at: performance.now(),
+          compositionId: state.draws.length + 1,
           distance: Number(block?.dataset.pdfPageDistance),
           height: destination.height,
           page: Number(block?.dataset.pdfPageIndex || -1) + 1,
@@ -1794,6 +1843,36 @@ async function waitForPdfModelCompletion(cdp, expectedPageCount) {
   }
 }
 
+async function readRasterTransitionDiagnostic(
+  cdp,
+  pageNumber,
+  scenarioStart,
+  modelCompletion,
+) {
+  const [canvas, model, activity] = await Promise.all([
+    evaluate(cdp, pageCanvasExpression(pageNumber)),
+    readPdfModelDiagnostic(cdp, 6),
+    evaluate(
+      cdp,
+      browserExpression(`
+        const state = globalThis.__lineLightIssue68;
+        return {
+          draws: (state?.draws ?? []).slice(${scenarioStart.drawStart}).filter(
+            (draw) => draw.page === ${pageNumber}
+          ),
+          workerEvents: (state?.workerEvents ?? []).filter((event) =>
+            event.pageNumber === ${pageNumber} &&
+            event.jobId === ${modelCompletion.importJobId} &&
+            event.revision === ${JSON.stringify(modelCompletion.revision)} &&
+            ['render', 'bitmap'].includes(event.type)
+          )
+        };
+      `),
+    ),
+  ]);
+  return { activity, canvas, model };
+}
+
 async function mountPdfPageByTraversal(cdp, pageNumber) {
   const startedAt = Date.now();
   let lastState = null;
@@ -1899,7 +1978,12 @@ async function scrollPageIntoView(cdp, pageNumber) {
   );
 }
 
-async function waitForSharpCanvas(cdp, pageNumber, source = null) {
+async function waitForSharpCanvas(
+  cdp,
+  pageNumber,
+  source = null,
+  modelCompletion = null,
+) {
   return waitForExpression(
     cdp,
     browserExpression(`
@@ -1909,7 +1993,11 @@ async function waitForSharpCanvas(cdp, pageNumber, source = null) {
       const bounds = canvas.getBoundingClientRect();
       const pageEvent = globalThis.__lineLightIssue68.workerEvents.findLast(
         (event) => event.direction === 'from-worker' &&
-          event.type === 'page' && event.pageNumber === ${pageNumber}
+          event.type === 'page' && event.pageNumber === ${pageNumber} &&
+          (${modelCompletion?.importJobId ?? "null"} === null ||
+            event.jobId === ${modelCompletion?.importJobId ?? "null"}) &&
+          (${JSON.stringify(modelCompletion?.revision ?? null)} === null ||
+            event.revision === ${JSON.stringify(modelCompletion?.revision ?? null)})
       );
       const targetWidth = Number(canvas.dataset.pdfRasterTargetWidth);
       const targetHeight = Number(canvas.dataset.pdfRasterTargetHeight);
@@ -1918,7 +2006,7 @@ async function waitForSharpCanvas(cdp, pageNumber, source = null) {
       return bounds.width > 0 && bounds.height > 0 &&
         pageEvent?.pageWidth > 0 && pageEvent?.pageHeight > 0 &&
         targetWidth > 0 && targetHeight > 0 &&
-        canvas.width >= targetWidth && canvas.height >= targetHeight && {
+        canvas.width === targetWidth && canvas.height === targetHeight && {
           actualHeight: canvas.height,
           actualWidth: canvas.width,
           cssHeight: bounds.height,
@@ -2194,7 +2282,7 @@ async function collectMatrixRun(
     "the browser-side imported PDF hash",
     SCENARIO_TIMEOUT_MS,
   );
-  await waitForPdfModelCompletion(cdp, 6);
+  const modelCompletion = await waitForPdfModelCompletion(cdp, 6);
   const adjacent = await selectAdjacentPreviewTarget(cdp);
   if (
     adjacent.distance !== 1 ||
@@ -2217,6 +2305,8 @@ async function collectMatrixRun(
         event.direction === 'from-worker' &&
         event.type === 'bitmap' &&
         event.pageNumber === ${adjacent.page} &&
+        event.jobId === ${modelCompletion.importJobId} &&
+        event.revision === ${JSON.stringify(modelCompletion.revision)} &&
         event.scale <= 1.2500001
       ) || false;
     `),
@@ -2250,6 +2340,7 @@ async function collectMatrixRun(
         draw.page === ${adjacent.page} &&
         draw.visible === true &&
         draw.source === 'worker-bitmap' &&
+        draw.scale > 0 &&
         draw.scale <= 1.2500001 &&
         draw.at >= ${scenarioStart.startedAt}
       ) || false;
@@ -2257,21 +2348,49 @@ async function collectMatrixRun(
     `page ${adjacent.page} connected-canvas preview composition`,
     SCENARIO_TIMEOUT_MS,
   );
-  const sharp = await waitForSharpCanvas(cdp, adjacent.page);
-  const sharpComposition = await waitForExpression(
-    cdp,
-    browserExpression(`
-      return globalThis.__lineLightIssue68.draws.find((draw) =>
-        draw.page === ${adjacent.page} &&
-        draw.visible === true &&
-        draw.width >= ${sharp.targetWidth} &&
-        draw.height >= ${sharp.targetHeight} &&
-        draw.at > ${previewComposition.at}
-      ) || false;
-    `),
-    `page ${adjacent.page} connected-canvas sharp composition`,
-    SCENARIO_TIMEOUT_MS,
-  );
+  let rasterTransition;
+  let sharp;
+  let sharpComposition;
+  try {
+    sharp = await waitForSharpCanvas(
+      cdp,
+      adjacent.page,
+      "worker-bitmap",
+      modelCompletion,
+    );
+    rasterTransition = classifyPdfRasterTransition(previewComposition, sharp);
+    sharpComposition = rasterTransition === "preview-satisfied-target"
+      ? previewComposition
+      : await waitForExpression(
+        cdp,
+        browserExpression(`
+          return globalThis.__lineLightIssue68.draws.find((draw) =>
+            draw.page === ${adjacent.page} &&
+            draw.visible === true &&
+            draw.source === 'worker-bitmap' &&
+            draw.width === ${sharp.targetWidth} &&
+            draw.height === ${sharp.targetHeight} &&
+            Math.abs(draw.scale - ${sharp.targetScale}) <= 1e-7 &&
+            draw.compositionId > ${previewComposition.compositionId}
+          ) || false;
+        `),
+        `page ${adjacent.page} connected-canvas sharp composition`,
+        SCENARIO_TIMEOUT_MS,
+      );
+  } catch (error) {
+    const diagnostic = await readRasterTransitionDiagnostic(
+      cdp,
+      adjacent.page,
+      scenarioStart,
+      modelCompletion,
+    ).catch((diagnosticError) => ({
+      diagnosticError: String(diagnosticError),
+    }));
+    throw new Error(
+      `${error instanceof Error ? error.message : error}\n` +
+      `Raster transition diagnostic: ${JSON.stringify(diagnostic)}`,
+    );
+  }
   const lineLightScreenshot = await writeScreenshot(
     cdp,
     outputDirectory,
@@ -2287,7 +2406,7 @@ async function collectMatrixRun(
     `globalThis.__lineLightIssue68.beginPriorityProbe(${priorityTarget}); true`,
   );
   await scrollPageIntoView(cdp, priorityTarget);
-  await waitForSharpCanvas(cdp, priorityTarget);
+  await waitForSharpCanvas(cdp, priorityTarget, null, modelCompletion);
   const priorityProbe = await evaluate(
     cdp,
     `globalThis.__lineLightIssue68.finishPriorityProbe()`,
@@ -2328,7 +2447,10 @@ async function collectMatrixRun(
   const pageSamples = samplesForPage(snapshot, scenario, adjacent.page);
   const pageDraws = drawsForPage(snapshot, scenario, adjacent.page);
   const targetWorkerEvents = snapshot.workerEvents.filter(
-    (event) => event.pageNumber === adjacent.page,
+    (event) =>
+      event.pageNumber === adjacent.page &&
+      event.jobId === modelCompletion.importJobId &&
+      event.revision === modelCompletion.revision,
   );
   const previewRequestIndex = targetWorkerEvents.findIndex(
     (event) =>
@@ -2339,21 +2461,27 @@ async function collectMatrixRun(
       event.distance === 1 &&
       event.scale <= 1.25 + 1e-7,
   );
-  const previewBitmapIndex = targetWorkerEvents.findIndex(
+  const previewBitmapEvent = targetWorkerEvents.find(
     (event) =>
       event.direction === "from-worker" &&
       event.type === "bitmap" &&
-      event.scale <= 1.25 + 1e-7,
+      event.scale <= 1.25 + 1e-7 &&
+      event.width === previewComposition.width &&
+      event.height === previewComposition.height,
   );
-  const sharpBitmapIndex = targetWorkerEvents.findIndex(
+  const sharpBitmapEvent = targetWorkerEvents.find(
     (event) =>
       event.direction === "from-worker" &&
       event.type === "bitmap" &&
-      event.width >= sharp.targetWidth &&
-      event.height >= sharp.targetHeight,
+      event.width === sharp.targetWidth &&
+      event.height === sharp.targetHeight,
   );
   const priorityBitmaps = (priorityProbe?.workerEvents ?? []).filter(
-    (event) => event.direction === "from-worker" && event.type === "bitmap",
+    (event) =>
+      event.direction === "from-worker" &&
+      event.type === "bitmap" &&
+      event.jobId === modelCompletion.importJobId &&
+      event.revision === modelCompletion.revision,
   );
   const firstTargetBitmapIndex = priorityBitmaps.findIndex(
     (event) => event.pageNumber === priorityTarget,
@@ -2396,25 +2524,32 @@ async function collectMatrixRun(
         hasNoResolutionRegression(pageDraws) &&
         hasNoResolutionRegression(pageSamples),
       preview: {
+        actualHeight: previewComposition.height,
+        actualWidth: previewComposition.width,
+        bitmapEventId: previewBitmapEvent?.eventId ?? null,
         composedAt: previewComposition.at,
+        compositionId: previewComposition.compositionId,
         connectedCanvas: previewComposition.visible === true,
         distance: adjacent.distance,
         observed:
           previewRequestIndex >= 0 &&
-          previewBitmapIndex >= 0 &&
+          Boolean(previewBitmapEvent) &&
           previewComposition.visible === true,
         scale: previewComposition.scale,
-        workerObserved: previewRequestIndex >= 0 && previewBitmapIndex >= 0,
+        workerObserved: previewRequestIndex >= 0 && Boolean(previewBitmapEvent),
       },
       previewBeforeSharp:
-        previewComposition.at < sharpComposition.at &&
-        previewBitmapIndex >= 0 &&
-        sharpBitmapIndex >= 0 &&
-        previewBitmapIndex < sharpBitmapIndex,
+        rasterTransition === "preview-to-sharp-upgrade" &&
+        previewComposition.compositionId < sharpComposition.compositionId &&
+        Number.isInteger(previewBitmapEvent?.eventId) &&
+        Number.isInteger(sharpBitmapEvent?.eventId) &&
+        previewBitmapEvent.eventId < sharpBitmapEvent.eventId,
       sharp: {
         actualHeight: sharp.actualHeight,
         actualWidth: sharp.actualWidth,
+        bitmapEventId: sharpBitmapEvent?.eventId ?? null,
         composedAt: sharpComposition.at,
+        compositionId: sharpComposition.compositionId,
         cssHeight: sharp.cssHeight,
         cssWidth: sharp.cssWidth,
         pageHeight: sharp.pageHeight,
@@ -2425,6 +2560,7 @@ async function collectMatrixRun(
         targetScale: sharp.targetScale,
         targetWidth: sharp.targetWidth,
       },
+      transition: rasterTransition,
     },
     release,
     runtimeErrors: snapshot.errors,
@@ -2541,7 +2677,7 @@ async function collectFallbackEvidence(
     "the fallback browser-side imported PDF hash",
     SCENARIO_TIMEOUT_MS,
   );
-  await waitForPdfModelCompletion(cdp, 6);
+  const modelCompletion = await waitForPdfModelCompletion(cdp, 6);
   await waitForExpression(
     cdp,
     `document.querySelector('.pdf-page-view')?.dataset.pdfRenderFallback === 'true'`,
@@ -2555,7 +2691,7 @@ async function collectFallbackEvidence(
     SCENARIO_TIMEOUT_MS,
   );
   await scrollPageIntoView(cdp, 1);
-  await waitForSharpCanvas(cdp, 1, "main-fallback");
+  await waitForSharpCanvas(cdp, 1, "main-fallback", modelCompletion);
   const retry = await waitForExpression(
     cdp,
     browserExpression(`
@@ -2708,7 +2844,7 @@ async function collectFallbackEvidence(
     `page ${cancelledPage} delayed continuation to resume after one second`,
     SCENARIO_TIMEOUT_MS,
   );
-  await waitForSharpCanvas(cdp, 5, "main-fallback");
+  await waitForSharpCanvas(cdp, 5, "main-fallback", modelCompletion);
   await waitForExpression(
     cdp,
     `globalThis.__lineLightIssue68.fallback.activeStaging === 0`,
@@ -2733,22 +2869,37 @@ async function collectFallbackEvidence(
     cdp,
     `globalThis.__lineLightIssue68.snapshot()`,
   );
-  const firstStaging = snapshot.fallback.events.find(
-    (event) => event.type === "staging-start",
+  const {
+    events: stagingEvents,
+    maximumConcurrentStaging,
+  } = selectPdfFallbackScenarioEvents(snapshot.fallback.events, {
+    documentKey: modelCompletion.documentKey,
+    revision: modelCompletion.revision,
+    startedAt: scenario.startedAt,
+  });
+  const firstStaging = stagingEvents.find(
+    (event) =>
+      event.type === "staging-start",
   );
   const workerFallbackEvent = snapshot.workerEvents.find(
     (event) =>
       event.direction === "from-worker" &&
-      event.type === "render-fallback",
+      event.type === "render-fallback" &&
+      event.jobId === modelCompletion.importJobId &&
+      event.revision === modelCompletion.revision,
   );
   const workerBitmapsAfterSignal = snapshot.workerEvents.filter(
     (event) =>
       event.direction === "from-worker" &&
       event.type === "bitmap" &&
+      event.jobId === modelCompletion.importJobId &&
+      event.revision === modelCompletion.revision &&
       event.at >= (workerFallbackEvent?.at ?? Number.POSITIVE_INFINITY),
   );
-  const pageOneDraws = snapshot.draws.filter((draw) => draw.page === 1);
-  const cancelledAttemptLateComposes = snapshot.fallback.events.filter(
+  const pageOneDraws = snapshot.draws
+    .slice(scenario.drawStart)
+    .filter((draw) => draw.page === 1);
+  const cancelledAttemptLateComposes = stagingEvents.filter(
     (event) =>
       event.type === "visible-compose" &&
       event.renderAttemptId === renderAttemptId &&
@@ -2791,8 +2942,7 @@ async function collectFallbackEvidence(
       scenario.longTaskStart,
       scenario.longTaskEnd,
     ),
-    maximumConcurrentStaging:
-      snapshot.fallback.maximumConcurrentStaging,
+    maximumConcurrentStaging,
     noLateLowOverwrite:
       workerBitmapsAfterSignal.length === 0 &&
       hasNoResolutionRegression(pageOneDraws),
@@ -2800,13 +2950,11 @@ async function collectFallbackEvidence(
     retrySucceeded: Boolean(retry),
     runtimeErrors: snapshot.errors,
     signaledBeforeDocumentReady: Boolean(
-      snapshot.fallback.signalAt !== null &&
       workerFallbackEvent &&
       firstStaging &&
-      workerFallbackEvent.at <= snapshot.fallback.signalAt &&
-      snapshot.fallback.signalAt <= firstStaging.at
+      workerFallbackEvent.at <= firstStaging.at
     ),
-    stagingEvents: snapshot.fallback.events,
+    stagingEvents,
     workerFallbackEvent,
     workerQueueClosed:
       Boolean(workerFallbackEvent) && workerBitmapsAfterSignal.length === 0,

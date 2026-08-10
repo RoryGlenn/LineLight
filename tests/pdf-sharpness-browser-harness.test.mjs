@@ -18,9 +18,11 @@ import {
 } from "../scripts/pdf-sharpness-evidence.mjs";
 import {
   analyzeReferencePixels,
+  classifyPdfRasterTransition,
   decodePngScreenshot,
   planPdfVirtualScroll,
   probePdfBitmapBudget,
+  selectPdfFallbackScenarioEvents,
   summarizePdfModelCompletion,
 } from
   "../scripts/run-pdf-sharpness-browser-regression.mjs";
@@ -61,8 +63,12 @@ function passingEvidence() {
     );
     const pageWidth = 600;
     const pageHeight = 800;
-    const cssWidth = configuration.kind === "mobile" ? 300 : 600;
-    const cssHeight = configuration.kind === "mobile" ? 400 : 800;
+    const cssWidth = configuration.id === "desktop-dpr1-zoom100"
+      ? 720
+      : configuration.kind === "mobile"
+        ? 300
+        : 600;
+    const cssHeight = (cssWidth * pageHeight) / pageWidth;
     const physicalRatio =
       configuration.baseDevicePixelRatio *
       configuration.browserZoom *
@@ -75,6 +81,12 @@ function passingEvidence() {
     ) * 0.25;
     const targetWidth = Math.ceil(pageWidth * targetScale);
     const targetHeight = Math.ceil(pageHeight * targetScale);
+    const previewScale = Math.min(targetScale, 1.25);
+    const previewWidth = Math.ceil(pageWidth * previewScale);
+    const previewHeight = Math.ceil(pageHeight * previewScale);
+    const previewSatisfiedTarget = previewScale === targetScale;
+    const sharpCompositionId = previewSatisfiedTarget ? 1 : 2;
+    const sharpComposedAt = previewSatisfiedTarget ? 10 : 20;
     return {
       alignment: {
         activeWordAfter: 2,
@@ -119,18 +131,24 @@ function passingEvidence() {
         noLateLowOverwrite: true,
         noResolutionRegression: true,
         preview: {
+          actualHeight: previewHeight,
+          actualWidth: previewWidth,
+          bitmapEventId: 1,
           composedAt: 10,
+          compositionId: 1,
           connectedCanvas: true,
           distance: 1,
           observed: true,
-          scale: 1.25,
+          scale: previewScale,
           workerObserved: true,
         },
-        previewBeforeSharp: true,
+        previewBeforeSharp: !previewSatisfiedTarget,
         sharp: {
           actualHeight: targetHeight,
           actualWidth: targetWidth,
-          composedAt: 20,
+          bitmapEventId: sharpCompositionId,
+          composedAt: sharpComposedAt,
+          compositionId: sharpCompositionId,
           cssHeight,
           cssWidth,
           pageHeight,
@@ -141,6 +159,9 @@ function passingEvidence() {
           targetScale,
           targetWidth,
         },
+        transition: previewSatisfiedTarget
+          ? "preview-satisfied-target"
+          : "preview-to-sharp-upgrade",
       },
       release: {
         canvasHeight: 0,
@@ -615,7 +636,96 @@ function passingEvidence() {
 }
 
 test("accepts complete Issue 68 sharpness evidence", () => {
-  assert.deepEqual(validatePdfSharpnessEvidence(passingEvidence()), []);
+  const evidence = passingEvidence();
+  assert.deepEqual(
+    evidence.matrix.map((run) => run.raster.transition),
+    [
+      "preview-satisfied-target",
+      "preview-satisfied-target",
+      "preview-to-sharp-upgrade",
+      "preview-to-sharp-upgrade",
+      "preview-to-sharp-upgrade",
+      "preview-to-sharp-upgrade",
+    ],
+  );
+  assert.deepEqual(validatePdfSharpnessEvidence(evidence), []);
+});
+
+test("classifies target-satisfying previews without manufacturing an upgrade", () => {
+  const sharp = { targetHeight: 990, targetScale: 1.25, targetWidth: 765 };
+  assert.equal(
+    classifyPdfRasterTransition(
+      { height: 990, scale: 1.25, width: 765 },
+      sharp,
+    ),
+    "preview-satisfied-target",
+  );
+  assert.equal(
+    classifyPdfRasterTransition(
+      { height: 792, scale: 1, width: 612 },
+      sharp,
+    ),
+    "preview-to-sharp-upgrade",
+  );
+});
+
+test("binds raster transitions to import and monotonic event identities", async () => {
+  const source = await readFile(
+    "scripts/run-pdf-sharpness-browser-regression.mjs",
+    "utf8",
+  );
+  assert.match(source, /compositionId: state\.draws\.length \+ 1/u);
+  assert.equal(source.match(/eventId: workerEvents\.length \+ 1/gu)?.length, 2);
+  assert.match(
+    source,
+    /event\.jobId === \$\{modelCompletion\.importJobId\}/u,
+  );
+  assert.match(
+    source,
+    /event\.revision === \$\{JSON\.stringify\(modelCompletion\.revision\)\}/u,
+  );
+  assert.match(source, /readRasterTransitionDiagnostic/u);
+  assert.match(
+    source,
+    /draw\.compositionId > \$\{previewComposition\.compositionId\}/u,
+  );
+  assert.doesNotMatch(
+    source,
+    /draw\.at > \$\{previewComposition\.at\}/u,
+  );
+});
+
+test("filters fallback proof to the current imported document and signals", () => {
+  const stale = {
+    abortSignalId: 1,
+    documentKey: "restored:revision",
+    revision: "restored-revision",
+  };
+  const current = {
+    abortSignalId: 2,
+    documentKey: DOCUMENT_KEY,
+    revision: REVISION,
+  };
+  const { events, maximumConcurrentStaging } = selectPdfFallbackScenarioEvents(
+    [
+      { ...stale, at: 90, type: "staging-start" },
+      { abortSignalId: 1, at: 101, type: "abort-signal-registered" },
+      { ...stale, at: 102, type: "staging-start" },
+      { abortSignalId: 2, at: 103, type: "abort-signal-registered" },
+      { ...current, at: 104, type: "staging-start" },
+      { ...current, at: 105, type: "staging-finish" },
+    ],
+    { documentKey: DOCUMENT_KEY, revision: REVISION, startedAt: 100 },
+  );
+  assert.deepEqual(
+    events.map((event) => [event.abortSignalId, event.type]),
+    [
+      [2, "abort-signal-registered"],
+      [2, "staging-start"],
+      [2, "staging-finish"],
+    ],
+  );
+  assert.equal(maximumConcurrentStaging, 1);
 });
 
 test("accepts synchronous cancellation before a delayed PDF.js continuation resumes", () => {
@@ -625,6 +735,13 @@ test("accepts synchronous cancellation before a delayed PDF.js continuation resu
     cancellation.cancellationTerminal.at < cancellation.exitedAt &&
     cancellation.exitedAt < cancellation.continuationResumeAt,
   );
+  assert.deepEqual(validatePdfSharpnessEvidence(evidence), []);
+});
+
+test("uses composition and bitmap sequence when timer samples tie", () => {
+  const evidence = passingEvidence();
+  const upgraded = evidence.matrix[2].raster;
+  upgraded.sharp.composedAt = upgraded.preview.composedAt;
   assert.deepEqual(validatePdfSharpnessEvidence(evidence), []);
 });
 
@@ -643,6 +760,18 @@ test("independently validates a safety-capped physical-pixel target", () => {
     targetScale: 0.4096,
     targetWidth: 4096,
   });
+  Object.assign(run.raster.preview, {
+    actualHeight: 4096,
+    actualWidth: 4096,
+    composedAt: 10,
+    compositionId: 1,
+    scale: 0.4096,
+  });
+  run.raster.previewBeforeSharp = false;
+  run.raster.sharp.bitmapEventId = 1;
+  run.raster.sharp.composedAt = 10;
+  run.raster.sharp.compositionId = 1;
+  run.raster.transition = "preview-satisfied-target";
   run.canvasBudget.maximumPixels = PDF_SHARPNESS_MAX_RASTER_PIXELS;
   assert.deepEqual(validatePdfSharpnessEvidence(evidence), []);
 
@@ -650,6 +779,44 @@ test("independently validates a safety-capped physical-pixel target", () => {
   assert.match(
     validatePdfSharpnessEvidence(evidence).join("\n"),
     /computed capped target/u,
+  );
+});
+
+test("requires at least one strict preview-to-sharp upgrade in the matrix", () => {
+  const evidence = passingEvidence();
+  for (const run of evidence.matrix) {
+    if (run.raster.transition !== "preview-to-sharp-upgrade") continue;
+    const physicalRatio =
+      run.viewport.devicePixelRatio * run.viewport.visualViewportScale;
+    Object.assign(run.raster.sharp, {
+      actualHeight: 800,
+      actualWidth: 600,
+      bitmapEventId: 1,
+      composedAt: 10,
+      compositionId: 1,
+      cssHeight: 400 / physicalRatio,
+      cssWidth: 300 / physicalRatio,
+      pageHeight: 800,
+      pageWidth: 600,
+      targetCapped: false,
+      targetHeight: 800,
+      targetScale: 1,
+      targetWidth: 600,
+    });
+    Object.assign(run.raster.preview, {
+      actualHeight: 800,
+      actualWidth: 600,
+      bitmapEventId: 1,
+      composedAt: 10,
+      compositionId: 1,
+      scale: 1,
+    });
+    run.raster.previewBeforeSharp = false;
+    run.raster.transition = "preview-satisfied-target";
+  }
+  assert.match(
+    validatePdfSharpnessEvidence(evidence).join("\n"),
+    /did not prove any strict preview-to-sharp raster upgrade/u,
   );
 });
 
@@ -684,9 +851,36 @@ test("rejects each material Issue 68 acceptance regression", async (t) => {
     ["connected preview composition", (value) => {
       value.matrix[0].raster.preview.connectedCanvas = false;
     }, /adjacent 1\.25x preview/u],
+    ["independent preview scale", (value) => {
+      value.matrix[0].raster.preview.scale = 1;
+    }, /preview backing/u],
+    ["independent preview dimensions", (value) => {
+      value.matrix[0].raster.preview.actualWidth -= 1;
+    }, /preview backing|transition proof/u],
+    ["satisfied target reuses composition", (value) => {
+      value.matrix[0].raster.sharp.composedAt = 20;
+      value.matrix[0].raster.sharp.compositionId = 2;
+      value.matrix[0].raster.sharp.bitmapEventId = 2;
+    }, /transition proof/u],
+    ["larger target cannot collapse into preview", (value) => {
+      const raster = value.matrix[2].raster;
+      raster.transition = "preview-satisfied-target";
+      raster.previewBeforeSharp = false;
+      raster.sharp.composedAt = raster.preview.composedAt;
+      raster.sharp.compositionId = raster.preview.compositionId;
+      raster.sharp.bitmapEventId = raster.preview.bitmapEventId;
+    }, /transition proof/u],
+    ["upgrade composition sequence", (value) => {
+      value.matrix[2].raster.sharp.compositionId =
+        value.matrix[2].raster.preview.compositionId;
+    }, /transition proof/u],
+    ["upgrade bitmap sequence", (value) => {
+      value.matrix[2].raster.sharp.bitmapEventId =
+        value.matrix[2].raster.preview.bitmapEventId;
+    }, /transition proof/u],
     ["preview composition order", (value) => {
       value.matrix[0].raster.preview.composedAt = 25;
-    }, /computed capped target|upgrade ordering/u],
+    }, /transition proof/u],
     ["blank reference viewer", (value) => {
       value.matrix[0].comparison.referenceReadiness.renderedPage = false;
       value.matrix[0].comparison.referenceReadiness.inkPixels = 0;

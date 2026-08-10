@@ -40,19 +40,24 @@ with multiple, broadly distributed lines of rendered ink; a fixed delay,
 nonempty PNG, blank page, or loading surface cannot satisfy readiness. The JSON
 validator additionally requires:
 
-- an adjacent page cached at no more than 1.25x, then actually drawn into its
-  connected visible canvas before a later sharp composition reaches the
-  computed, safety-capped target (the validator independently derives that
-  target from measured CSS size, PDF page size, DPR, and visual-viewport scale;
-  no timing sleep or app-reported target stands in for either draw);
+- an adjacent page cached at the independently derived, safety-capped preview
+  target of at most 1.25x, then actually drawn into its connected visible
+  canvas. When that exact backing already equals the computed physical-pixel
+  target, the same composition and worker-bitmap identities must be retained
+  without a redundant render; otherwise, distinct monotonically ordered bitmap
+  and composition identities must prove the later larger sharp backing. At
+  least one matrix run must exercise that strict upgrade. The validator derives
+  both targets from measured CSS size, PDF page size, DPR, and visual-viewport
+  scale, so no timing sleep or app-reported target stands in for either path;
 - the current viewport to compose first after a rapid scroll, with no stale
   non-visible composition and no lower-resolution overwrite; before those
   probes, the harness requires the exact six-page worker model to complete and
   reaches distant virtualized shells through bounded half-viewport traversal,
   without assuming offscreen pages are mounted or copying product offset math;
-  page/progress/complete events are bound to the latest exact import request's
-  job, revision, and document key so an earlier automatic library restore cannot
-  satisfy or invalidate this gate;
+  page/complete document keys and every page/progress/complete and
+  preview/render/bitmap job/revision are bound to the latest exact import
+  request so an earlier automatic library restore cannot satisfy or invalidate
+  these gates;
 - count and total-pixel bitmap limits, temporary pinned-only overflow, and a
   zero-sized offscreen canvas whose measured text/highlight shell remains;
 - one main-thread fallback staging render at a time, an injected first-render
