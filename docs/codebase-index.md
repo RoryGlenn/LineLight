@@ -258,11 +258,12 @@ same local PDF page in the browser viewer and LineLight across desktop DPR,
 effective browser-zoom metrics, mobile DPR, and visual-viewport pinch. It
 requires decoded reference pixels to prove a rendered page, and records
 independently recomputed preview-to-sharp backing targets, current viewport
-priority, bitmap/canvas budgets, offscreen release, identity-bound serialized
-fallback failure/retry, exact `AbortSignal`- and attempt-bound cancellation
-terminals, per-scenario measured narration alignment, Long Tasks, per-scenario
-document/parser worker traffic settled to a network-quiet fixed point, exact
-source/screenshot manifests, and owned-process teardown.
+priority after bounded traversal of virtualized page shells, bitmap/canvas
+budgets, offscreen release, identity-bound serialized fallback failure/retry,
+exact `AbortSignal`- and attempt-bound cancellation terminals, per-scenario
+measured narration alignment, Long Tasks, per-scenario document/parser worker
+traffic settled to a network-quiet fixed point, exact source/screenshot
+manifests, and owned-process teardown.
 The independently testable acceptance contract lives in
 [`scripts/pdf-sharpness-evidence.mjs`](../scripts/pdf-sharpness-evidence.mjs),
 its fast and opt-in browser gates live in

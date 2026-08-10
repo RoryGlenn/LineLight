@@ -46,7 +46,10 @@ validator additionally requires:
   target from measured CSS size, PDF page size, DPR, and visual-viewport scale;
   no timing sleep or app-reported target stands in for either draw);
 - the current viewport to compose first after a rapid scroll, with no stale
-  non-visible composition and no lower-resolution overwrite;
+  non-visible composition and no lower-resolution overwrite; before those
+  probes, the harness requires the exact six-page worker model to complete and
+  reaches distant virtualized shells through bounded half-viewport traversal,
+  without assuming offscreen pages are mounted or copying product offset math;
 - count and total-pixel bitmap limits, temporary pinned-only overflow, and a
   zero-sized offscreen canvas whose measured text/highlight shell remains;
 - one main-thread fallback staging render at a time, an injected first-render

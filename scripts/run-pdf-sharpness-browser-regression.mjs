@@ -62,6 +62,90 @@ const BUILD_TIMEOUT_MS = 300_000;
 const SERVER_TIMEOUT_MS = 60_000;
 const SCENARIO_TIMEOUT_MS = 90_000;
 const SHUTDOWN_TIMEOUT_MS = 3_000;
+const PDF_VIRTUAL_SCROLL_MAX_STEPS = 120;
+
+export function summarizePdfModelCompletion(workerEvents, expectedPageCount) {
+  const expectedPages = Array.from(
+    { length: expectedPageCount },
+    (_, index) => index + 1,
+  );
+  const pageEvents = (workerEvents ?? []).filter(
+    (event) =>
+      event?.direction === "from-worker" &&
+      event?.type === "page" &&
+      Number.isInteger(event?.pageNumber),
+  );
+  const pageNumbers = [...new Set(pageEvents.map((event) => event.pageNumber))]
+    .sort((left, right) => left - right);
+  const progressEvents = (workerEvents ?? []).filter(
+    (event) =>
+      event?.direction === "from-worker" &&
+      event?.type === "progress" &&
+      event?.completedPages === expectedPageCount &&
+      event?.pageCount === expectedPageCount,
+  );
+  const completeEvents = (workerEvents ?? []).filter(
+    (event) =>
+      event?.direction === "from-worker" &&
+      event?.type === "complete" &&
+      event?.pageCount === expectedPageCount,
+  );
+  const completion = completeEvents[0];
+  const expectedPageKey = expectedPages.join(",");
+  const pageNumberKey = pageNumbers.join(",");
+  const identityBound =
+    typeof completion?.documentKey === "string" &&
+    completion.documentKey.length > 0 &&
+    typeof completion?.revision === "string" &&
+    completion.revision.length > 0 &&
+    pageEvents.every(
+      (event) =>
+        event.documentKey === completion.documentKey &&
+        event.revision === completion.revision,
+    );
+  return {
+    complete:
+      Number.isInteger(expectedPageCount) &&
+      expectedPageCount > 0 &&
+      pageEvents.length === expectedPageCount &&
+      pageNumberKey === expectedPageKey &&
+      progressEvents.length === 1 &&
+      completeEvents.length === 1 &&
+      identityBound,
+    completeEventCount: completeEvents.length,
+    completedProgressCount: progressEvents.length,
+    documentKey: completion?.documentKey ?? null,
+    pageEventCount: pageEvents.length,
+    pageNumbers,
+    revision: completion?.revision ?? null,
+  };
+}
+
+export function planPdfVirtualScroll({
+  clientHeight,
+  mountedPages,
+  scrollHeight,
+  scrollTop,
+  targetPage,
+  visiblePages,
+}) {
+  const mounted = (mountedPages ?? []).filter(Number.isInteger);
+  const visible = (visiblePages ?? []).filter(Number.isInteger);
+  const anchors = visible.length ? visible : mounted;
+  const minimum = Math.min(...anchors);
+  const maximum = Math.max(...anchors);
+  const midpoint = (minimum + maximum) / 2;
+  const direction = targetPage < minimum || targetPage < midpoint ? -1 : 1;
+  const maximumScrollTop = Math.max(0, scrollHeight - clientHeight);
+  const step = Math.max(1, Math.floor(clientHeight * 0.5));
+  return {
+    direction,
+    nextScrollTop: Math.min(
+      maximumScrollTop,
+      Math.max(0, scrollTop + direction * step),
+    ),
+  };
+}
 
 function parseArguments(argv) {
   const options = {
@@ -670,12 +754,16 @@ const INSTRUMENTATION_SOURCE = String.raw`
           const revision = message.page?.revision || message.revision || null;
           workerEvents.push({
             at: performance.now(),
+            completedPages: Number(message.completedPages) || null,
             direction: "from-worker",
             documentKey: documentId && revision
               ? documentId + ":" + revision
               : null,
             height: Number(message.height) || null,
             pageHeight: Number(message.page?.layout?.height) || null,
+            pageCount: Number(
+              message.pageCount || message.document?.pdfPageCount
+            ) || null,
             pageNumber: Number(message.pageNumber || message.page?.pageNumber) || null,
             pageWidth: Number(message.page?.layout?.width) || null,
             revision,
@@ -1610,7 +1698,151 @@ async function waitForPageShell(cdp, pageNumber) {
   );
 }
 
+async function readPdfModelDiagnostic(cdp, expectedPageCount) {
+  return evaluate(
+    cdp,
+    browserExpression(`
+      const workerEvents = globalThis.__lineLightIssue68?.workerEvents ?? [];
+      const summarize = (${summarizePdfModelCompletion.toString()});
+      const root = document.querySelector('.reader-scroll');
+      const list = document.querySelector('.pdf-pages');
+      return {
+        model: summarize(workerEvents, ${expectedPageCount}),
+        mountedShellIds: Array.from(
+          document.querySelectorAll('.pdf-page-block')
+        ).map((block) => block.id),
+        range: list?.dataset.pdfRange ?? null,
+        scroll: root ? {
+          clientHeight: root.clientHeight,
+          scrollHeight: root.scrollHeight,
+          scrollTop: root.scrollTop
+        } : null,
+        workerEvents: workerEvents.filter((event) =>
+          event.direction === 'from-worker' &&
+          ['page', 'progress', 'complete'].includes(event.type)
+        )
+      };
+    `),
+  );
+}
+
+async function waitForPdfModelCompletion(cdp, expectedPageCount) {
+  try {
+    return await waitForExpression(
+      cdp,
+      browserExpression(`
+        const summarize = (${summarizePdfModelCompletion.toString()});
+        const summary = summarize(
+          globalThis.__lineLightIssue68?.workerEvents ?? [],
+          ${expectedPageCount}
+        );
+        return summary.complete ? summary : false;
+      `),
+      `the exact ${expectedPageCount}-page PDF worker model to complete`,
+      SCENARIO_TIMEOUT_MS,
+    );
+  } catch (error) {
+    const diagnostic = await readPdfModelDiagnostic(cdp, expectedPageCount)
+      .catch((diagnosticError) => ({
+        diagnosticError: String(diagnosticError),
+      }));
+    throw new Error(
+      `${error instanceof Error ? error.message : error}\n` +
+      `PDF model diagnostic: ${JSON.stringify(diagnostic)}`,
+    );
+  }
+}
+
+async function mountPdfPageByTraversal(cdp, pageNumber) {
+  const startedAt = Date.now();
+  let lastState = null;
+  let stagnantSteps = 0;
+  for (
+    let step = 0;
+    step < PDF_VIRTUAL_SCROLL_MAX_STEPS &&
+      Date.now() - startedAt < SCENARIO_TIMEOUT_MS;
+    step += 1
+  ) {
+    const state = await evaluate(
+      cdp,
+      browserExpression(`
+        const targetPage = ${pageNumber};
+        const root = document.querySelector('.reader-scroll');
+        const list = document.querySelector('.pdf-pages');
+        const readState = () => {
+          const blocks = Array.from(document.querySelectorAll('.pdf-page-block'));
+          const mountedPages = blocks.map(
+            (block) => Number(block.dataset.pdfPageIndex) + 1
+          ).filter(Number.isInteger).sort((left, right) => left - right);
+          const visiblePages = blocks.filter(
+            (block) => block.dataset.pdfPageVisible === 'true'
+          ).map(
+            (block) => Number(block.dataset.pdfPageIndex) + 1
+          ).filter(Number.isInteger).sort((left, right) => left - right);
+          return {
+            found: Boolean(document.querySelector('#pdf-page-' + targetPage)),
+            mountedPages,
+            range: list?.dataset.pdfRange ?? null,
+            scroll: root ? {
+              clientHeight: root.clientHeight,
+              scrollHeight: root.scrollHeight,
+              scrollTop: root.scrollTop
+            } : null,
+            visiblePages
+          };
+        };
+        const before = readState();
+        if (before.found || !root || !list || before.mountedPages.length === 0) {
+          return before;
+        }
+        const plan = (${planPdfVirtualScroll.toString()})({
+          ...before.scroll,
+          mountedPages: before.mountedPages,
+          targetPage,
+          visiblePages: before.visiblePages
+        });
+        root.scrollTop = plan.nextScrollTop;
+        return new Promise((resolve) => requestAnimationFrame(() =>
+          requestAnimationFrame(() => resolve({
+            ...readState(),
+            attemptedDirection: plan.direction,
+            attemptedScrollTop: plan.nextScrollTop,
+            previousScrollTop: before.scroll.scrollTop
+          }))
+        ));
+      `),
+    );
+    lastState = state;
+    if (state?.found) return state;
+    if (!state?.scroll || !state?.mountedPages?.length) {
+      throw new Error(
+        `Cannot traverse the virtualized PDF to page ${pageNumber}: ` +
+        JSON.stringify(state),
+      );
+    }
+    if (state.scroll.scrollTop === state.previousScrollTop) stagnantSteps += 1;
+    else stagnantSteps = 0;
+    if (stagnantSteps >= 8) break;
+  }
+  throw new Error(
+    `Bounded virtualized PDF traversal did not mount page ${pageNumber}: ` +
+    JSON.stringify(lastState),
+  );
+}
+
 async function scrollPageIntoView(cdp, pageNumber) {
+  await waitForExpression(
+    cdp,
+    browserExpression(`
+      return globalThis.__lineLightIssue68.workerEvents.some((event) =>
+        event.direction === 'from-worker' && event.type === 'page' &&
+        event.pageNumber === ${pageNumber}
+      );
+    `),
+    `PDF page ${pageNumber} worker model`,
+    SCENARIO_TIMEOUT_MS,
+  );
+  await mountPdfPageByTraversal(cdp, pageNumber);
   await waitForPageShell(cdp, pageNumber);
   await evaluate(
     cdp,
@@ -1921,7 +2153,7 @@ async function collectMatrixRun(
     "the browser-side imported PDF hash",
     SCENARIO_TIMEOUT_MS,
   );
-  await waitForPageShell(cdp, 6);
+  await waitForPdfModelCompletion(cdp, 6);
   const adjacent = await selectAdjacentPreviewTarget(cdp);
   if (
     adjacent.distance !== 1 ||
@@ -2268,7 +2500,7 @@ async function collectFallbackEvidence(
     "the fallback browser-side imported PDF hash",
     SCENARIO_TIMEOUT_MS,
   );
-  await waitForPageShell(cdp, 6);
+  await waitForPdfModelCompletion(cdp, 6);
   await waitForExpression(
     cdp,
     `document.querySelector('.pdf-page-view')?.dataset.pdfRenderFallback === 'true'`,

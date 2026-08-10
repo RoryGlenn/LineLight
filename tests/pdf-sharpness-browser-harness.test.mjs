@@ -19,7 +19,9 @@ import {
 import {
   analyzeReferencePixels,
   decodePngScreenshot,
+  planPdfVirtualScroll,
   probePdfBitmapBudget,
+  summarizePdfModelCompletion,
 } from
   "../scripts/run-pdf-sharpness-browser-regression.mjs";
 
@@ -1023,6 +1025,120 @@ test("binds fallback delay to a real attempt instead of a caller page", async ()
   assert.match(source, /delayNextContinuation\(1000\);/u);
   assert.match(source, /arguments\.length !== 1/u);
   assert.doesNotMatch(source, /delayNextContinuation\(1000,\s*3\)/u);
+});
+
+test("requires exact worker model completion before traversing virtualized pages", async () => {
+  const pageEvents = Array.from({ length: 6 }, (_, index) => ({
+    direction: "from-worker",
+    documentKey: DOCUMENT_KEY,
+    pageNumber: index + 1,
+    revision: REVISION,
+    type: "page",
+  }));
+  const events = [
+    ...pageEvents,
+    {
+      completedPages: 6,
+      direction: "from-worker",
+      pageCount: 6,
+      revision: REVISION,
+      type: "progress",
+    },
+    {
+      direction: "from-worker",
+      documentKey: DOCUMENT_KEY,
+      pageCount: 6,
+      revision: REVISION,
+      type: "complete",
+    },
+  ];
+  assert.equal(summarizePdfModelCompletion(events, 6).complete, true);
+  assert.equal(
+    summarizePdfModelCompletion(events.slice(0, -1), 6).complete,
+    false,
+  );
+  assert.equal(
+    summarizePdfModelCompletion(
+      events.map((event) =>
+        event.type === "progress" ? { ...event, pageCount: 7 } : event,
+      ),
+      6,
+    ).complete,
+    false,
+  );
+  assert.equal(
+    summarizePdfModelCompletion([...events, pageEvents[5]], 6).complete,
+    false,
+  );
+  assert.equal(
+    summarizePdfModelCompletion(
+      events.filter(
+        (event) => event.type !== "page" || event.pageNumber !== 6,
+      ),
+      6,
+    ).complete,
+    false,
+  );
+  assert.equal(
+    summarizePdfModelCompletion(
+      events.map((event) =>
+        event.type === "page" && event.pageNumber === 6
+          ? { ...event, revision: "substituted-revision" }
+          : event,
+      ),
+      6,
+    ).complete,
+    false,
+  );
+
+  const source = await readFile(
+    "scripts/run-pdf-sharpness-browser-regression.mjs",
+    "utf8",
+  );
+  assert.equal(
+    source.match(/waitForPdfModelCompletion\(cdp, 6\)/gu)?.length,
+    2,
+  );
+  assert.doesNotMatch(source, /waitForPageShell\(cdp, 6\)/u);
+  assert.match(
+    source,
+    /mountPdfPageByTraversal\(cdp, pageNumber\);[\s\S]*waitForPageShell\(cdp, pageNumber\)/u,
+  );
+  assert.match(source, /PDF_VIRTUAL_SCROLL_MAX_STEPS/u);
+  assert.match(source, /requestAnimationFrame\(\(\) =>[\s\S]*requestAnimationFrame/u);
+  assert.doesNotMatch(source, /PDF_PAGE_(?:CHROME|GAP)/u);
+});
+
+test("plans bounded sub-viewport traversal toward unmounted PDF pages", () => {
+  const forward = planPdfVirtualScroll({
+    clientHeight: 900,
+    mountedPages: [1, 2, 3],
+    scrollHeight: 6_000,
+    scrollTop: 0,
+    targetPage: 6,
+    visiblePages: [1],
+  });
+  assert.deepEqual(forward, { direction: 1, nextScrollTop: 450 });
+
+  const backward = planPdfVirtualScroll({
+    clientHeight: 900,
+    mountedPages: [4, 5, 6],
+    scrollHeight: 6_000,
+    scrollTop: 3_000,
+    targetPage: 1,
+    visiblePages: [5],
+  });
+  assert.deepEqual(backward, { direction: -1, nextScrollTop: 2_550 });
+
+  const bounded = planPdfVirtualScroll({
+    clientHeight: 900,
+    mountedPages: [1, 2, 3],
+    scrollHeight: 6_000,
+    scrollTop: 0,
+    targetPage: 1,
+    visiblePages: [2],
+  });
+  assert.deepEqual(bounded, { direction: -1, nextScrollTop: 0 });
 });
 
 test("probes mixed bitmap sizes and temporary pinned overflow", () => {
