@@ -21,6 +21,7 @@ import {
   analyzeReferencePixels,
   advanceCdpFixedPointStability,
   buildCdpNetworkFixedPointDiagnostic,
+  buildFallbackImportDiagnosticReport,
   buildFirstNetworkDiagnosticReport,
   classifyCdpDiagnosticUrl,
   classifyPdfRasterTransition,
@@ -31,6 +32,7 @@ import {
   hasCdpPhasePdfBootstrapCoverage,
   isCdpAttachmentStateHealthy,
   isCdpFixedPointDiagnosticHealthy,
+  isFallbackImportNetworkDiagnosticHealthy,
   isCdpServiceWorkerBootstrapRequest,
   isCdpTargetBootstrapRequest,
   isCdpTargetSetupComplete,
@@ -40,11 +42,13 @@ import {
   recordCdpNetworkRequest,
   reconcileCdpServiceWorkerBootstraps,
   reconcileCdpTargetBootstrapRequests,
+  runBoundedDiagnosticOperation,
   selectPdfFallbackAbortCandidate,
   selectPdfFallbackScenarioEvents,
   sendToCdpSession,
   settleCdpCommandDispatches,
   summarizePdfModelCompletion,
+  summarizeFallbackImportLifecycle,
   validateCdpInitialTargetBaseline,
 } from
   "../scripts/run-pdf-sharpness-browser-regression.mjs";
@@ -116,6 +120,650 @@ function artifact(name, digit) {
     sha256: String(digit).repeat(64),
   };
 }
+
+function cleanDiagnosticTeardown() {
+  return {
+    app: {
+      cdpClosed: true,
+      error: null,
+      present: true,
+      processClosed: true,
+      profileRemoved: true,
+    },
+    browserClosed: true,
+    cdpClosed: true,
+    errors: [],
+    profilesRemoved: true,
+    reference: {
+      cdpClosed: true,
+      error: null,
+      present: false,
+      processClosed: true,
+      profileRemoved: true,
+    },
+    referenceBrowserClosed: true,
+    server: {
+      error: null,
+      present: true,
+      processClosed: true,
+    },
+    serverClosed: true,
+  };
+}
+
+function passingFallbackImportCapture() {
+  const documentId = "pdf-current-public-fixture";
+  const revision = "fallback-import-revision";
+  const documentKey = `${documentId}:${revision}`;
+  const jobId = 7;
+  const workerInstanceId = 2;
+  let eventId = 10;
+  const event = (value) => ({
+    at: eventId,
+    eventId: eventId++,
+    jobId,
+    revision,
+    workerInstanceId,
+    ...value,
+  });
+  const workerEvents = [
+    event({
+      direction: "to-worker",
+      documentKey,
+      type: "import",
+    }),
+    event({
+      direction: "from-worker",
+      documentKey,
+      pageCount: 6,
+      pageNumber: 1,
+      type: "page",
+    }),
+    event({ direction: "from-worker", type: "render-fallback" }),
+    event({
+      completedPages: 1,
+      direction: "from-worker",
+      pageCount: 6,
+      type: "progress",
+    }),
+  ];
+  for (let pageNumber = 2; pageNumber <= 6; pageNumber += 1) {
+    workerEvents.push(
+      event({
+        direction: "from-worker",
+        documentKey,
+        pageCount: 6,
+        pageNumber,
+        type: "page",
+      }),
+      event({
+        completedPages: pageNumber,
+        direction: "from-worker",
+        pageCount: 6,
+        type: "progress",
+      }),
+    );
+  }
+  workerEvents.push(
+    event({ direction: "from-worker", documentKey, pageCount: 6, type: "complete" }),
+  );
+  return {
+    boundary: {
+      sourceFileStart: 0,
+      startedAt: 1,
+      workerEventStart: 0,
+      workerLifecycleStart: 0,
+    },
+    dom: {
+      fallbackActive: true,
+      fileInputDisabled: false,
+      fileInputPresent: true,
+      importDialogPresent: false,
+      loadingPageCount: 0,
+      mountedPageCount: 3,
+      noticeCategory: "render-fallback",
+      noticePresent: true,
+      pageOneCanvasHeight: 990,
+      pageOneCanvasSource: "main-fallback",
+      pageOneCanvasWidth: 765,
+      pageOnePresent: true,
+      pageOneVisible: true,
+      pageOneWordOverlayCount: 24,
+      pageViewPresent: true,
+    },
+    libraryAfter: {
+      activeDocumentIdentityHash: diagnosticIdentity(documentId),
+      activeDocumentPresent: true,
+      available: true,
+      documentCount: 2,
+      entryCount: 2,
+      pageCount: 12,
+      pdfEntryCount: 2,
+      sourceCount: 2,
+    },
+    libraryBefore: {
+      activeDocumentIdentityHash: diagnosticIdentity("pdf-restored-fixture"),
+      activeDocumentPresent: true,
+      available: true,
+      documentCount: 1,
+      entryCount: 1,
+      pageCount: 6,
+      pdfEntryCount: 1,
+      sourceCount: 1,
+    },
+    importRequestObserved: true,
+    networkBoundary: {
+      attachPromiseCount: 3,
+      requestCount: 10,
+      settlementCount: 2,
+      targetCount: 3,
+    },
+    outcome: "import-chain-reached",
+    snapshot: {
+      errors: [],
+      fallback: { signalAt: 12 },
+      notices: [{ at: 13, text: "OffscreenCanvas is unavailable; cooperative visible-page rendering." }],
+      sourceFiles: [{
+        at: 11,
+        eventId: 1,
+        sha256: PUBLIC_PDF_FIXTURE_SHA256,
+        size: PUBLIC_PDF_FIXTURE_BYTES,
+      }],
+      workerEvents,
+      workerLifecycle: [
+        {
+          at: 8,
+          forceFallback: true,
+          type: "constructed",
+          urlClass: "pdf-document-worker",
+          workerInstanceId,
+          wrapped: true,
+        },
+        {
+          at: 10,
+          documentKey,
+          jobId,
+          messageType: "import",
+          revision,
+          type: "post-message",
+          urlClass: "pdf-document-worker",
+          workerInstanceId,
+        },
+        {
+          at: 11,
+          documentKey,
+          jobId,
+          messageType: "page",
+          pageNumber: 1,
+          revision,
+          type: "first-message",
+          urlClass: "pdf-document-worker",
+          workerInstanceId,
+        },
+      ],
+    },
+  };
+}
+
+function passingFallbackNetworkDiagnostic() {
+  const serviceWorker = {
+    ancestry: [],
+    attachComplete: true,
+    ...completedCdpTargetSetup({ cdpIdStart: 10, serviceWorker: true }),
+    identityHash: diagnosticIdentity(
+      "service-worker-session",
+      "service-worker-target",
+    ),
+    phase: "fallback-diagnostic-setup",
+    resumed: true,
+    sessionId: "service-worker-session",
+    targetId: "service-worker-target",
+    type: "service_worker",
+    urlClass: "app-asset",
+    waitingForDebugger: true,
+  };
+  const setupDocument = {
+    ancestry: [],
+    attachComplete: true,
+    ...completedCdpTargetSetup({ cdpIdStart: 20 }),
+    identityHash: diagnosticIdentity(
+      "setup-document-session",
+      "setup-document-target",
+    ),
+    parentSessionId: null,
+    phase: "fallback-diagnostic-setup",
+    resumed: true,
+    sessionId: "setup-document-session",
+    targetId: "setup-document-target",
+    type: "worker",
+    urlClass: "pdf-document-worker",
+    waitingForDebugger: true,
+  };
+  const setupParser = {
+    ancestry: [{
+      phase: setupDocument.phase,
+      sessionId: setupDocument.sessionId,
+      type: setupDocument.type,
+      urlClass: setupDocument.urlClass,
+    }],
+    attachComplete: true,
+    ...completedCdpTargetSetup({ cdpIdStart: 30 }),
+    identityHash: diagnosticIdentity(
+      "setup-parser-session",
+      "setup-parser-target",
+    ),
+    parentSessionId: setupDocument.sessionId,
+    phase: "fallback-diagnostic-setup",
+    resumed: true,
+    sessionId: "setup-parser-session",
+    targetId: "setup-parser-target",
+    type: "worker",
+    urlClass: "pdf-parser-worker",
+    waitingForDebugger: true,
+  };
+  const oldTargets = [serviceWorker, setupDocument, setupParser];
+  const blobTarget = {
+    ancestry: [],
+    attachComplete: true,
+    ...completedCdpTargetSetup({ cdpIdStart: 50 }),
+    identityHash: diagnosticIdentity("fallback-blob-session", "fallback-blob-target"),
+    parentSessionId: null,
+    phase: "fallback-import-diagnostic",
+    resumed: true,
+    sessionId: "fallback-blob-session",
+    targetId: "fallback-blob-target",
+    type: "worker",
+    urlClass: "blob",
+    waitingForDebugger: true,
+  };
+  const parserTarget = {
+    ancestry: [{
+      phase: "fallback-import-diagnostic",
+      sessionId: blobTarget.sessionId,
+      type: "worker",
+      urlClass: "blob",
+    }],
+    attachComplete: true,
+    ...completedCdpTargetSetup({ cdpIdStart: 60 }),
+    identityHash: diagnosticIdentity("fallback-parser-session", "fallback-parser-target"),
+    parentSessionId: blobTarget.sessionId,
+    phase: "fallback-import-diagnostic",
+    resumed: true,
+    sessionId: "fallback-parser-session",
+    targetId: "fallback-parser-target",
+    type: "worker",
+    urlClass: "pdf-parser-worker",
+    waitingForDebugger: true,
+  };
+  blobTarget.workerInstanceId = 2;
+  const targets = [...oldTargets, blobTarget, parserTarget];
+  const settlement = ({ requestId, requestSessionId, target }) => ({
+    identityHash: diagnosticIdentity(
+      requestSessionId,
+      requestId,
+      target.sessionId,
+      target.targetId,
+    ),
+    method: "GET",
+    phase: target.phase,
+    requestId,
+    requestSessionId,
+    resourceType: "Script",
+    targetDetachedAtSettlement: false,
+    targetId: target.targetId,
+    targetParentSessionId: target.parentSessionId,
+    targetSessionId: target.sessionId,
+    targetType: "worker",
+    terminalReason: "target-attached",
+    urlClass: target.urlClass,
+  });
+  const targetBootstrapSettlements = [
+    settlement({
+      requestId: "setup-document-request",
+      requestSessionId: null,
+      target: setupDocument,
+    }),
+    settlement({
+      requestId: "setup-parser-request",
+      requestSessionId: setupDocument.sessionId,
+      target: setupParser,
+    }),
+    settlement({
+      requestId: "fallback-parser-request",
+      requestSessionId: blobTarget.sessionId,
+      target: parserTarget,
+    }),
+  ];
+  return {
+    attachErrors: [],
+    counts: {
+      attachErrorCount: 0,
+      attachPromiseCount: targets.length,
+      completedRequestCount: 20,
+      externalRequestCount: 0,
+      inflightRequestCount: 0,
+      networkFailureCount: 0,
+      pendingAttachCount: 0,
+      requestCount: 20,
+      serviceWorkerBootstrapObservationCount: 1,
+      targetBootstrapSettlementCount: targetBootstrapSettlements.length,
+      targetCount: targets.length,
+    },
+    inflightRequests: [],
+    initialTargetBaseline: {
+      checked: true,
+      pageCount: 1,
+      pageUrlClass: "about",
+      targetCount: 1,
+      workerCount: 0,
+    },
+    label: "fallback-import-diagnostic",
+    outcome: "fixed-point-reached",
+    pendingAttaches: [],
+    serviceWorkerBypassed: true,
+    serviceWorkerBootstrapObservations: [{
+      identityHash: diagnosticIdentity(
+        serviceWorker.sessionId,
+        "service-worker-request",
+        serviceWorker.sessionId,
+        serviceWorker.targetId,
+      ),
+      earlierRequestCount: 0,
+      method: "GET",
+      phase: serviceWorker.phase,
+      requestId: "service-worker-request",
+      requestIsFirst: true,
+      requestSequence: 1,
+      requestSessionId: serviceWorker.sessionId,
+      requestStartedAt: serviceWorker.resumeDispatchedAt + 1,
+      resourceType: "Script",
+      resumeDispatchedAt: serviceWorker.resumeDispatchedAt,
+      sessionFailureCount: 0,
+      sessionRequestCount: 1,
+      targetDetachedAtObservation: false,
+      targetId: serviceWorker.targetId,
+      targetSessionId: serviceWorker.sessionId,
+      targetType: "service_worker",
+      targetUrlMatched: true,
+      terminalAt: serviceWorker.resumeDispatchedAt + 2,
+      terminalReason: "loading-finished",
+      urlClass: serviceWorker.urlClass,
+    }],
+    targetBootstrapSettlements,
+    targets,
+    wait: {
+      recentSamples: [1, 2, 3].map((stableSamples) => ({
+        attachErrorCount: 0,
+        attachmentReady: true,
+        incompleteTargetCount: 0,
+        inflightRequestCount: 0,
+        pendingAttachCount: 0,
+        requestCount: 20,
+        serviceWorkerBypassed: true,
+        stableSamples,
+        targetCount: targets.length,
+      })),
+      requiredStableSamples: 3,
+      stableSamples: 3,
+    },
+  };
+}
+
+test("binds fallback import completion to the exact post-change worker chain", () => {
+  const capture = passingFallbackImportCapture();
+  capture.snapshot.workerEvents.unshift({
+    at: 5,
+    direction: "to-worker",
+    documentKey: "pdf-restored:restore-revision",
+    eventId: 5,
+    jobId: 6,
+    revision: "restore-revision",
+    type: "open",
+    workerInstanceId: 1,
+  });
+  const summary = summarizeFallbackImportLifecycle(capture, {
+    bytes: PUBLIC_PDF_FIXTURE_BYTES,
+    sha256: PUBLIC_PDF_FIXTURE_SHA256,
+  });
+  assert.equal(summary.importCompleted, true);
+  assert.equal(summary.importRequestCount, 1);
+  assert.equal(summary.laterStartCount, 0);
+  assert.deepEqual(summary.chain.pageNumbers, [1, 2, 3, 4, 5, 6]);
+  assert.deepEqual(summary.chain.progressPages, [1, 2, 3, 4, 5, 6]);
+  assert.equal(summary.worker.wrapped, true);
+  assert.equal(summary.worker.postBound, true);
+  assert.equal(summary.dom.pageOneWordOverlayCount, 24);
+  const serialized = JSON.stringify(summary);
+  assert.doesNotMatch(serialized, /fallback-import-revision/u);
+  assert.doesNotMatch(serialized, /pdf-current-public-fixture/u);
+});
+
+test("fallback import lifecycle mutations fail closed", () => {
+  const mutations = [
+    (capture) => {
+      capture.snapshot.workerEvents.push({
+        at: 100,
+        direction: "to-worker",
+        documentKey: "restored-late:late-revision",
+        eventId: 100,
+        jobId: 8,
+        revision: "late-revision",
+        type: "open",
+      });
+    },
+    (capture) => {
+      capture.snapshot.workerEvents.find(
+        (event) => event.type === "page" && event.pageNumber === 6,
+      ).documentKey = "wrong-document:wrong-revision";
+    },
+    (capture) => {
+      capture.snapshot.workerEvents.find(
+        (event) => event.type === "progress" && event.completedPages === 6,
+      ).revision = "stale-revision";
+    },
+    (capture) => {
+      capture.snapshot.workerEvents.find(
+        (event) => event.type === "complete",
+      ).documentKey = "wrong-document:wrong-revision";
+    },
+    (capture) => {
+      capture.snapshot.workerEvents = capture.snapshot.workerEvents.filter(
+        (event) => event.type !== "render-fallback",
+      );
+    },
+    (capture) => {
+      capture.snapshot.sourceFiles[0].sha256 = "d".repeat(64);
+    },
+    (capture) => {
+      capture.snapshot.workerLifecycle.push({
+        category: "worker-error",
+        type: "error",
+        workerInstanceId: 2,
+      });
+    },
+    (capture) => {
+      capture.snapshot.workerLifecycle.push({
+        at: 12,
+        type: "terminated",
+        workerInstanceId: 2,
+      });
+    },
+    (capture) => {
+      capture.libraryAfter.activeDocumentIdentityHash =
+        capture.libraryBefore.activeDocumentIdentityHash;
+    },
+    (capture) => {
+      capture.dom.fallbackActive = false;
+    },
+    (capture) => {
+      capture.dom.pageOneWordOverlayCount = 0;
+    },
+    (capture) => {
+      capture.outcome = "import-request-timeout";
+    },
+    (capture) => {
+      capture.importRequestObserved = false;
+    },
+    (capture) => {
+      capture.snapshot.workerLifecycle.push(
+        structuredClone(capture.snapshot.workerLifecycle[0]),
+      );
+    },
+    (capture) => {
+      capture.snapshot.workerLifecycle.find(
+        (event) => event.type === "first-message",
+      ).pageNumber = 2;
+    },
+    (capture) => {
+      capture.dom.noticeCategory = "document-open-failed";
+    },
+    (capture) => {
+      capture.dom.pageOneCanvasSource = null;
+    },
+    ...["page", "progress", "complete", "render-fallback"].map(
+      (type) => (capture) => {
+        capture.snapshot.workerEvents.find(
+          (event) => event.type === type,
+        ).workerInstanceId = 99;
+      },
+    ),
+  ];
+  for (const mutate of mutations) {
+    const capture = passingFallbackImportCapture();
+    mutate(capture);
+    assert.equal(
+      summarizeFallbackImportLifecycle(capture, {
+        bytes: PUBLIC_PDF_FIXTURE_BYTES,
+        sha256: PUBLIC_PDF_FIXTURE_SHA256,
+      }).importCompleted,
+      false,
+    );
+  }
+});
+
+test("requires a clean fallback blob/parser CDP lifecycle after the setup boundary", () => {
+  const diagnostic = passingFallbackNetworkDiagnostic();
+  const boundary = passingFallbackImportCapture().networkBoundary;
+  assert.equal(
+    isFallbackImportNetworkDiagnosticHealthy(diagnostic, boundary, 2),
+    true,
+  );
+  const mutations = [
+    (value) => { value.counts.attachErrorCount = 1; },
+    (value) => { value.counts.inflightRequestCount = 1; },
+    (value) => { value.counts.externalRequestCount = 1; },
+    (value) => { value.targets.at(-1).attachComplete = false; },
+    (value) => { value.targets.at(-1).parentSessionId = "wrong-parent"; },
+    (value) => { value.targetBootstrapSettlements = []; },
+    (value) => { value.targets = value.targets.filter((target) => target.urlClass !== "blob"); },
+    (value) => { value.wait.stableSamples = 2; },
+    (value) => { value.targets.at(-1).identityHash = "0".repeat(64); },
+    (value) => { value.targets.at(-1).commands[0].dispatchSequence = 2; },
+    (value) => { value.counts.targetCount += 1; },
+    (value) => { value.serviceWorkerBootstrapObservations = []; },
+    (value) => { value.initialTargetBaseline.workerCount = 1; },
+    (value) => { value.targetBootstrapSettlements.at(-1).method = "POST"; },
+    (value) => { value.wait.recentSamples.at(-1).requestCount -= 1; },
+    (value) => { value.targets.find((target) => target.urlClass === "blob").workerInstanceId = null; },
+  ];
+  for (const mutate of mutations) {
+    const value = structuredClone(diagnostic);
+    mutate(value);
+    assert.equal(
+      isFallbackImportNetworkDiagnosticHealthy(value, boundary, 2),
+      false,
+    );
+  }
+  assert.equal(
+    isFallbackImportNetworkDiagnosticHealthy(diagnostic, boundary, 3),
+    false,
+  );
+  assert.equal(
+    isFallbackImportNetworkDiagnosticHealthy(
+      diagnostic,
+      { ...boundary, targetCount: boundary.targetCount + 1 },
+      2,
+    ),
+    false,
+  );
+});
+
+test("builds a noncanonical privacy-safe fallback import diagnostic", () => {
+  const outputDirectory = path.join(os.tmpdir(), "issue-68-fallback-diagnostic");
+  const capture = passingFallbackImportCapture();
+  capture.screenshot = {
+    ...artifact("linelight-fallback-import-diagnostic.png", 8),
+    path: path.relative(
+      path.resolve("."),
+      path.join(outputDirectory, "linelight-fallback-import-diagnostic.png"),
+    ),
+  };
+  const setupDocumentIdentity = capture.libraryBefore.activeDocumentIdentityHash;
+  const input = {
+    build: { localManifest: { deploymentId: DEPLOYMENT } },
+    capture,
+    fixture: {
+      bytes: PUBLIC_PDF_FIXTURE_BYTES,
+      path: PUBLIC_PDF_FIXTURE,
+      sha256: PUBLIC_PDF_FIXTURE_SHA256,
+    },
+    networkDiagnostic: passingFallbackNetworkDiagnostic(),
+    outputDirectory,
+    runnerFailure: null,
+    setup: {
+      completeEventCount: 1,
+      documentIdentityHash: setupDocumentIdentity,
+      library: capture.libraryBefore,
+      pageEventCount: 6,
+      source: {
+        bytes: PUBLIC_PDF_FIXTURE_BYTES,
+        sha256: PUBLIC_PDF_FIXTURE_SHA256,
+      },
+    },
+    source: { commit: COMMIT, tree: TREE },
+    teardown: cleanDiagnosticTeardown(),
+  };
+  const report = buildFallbackImportDiagnosticReport(input);
+  assert.equal(report.diagnostic, true);
+  assert.equal(report.completed, true);
+  assert.equal(report.importCompleted, true);
+  assert.equal(report.networkSettled, true);
+  assert.equal(report.mode, "fallback-import-lifecycle");
+  assert.deepEqual(report.failures, []);
+  assert.equal(
+    report.artifacts.screenshots[0].path,
+    "linelight-fallback-import-diagnostic.png",
+  );
+  assert.equal("passed" in report, false);
+  assert.equal("schemaVersion" in report, false);
+
+  const privateFailure = structuredClone(input);
+  privateFailure.capture.snapshot.errors = [
+    "private text /tmp/private-profile https://example.test/?token=secret",
+  ];
+  privateFailure.capture.snapshot.notices = [{
+    text: "private paragraph from a local PDF",
+  }];
+  const privateReport = buildFallbackImportDiagnosticReport(privateFailure);
+  const serialized = JSON.stringify(privateReport);
+  assert.doesNotMatch(serialized, /private text|private-profile|token=secret|private paragraph/u);
+  assert.doesNotMatch(serialized, /"passed"|"schemaVersion"/u);
+
+  const mutations = [
+    (value) => { value.fixture.bytes -= 1; },
+    (value) => { value.setup.pageEventCount = 5; },
+    (value) => { value.capture.snapshot.fallback.signalAt = null; },
+    (value) => { value.capture.screenshot.path = "substituted.png"; },
+    (value) => { value.networkDiagnostic.counts.inflightRequestCount = 1; },
+    (value) => { value.teardown.app.profileRemoved = false; },
+  ];
+  for (const mutate of mutations) {
+    const value = structuredClone(input);
+    mutate(value);
+    const failed = buildFallbackImportDiagnosticReport(value);
+    assert.ok(failed.failures.length > 0);
+  }
+});
 
 function passingEvidence() {
   const fixture = {
@@ -3447,7 +4095,7 @@ test("requires exact worker model completion before traversing virtualized pages
   );
   assert.equal(
     source.match(/waitForPdfModelCompletion\(cdp, 6\)/gu)?.length,
-    2,
+    3,
   );
   assert.doesNotMatch(source, /waitForPageShell\(cdp, 6\)/u);
   assert.match(
@@ -3513,6 +4161,7 @@ test("documents a headed, fresh-build-only command without launching it", async 
   );
   assert.match(stdout, /fresh production build/u);
   assert.match(stdout, /visible browser/u);
+  assert.match(stdout, /--diagnose-fallback-import/u);
   assert.match(stdout, /--diagnose-first-network-fixed-point/u);
   assert.doesNotMatch(stdout, /headless/u);
 });
@@ -3597,7 +4246,7 @@ test("keeps the first-network diagnostic bounded and non-recording", async () =>
   );
   assert.match(
     source,
-    /if \(!options\.diagnoseFirstNetworkFixedPoint\) \{\s*networkState\.phase = "forced-main-fallback"/u,
+    /!options\.diagnoseFallbackImport &&\s*!options\.diagnoseFirstNetworkFixedPoint[\s\S]*networkState\.phase = "forced-main-fallback"/u,
   );
   assert.match(
     source,
@@ -3613,6 +4262,131 @@ test("keeps the first-network diagnostic bounded and non-recording", async () =>
   );
   assert.match(source, /buildFirstNetworkDiagnosticReport/u);
   assert.match(source, /pdf-sharpness-network-diagnostic\.json/u);
+});
+
+test("keeps the fallback-import diagnostic bounded and noncanonical", async () => {
+  const runner = "scripts/run-pdf-sharpness-browser-regression.mjs";
+  await assert.rejects(
+    execFileAsync(
+      process.execPath,
+      [runner, "--diagnose-fallback-import", "--record"],
+      { cwd: path.resolve(".") },
+    ),
+    /cannot be combined with --record/u,
+  );
+  await assert.rejects(
+    execFileAsync(
+      process.execPath,
+      [runner, "--diagnose-fallback-import"],
+      { cwd: path.resolve(".") },
+    ),
+    /requires an explicit --output/u,
+  );
+  await assert.rejects(
+    execFileAsync(
+      process.execPath,
+      [
+        runner,
+        "--diagnose-fallback-import",
+        "--output",
+        "outputs/issue-68-fallback-diagnostic",
+      ],
+      { cwd: path.resolve(".") },
+    ),
+    /output must be outside the source repository/u,
+  );
+  await assert.rejects(
+    execFileAsync(
+      process.execPath,
+      [
+        runner,
+        "--diagnose-fallback-import",
+        "--fixture",
+        path.join(os.tmpdir(), "private-reader-document.pdf"),
+        "--output",
+        path.join(os.tmpdir(), "issue-68-fallback-diagnostic"),
+      ],
+      { cwd: path.resolve(".") },
+    ),
+    /requires the exact repository PDF fixture/u,
+  );
+  await assert.rejects(
+    execFileAsync(
+      process.execPath,
+      [
+        runner,
+        "--diagnose-fallback-import",
+        "--diagnose-first-network-fixed-point",
+        "--output",
+        path.join(os.tmpdir(), "issue-68-fallback-diagnostic"),
+      ],
+      { cwd: path.resolve(".") },
+    ),
+    /diagnostic modes are mutually exclusive/u,
+  );
+
+  const source = await readFile(runner, "utf8");
+  assert.match(
+    source,
+    /if \(options\.diagnoseFallbackImport\) \{[\s\S]*collectPersistedFallbackDiagnosticSetup[\s\S]*collectFallbackImportDiagnostic/u,
+  );
+  assert.match(
+    source,
+    /collectPersistedFallbackDiagnosticSetup[\s\S]*navigateToReader\(cdp, appUrl, configuration, true\)[\s\S]*selectFixtureFile/u,
+  );
+  assert.match(source, /buildFallbackImportDiagnosticReport/u);
+  assert.match(
+    source,
+    /console\.debug\('__linelight_issue68_worker__'[\s\S]*Runtime\.consoleAPICalled[\s\S]*target\.workerInstanceId = workerInstanceId\.value/u,
+  );
+  assert.match(
+    source,
+    /isFallbackImportNetworkDiagnosticHealthy\([\s\S]*lifecycle\.importIdentity\?\.workerInstanceId/u,
+  );
+  assert.match(
+    source,
+    /pdf-sharpness-fallback-import-diagnostic\.json/u,
+  );
+  assert.match(
+    source,
+    /finally \{[\s\S]*closeOwnedBrowser[\s\S]*if \(options\.diagnoseFallbackImport\)/u,
+  );
+  assert.doesNotMatch(
+    buildFallbackImportDiagnosticReport.toString(),
+    /\bpassed\b|schemaVersion/u,
+  );
+});
+
+test("forces bounded fallback diagnostic cleanup before reporting", async () => {
+  let cleanupStarted = false;
+  let finallyReached = false;
+  try {
+    await assert.rejects(
+      runBoundedDiagnosticOperation(
+        () => new Promise(() => {}),
+        {
+          onTimeout() {
+            cleanupStarted = true;
+          },
+          timeoutMs: 5,
+        },
+      ),
+      /bounded fallback-import diagnostic timed out/u,
+    );
+  } finally {
+    finallyReached = true;
+  }
+  assert.equal(cleanupStarted, true);
+  assert.equal(finallyReached, true);
+
+  const source = await readFile(
+    "scripts/run-pdf-sharpness-browser-regression.mjs",
+    "utf8",
+  );
+  assert.match(
+    source,
+    /runBoundedDiagnosticOperation\(collectAppEvidence[\s\S]*appCdp\?\.close\(\)[\s\S]*finally \{[\s\S]*closeOwnedBrowser[\s\S]*buildFallbackImportDiagnosticReport/u,
+  );
 });
 
 test("refuses to record screenshots from a private fixture", async () => {

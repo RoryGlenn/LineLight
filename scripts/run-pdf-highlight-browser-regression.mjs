@@ -526,7 +526,7 @@ export async function configurePage(cdp, appUrl) {
   return consoleEntries;
 }
 
-export async function importFixture(cdp, fixture) {
+export async function selectFixtureFile(cdp, fixture) {
   await waitForExpression(
     cdp,
     `(() => {
@@ -547,6 +547,10 @@ export async function importFixture(cdp, fixture) {
     files: [fixture],
     nodeId: fileInput.nodeId,
   });
+}
+
+export async function importFixture(cdp, fixture) {
+  await selectFixtureFile(cdp, fixture);
   await waitForExpression(
     cdp,
     `Boolean(document.querySelector('.pdf-page-view')) &&

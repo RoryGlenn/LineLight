@@ -280,7 +280,12 @@ phase, stable-sample sequence, opaque request/target identities, and nested
 parser ancestry rather than trusting a self-reported fixed-point outcome. The
 bounded first-scenario diagnostic
 mode persists privacy-safe pending-attach, inflight-request, and target-ancestry
-metadata on fixed-point timeouts without running fallback/reference work.
+metadata on fixed-point timeouts without running fallback/reference work. A
+separate bounded fallback-import diagnostic persists the exact fixture once,
+reloads the same disposable profile under forced fallback, immediately
+re-imports, and binds success to that new import's worker/model/fallback chain,
+sanitized CDP lifecycle, external screenshot, and complete teardown; it is a
+noncanonical diagnostic and cannot satisfy acceptance.
 The independently testable acceptance contract lives in
 [`scripts/pdf-sharpness-evidence.mjs`](../scripts/pdf-sharpness-evidence.mjs),
 its fast and opt-in browser gates live in
@@ -313,7 +318,9 @@ stored audio/timing record validation. Audiobook record validation belongs to
 [`app/audiobook-alignment.mjs`](../app/audiobook-alignment.mjs).
 [`app/reader-navigation.mjs`](../app/reader-navigation.mjs) owns contextual
 position snapshots, recovery after text changes, bounded history, and document
-word search. [`app/reader-layout.mjs`](../app/reader-layout.mjs) owns layout
+word search. [`app/reader-lifecycle.mjs`](../app/reader-lifecycle.mjs) keeps an
+asynchronous startup restore bound to its original reader generation so a
+newer explicit import cannot be superseded. [`app/reader-layout.mjs`](../app/reader-layout.mjs) owns layout
 normalization, CSS values, and focus-window selection.
 [`app/reader-virtualization.mjs`](../app/reader-virtualization.mjs) owns bounded
 render windows and placeholder sizing.
@@ -347,6 +354,8 @@ migration, prepared-audio cleanup, and lifecycle behavior;
 profile identity, source fingerprints, and stored-chunk validation;
 [`tests/audiobook-alignment.test.mjs`](../tests/audiobook-alignment.test.mjs)
 for audiobook record, window, alignment, and confidence contracts;
+[`tests/reader-lifecycle.test.mjs`](../tests/reader-lifecycle.test.mjs) for
+startup-restore generation and replacement behavior;
 [`tests/reader-navigation.test.mjs`](../tests/reader-navigation.test.mjs) for
 snapshots, recovery, history, and search; and
 [`tests/reader-layout.test.mjs`](../tests/reader-layout.test.mjs) plus

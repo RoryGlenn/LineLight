@@ -25,6 +25,7 @@ import {
   delay,
   evaluate,
   importFixture,
+  selectFixtureFile,
   startBrowser,
   stopProcessGroup,
   waitForExpression,
@@ -66,6 +67,11 @@ const SHUTDOWN_TIMEOUT_MS = 3_000;
 const PDF_VIRTUAL_SCROLL_MAX_STEPS = 120;
 const CDP_FIXED_POINT_STABLE_SAMPLES = 3;
 const CDP_CHILD_COMMAND_TIMEOUT_MS = 5_000;
+const FALLBACK_IMPORT_DIAGNOSTIC_TIMEOUT_MS = 60_000;
+const FALLBACK_IMPORT_DIAGNOSTIC_RUN_TIMEOUT_MS = 180_000;
+const FALLBACK_IMPORT_DIAGNOSTIC_LABEL = "fallback-import-diagnostic";
+const FALLBACK_IMPORT_DIAGNOSTIC_SCREENSHOT =
+  "linelight-fallback-import-diagnostic.png";
 const PUBLIC_PDF_FIXTURE_BYTES = 4_745;
 const PUBLIC_PDF_FIXTURE_SHA256 =
   "1addfceae4b869eec37dae4755d576ccd0fd7e1ce505dc856da3b96acbf3f06c";
@@ -74,6 +80,34 @@ const CDP_WORKER_TARGET_TYPES = new Set([
   "shared_worker",
   "worker",
 ]);
+
+export async function runBoundedDiagnosticOperation(
+  operation,
+  { onTimeout = () => {}, timeoutMs },
+) {
+  if (typeof operation !== "function" || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new Error("A bounded diagnostic requires an operation and timeout.");
+  }
+  let timeoutId;
+  const timeout = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => {
+      try {
+        Promise.resolve(onTimeout()).catch(() => {});
+      } catch {
+        // The fixed timeout result still drives the owned finally cleanup.
+      }
+      reject(new Error("The bounded fallback-import diagnostic timed out."));
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([
+      Promise.resolve().then(operation),
+      timeout,
+    ]);
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
 
 export function validateCdpInitialTargetBaseline(targetInfos) {
   const targets = Array.isArray(targetInfos) ? targetInfos : [];
@@ -790,6 +824,9 @@ export function buildCdpNetworkFixedPointDiagnostic(
     type: target.type ?? null,
     urlClass: classifyCdpDiagnosticUrl(target.url, appUrl),
     waitingForDebugger: target.waitingForDebugger === true,
+    workerInstanceId: Number.isInteger(target.workerInstanceId)
+      ? target.workerInstanceId
+      : null,
   }));
   const targetBootstrapSettlements = (
     networkState.targetBootstrapSettlements ?? []
@@ -1357,6 +1394,699 @@ export function buildFirstNetworkDiagnosticReport({
   };
 }
 
+function fixedDiagnosticCategory(value) {
+  const text = String(value ?? "");
+  if (/AbortError|cancel/u.test(text)) return "cancellation";
+  if (/worker/u.test(text)) return "worker-runtime";
+  if (/library/u.test(text)) return "library-runtime";
+  return text ? "other-runtime" : "none";
+}
+
+function fixedNoticeCategory(value) {
+  const text = String(value ?? "");
+  if (!text) return "none";
+  if (/operation was replaced/u.test(text)) return "operation-replaced";
+  if (/private library/u.test(text)) return "library-open-failed";
+  if (/OffscreenCanvas|cooperative visible-page rendering/u.test(text)) {
+    return "render-fallback";
+  }
+  if (/could not be opened|stopped unexpectedly/u.test(text)) {
+    return "document-open-failed";
+  }
+  return "other-present";
+}
+
+export function summarizeFallbackImportLifecycle(capture, fixture) {
+  const boundary = capture?.boundary ?? {};
+  const snapshot = capture?.snapshot ?? {};
+  const workerEvents = Array.isArray(snapshot.workerEvents)
+    ? snapshot.workerEvents
+    : [];
+  const sourceFiles = Array.isArray(snapshot.sourceFiles)
+    ? snapshot.sourceFiles.slice(boundary.sourceFileStart ?? 0)
+    : [];
+  const workerLifecycle = Array.isArray(snapshot.workerLifecycle)
+    ? snapshot.workerLifecycle.slice(boundary.workerLifecycleStart ?? 0)
+    : [];
+  const outcome = [
+    "import-request-timeout",
+    "import-chain-timeout",
+    "import-chain-reached",
+  ].includes(capture?.outcome)
+    ? capture.outcome
+    : "invalid";
+  const afterWorkerEvent = (event) =>
+    Number.isInteger(event?.eventId) &&
+    event.eventId > Number(boundary.workerEventStart ?? 0);
+  const boundaryValid =
+    Number.isInteger(boundary?.sourceFileStart) &&
+    boundary.sourceFileStart >= 0 &&
+    Number.isInteger(boundary?.workerEventStart) &&
+    boundary.workerEventStart >= 0 &&
+    Number.isInteger(boundary?.workerLifecycleStart) &&
+    boundary.workerLifecycleStart >= 0 &&
+    Number.isFinite(boundary?.startedAt) &&
+    boundary.sourceFileStart <= (snapshot.sourceFiles?.length ?? -1) &&
+    boundary.workerEventStart <= workerEvents.length &&
+    boundary.workerLifecycleStart <= (snapshot.workerLifecycle?.length ?? -1);
+  const importRequests = workerEvents.filter(
+    (event) =>
+      afterWorkerEvent(event) &&
+      event.direction === "to-worker" &&
+      event.type === "import",
+  );
+  const importRequest = importRequests[0] ?? null;
+  const importEventId = importRequest?.eventId ?? Number.POSITIVE_INFINITY;
+  const matchingEvent = (event) =>
+    Number.isInteger(importRequest?.jobId) &&
+    Number.isInteger(importRequest?.workerInstanceId) &&
+    importRequest.workerInstanceId > 0 &&
+    typeof importRequest?.revision === "string" &&
+    event?.eventId > importEventId &&
+    event?.jobId === importRequest.jobId &&
+    event?.revision === importRequest.revision &&
+    event?.workerInstanceId === importRequest.workerInstanceId;
+  const pageEvents = workerEvents.filter(
+    (event) =>
+      matchingEvent(event) &&
+      event.direction === "from-worker" &&
+      event.type === "page" &&
+      event.documentKey === importRequest?.documentKey,
+  );
+  const progressEvents = workerEvents.filter(
+    (event) =>
+      matchingEvent(event) &&
+      event.direction === "from-worker" &&
+      event.type === "progress",
+  );
+  const completeEvents = workerEvents.filter(
+    (event) =>
+      matchingEvent(event) &&
+      event.direction === "from-worker" &&
+      event.type === "complete" &&
+      event.documentKey === importRequest?.documentKey,
+  );
+  const fallbackEvents = workerEvents.filter(
+    (event) =>
+      matchingEvent(event) &&
+      event.direction === "from-worker" &&
+      event.type === "render-fallback",
+  );
+  const laterStartEvents = workerEvents.filter(
+    (event) =>
+      event?.eventId > importEventId &&
+      event.direction === "to-worker" &&
+      ["import", "open"].includes(event.type),
+  );
+  const pageNumbers = pageEvents.map((event) => event.pageNumber);
+  const progressPages = progressEvents.map((event) => event.completedPages);
+  const terminalProgressEvents = progressEvents.filter(
+    (event) => event.completedPages === 6 && event.pageCount === 6,
+  );
+  const pageOne = pageEvents.find((event) => event.pageNumber === 1) ?? null;
+  const terminalProgress = terminalProgressEvents[0] ?? null;
+  const complete = completeEvents[0] ?? null;
+  const fallback = fallbackEvents[0] ?? null;
+  const documentKey = importRequest?.documentKey;
+  const revision = importRequest?.revision;
+  const documentId =
+    typeof documentKey === "string" &&
+    typeof revision === "string" &&
+    documentKey.endsWith(`:${revision}`)
+      ? documentKey.slice(0, -(revision.length + 1))
+      : null;
+  const workerInstanceId = importRequest?.workerInstanceId ?? null;
+  const lifecycleForImport = workerLifecycle.filter(
+    (event) => event?.workerInstanceId === workerInstanceId,
+  );
+  const constructedEvents = lifecycleForImport.filter(
+    (event) => event.type === "constructed",
+  );
+  const importPostEvents = lifecycleForImport.filter(
+    (event) =>
+      event.type === "post-message" &&
+      event.messageType === "import" &&
+      event.jobId === importRequest?.jobId &&
+      event.revision === revision &&
+      event.documentKey === documentKey,
+  );
+  const firstMessageEvents = lifecycleForImport.filter(
+    (event) => event.type === "first-message",
+  );
+  const constructed = constructedEvents[0] ?? null;
+  const importPost = importPostEvents[0] ?? null;
+  const firstMessage = firstMessageEvents[0] ?? null;
+  const lifecycleFailures = lifecycleForImport.filter(
+    (event) => ["error", "message-error"].includes(event.type),
+  );
+  const terminatedBeforeComplete = lifecycleForImport.some(
+    (event) =>
+      event.type === "terminated" &&
+      (!complete || Number(event.at) <= Number(complete.at)),
+  );
+  const source = sourceFiles[0] ?? null;
+  const sourceBound =
+    sourceFiles.length === 1 &&
+    source?.size === PUBLIC_PDF_FIXTURE_BYTES &&
+    source?.sha256 === PUBLIC_PDF_FIXTURE_SHA256 &&
+    fixture?.bytes === PUBLIC_PDF_FIXTURE_BYTES &&
+    fixture?.sha256 === PUBLIC_PDF_FIXTURE_SHA256;
+  const exactPages =
+    pageEvents.length === 6 &&
+    new Set(pageNumbers).size === 6 &&
+    [1, 2, 3, 4, 5, 6].every((page) => pageNumbers.includes(page));
+  const exactProgress =
+    progressEvents.length === 6 &&
+    new Set(progressPages).size === 6 &&
+    [1, 2, 3, 4, 5, 6].every((page) => progressPages.includes(page)) &&
+    terminalProgressEvents.length === 1;
+  const exactOrdering = Boolean(
+    importRequest &&
+    pageOne &&
+    fallback &&
+    terminalProgress &&
+    complete &&
+    importRequest.eventId < pageOne.eventId &&
+    pageOne.eventId < fallback.eventId &&
+    fallback.eventId < terminalProgress.eventId &&
+    terminalProgress.eventId < complete.eventId,
+  );
+  const dom = capture?.dom ?? {};
+  const runtimeErrorCategories = (snapshot.errors ?? []).map(
+    fixedDiagnosticCategory,
+  );
+  const noticeCategories = (snapshot.notices ?? []).map(
+    (notice) => fixedNoticeCategory(notice?.text),
+  );
+  const importedDocumentIdentityHash = documentId
+    ? cdpDiagnosticIdentity(documentId)
+    : null;
+  const importCompleted = Boolean(
+    boundaryValid &&
+    outcome === "import-chain-reached" &&
+    capture?.importRequestObserved === true &&
+    importRequests.length === 1 &&
+    Number(importRequest?.at) >= Number(boundary.startedAt) &&
+    sourceBound &&
+    Number(source?.at) >= Number(boundary.startedAt) &&
+    source?.eventId === boundary.sourceFileStart + 1 &&
+    exactPages &&
+    exactProgress &&
+    completeEvents.length === 1 &&
+    fallbackEvents.length === 1 &&
+    laterStartEvents.length === 0 &&
+    exactOrdering &&
+    constructedEvents.length === 1 &&
+    importPostEvents.length === 1 &&
+    firstMessageEvents.length === 1 &&
+    constructed?.wrapped === true &&
+    constructed?.forceFallback === true &&
+    Number(constructed?.at) >= Number(boundary.startedAt) &&
+    importPost &&
+    Number(importPost.at) >= Number(constructed.at) &&
+    firstMessage?.messageType === "page" &&
+    firstMessage?.pageNumber === 1 &&
+    Number(firstMessage.at) >= Number(importPost.at) &&
+    Number(complete?.at) >= Number(firstMessage.at) &&
+    firstMessage?.jobId === importRequest.jobId &&
+    firstMessage?.revision === revision &&
+    firstMessage?.documentKey === documentKey &&
+    lifecycleFailures.length === 0 &&
+    !terminatedBeforeComplete &&
+    runtimeErrorCategories.length === 0 &&
+    noticeCategories.includes("render-fallback") &&
+    noticeCategories.every((category) => category === "render-fallback") &&
+    Number.isFinite(snapshot?.fallback?.signalAt) &&
+    dom.pageViewPresent === true &&
+    dom.fallbackActive === true &&
+    dom.pageOnePresent === true &&
+    dom.pageOneVisible === true &&
+    dom.pageOneWordOverlayCount >= 20 &&
+    dom.pageOneCanvasSource === "main-fallback" &&
+    dom.pageOneCanvasWidth > 0 &&
+    dom.pageOneCanvasHeight > 0 &&
+    dom.loadingPageCount === 0 &&
+    dom.noticeCategory === "render-fallback" &&
+    dom.noticePresent === true &&
+    capture?.libraryAfter?.available === true &&
+    capture.libraryAfter.activeDocumentPresent === true &&
+    capture?.libraryAfter?.activeDocumentIdentityHash ===
+      importedDocumentIdentityHash,
+  );
+  return {
+    chain: {
+      completeEventCount: completeEvents.length,
+      exactOrdering,
+      fallbackEventCount: fallbackEvents.length,
+      fallbackSignalObserved: Number.isFinite(snapshot?.fallback?.signalAt),
+      pageEventCount: pageEvents.length,
+      pageNumbers: [...new Set(pageNumbers)].sort((left, right) => left - right),
+      progressEventCount: progressEvents.length,
+      progressPages: [...new Set(progressPages)].sort((left, right) => left - right),
+      terminalProgressEventCount: terminalProgressEvents.length,
+    },
+    dom,
+    importCompleted,
+    importIdentity: importRequest
+      ? {
+          documentIdentityHash: importedDocumentIdentityHash,
+          identityHash: cdpDiagnosticIdentity(
+            importRequest.workerInstanceId,
+            importRequest.jobId,
+            documentKey,
+            revision,
+          ),
+          jobId: importRequest.jobId,
+          requestEventId: importRequest.eventId,
+          revisionIdentityHash: cdpDiagnosticIdentity(revision),
+          workerInstanceId,
+        }
+      : null,
+    importRequestCount: importRequests.length,
+    laterStartCount: laterStartEvents.length,
+    libraryAfter: capture?.libraryAfter ?? null,
+    libraryBefore: capture?.libraryBefore ?? null,
+    noticeCategories: [...new Set(noticeCategories)],
+    outcome,
+    runtimeErrorCategories: [...new Set(runtimeErrorCategories)],
+    source: sourceBound
+      ? { bytes: source.size, sha256: source.sha256 }
+      : null,
+    sourceSelectionCount: sourceFiles.length,
+    worker: {
+      constructed: Boolean(constructed),
+      firstMessageType: firstMessage?.messageType ?? null,
+      lifecycleFailureCount: lifecycleFailures.length,
+      postBound: Boolean(importPost),
+      terminatedBeforeComplete,
+      wrapped: constructed?.wrapped === true,
+    },
+    workerLifecycle: workerLifecycle.map((event, index) => ({
+      category: event.category ?? null,
+      documentIdentityHash:
+        typeof event.documentKey === "string" &&
+        typeof event.revision === "string" &&
+        event.documentKey.endsWith(`:${event.revision}`)
+          ? cdpDiagnosticIdentity(
+              event.documentKey.slice(0, -(event.revision.length + 1)),
+            )
+          : null,
+      forceFallback: event.forceFallback === true,
+      identityHash: cdpDiagnosticIdentity(event.workerInstanceId),
+      jobId: event.jobId ?? null,
+      messageType: event.messageType ?? null,
+      pageNumber: event.pageNumber ?? null,
+      sequence: index + 1,
+      type: event.type,
+      urlClass: event.urlClass,
+      workerInstanceId: event.workerInstanceId,
+      wrapped: event.wrapped === true,
+    })),
+  };
+}
+
+export function isFallbackImportNetworkDiagnosticHealthy(
+  diagnostic,
+  boundary,
+  expectedWorkerInstanceId,
+) {
+  const targets = Array.isArray(diagnostic?.targets) ? diagnostic.targets : [];
+  const settlements = Array.isArray(diagnostic?.targetBootstrapSettlements)
+    ? diagnostic.targetBootstrapSettlements
+    : [];
+  const observations = Array.isArray(
+    diagnostic?.serviceWorkerBootstrapObservations,
+  )
+    ? diagnostic.serviceWorkerBootstrapObservations
+    : [];
+  const counts = diagnostic?.counts ?? {};
+  const targetStart = boundary?.targetCount;
+  const settlementStart = boundary?.settlementCount;
+  const requestStart = boundary?.requestCount;
+  const attachStart = boundary?.attachPromiseCount;
+  const validBoundary =
+    [targetStart, settlementStart, requestStart, attachStart].every(
+      (value) => Number.isInteger(value) && value >= 0,
+    ) &&
+    targetStart === attachStart &&
+    targetStart <= targets.length &&
+    settlementStart <= settlements.length &&
+    requestStart <= counts.requestCount;
+  const newTargets = validBoundary ? targets.slice(targetStart) : [];
+  const newTargetSessions = new Set(
+    newTargets.map((target) => target?.sessionId),
+  );
+  const newSettlements = validBoundary
+    ? settlements.filter((entry) =>
+        newTargetSessions.has(entry?.targetSessionId)
+      )
+    : [];
+  const blobTargets = newTargets.filter(
+    (target) => target?.type === "worker" && target?.urlClass === "blob",
+  );
+  const parserTargets = newTargets.filter(
+    (target) =>
+      target?.type === "worker" && target?.urlClass === "pdf-parser-worker",
+  );
+  const importBlobTargets = blobTargets.filter(
+    (target) => target?.workerInstanceId === expectedWorkerInstanceId,
+  );
+  const importBlobTarget = importBlobTargets[0] ?? null;
+  const importParserTargets = parserTargets.filter(
+    (target) => target?.parentSessionId === importBlobTarget?.sessionId,
+  );
+  const nonEmptyString = (value) =>
+    typeof value === "string" && value.length > 0;
+  const targetSessions = targets.map((target) => target?.sessionId);
+  const targetIds = targets.map((target) => target?.targetId);
+  const commandIds = targets.flatMap((target) =>
+    Array.isArray(target?.commands)
+      ? target.commands.map((command) => command?.cdpId)
+      : []
+  );
+  const targetBySession = new Map(
+    targets.map((target) => [target?.sessionId, target]),
+  );
+  const validTargets =
+    targetSessions.every(nonEmptyString) &&
+    new Set(targetSessions).size === targetSessions.length &&
+    targetIds.every(nonEmptyString) &&
+    new Set(targetIds).size === targetIds.length &&
+    new Set(commandIds).size === commandIds.length &&
+    targets.every(
+      (target) =>
+        isCdpTargetSetupComplete(target) &&
+        nonEmptyString(target?.phase) &&
+        nonEmptyString(target?.type) &&
+        target?.identityHash === cdpDiagnosticIdentity(
+          target.sessionId,
+          target.targetId,
+        ),
+    );
+  const serviceWorkerTargets = targets.filter(
+    (target) => target?.type === "service_worker",
+  );
+  const validServiceWorkerObservations =
+    serviceWorkerTargets.length > 0 &&
+    observations.length === serviceWorkerTargets.length &&
+    new Set(observations.map((entry) => entry?.targetSessionId)).size ===
+      observations.length &&
+    observations.every((entry) => {
+      const target = targetBySession.get(entry?.targetSessionId);
+      return (
+        target?.type === "service_worker" &&
+        entry?.identityHash === cdpDiagnosticIdentity(
+          entry.requestSessionId,
+          entry.requestId,
+          entry.targetSessionId,
+          entry.targetId,
+        ) &&
+        nonEmptyString(entry?.requestId) &&
+        entry?.requestSessionId === target.sessionId &&
+        entry?.targetId === target.targetId &&
+        entry?.targetDetachedAtObservation === false &&
+        entry?.targetType === target.type &&
+        entry?.phase === target.phase &&
+        entry?.method === "GET" &&
+        entry?.resourceType === "Script" &&
+        entry?.urlClass === target.urlClass &&
+        entry?.targetUrlMatched === true &&
+        entry?.requestIsFirst === true &&
+        Number.isInteger(entry?.requestSequence) &&
+        entry.requestSequence > 0 &&
+        entry?.resumeDispatchedAt === target.resumeDispatchedAt &&
+        Number.isFinite(entry?.requestStartedAt) &&
+        entry.requestStartedAt >= entry.resumeDispatchedAt &&
+        entry?.earlierRequestCount === 0 &&
+        Number.isInteger(entry?.sessionRequestCount) &&
+        entry.sessionRequestCount > 0 &&
+        entry?.sessionFailureCount === 0 &&
+        entry?.terminalReason === "loading-finished" &&
+        Number.isFinite(entry?.terminalAt) &&
+        entry.terminalAt >= entry.requestStartedAt
+      );
+    });
+  const validNewSettlements =
+    newSettlements.length === parserTargets.length &&
+    new Set(newSettlements.map((entry) => entry?.targetSessionId)).size ===
+      newSettlements.length &&
+    new Set(
+      newSettlements.map(
+        (entry) => `${entry?.requestSessionId}:${entry?.requestId}`,
+      ),
+    ).size === newSettlements.length &&
+    newSettlements.every((entry) => {
+      const target = targetBySession.get(entry?.targetSessionId);
+      return (
+        parserTargets.includes(target) &&
+        nonEmptyString(entry?.requestId) &&
+        nonEmptyString(entry?.requestSessionId) &&
+        entry?.identityHash === cdpDiagnosticIdentity(
+          entry.requestSessionId,
+          entry.requestId,
+          entry.targetSessionId,
+          entry.targetId,
+        ) &&
+        entry?.targetId === target.targetId &&
+        entry?.targetParentSessionId === target.parentSessionId &&
+        entry?.requestSessionId === target.parentSessionId &&
+        entry?.phase === FALLBACK_IMPORT_DIAGNOSTIC_LABEL &&
+        entry?.phase === target.phase &&
+        entry?.method === "GET" &&
+        entry?.resourceType === "Script" &&
+        entry?.targetType === "worker" &&
+        entry?.urlClass === "pdf-parser-worker" &&
+        entry?.targetDetachedAtSettlement === false &&
+        entry?.terminalReason === "target-attached"
+      );
+    });
+  const stableTail = Array.isArray(diagnostic?.wait?.recentSamples)
+    ? diagnostic.wait.recentSamples.slice(-CDP_FIXED_POINT_STABLE_SAMPLES)
+    : [];
+  return (
+    validBoundary &&
+    diagnostic?.label === FALLBACK_IMPORT_DIAGNOSTIC_LABEL &&
+    diagnostic?.outcome === "fixed-point-reached" &&
+    diagnostic?.serviceWorkerBypassed === true &&
+    diagnostic?.counts?.attachErrorCount === 0 &&
+    diagnostic?.counts?.pendingAttachCount === 0 &&
+    diagnostic?.counts?.inflightRequestCount === 0 &&
+    diagnostic?.counts?.externalRequestCount === 0 &&
+    diagnostic?.counts?.networkFailureCount === 0 &&
+    counts.attachPromiseCount === targets.length &&
+    counts.completedRequestCount === counts.requestCount &&
+    Number.isInteger(counts.requestCount) &&
+    counts.requestCount > requestStart &&
+    counts.serviceWorkerBootstrapObservationCount === observations.length &&
+    counts.targetBootstrapSettlementCount === settlements.length &&
+    counts.targetCount === targets.length &&
+    Array.isArray(diagnostic?.attachErrors) &&
+    diagnostic.attachErrors.length === 0 &&
+    Array.isArray(diagnostic?.pendingAttaches) &&
+    diagnostic.pendingAttaches.length === 0 &&
+    Array.isArray(diagnostic?.inflightRequests) &&
+    diagnostic.inflightRequests.length === 0 &&
+    diagnostic?.initialTargetBaseline?.checked === true &&
+    diagnostic.initialTargetBaseline.pageCount === 1 &&
+    diagnostic.initialTargetBaseline.pageUrlClass === "about" &&
+    diagnostic.initialTargetBaseline.targetCount === 1 &&
+    diagnostic.initialTargetBaseline.workerCount === 0 &&
+    validTargets &&
+    validServiceWorkerObservations &&
+    targets.length > targetStart &&
+    newTargets.every(
+      (target) => target?.phase === FALLBACK_IMPORT_DIAGNOSTIC_LABEL,
+    ) &&
+    blobTargets.length >= 1 &&
+    parserTargets.length >= 1 &&
+    Number.isInteger(expectedWorkerInstanceId) &&
+    expectedWorkerInstanceId > 0 &&
+    importBlobTargets.length === 1 &&
+    importParserTargets.length >= 1 &&
+    parserTargets.every((target) => {
+      const parent = blobTargets.find(
+        (candidate) => candidate.sessionId === target.parentSessionId,
+      );
+      return (
+        parent &&
+        target.phase === FALLBACK_IMPORT_DIAGNOSTIC_LABEL &&
+        target.ancestry?.[0]?.sessionId === parent.sessionId &&
+        settlements.some(
+          (settlement) =>
+            settlement?.targetSessionId === target.sessionId &&
+            settlement?.terminalReason === "target-attached",
+        )
+      );
+    }) &&
+    validNewSettlements &&
+    diagnostic?.wait?.requiredStableSamples ===
+      CDP_FIXED_POINT_STABLE_SAMPLES &&
+    diagnostic?.wait?.stableSamples === CDP_FIXED_POINT_STABLE_SAMPLES &&
+    stableTail.length === CDP_FIXED_POINT_STABLE_SAMPLES &&
+    stableTail.every(
+      (sample, index) =>
+        sample?.attachmentReady === true &&
+        sample?.attachErrorCount === 0 &&
+        sample?.incompleteTargetCount === 0 &&
+        sample?.pendingAttachCount === 0 &&
+        sample?.inflightRequestCount === 0 &&
+        sample?.serviceWorkerBypassed === true &&
+        sample?.requestCount === counts.requestCount &&
+        sample?.targetCount === counts.targetCount &&
+        sample?.stableSamples === index + 1,
+    )
+  );
+}
+
+export function buildFallbackImportDiagnosticReport({
+  build,
+  capture,
+  fixture,
+  networkDiagnostic,
+  outputDirectory,
+  runnerFailure,
+  setup,
+  source,
+  teardown,
+}) {
+  const expectedFixturePath = path.relative(
+    REPOSITORY_ROOT,
+    path.resolve(DEFAULT_PDF_HIGHLIGHT_FIXTURE),
+  );
+  const fixtureBound =
+    fixture?.path === expectedFixturePath &&
+    fixture?.bytes === PUBLIC_PDF_FIXTURE_BYTES &&
+    fixture?.sha256 === PUBLIC_PDF_FIXTURE_SHA256;
+  const outputIsExternal = isOutsideRepository(outputDirectory);
+  const screenshot = capture?.screenshot ?? null;
+  const expectedScreenshotPath = outputIsExternal
+    ? path.relative(
+        REPOSITORY_ROOT,
+        path.join(outputDirectory, FALLBACK_IMPORT_DIAGNOSTIC_SCREENSHOT),
+      )
+    : null;
+  const screenshotBound =
+    outputIsExternal &&
+    screenshot?.path === expectedScreenshotPath &&
+    Number.isInteger(screenshot?.bytes) &&
+    screenshot.bytes > 0 &&
+    /^[a-f0-9]{64}$/u.test(screenshot?.sha256 ?? "");
+  const publicScreenshot = screenshotBound
+    ? { ...screenshot, path: FALLBACK_IMPORT_DIAGNOSTIC_SCREENSHOT }
+    : null;
+  const teardownFailed =
+    teardown?.app?.present !== true ||
+    teardown?.app?.cdpClosed !== true ||
+    teardown?.app?.processClosed !== true ||
+    teardown?.app?.profileRemoved !== true ||
+    Boolean(teardown?.app?.error) ||
+    teardown?.reference?.cdpClosed !== true ||
+    teardown?.reference?.processClosed !== true ||
+    teardown?.reference?.profileRemoved !== true ||
+    Boolean(teardown?.reference?.error) ||
+    teardown?.server?.present !== true ||
+    teardown?.server?.processClosed !== true ||
+    Boolean(teardown?.server?.error) ||
+    teardown?.browserClosed !== true ||
+    teardown?.cdpClosed !== true ||
+    teardown?.profilesRemoved !== true ||
+    teardown?.serverClosed !== true ||
+    teardown?.errors?.length > 0;
+  const setupBound = Boolean(
+    setup?.source?.bytes === PUBLIC_PDF_FIXTURE_BYTES &&
+    setup?.source?.sha256 === PUBLIC_PDF_FIXTURE_SHA256 &&
+    setup?.pageEventCount === 6 &&
+    setup?.completeEventCount === 1 &&
+    /^[a-f0-9]{64}$/u.test(setup?.documentIdentityHash ?? "") &&
+    setup?.library?.activeDocumentIdentityHash ===
+      setup?.documentIdentityHash &&
+    setup?.library?.available === true &&
+    setup?.library?.activeDocumentPresent === true &&
+    setup?.library?.documentCount >= 1 &&
+    setup?.library?.entryCount >= 1 &&
+    setup?.library?.pageCount >= 6 &&
+    setup?.library?.pdfEntryCount >= 1 &&
+    setup?.library?.sourceCount >= 1,
+  );
+  const lifecycle = summarizeFallbackImportLifecycle(capture, fixture);
+  const networkHealthy = isFallbackImportNetworkDiagnosticHealthy(
+    networkDiagnostic,
+    capture?.networkBoundary,
+    lifecycle.importIdentity?.workerInstanceId,
+  );
+  const failures = [
+    ...(runnerFailure
+      ? ["The bounded fallback-import diagnostic runner reported a failure."]
+      : []),
+    ...(!fixtureBound
+      ? ["The fallback-import diagnostic fixture is not the exact public fixture."]
+      : []),
+    ...(!setupBound
+      ? ["The fallback-import diagnostic did not persist the exact setup PDF."]
+      : []),
+    ...(!lifecycle.importCompleted
+      ? ["The post-navigation fallback import did not complete its exact bound chain."]
+      : []),
+    ...(!networkHealthy
+      ? ["The fallback-import diagnostic CDP lifecycle did not settle cleanly."]
+      : []),
+    ...(!screenshotBound
+      ? ["The fallback-import diagnostic screenshot manifest is not exact."]
+      : []),
+    ...(teardownFailed
+      ? ["Owned fallback diagnostic resources did not tear down cleanly."]
+      : []),
+  ];
+  return {
+    artifacts: {
+      deploymentId: build?.localManifest?.deploymentId ?? null,
+      screenshots: publicScreenshot ? [publicScreenshot] : [],
+      sourceCommit: source?.commit ?? null,
+      sourceTree: source?.tree ?? null,
+    },
+    build,
+    completed: fixtureBound && screenshotBound && !teardownFailed,
+    diagnostic: true,
+    diagnosticSchemaVersion: 1,
+    failures,
+    fixture: fixtureBound ? fixture : null,
+    importCompleted: lifecycle.importCompleted,
+    lifecycle,
+    mode: "fallback-import-lifecycle",
+    network: networkDiagnostic,
+    networkSettled: networkHealthy,
+    recordedAt: new Date().toISOString(),
+    setup: setupBound ? setup : null,
+    source,
+    teardown: {
+      app: {
+        cdpClosed: teardown?.app?.cdpClosed === true,
+        errorPresent: Boolean(teardown?.app?.error),
+        present: teardown?.app?.present === true,
+        processClosed: teardown?.app?.processClosed === true,
+        profileRemoved: teardown?.app?.profileRemoved === true,
+      },
+      browserClosed: teardown?.browserClosed === true,
+      cdpClosed: teardown?.cdpClosed === true,
+      errorCount: Array.isArray(teardown?.errors) ? teardown.errors.length : 0,
+      profilesRemoved: teardown?.profilesRemoved === true,
+      reference: {
+        cdpClosed: teardown?.reference?.cdpClosed === true,
+        errorPresent: Boolean(teardown?.reference?.error),
+        present: teardown?.reference?.present === true,
+        processClosed: teardown?.reference?.processClosed === true,
+        profileRemoved: teardown?.reference?.profileRemoved === true,
+      },
+      server: {
+        errorPresent: Boolean(teardown?.server?.error),
+        present: teardown?.server?.present === true,
+        processClosed: teardown?.server?.processClosed === true,
+      },
+      serverClosed: teardown?.serverClosed === true,
+    },
+  };
+}
+
 export function planPdfVirtualScroll({
   clientHeight,
   mountedPages,
@@ -1386,6 +2116,7 @@ export function planPdfVirtualScroll({
 function parseArguments(argv) {
   const options = {
     browser: process.env.LINELIGHT_BROWSER ?? "/usr/bin/brave-browser",
+    diagnoseFallbackImport: false,
     diagnoseFirstNetworkFixedPoint: false,
     fixture: DEFAULT_PDF_HIGHLIGHT_FIXTURE,
     outputDirectory:
@@ -1397,6 +2128,9 @@ function parseArguments(argv) {
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === "--browser") options.browser = argv[++index];
+    else if (argument === "--diagnose-fallback-import") {
+      options.diagnoseFallbackImport = true;
+    }
     else if (argument === "--diagnose-first-network-fixed-point") {
       options.diagnoseFirstNetworkFixedPoint = true;
     }
@@ -1416,6 +2150,8 @@ function parseArguments(argv) {
           "Issue #68 sharpness, priority, memory, fallback, privacy, and teardown evidence.",
           "",
           "  --browser PATH   Brave/Chromium executable.",
+          "  --diagnose-fallback-import",
+          "                   Persist once, reload in fallback mode, re-import, then cleanup.",
           "  --diagnose-first-network-fixed-point",
           "                   Stop after the first matrix network gate and cleanup.",
           "  --fixture PATH   Selectable-text PDF used for both original and import.",
@@ -1437,9 +2173,20 @@ function parseArguments(argv) {
       "First-network diagnostic mode cannot be combined with --record.",
     );
   }
-  if (options.diagnoseFirstNetworkFixedPoint && !options.outputProvided) {
+  if (options.record && options.diagnoseFallbackImport) {
     throw new Error(
-      "First-network diagnostic mode requires an explicit --output directory.",
+      "Fallback-import diagnostic mode cannot be combined with --record.",
+    );
+  }
+  if (options.diagnoseFirstNetworkFixedPoint && options.diagnoseFallbackImport) {
+    throw new Error("Issue #68 diagnostic modes are mutually exclusive.");
+  }
+  if (
+    (options.diagnoseFirstNetworkFixedPoint || options.diagnoseFallbackImport) &&
+    !options.outputProvided
+  ) {
+    throw new Error(
+      "Issue #68 diagnostic mode requires an explicit --output directory.",
     );
   }
   if (options.record) options.outputDirectory = RECORDED_OUTPUT_DIRECTORY;
@@ -1447,19 +2194,19 @@ function parseArguments(argv) {
   options.fixture = path.resolve(options.fixture);
   options.outputDirectory = path.resolve(options.outputDirectory);
   if (
-    options.diagnoseFirstNetworkFixedPoint &&
+    (options.diagnoseFirstNetworkFixedPoint || options.diagnoseFallbackImport) &&
     options.fixture !== path.resolve(DEFAULT_PDF_HIGHLIGHT_FIXTURE)
   ) {
     throw new Error(
-      "First-network diagnostic mode requires the exact repository PDF fixture.",
+      "Issue #68 diagnostic mode requires the exact repository PDF fixture.",
     );
   }
   if (
-    options.diagnoseFirstNetworkFixedPoint &&
+    (options.diagnoseFirstNetworkFixedPoint || options.diagnoseFallbackImport) &&
     !isOutsideRepository(options.outputDirectory)
   ) {
     throw new Error(
-      "First-network diagnostic output must be outside the source repository.",
+      "Issue #68 diagnostic output must be outside the source repository.",
     );
   }
   if (
@@ -2003,14 +2750,19 @@ const INSTRUMENTATION_SOURCE = String.raw`
   const forceFallback = new URL(location.href).searchParams.has("issue68Fallback");
   const NativeWorker = globalThis.Worker;
   const workerEvents = [];
+  const workerLifecycle = [];
+  let workerInstanceSequence = 0;
   globalThis.Worker = class Issue68Worker extends NativeWorker {
     constructor(url, options) {
       const resolved = new URL(String(url), location.href).href;
       const pdfWorker = resolved.includes("pdf-document.worker");
+      const workerInstanceId = ++workerInstanceSequence;
+      const wrapped = forceFallback && pdfWorker;
       let workerUrl = url;
-      if (forceFallback && pdfWorker) {
+      if (wrapped) {
         const source = [
           "try { Object.defineProperty(globalThis, 'OffscreenCanvas', { configurable: true, value: undefined }); } catch {}",
+          "console.debug('__linelight_issue68_worker__', " + workerInstanceId + ");",
           "await import(" + JSON.stringify(resolved) + ");"
         ].join("\n");
         workerUrl = URL.createObjectURL(
@@ -2019,11 +2771,37 @@ const INSTRUMENTATION_SOURCE = String.raw`
       }
       super(workerUrl, options);
       this.__issue68PdfWorker = pdfWorker;
+      this.__issue68WorkerInstanceId = workerInstanceId;
+      workerLifecycle.push({
+        at: performance.now(),
+        forceFallback,
+        type: "constructed",
+        urlClass: pdfWorker ? "pdf-document-worker" : "other-worker",
+        workerInstanceId,
+        wrapped
+      });
       if (pdfWorker) {
+        let firstMessageRecorded = false;
         this.addEventListener("message", (event) => {
           const message = event.data || {};
           const documentId = message.page?.documentId || message.document?.id;
           const revision = message.page?.revision || message.revision || null;
+          if (!firstMessageRecorded) {
+            firstMessageRecorded = true;
+            workerLifecycle.push({
+              at: performance.now(),
+              documentKey: documentId && revision
+                ? documentId + ":" + revision
+                : null,
+              jobId: Number(message.jobId) || null,
+              messageType: message.type || null,
+              pageNumber: Number(message.pageNumber || message.page?.pageNumber) || null,
+              revision,
+              type: "first-message",
+              urlClass: "pdf-document-worker",
+              workerInstanceId
+            });
+          }
           workerEvents.push({
             at: performance.now(),
             completedPages: Number(message.completedPages) || null,
@@ -2043,7 +2821,26 @@ const INSTRUMENTATION_SOURCE = String.raw`
             revision,
             scale: Number(message.scale) || null,
             type: message.type || null,
+            workerInstanceId,
             width: Number(message.width) || null
+          });
+        });
+        this.addEventListener("error", () => {
+          workerLifecycle.push({
+            at: performance.now(),
+            category: "worker-error",
+            type: "error",
+            urlClass: "pdf-document-worker",
+            workerInstanceId
+          });
+        });
+        this.addEventListener("messageerror", () => {
+          workerLifecycle.push({
+            at: performance.now(),
+            category: "message-deserialization",
+            type: "message-error",
+            urlClass: "pdf-document-worker",
+            workerInstanceId
           });
         });
       }
@@ -2067,13 +2864,38 @@ const INSTRUMENTATION_SOURCE = String.raw`
           revision,
           scale: Number(message?.scale) || null,
           type: message?.type || null,
-          visible: message?.visible
+          visible: message?.visible,
+          workerInstanceId: this.__issue68WorkerInstanceId
+        });
+        workerLifecycle.push({
+          at: performance.now(),
+          documentKey: documentId && revision
+            ? documentId + ":" + revision
+            : null,
+          jobId: Number(message?.jobId) || null,
+          messageType: message?.type || null,
+          revision,
+          type: "post-message",
+          urlClass: "pdf-document-worker",
+          workerInstanceId: this.__issue68WorkerInstanceId
         });
       }
       if (arguments.length > 1) {
         return super.postMessage(message, transferOrOptions);
       }
       return super.postMessage(message);
+    }
+
+    terminate() {
+      if (this.__issue68PdfWorker) {
+        workerLifecycle.push({
+          at: performance.now(),
+          type: "terminated",
+          urlClass: "pdf-document-worker",
+          workerInstanceId: this.__issue68WorkerInstanceId
+        });
+      }
+      return super.terminate();
     }
   };
 
@@ -2094,7 +2916,8 @@ const INSTRUMENTATION_SOURCE = String.raw`
     scenarios: [],
     sourceFiles: [],
     spoken: [],
-    workerEvents
+    workerEvents,
+    workerLifecycle
   };
   let currentScenario = null;
   let currentPriorityProbe = null;
@@ -2208,7 +3031,12 @@ const INSTRUMENTATION_SOURCE = String.raw`
       const sha256 = Array.from(new Uint8Array(digest), (value) =>
         value.toString(16).padStart(2, "0")
       ).join("");
-      state.sourceFiles.push({ sha256, size: file.size });
+      state.sourceFiles.push({
+        at: performance.now(),
+        eventId: state.sourceFiles.length + 1,
+        sha256,
+        size: file.size
+      });
     }).catch(recordError);
   }, true);
   try {
@@ -2559,6 +3387,8 @@ const INSTRUMENTATION_SOURCE = String.raw`
     }
     let composedCount = 0;
     let composedPixels = 0;
+    const composedPages = [];
+    const visiblePages = [];
     for (const block of document.querySelectorAll(".pdf-page-block")) {
       const canvas = block.querySelector("canvas");
       if (!canvas) continue;
@@ -2580,7 +3410,15 @@ const INSTRUMENTATION_SOURCE = String.raw`
       if (sample.width > 0 && sample.height > 0) {
         composedCount += 1;
         composedPixels += sample.width * sample.height;
+        composedPages.push({
+          height: sample.height,
+          page,
+          pixels: sample.width * sample.height,
+          visible: sample.visible,
+          width: sample.width
+        });
       }
+      if (sample.visible) visiblePages.push(page);
       const key = [
         sample.width,
         sample.height,
@@ -2600,6 +3438,19 @@ const INSTRUMENTATION_SOURCE = String.raw`
       }
     }
     if (currentScenario) {
+      const frame = {
+        at: now,
+        composedCount,
+        composedPages,
+        composedPixels,
+        visiblePages
+      };
+      if (composedCount > currentScenario.maximumCanvasCount) {
+        currentScenario.maximumCountFrame = structuredClone(frame);
+      }
+      if (composedPixels > currentScenario.maximumCanvasPixels) {
+        currentScenario.maximumPixelsFrame = structuredClone(frame);
+      }
       currentScenario.maximumCanvasCount = Math.max(
         currentScenario.maximumCanvasCount,
         composedCount
@@ -2620,6 +3471,8 @@ const INSTRUMENTATION_SOURCE = String.raw`
       longTaskStart: state.longTasks.length,
       maximumCanvasCount: 0,
       maximumCanvasPixels: 0,
+      maximumCountFrame: null,
+      maximumPixelsFrame: null,
       sampleStart: state.samples.length,
       startedAt: performance.now(),
       workerEventStart: workerEvents.length
@@ -2640,18 +3493,70 @@ const INSTRUMENTATION_SOURCE = String.raw`
     return result;
   };
   state.beginPriorityProbe = (targetPage) => {
+    const latestImport = latestValidatedPdfImport();
+    const block = document.querySelector('#pdf-page-' + targetPage);
+    const canvas = block?.querySelector('canvas') ?? null;
+    const latestBitmap = workerEvents.findLast((event) =>
+      event.direction === 'from-worker' &&
+      event.type === 'bitmap' &&
+      event.pageNumber === targetPage &&
+      event.jobId === latestImport?.jobId &&
+      event.revision === latestImport?.revision &&
+      event.at >= latestImport.at
+    ) ?? null;
     currentPriorityProbe = {
       compositions: [],
       startedAt: performance.now(),
+      targetBefore: {
+        canvasHeight: canvas?.height ?? null,
+        canvasWidth: canvas?.width ?? null,
+        distance: Number(block?.dataset.pdfPageDistance),
+        latestBitmapEventId: latestBitmap?.eventId ?? null,
+        latestBitmapHeight: latestBitmap?.height ?? null,
+        latestBitmapScale: latestBitmap?.scale ?? null,
+        latestBitmapWidth: latestBitmap?.width ?? null,
+        targetHeight: Number(canvas?.dataset.pdfRasterTargetHeight) || null,
+        targetScale: Number(canvas?.dataset.pdfRasterTargetScale) || null,
+        targetWidth: Number(canvas?.dataset.pdfRasterTargetWidth) || null,
+        visible: block?.dataset.pdfPageVisible === 'true'
+      },
       targetPage,
       workerEventStart: workerEvents.length
     };
+  };
+  state.markPriorityScrollAction = (targetPage) => {
+    if (!currentPriorityProbe || currentPriorityProbe.targetPage !== targetPage) {
+      throw new Error('Priority scroll action does not match the active target.');
+    }
+    const event = {
+      at: performance.now(),
+      eventId: workerEvents.length,
+      targetPage,
+      type: 'rapid-scroll-action'
+    };
+    currentPriorityProbe.scrollAction = event;
+    return structuredClone(event);
   };
   state.finishPriorityProbe = () => {
     if (currentPriorityProbe) {
       currentPriorityProbe.workerEvents = workerEvents.slice(
         currentPriorityProbe.workerEventStart
       );
+      const block = document.querySelector(
+        '#pdf-page-' + currentPriorityProbe.targetPage
+      );
+      const canvas = block?.querySelector('canvas') ?? null;
+      currentPriorityProbe.targetAfter = {
+        canvasHeight: canvas?.height ?? null,
+        canvasWidth: canvas?.width ?? null,
+        distance: Number(block?.dataset.pdfPageDistance),
+        renderSource: canvas?.dataset.pdfRenderSource || null,
+        scale: Number(canvas?.dataset.pdfRasterScale) || null,
+        targetHeight: Number(canvas?.dataset.pdfRasterTargetHeight) || null,
+        targetScale: Number(canvas?.dataset.pdfRasterTargetScale) || null,
+        targetWidth: Number(canvas?.dataset.pdfRasterTargetWidth) || null,
+        visible: block?.dataset.pdfPageVisible === 'true'
+      };
     }
     const result = structuredClone(currentPriorityProbe);
     currentPriorityProbe = null;
@@ -2824,7 +3729,8 @@ const INSTRUMENTATION_SOURCE = String.raw`
     scenarios: state.scenarios,
     sourceFiles: state.sourceFiles,
     spoken: state.spoken,
-    workerEvents: state.workerEvents
+    workerEvents: state.workerEvents,
+    workerLifecycle: state.workerLifecycle
   });
 })();
 `;
@@ -3078,6 +3984,28 @@ async function configureAppSession(cdp, networkState) {
       completeRequest(event, message.sessionId, "loading-finished");
     } else if (message.method === "Network.responseReceived") {
       recordResponse(event, message.sessionId);
+    } else if (message.method === "Runtime.consoleAPICalled") {
+      const [sentinel, workerInstanceId] = event.args ?? [];
+      const target = networkState.targets.find(
+        (candidate) => candidate.sessionId === message.sessionId,
+      );
+      if (
+        sentinel?.value === "__linelight_issue68_worker__" &&
+        Number.isInteger(workerInstanceId?.value) &&
+        workerInstanceId.value > 0 &&
+        target?.type === "worker" &&
+        String(target.url).startsWith("blob:")
+      ) {
+        target.workerInstanceId = workerInstanceId.value;
+        recordActivity({
+          kind: "worker-instance-bound",
+          phase: target.phase,
+          sessionId: target.sessionId,
+          targetId: target.targetId,
+          type: target.type,
+          url: target.url,
+        });
+      }
     } else if (message.method === "Target.targetInfoChanged") {
       const target = networkState.targets.find(
         (candidate) => candidate.targetId === event.targetInfo?.targetId,
@@ -3140,6 +4068,7 @@ async function configureAppSession(cdp, networkState) {
         type: targetInfo.type,
         url: targetInfo.url,
         waitingForDebugger: Boolean(waitingForDebugger),
+        workerInstanceId: null,
       };
       let commandResultSequence = 0;
       const dispatchAttachCommand = (name, method, params) => {
@@ -3491,6 +4420,283 @@ async function navigateToReader(cdp, appUrl, configuration, fallback = false) {
     "the instrumented LineLight reader shell",
     SCENARIO_TIMEOUT_MS,
   );
+}
+
+async function readPrivateLibraryDiagnostic(cdp) {
+  return evaluate(
+    cdp,
+    browserExpression(`
+      const requestValue = (request) => new Promise((resolve, reject) => {
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+      const digestIdentity = async (value) => {
+        if (typeof value !== 'string' || !value) return null;
+        const bytes = new TextEncoder().encode(JSON.stringify([value]));
+        const digest = await crypto.subtle.digest('SHA-256', bytes);
+        return Array.from(new Uint8Array(digest), (byte) =>
+          byte.toString(16).padStart(2, '0')
+        ).join('');
+      };
+      try {
+        const database = await new Promise((resolve, reject) => {
+          const request = indexedDB.open('guided-reader-library');
+          request.onsuccess = () => resolve(request.result);
+          request.onerror = () => reject(request.error);
+        });
+        try {
+          const transaction = database.transaction(
+            ['documents', 'library', 'state', 'pdf-sources', 'pdf-pages'],
+            'readonly'
+          );
+          const library = await requestValue(
+            transaction.objectStore('library').getAll()
+          );
+          const activeDocumentId = await requestValue(
+            transaction.objectStore('state').get('active-document-id')
+          );
+          const activeDocument = typeof activeDocumentId === 'string'
+            ? await requestValue(
+                transaction.objectStore('documents').get(activeDocumentId)
+              )
+            : null;
+          const documentCount = await requestValue(
+            transaction.objectStore('documents').count()
+          );
+          const sourceCount = await requestValue(
+            transaction.objectStore('pdf-sources').count()
+          );
+          const pageCount = await requestValue(
+            transaction.objectStore('pdf-pages').count()
+          );
+          return {
+            activeDocumentIdentityHash: await digestIdentity(activeDocumentId),
+            activeDocumentPresent: Boolean(activeDocument),
+            available: true,
+            documentCount,
+            entryCount: library.length,
+            pageCount,
+            pdfEntryCount: library.filter((entry) => entry?.kind === 'pdf').length,
+            sourceCount
+          };
+        } finally {
+          database.close();
+        }
+      } catch {
+        return {
+          activeDocumentIdentityHash: null,
+          activeDocumentPresent: false,
+          available: false,
+          documentCount: null,
+          entryCount: null,
+          errorCategory: 'indexeddb-read',
+          pageCount: null,
+          pdfEntryCount: null,
+          sourceCount: null
+        };
+      }
+    `),
+  );
+}
+
+async function readFallbackImportDomDiagnostic(cdp) {
+  return evaluate(
+    cdp,
+    browserExpression(`
+      const pageView = document.querySelector('.pdf-page-view');
+      const pageOne = document.querySelector('#pdf-page-1');
+      const canvas = pageOne?.querySelector('canvas') ?? null;
+      const canvasSource = canvas?.dataset.pdfRenderSource || '';
+      const fileInput = document.querySelector('input[type="file"]');
+      const notice = document.querySelector('.notice')?.textContent?.trim() || '';
+      const noticeCategory = (${fixedNoticeCategory.toString()})(notice);
+      return {
+        fallbackActive: pageView?.dataset.pdfRenderFallback === 'true',
+        fileInputDisabled: fileInput instanceof HTMLInputElement
+          ? fileInput.disabled
+          : null,
+        fileInputPresent: Boolean(fileInput),
+        importDialogPresent: Boolean(document.querySelector('.import-modal')),
+        loadingPageCount: Array.from(
+          document.querySelectorAll('.pdf-page-loading')
+        ).filter((element) => getComputedStyle(element).display !== 'none').length,
+        mountedPageCount: document.querySelectorAll('.pdf-page-block').length,
+        noticeCategory,
+        noticePresent: Boolean(notice),
+        pageOneCanvasHeight: canvas?.height ?? null,
+        pageOneCanvasSource: ['main-fallback', 'worker-bitmap'].includes(canvasSource)
+          ? canvasSource
+          : canvasSource ? 'other' : null,
+        pageOneCanvasWidth: canvas?.width ?? null,
+        pageOnePresent: Boolean(pageOne),
+        pageOneVisible: pageOne?.dataset.pdfPageVisible === 'true',
+        pageOneWordOverlayCount:
+          pageOne?.querySelectorAll('.pdf-word-overlay').length ?? 0,
+        pageViewPresent: Boolean(pageView)
+      };
+    `),
+  );
+}
+
+async function collectPersistedFallbackDiagnosticSetup(
+  cdp,
+  appUrl,
+  fixturePath,
+) {
+  const configuration = PDF_SHARPNESS_MATRIX[0];
+  await navigateToReader(cdp, appUrl, configuration);
+  await importFixture(cdp, fixturePath);
+  await waitForExpression(
+    cdp,
+    `globalThis.__lineLightIssue68.sourceFiles.length === 1`,
+    "the setup PDF source identity",
+    SCENARIO_TIMEOUT_MS,
+  );
+  const model = await waitForPdfModelCompletion(cdp, 6);
+  const [snapshot, library] = await Promise.all([
+    evaluate(cdp, `globalThis.__lineLightIssue68.snapshot()`),
+    readPrivateLibraryDiagnostic(cdp),
+  ]);
+  const documentId =
+    typeof model.documentKey === "string" &&
+    typeof model.revision === "string" &&
+    model.documentKey.endsWith(`:${model.revision}`)
+      ? model.documentKey.slice(0, -(model.revision.length + 1))
+      : null;
+  const source = snapshot.sourceFiles?.[0] ?? null;
+  return {
+    completeEventCount: model.completeEventCount,
+    documentIdentityHash: documentId
+      ? cdpDiagnosticIdentity(documentId)
+      : null,
+    library,
+    pageEventCount: model.pageEventCount,
+    source:
+      source?.size === PUBLIC_PDF_FIXTURE_BYTES &&
+      source?.sha256 === PUBLIC_PDF_FIXTURE_SHA256
+        ? { bytes: source.size, sha256: source.sha256 }
+        : null,
+  };
+}
+
+async function collectFallbackImportDiagnostic(
+  cdp,
+  appUrl,
+  fixturePath,
+  fixture,
+  outputDirectory,
+  networkState,
+) {
+  const configuration = PDF_SHARPNESS_MATRIX[0];
+  await navigateToReader(cdp, appUrl, configuration, true);
+  const boundary = await evaluate(
+    cdp,
+    browserExpression(`
+      const state = globalThis.__lineLightIssue68;
+      return {
+        sourceFileStart: state.sourceFiles.length,
+        startedAt: performance.now(),
+        workerEventStart: state.workerEvents.length,
+        workerLifecycleStart: state.workerLifecycle.length
+      };
+    `),
+  );
+  const networkBoundary = {
+    attachPromiseCount: networkState.attachPromises.length,
+    requestCount: networkState.requests.length,
+    settlementCount: networkState.targetBootstrapSettlements.length,
+    targetCount: networkState.targets.length,
+  };
+  await selectFixtureFile(cdp, fixturePath);
+  let importRequest = null;
+  let outcome = "import-request-timeout";
+  try {
+    importRequest = await waitForExpression(
+      cdp,
+      browserExpression(`
+        return globalThis.__lineLightIssue68.workerEvents.find((event) =>
+          event.eventId > ${boundary.workerEventStart} &&
+          event.direction === 'to-worker' &&
+          event.type === 'import' &&
+          Number.isInteger(event.jobId) &&
+          typeof event.documentKey === 'string' && event.documentKey &&
+          typeof event.revision === 'string' && event.revision
+        ) || false;
+      `),
+      "the exact post-change fallback import request",
+      10_000,
+    );
+    outcome = "import-chain-timeout";
+    await waitForExpression(
+      cdp,
+      browserExpression(`
+        const state = globalThis.__lineLightIssue68;
+        const summarize = (${summarizePdfModelCompletion.toString()});
+        const importRequest = state.workerEvents.find((event) =>
+          event.eventId === ${importRequest.eventId} &&
+          event.direction === 'to-worker' && event.type === 'import'
+        );
+        if (!importRequest) return false;
+        const model = summarize(state.workerEvents.filter((event) =>
+          event.direction === 'to-worker' ||
+          event.workerInstanceId === importRequest.workerInstanceId
+        ), 6);
+        const laterStart = state.workerEvents.some((event) =>
+          event.eventId > importRequest.eventId &&
+          event.direction === 'to-worker' &&
+          ['import', 'open'].includes(event.type)
+        );
+        const fallback = state.workerEvents.find((event) =>
+          event.eventId > importRequest.eventId &&
+          event.direction === 'from-worker' &&
+          event.type === 'render-fallback' &&
+          event.jobId === importRequest.jobId &&
+          event.revision === importRequest.revision &&
+          event.workerInstanceId === importRequest.workerInstanceId
+        );
+        const source = state.sourceFiles[${boundary.sourceFileStart}];
+        const pageOne = document.querySelector('#pdf-page-1');
+        return Boolean(
+          model.complete &&
+          model.importJobId === importRequest.jobId &&
+          model.revision === importRequest.revision &&
+          model.documentKey === importRequest.documentKey &&
+          !laterStart && fallback &&
+          source?.size === ${PUBLIC_PDF_FIXTURE_BYTES} &&
+          source?.sha256 === ${JSON.stringify(PUBLIC_PDF_FIXTURE_SHA256)} &&
+          document.querySelector('.pdf-page-view')?.dataset.pdfRenderFallback === 'true' &&
+          pageOne?.querySelectorAll('.pdf-word-overlay').length >= 20
+        );
+      `),
+      "the exact fallback import model/DOM chain",
+      FALLBACK_IMPORT_DIAGNOSTIC_TIMEOUT_MS,
+    );
+    outcome = "import-chain-reached";
+  } catch {
+    // The report persists bounded fixed metadata that distinguishes the stage.
+  }
+  const [snapshot, dom, libraryAfter] = await Promise.all([
+    evaluate(cdp, `globalThis.__lineLightIssue68.snapshot()`),
+    readFallbackImportDomDiagnostic(cdp),
+    readPrivateLibraryDiagnostic(cdp),
+  ]);
+  const screenshot = await writeScreenshot(
+    cdp,
+    outputDirectory,
+    FALLBACK_IMPORT_DIAGNOSTIC_SCREENSHOT,
+  );
+  return {
+    boundary,
+    dom,
+    fixture: { bytes: fixture.bytes, sha256: fixture.sha256 },
+    importRequestObserved: Boolean(importRequest),
+    libraryAfter,
+    libraryBefore: null,
+    networkBoundary,
+    outcome,
+    screenshot,
+    snapshot,
+  };
 }
 
 async function waitForPageShell(cdp, pageNumber) {
@@ -4121,6 +5327,10 @@ async function collectMatrixRun(
     cdp,
     `globalThis.__lineLightIssue68.beginPriorityProbe(${priorityTarget}); true`,
   );
+  await evaluate(
+    cdp,
+    `globalThis.__lineLightIssue68.markPriorityScrollAction(${priorityTarget})`,
+  );
   await scrollPageIntoView(cdp, priorityTarget);
   await waitForSharpCanvas(cdp, priorityTarget, null, modelCompletion);
   const priorityProbe = await evaluate(
@@ -4199,6 +5409,53 @@ async function collectMatrixRun(
       event.jobId === modelCompletion.importJobId &&
       event.revision === modelCompletion.revision,
   );
+  const postScrollWorkerEvents = (priorityProbe?.workerEvents ?? []).filter(
+    (event) =>
+      Number.isInteger(event.eventId) &&
+      event.eventId > Number(priorityProbe?.scrollAction?.eventId) &&
+      event.jobId === modelCompletion.importJobId &&
+      event.revision === modelCompletion.revision,
+  );
+  const visibleRenderRequests = postScrollWorkerEvents.filter(
+    (event) =>
+      event.direction === "to-worker" &&
+      event.type === "render" &&
+      event.enabled === true &&
+      event.visible === true,
+  );
+  const postScrollBitmaps = postScrollWorkerEvents.filter(
+    (event) => event.direction === "from-worker" && event.type === "bitmap",
+  );
+  const targetVisibleRequest = visibleRenderRequests.find(
+    (event) => event.pageNumber === priorityTarget,
+  ) ?? null;
+  const targetBitmapAfterVisibleRequest = targetVisibleRequest
+    ? postScrollBitmaps.find(
+        (event) =>
+          event.pageNumber === priorityTarget &&
+          event.eventId > targetVisibleRequest.eventId,
+      ) ?? null
+    : null;
+  const summarizePriorityEvent = (event) => event
+    ? {
+        distance: Number.isFinite(event.distance) ? event.distance : null,
+        enabled: typeof event.enabled === "boolean" ? event.enabled : null,
+        eventId: event.eventId,
+        height: event.height ?? null,
+        identityHash: cdpDiagnosticIdentity(
+          event.workerInstanceId,
+          event.jobId,
+          event.documentKey,
+          event.revision,
+          event.eventId,
+        ),
+        pageNumber: event.pageNumber,
+        scale: event.scale ?? null,
+        type: event.type,
+        visible: typeof event.visible === "boolean" ? event.visible : null,
+        width: event.width ?? null,
+      }
+    : null;
   const firstTargetBitmapIndex = priorityBitmaps.findIndex(
     (event) => event.pageNumber === priorityTarget,
   );
@@ -4226,7 +5483,9 @@ async function collectMatrixRun(
     },
     canvasBudget: {
       maximumCount: scenario.maximumCanvasCount,
+      maximumCountFrame: scenario.maximumCountFrame,
       maximumPixels: scenario.maximumCanvasPixels,
+      maximumPixelsFrame: scenario.maximumPixelsFrame,
     },
     id: configuration.id,
     importedSource: snapshot.sourceFiles[0] ?? null,
@@ -4286,7 +5545,17 @@ async function collectMatrixRun(
       firstWorkerBitmapPage: priorityBitmaps[0]?.pageNumber ?? null,
       staleNonVisibleCompositions,
       staleWorkerBitmaps,
+      targetAfter: priorityProbe?.targetAfter ?? null,
+      targetBefore: priorityProbe?.targetBefore ?? null,
+      targetBitmapAfterVisibleRequest: summarizePriorityEvent(
+        targetBitmapAfterVisibleRequest,
+      ),
       targetPage: priorityTarget,
+      targetVisibleRequest: summarizePriorityEvent(targetVisibleRequest),
+      firstPostScrollBitmapPage: postScrollBitmaps[0]?.pageNumber ?? null,
+      firstPostScrollVisibleRequestPage:
+        visibleRenderRequests[0]?.pageNumber ?? null,
+      scrollAction: priorityProbe?.scrollAction ?? null,
     },
   };
 }
@@ -5054,6 +6323,9 @@ async function run(options) {
   let referenceBrowser = null;
   let referenceCdp = null;
   let runnerFailure = null;
+  let fallbackDiagnosticCapture = null;
+  let fallbackDiagnosticNetwork = null;
+  let fallbackDiagnosticSetup = null;
   let appShutdown = null;
   let referenceShutdown = null;
   let serverShutdown = null;
@@ -5107,104 +6379,153 @@ async function run(options) {
       evidence.build.localManifest.deploymentId;
 
     appBrowser = await startBrowser(options.browser, true);
-    appCdp = await CdpSession.connect(appBrowser.webSocketDebuggerUrl);
-    const { targetInfos: initialTargetInfos } = await appCdp.send(
-      "Target.getTargets",
-      {
-        filter: [
-          { type: "page" },
-          { type: "worker" },
-          { type: "shared_worker" },
-          { type: "service_worker" },
-        ],
-      },
-    );
-    networkState.initialTargetBaseline =
-      validateCdpInitialTargetBaseline(initialTargetInfos);
-    await configureAppSession(appCdp, networkState);
-    const targetPages = new Map();
-    for (const configuration of PDF_SHARPNESS_MATRIX) {
-      networkState.phase = configuration.id;
-      const matrixRun = await collectMatrixRun(
-        appCdp,
-        server.appUrl,
-        options.fixture,
-        options.outputDirectory,
-        configuration,
+    const collectAppEvidence = async () => {
+      appCdp = await CdpSession.connect(appBrowser.webSocketDebuggerUrl);
+      const { targetInfos: initialTargetInfos } = await appCdp.send(
+        "Target.getTargets",
+        {
+          filter: [
+            { type: "page" },
+            { type: "worker" },
+            { type: "shared_worker" },
+            { type: "service_worker" },
+          ],
+        },
       );
-      matrixRun.comparison.sourceSha256 = fixture.sha256;
-      if (options.diagnoseFirstNetworkFixedPoint) {
-        evidence.matrix.push(matrixRun);
-      }
-      const networkFixedPoint = await waitForCdpNetworkFixedPoint(
-        networkState,
-        server.appUrl,
-        configuration.id,
-      );
-      if (options.diagnoseFirstNetworkFixedPoint) {
-        networkState.fixedPointDiagnostics.push(
-          networkFixedPoint.diagnostic,
+      networkState.initialTargetBaseline =
+        validateCdpInitialTargetBaseline(initialTargetInfos);
+      await configureAppSession(appCdp, networkState);
+      const targetPages = new Map();
+      if (options.diagnoseFallbackImport) {
+        networkState.phase = "fallback-diagnostic-setup";
+        fallbackDiagnosticSetup = await collectPersistedFallbackDiagnosticSetup(
+          appCdp,
+          server.appUrl,
+          options.fixture,
         );
-        break;
+        await waitForCdpNetworkFixedPoint(
+          networkState,
+          server.appUrl,
+          "fallback-diagnostic-setup",
+        );
+        networkState.phase = FALLBACK_IMPORT_DIAGNOSTIC_LABEL;
+        fallbackDiagnosticCapture = await collectFallbackImportDiagnostic(
+          appCdp,
+          server.appUrl,
+          options.fixture,
+          fixture,
+          options.outputDirectory,
+          networkState,
+        );
+        try {
+          const fixedPoint = await waitForCdpNetworkFixedPoint(
+            networkState,
+            server.appUrl,
+            FALLBACK_IMPORT_DIAGNOSTIC_LABEL,
+          );
+          fallbackDiagnosticNetwork = fixedPoint.diagnostic;
+        } catch {
+          fallbackDiagnosticNetwork =
+            networkState.fixedPointDiagnostics.at(-1) ?? null;
+        }
+      } else {
+        for (const configuration of PDF_SHARPNESS_MATRIX) {
+          networkState.phase = configuration.id;
+          const matrixRun = await collectMatrixRun(
+            appCdp,
+            server.appUrl,
+            options.fixture,
+            options.outputDirectory,
+            configuration,
+          );
+          matrixRun.comparison.sourceSha256 = fixture.sha256;
+          if (options.diagnoseFirstNetworkFixedPoint) {
+            evidence.matrix.push(matrixRun);
+          }
+          const networkFixedPoint = await waitForCdpNetworkFixedPoint(
+            networkState,
+            server.appUrl,
+            configuration.id,
+          );
+          if (options.diagnoseFirstNetworkFixedPoint) {
+            networkState.fixedPointDiagnostics.push(
+              networkFixedPoint.diagnostic,
+            );
+            break;
+          }
+          targetPages.set(configuration.id, matrixRun.comparison.targetPage);
+          evidence.matrix.push(matrixRun);
+        }
       }
-      targetPages.set(configuration.id, matrixRun.comparison.targetPage);
-      evidence.matrix.push(matrixRun);
-    }
-    if (!options.diagnoseFirstNetworkFixedPoint) {
-      networkState.phase = "forced-main-fallback";
-      evidence.fallback = await collectFallbackEvidence(
-        appCdp,
-        server.appUrl,
-        options.fixture,
-        options.outputDirectory,
-      );
-      await waitForCdpNetworkFixedPoint(
-        networkState,
-        server.appUrl,
-        "forced-main-fallback",
-      );
+      if (
+        !options.diagnoseFallbackImport &&
+        !options.diagnoseFirstNetworkFixedPoint
+      ) {
+        networkState.phase = "forced-main-fallback";
+        evidence.fallback = await collectFallbackEvidence(
+          appCdp,
+          server.appUrl,
+          options.fixture,
+          options.outputDirectory,
+        );
+        await waitForCdpNetworkFixedPoint(
+          networkState,
+          server.appUrl,
+          "forced-main-fallback",
+        );
 
-      referenceBrowser = await startBrowser(options.browser, true);
-      referenceCdp = await CdpSession.connect(
-        referenceBrowser.webSocketDebuggerUrl,
-      );
-      await Promise.all([
-        referenceCdp.send("Page.enable"),
-        referenceCdp.send("Runtime.enable"),
-      ]);
-      const reference = await captureReferenceScreenshots(
-        referenceCdp,
-        options.fixture,
-        options.outputDirectory,
-        targetPages,
-      );
-      for (const matrixRun of evidence.matrix) {
-        const referenceCapture = reference.screenshots.get(matrixRun.id);
-        matrixRun.comparison.referenceScreenshot =
-          referenceCapture?.artifact ?? null;
-        matrixRun.comparison.referenceReadiness =
-          referenceCapture?.readiness ?? null;
-        matrixRun.comparison.paired = true;
+        referenceBrowser = await startBrowser(options.browser, true);
+        referenceCdp = await CdpSession.connect(
+          referenceBrowser.webSocketDebuggerUrl,
+        );
+        await Promise.all([
+          referenceCdp.send("Page.enable"),
+          referenceCdp.send("Runtime.enable"),
+        ]);
+        const reference = await captureReferenceScreenshots(
+          referenceCdp,
+          options.fixture,
+          options.outputDirectory,
+          targetPages,
+        );
+        for (const matrixRun of evidence.matrix) {
+          const referenceCapture = reference.screenshots.get(matrixRun.id);
+          matrixRun.comparison.referenceScreenshot =
+            referenceCapture?.artifact ?? null;
+          matrixRun.comparison.referenceReadiness =
+            referenceCapture?.readiness ?? null;
+          matrixRun.comparison.paired = true;
+        }
+        await waitForCdpNetworkFixedPoint(
+          networkState,
+          server.appUrl,
+          "final-network-privacy",
+        );
+        evidence.network = summarizeNetwork(
+          networkState,
+          server.appUrl,
+          options.fixture,
+          fixture.sha256,
+          reference.scheme,
+        );
+        evidence.artifacts.screenshots = [
+          ...evidence.matrix.flatMap((matrixRun) => [
+            matrixRun.comparison.referenceScreenshot,
+            matrixRun.comparison.lineLightScreenshot,
+          ]),
+          evidence.fallback.artifact,
+        ];
       }
-      await waitForCdpNetworkFixedPoint(
-        networkState,
-        server.appUrl,
-        "final-network-privacy",
-      );
-      evidence.network = summarizeNetwork(
-        networkState,
-        server.appUrl,
-        options.fixture,
-        fixture.sha256,
-        reference.scheme,
-      );
-      evidence.artifacts.screenshots = [
-        ...evidence.matrix.flatMap((matrixRun) => [
-          matrixRun.comparison.referenceScreenshot,
-          matrixRun.comparison.lineLightScreenshot,
-        ]),
-        evidence.fallback.artifact,
-      ];
+    };
+    if (options.diagnoseFallbackImport) {
+      await runBoundedDiagnosticOperation(collectAppEvidence, {
+        onTimeout() {
+          appCdp?.close();
+        },
+        timeoutMs: FALLBACK_IMPORT_DIAGNOSTIC_RUN_TIMEOUT_MS,
+      });
+    } else {
+      await collectAppEvidence();
     }
   } catch (error) {
     runnerFailure = error;
@@ -5238,6 +6559,34 @@ async function run(options) {
     evidence.networkDiagnostics = [
       ...networkState.fixedPointDiagnostics,
     ];
+  }
+
+  if (options.diagnoseFallbackImport) {
+    const report = buildFallbackImportDiagnosticReport({
+      build: evidence.build,
+      capture: fallbackDiagnosticCapture,
+      fixture,
+      networkDiagnostic: fallbackDiagnosticNetwork,
+      outputDirectory: options.outputDirectory,
+      runnerFailure,
+      setup: fallbackDiagnosticSetup,
+      source,
+      teardown: evidence.teardown,
+    });
+    const diagnosticPath = path.join(
+      options.outputDirectory,
+      "pdf-sharpness-fallback-import-diagnostic.json",
+    );
+    await writeFile(diagnosticPath, `${JSON.stringify(report, null, 2)}\n`);
+    if (report.failures.length) {
+      throw new Error(
+        `Issue #68 fallback-import diagnostic completed with a failed gate. Evidence: ${diagnosticPath}\n${report.failures.join("\n")}`,
+      );
+    }
+    process.stdout.write(
+      `Issue #68 fallback-import diagnostic completed: ${diagnosticPath}\n`,
+    );
+    return;
   }
 
   if (options.diagnoseFirstNetworkFixedPoint) {

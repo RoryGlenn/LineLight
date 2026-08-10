@@ -19,6 +19,7 @@ const PDF_SHARPNESS_RASTER_SCALE_STEP = 0.25;
 const PDF_SHARPNESS_SCALE_EPSILON = 1e-7;
 
 export const PDF_SHARPNESS_SOURCE_FILES = Object.freeze([
+  "app/page.tsx",
   "app/pdf-document-model.mjs",
   "app/pdf-document-protocol.mjs",
   "app/pdf-document-types.ts",
@@ -30,6 +31,7 @@ export const PDF_SHARPNESS_SOURCE_FILES = Object.freeze([
   "app/pdf-parser.worker.ts",
   "app/pdf-raster-scheduler.mjs",
   "app/pdf-raster-scale.mjs",
+  "app/reader-lifecycle.mjs",
   "app/reader-virtualization.mjs",
   "docs/codebase-index.md",
   "docs/evidence/issue-68/README.md",
@@ -43,6 +45,7 @@ export const PDF_SHARPNESS_SOURCE_FILES = Object.freeze([
   "tests/pdf-raster-lifecycle.test.mjs",
   "tests/pdf-raster-scale.test.mjs",
   "tests/pdf-sharpness-browser-harness.test.mjs",
+  "tests/reader-lifecycle.test.mjs",
   "tests/reader-virtualization.test.mjs",
 ]);
 

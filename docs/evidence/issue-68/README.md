@@ -43,6 +43,29 @@ never records URL paths or queries, raw error text,
 request bodies or headers, document text, or browser-profile paths. It is a
 diagnosis aid, not Issue 68 acceptance evidence.
 
+When the persisted-document restore and forced-fallback import boundary needs
+diagnosis, use the separate bounded lifecycle mode with a fresh external output
+directory:
+
+```bash
+node scripts/run-pdf-sharpness-browser-regression.mjs \
+  --diagnose-fallback-import --output /tmp/issue-68-fallback-import-diagnostic
+```
+
+This mode first imports and persists the exact public fixture, navigates the
+same disposable profile into forced fallback, and immediately selects that
+fixture again. It accepts completion only from the new file-change import's
+exact job, document, revision, page 1, terminal progress, complete, and
+render-fallback chain; an automatically restored page or generic ready DOM
+cannot pass. Its distinct `diagnostic: true` report has `completed`,
+`importCompleted`, and `networkSettled` states but never a canonical `passed`
+field or acceptance schema version. It records only fixture hashes/counts,
+opaque local-library identities, fixed DOM/notice/error categories, wrapped
+worker lifecycle metadata, sanitized CDP target/network state, one bound
+external screenshot, and fail-closed owned teardown. It never stores document
+text, raw local document identities, worker payloads, URL paths or queries, raw
+errors, or profile paths.
+
 The runner always makes a fresh production build, serves that exact artifact on
 an owned loopback Wrangler process, and opens visible Brave windows. It refuses
 an uncommitted source tree and binds the source commit/tree, reviewed-file
