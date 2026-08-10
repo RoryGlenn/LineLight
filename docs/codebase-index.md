@@ -259,7 +259,9 @@ effective browser-zoom metrics, mobile DPR, and visual-viewport pinch. It
 launches and tears down one fresh configured reference browser/profile per
 matrix entry, binds each about:blank-to-new-loader lifecycle to its ordered
 teardown row, and validates native mobile layout/visual behavior through
-screen/DPR-derived relations rather than fixed browser decimals. Decoded
+the named 980-CSS-pixel Chromium default mobile layout width plus
+screen/DPR-derived height and scale relations, without freezing observed
+floating-point decimals. Decoded
 reference pixels retain the global version-2 component proof and separately
 crop the unique top-anchored substantial component for the requested page, so
 an adjacent global winner cannot substitute for the reviewed target. It records

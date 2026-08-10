@@ -99,10 +99,11 @@ post-dispatch `Page.loadEventFired` proves the page-load boundary. The report
 retains only opaque ID hashes, fixed protocol/content classes, and the actual
 DPR, screen, layout, and visual-viewport metrics. Native mobile PDF viewing is
 validated relationally: pre-navigation and viewer layouts remain stable,
-layout aspect follows the emulated screen, visual dimensions multiplied by
+the named 980-CSS-pixel Chromium default mobile layout width is exact, layout
+height follows the emulated screen aspect, visual dimensions multiplied by
 their scale map back to that screen within the DPR tolerance, and viewer scale
-derives from the requested pinch and screen-to-layout ratio. Chromium's
-non-meta mobile layout therefore needs no hardcoded browser width. The mode
+derives from the requested pinch and screen-to-layout ratio. Observed fractional
+heights and scales are derived rather than hardcoded. The mode
 then binds two adjacent, byte-identical candidate PNGs at the exact expected
 physical dimensions to fixed basenames, byte counts, hashes, version-2
 segmentation metrics, and the deterministic requested-page component
@@ -159,7 +160,9 @@ runner-up white areas, and their exact dominance ratio before applying the
 unchanged 1% inset and five rendered-ink thresholds. A disconnected white
 thumbnail rail, toolbar, blank page, clipped page, spinner, loading surface, or
 ambiguous tied components therefore cannot satisfy readiness. The JSON
-validator independently checks those global segmentation metrics. It proves
+validator independently checks those global segmentation metrics, including
+the disjoint-component area sum, disjoint white/ink pixel counts, and the
+minimum-pixel and row-spacing implications of each ink band. It proves
 the requested page separately instead of assuming that page is the largest
 visible component: all substantial components are retained in deterministic
 top-first order, exactly one must be anchored in the top quarter after the

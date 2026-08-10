@@ -34,6 +34,7 @@ import {
   PDF_SHARPNESS_MATRIX,
   PDF_SHARPNESS_MAX_BITMAP_COUNT,
   PDF_SHARPNESS_MAX_BITMAP_PIXELS,
+  PDF_SHARPNESS_NATIVE_MOBILE_LAYOUT_WIDTH,
   PDF_SHARPNESS_REFERENCE_MAX_INK_RATIO,
   PDF_SHARPNESS_REFERENCE_MIN_INK_PIXELS,
   PDF_SHARPNESS_REFERENCE_MIN_INK_SPAN_RATIO,
@@ -1839,6 +1840,10 @@ function sanitizeReferenceDiagnosticAnalysis(analysis) {
     substantialComponents &&
     substantialComponents.length === analysis?.substantialComponentCount &&
     substantialComponents.every(componentValid) &&
+    substantialComponents.reduce(
+      (total, component) => total + component.whiteArea,
+      0,
+    ) <= analysis.width * analysis.height &&
     componentOrderValid(substantialComponents) &&
     new Set(substantialComponents.map((component) =>
       JSON.stringify(component.pageBounds)
@@ -1921,6 +1926,7 @@ function sanitizeReferenceDiagnosticAnalysis(analysis) {
     const insetY = Math.max(2, Math.floor(bounds.height * 0.01));
     const expectedPagePixels =
       (bounds.width - insetX * 2) * (bounds.height - insetY * 2);
+    const interiorHeight = bounds.height - insetY * 2;
     const renderedPage =
       analysis.pageWhiteRatio >= PDF_SHARPNESS_REFERENCE_MIN_WHITE_RATIO &&
       analysis.inkPixels >= PDF_SHARPNESS_REFERENCE_MIN_INK_PIXELS &&
@@ -1937,6 +1943,9 @@ function sanitizeReferenceDiagnosticAnalysis(analysis) {
         analysis.pageWhitePixels / analysis.pagePixels,
       ) &&
       analysis.inkPixels <= analysis.pagePixels &&
+      analysis.pageWhitePixels + analysis.inkPixels <= analysis.pagePixels &&
+      analysis.inkRowBands <= Math.ceil(interiorHeight / 3) &&
+      analysis.inkPixels >= analysis.inkRowBands * 3 &&
       closeTo(
         analysis.inkRatio,
         analysis.inkPixels / analysis.pagePixels,
@@ -2147,7 +2156,7 @@ export function referenceViewportContract(expected, configured, viewer) {
         viewport.innerWidth * expected.layoutHeight / expected.layoutWidth,
     ) <= 1;
   const innerLayoutBound = (viewport) => expected.mobile
-    ? viewport.innerWidth >= expected.layoutWidth &&
+    ? closeTo(viewport.innerWidth, PDF_SHARPNESS_NATIVE_MOBILE_LAYOUT_WIDTH) &&
       viewport.innerHeight >= expected.layoutHeight
     : closeTo(viewport.innerWidth, expected.layoutWidth) &&
       closeTo(viewport.innerHeight, expected.layoutHeight);

@@ -14,6 +14,7 @@ export const PDF_SHARPNESS_REFERENCE_MIN_INK_PIXELS = 100;
 export const PDF_SHARPNESS_REFERENCE_MAX_INK_RATIO = 0.2;
 export const PDF_SHARPNESS_REFERENCE_MIN_INK_ROW_BANDS = 2;
 export const PDF_SHARPNESS_REFERENCE_MIN_INK_SPAN_RATIO = 0.2;
+export const PDF_SHARPNESS_NATIVE_MOBILE_LAYOUT_WIDTH = 980;
 const PDF_SHARPNESS_RASTER_SCALE_STEP = 0.25;
 const PDF_SHARPNESS_SCALE_EPSILON = 1e-7;
 
@@ -181,6 +182,9 @@ function validRenderedReferenceAnalysis(analysis) {
       Number.isInteger(bounds?.height)
     ? (bounds.width - insetX * 2) * (bounds.height - insetY * 2)
     : 0;
+  const interiorHeight = Number.isInteger(bounds?.height)
+    ? bounds.height - insetY * 2
+    : 0;
   return (
     analysis?.renderedPage === true &&
     analysis?.proof === "white-page-with-rendered-ink" &&
@@ -222,6 +226,7 @@ function validRenderedReferenceAnalysis(analysis) {
     nonNegativeInteger(analysis?.inkPixels) &&
     analysis.inkPixels >= PDF_SHARPNESS_REFERENCE_MIN_INK_PIXELS &&
     analysis.inkPixels <= analysis.pagePixels &&
+    analysis.pageWhitePixels + analysis.inkPixels <= analysis.pagePixels &&
     finite(analysis?.inkRatio) &&
     analysis.inkRatio <= PDF_SHARPNESS_REFERENCE_MAX_INK_RATIO &&
     closeTo(
@@ -231,6 +236,8 @@ function validRenderedReferenceAnalysis(analysis) {
     ) &&
     Number.isInteger(analysis?.inkRowBands) &&
     analysis.inkRowBands >= PDF_SHARPNESS_REFERENCE_MIN_INK_ROW_BANDS &&
+    analysis.inkRowBands <= Math.ceil(interiorHeight / 3) &&
+    analysis.inkPixels >= analysis.inkRowBands * 3 &&
     finite(analysis?.inkSpanRatio) &&
     analysis.inkSpanRatio >= PDF_SHARPNESS_REFERENCE_MIN_INK_SPAN_RATIO &&
     analysis.inkSpanRatio <= 1
@@ -239,14 +246,16 @@ function validRenderedReferenceAnalysis(analysis) {
 
 function validNativeReferenceViewport(expected, configured, viewer) {
   if (!configured || !viewer) return false;
+  const exact = (left, right) =>
+    finite(left) && finite(right) && Math.abs(left - right) <= 1e-7;
   const expectedDpr = expected.baseDevicePixelRatio * expected.browserZoom;
   const expectedWidth = Math.round(expected.width / expected.browserZoom);
   const expectedHeight = Math.round(expected.height / expected.browserZoom);
   const tolerance = 1 / expectedDpr;
   const screenBound = (viewport) =>
-    closeTo(viewport?.devicePixelRatio, expectedDpr) &&
-    closeTo(viewport?.screenWidth, expectedWidth) &&
-    closeTo(viewport?.screenHeight, expectedHeight);
+    exact(viewport?.devicePixelRatio, expectedDpr) &&
+    exact(viewport?.screenWidth, expectedWidth) &&
+    exact(viewport?.screenHeight, expectedHeight);
   const innerAspectBound = (viewport) =>
     finite(viewport?.innerWidth) &&
     finite(viewport?.innerHeight) &&
@@ -257,10 +266,10 @@ function validNativeReferenceViewport(expected, configured, viewer) {
         viewport.innerWidth * expectedHeight / expectedWidth,
     ) <= 1;
   const innerLayoutBound = (viewport) => expected.kind === "mobile"
-    ? viewport?.innerWidth >= expectedWidth &&
+    ? exact(viewport?.innerWidth, PDF_SHARPNESS_NATIVE_MOBILE_LAYOUT_WIDTH) &&
       viewport?.innerHeight >= expectedHeight
-    : closeTo(viewport?.innerWidth, expectedWidth) &&
-      closeTo(viewport?.innerHeight, expectedHeight);
+    : exact(viewport?.innerWidth, expectedWidth) &&
+      exact(viewport?.innerHeight, expectedHeight);
   const visualMapsToScreen = (viewport) =>
     finite(viewport?.visualViewportWidth) &&
     finite(viewport?.visualViewportHeight) &&
@@ -278,16 +287,16 @@ function validNativeReferenceViewport(expected, configured, viewer) {
   return (
     screenBound(configured) &&
     screenBound(viewer) &&
-    closeTo(configured.innerWidth, viewer.innerWidth) &&
-    closeTo(configured.innerHeight, viewer.innerHeight) &&
+    exact(configured.innerWidth, viewer.innerWidth) &&
+    exact(configured.innerHeight, viewer.innerHeight) &&
     innerLayoutBound(configured) &&
     innerLayoutBound(viewer) &&
     innerAspectBound(configured) &&
     innerAspectBound(viewer) &&
     visualMapsToScreen(configured) &&
     visualMapsToScreen(viewer) &&
-    closeTo(configured.visualViewportScale, expected.pinchZoom) &&
-    closeTo(
+    exact(configured.visualViewportScale, expected.pinchZoom) &&
+    exact(
       viewer.visualViewportScale,
       expected.pinchZoom * expectedWidth / viewer.innerWidth,
     )
@@ -658,6 +667,12 @@ export function validatePdfSharpnessEvidence(evidence) {
           winnerWhiteArea / runnerUpWhiteArea,
           1e-9,
         );
+    const referenceInsetY = Number.isInteger(pageBounds?.height)
+      ? Math.max(2, Math.floor(pageBounds.height * 0.01))
+      : 0;
+    const referenceInteriorHeight = Number.isInteger(pageBounds?.height)
+      ? pageBounds.height - referenceInsetY * 2
+      : 0;
     if (
       referenceReadiness?.renderedPage !== true ||
       referenceReadiness?.proof !== "white-page-with-rendered-ink" ||
@@ -706,6 +721,8 @@ export function validatePdfSharpnessEvidence(evidence) {
       !nonNegativeInteger(referenceReadiness?.inkPixels) ||
       referenceReadiness.inkPixels < PDF_SHARPNESS_REFERENCE_MIN_INK_PIXELS ||
       referenceReadiness.inkPixels > referenceReadiness.pagePixels ||
+      referenceReadiness.pageWhitePixels + referenceReadiness.inkPixels >
+        referenceReadiness.pagePixels ||
       !finite(referenceReadiness?.inkRatio) ||
       referenceReadiness.inkRatio > PDF_SHARPNESS_REFERENCE_MAX_INK_RATIO ||
       !closeTo(
@@ -716,6 +733,9 @@ export function validatePdfSharpnessEvidence(evidence) {
       !Number.isInteger(referenceReadiness?.inkRowBands) ||
       referenceReadiness.inkRowBands <
         PDF_SHARPNESS_REFERENCE_MIN_INK_ROW_BANDS ||
+      referenceReadiness.inkRowBands >
+        Math.ceil(referenceInteriorHeight / 3) ||
+      referenceReadiness.inkPixels < referenceReadiness.inkRowBands * 3 ||
       !finite(referenceReadiness?.inkSpanRatio) ||
       referenceReadiness.inkSpanRatio <
         PDF_SHARPNESS_REFERENCE_MIN_INK_SPAN_RATIO ||
@@ -776,6 +796,10 @@ export function validatePdfSharpnessEvidence(evidence) {
         referenceReadiness?.substantialComponentCount &&
       substantialComponents.length >= 1 &&
       substantialComponents.every(componentValid) &&
+      substantialComponents.reduce(
+        (total, component) => total + component.whiteArea,
+        0,
+      ) <= expectedPhysicalWidth * expectedPhysicalHeight &&
       componentOrderValid(substantialComponents) &&
       new Set(substantialComponents.map((component) => JSON.stringify(
         component.pageBounds,

@@ -1689,6 +1689,26 @@ test("builds a noncanonical privacy-safe reference-capture diagnostic", () => {
     assert.ok(failed.failures.length > 0);
   }
 
+  const forgedMobileLayout = structuredClone(mobileObservation);
+  const forgedInnerWidth = 10_000;
+  const forgedInnerHeight = forgedInnerWidth * 844 / 390;
+  Object.assign(forgedMobileLayout.capture.configuredViewport, {
+    innerHeight: forgedInnerHeight,
+    innerWidth: forgedInnerWidth,
+  });
+  Object.assign(forgedMobileLayout.capture.viewer.viewport, {
+    innerHeight: forgedInnerHeight,
+    innerWidth: forgedInnerWidth,
+    visualViewportHeight: forgedInnerHeight,
+    visualViewportScale: 390 / forgedInnerWidth,
+    visualViewportWidth: forgedInnerWidth,
+  });
+  const forgedMobileLayoutReport = buildReferenceCaptureDiagnosticReport(
+    forgedMobileLayout,
+  );
+  assert.equal(forgedMobileLayoutReport.completed, false);
+  assert.ok(forgedMobileLayoutReport.failures.length > 0);
+
   const impossibleStableAnalyses = [
     (analysis) => {
       analysis.winnerWhiteArea = analysis.runnerUpWhiteArea;
@@ -1708,6 +1728,48 @@ test("builds a noncanonical privacy-safe reference-capture diagnostic", () => {
     const value = structuredClone(input);
     for (const candidate of value.capture.candidates) {
       mutate(candidate.analysis);
+    }
+    const failed = buildReferenceCaptureDiagnosticReport(value);
+    assert.equal(failed.completed, false);
+    assert.ok(failed.failures.length > 0);
+    assert.deepEqual(failed.artifacts.candidates, []);
+  }
+
+  const correlatedComponentOverflow = structuredClone(input);
+  for (const candidate of correlatedComponentOverflow.capture.candidates) {
+    const overflowComponent = {
+      pageBounds: { height: 600, width: 1_000, x: 0, y: 250 },
+      whiteArea: 500_000,
+    };
+    candidate.analysis.substantialComponents.push(overflowComponent);
+    candidate.analysis.substantialComponentCount = 2;
+    candidate.analysis.runnerUpWhiteArea = overflowComponent.whiteArea;
+    candidate.analysis.winnerDominanceRatio =
+      candidate.analysis.winnerWhiteArea / overflowComponent.whiteArea;
+    candidate.referenceTarget = passingReferenceTarget(candidate.analysis, 2);
+  }
+  const componentOverflowReport = buildReferenceCaptureDiagnosticReport(
+    correlatedComponentOverflow,
+  );
+  assert.equal(componentOverflowReport.completed, false);
+  assert.ok(componentOverflowReport.failures.length > 0);
+  assert.deepEqual(componentOverflowReport.artifacts.candidates, []);
+
+  for (const mutateTargetReadiness of [
+    (readiness) => {
+      const insetY = Math.max(2, Math.floor(readiness.pageBounds.height * 0.01));
+      readiness.inkRowBands =
+        Math.ceil((readiness.pageBounds.height - insetY * 2) / 3) + 1;
+    },
+    (readiness) => {
+      readiness.inkPixels =
+        readiness.pagePixels - readiness.pageWhitePixels + 1;
+      readiness.inkRatio = readiness.inkPixels / readiness.pagePixels;
+    },
+  ]) {
+    const value = structuredClone(input);
+    for (const candidate of value.capture.candidates) {
+      mutateTargetReadiness(candidate.referenceTarget.readiness);
     }
     const failed = buildReferenceCaptureDiagnosticReport(value);
     assert.equal(failed.completed, false);
@@ -3241,6 +3303,29 @@ function makeAdjacentReferenceComponentTheGlobalWinner(run) {
     referenceTarget.components[0],
     { bounds: adjacentBounds, whiteArea: adjacent.whiteArea },
   ];
+}
+
+function forgeCorrelatedReferenceComponentAreaOverflow(run) {
+  const readiness = run.comparison.referenceReadiness;
+  const target = run.comparison.referenceTarget;
+  const winner = readiness.substantialComponents[0];
+  const additional = [1, 2].map((offset) => ({
+    pageBounds: {
+      ...winner.pageBounds,
+      x: winner.pageBounds.x + offset,
+      y: target.anchorLimit + offset,
+    },
+    whiteArea: winner.whiteArea - offset,
+  }));
+  readiness.substantialComponents.push(...additional);
+  readiness.substantialComponentCount = 3;
+  readiness.runnerUpWhiteArea = additional[0].whiteArea;
+  readiness.winnerDominanceRatio =
+    readiness.winnerWhiteArea / readiness.runnerUpWhiteArea;
+  target.components.push(...additional.map((component) => ({
+    bounds: { ...component.pageBounds },
+    whiteArea: component.whiteArea,
+  })));
 }
 
 test("accepts complete Issue 68 sharpness evidence", () => {
@@ -5318,6 +5403,9 @@ test("rejects each material Issue 68 acceptance regression", async (t) => {
       const target = value.matrix[0].comparison.referenceTarget;
       target.components.push(structuredClone(target.components[0]));
     }, /requested top page/u],
+    ["reference correlated component area overflow", (value) => {
+      forgeCorrelatedReferenceComponentAreaOverflow(value.matrix[0]);
+    }, /requested top page/u],
     ["reference target anchor ambiguity", (value) => {
       makeAdjacentReferenceComponentTheGlobalWinner(value.matrix[0]);
       const run = value.matrix[0];
@@ -5340,6 +5428,18 @@ test("rejects each material Issue 68 acceptance regression", async (t) => {
     }, /requested top page/u],
     ["reference target crop ink gates", (value) => {
       value.matrix[0].comparison.referenceTarget.readiness.inkRowBands = 1;
+    }, /requested top page/u],
+    ["reference target impossible ink bands", (value) => {
+      const readiness = value.matrix[0].comparison.referenceTarget.readiness;
+      const insetY = Math.max(2, Math.floor(readiness.pageBounds.height * 0.01));
+      readiness.inkRowBands =
+        Math.ceil((readiness.pageBounds.height - insetY * 2) / 3) + 1;
+    }, /requested top page/u],
+    ["reference target disjoint white and ink pixels", (value) => {
+      const readiness = value.matrix[0].comparison.referenceTarget.readiness;
+      readiness.inkPixels =
+        readiness.pagePixels - readiness.pageWhitePixels + 1;
+      readiness.inkRatio = readiness.inkPixels / readiness.pagePixels;
     }, /requested top page/u],
     ["reference target crop winner", (value) => {
       value.matrix[0].comparison.referenceTarget.readiness.winnerWhiteArea -= 1;
@@ -5372,7 +5472,7 @@ test("rejects each material Issue 68 acceptance regression", async (t) => {
     }, /isolated loader lifecycle/u],
     ["reference lifecycle DPR", (value) => {
       value.matrix[4].comparison.referenceReadiness.captureLifecycle
-        .viewer.viewport.devicePixelRatio = 2;
+        .viewer.viewport.devicePixelRatio += 0.01;
     }, /isolated loader lifecycle/u],
     ["reference lifecycle screen", (value) => {
       value.matrix[4].comparison.referenceReadiness.captureLifecycle
@@ -5385,6 +5485,23 @@ test("rejects each material Issue 68 acceptance regression", async (t) => {
     ["reference lifecycle layout stability", (value) => {
       value.matrix[4].comparison.referenceReadiness.captureLifecycle
         .viewer.viewport.innerWidth += 2;
+    }, /isolated loader lifecycle/u],
+    ["reference lifecycle native mobile layout width", (value) => {
+      const lifecycle = value.matrix[4].comparison.referenceReadiness
+        .captureLifecycle;
+      const innerWidth = 10_000;
+      const innerHeight = innerWidth * 844 / 390;
+      Object.assign(lifecycle.configuredViewport, {
+        innerHeight,
+        innerWidth,
+      });
+      Object.assign(lifecycle.viewer.viewport, {
+        innerHeight,
+        innerWidth,
+        visualViewportHeight: innerHeight,
+        visualViewportScale: 390 / innerWidth,
+        visualViewportWidth: innerWidth,
+      });
     }, /isolated loader lifecycle/u],
     ["stale priority", (value) => {
       value.matrix[0].visibleFirst.firstPostScrollCompositionPage = 3;
