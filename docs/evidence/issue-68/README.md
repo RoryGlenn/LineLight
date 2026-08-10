@@ -50,6 +50,9 @@ validator additionally requires:
   probes, the harness requires the exact six-page worker model to complete and
   reaches distant virtualized shells through bounded half-viewport traversal,
   without assuming offscreen pages are mounted or copying product offset math;
+  page/progress/complete events are bound to the latest exact import request's
+  job, revision, and document key so an earlier automatic library restore cannot
+  satisfy or invalidate this gate;
 - count and total-pixel bitmap limits, temporary pinned-only overflow, and a
   zero-sized offscreen canvas whose measured text/highlight shell remains;
 - one main-thread fallback staging render at a time, an injected first-render

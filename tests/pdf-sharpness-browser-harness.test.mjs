@@ -1028,31 +1028,86 @@ test("binds fallback delay to a real attempt instead of a caller page", async ()
 });
 
 test("requires exact worker model completion before traversing virtualized pages", async () => {
+  const restoredDocumentKey = "restored-document:restored-revision";
+  const restoredRevision = "restored-revision";
+  const restoredEvents = [
+    {
+      at: 1,
+      direction: "to-worker",
+      documentKey: restoredDocumentKey,
+      jobId: 1,
+      revision: restoredRevision,
+      type: "open",
+    },
+    ...Array.from({ length: 6 }, (_, index) => ({
+      at: index + 2,
+      direction: "from-worker",
+      documentKey: restoredDocumentKey,
+      jobId: 1,
+      pageNumber: index + 1,
+      revision: restoredRevision,
+      type: "page",
+    })),
+    {
+      at: 8,
+      completedPages: 6,
+      direction: "from-worker",
+      jobId: 1,
+      pageCount: 6,
+      revision: restoredRevision,
+      type: "progress",
+    },
+    {
+      at: 9,
+      direction: "from-worker",
+      documentKey: restoredDocumentKey,
+      jobId: 1,
+      pageCount: 6,
+      revision: restoredRevision,
+      type: "complete",
+    },
+  ];
   const pageEvents = Array.from({ length: 6 }, (_, index) => ({
+    at: index + 101,
     direction: "from-worker",
     documentKey: DOCUMENT_KEY,
+    jobId: 2,
     pageNumber: index + 1,
     revision: REVISION,
     type: "page",
   }));
   const events = [
+    ...restoredEvents,
+    {
+      at: 100,
+      direction: "to-worker",
+      documentKey: DOCUMENT_KEY,
+      jobId: 2,
+      revision: REVISION,
+      type: "import",
+    },
     ...pageEvents,
     {
+      at: 107,
       completedPages: 6,
       direction: "from-worker",
+      jobId: 2,
       pageCount: 6,
       revision: REVISION,
       type: "progress",
     },
     {
+      at: 108,
       direction: "from-worker",
       documentKey: DOCUMENT_KEY,
+      jobId: 2,
       pageCount: 6,
       revision: REVISION,
       type: "complete",
     },
   ];
   assert.equal(summarizePdfModelCompletion(events, 6).complete, true);
+  assert.equal(summarizePdfModelCompletion(restoredEvents, 6).complete, false);
   assert.equal(
     summarizePdfModelCompletion(events.slice(0, -1), 6).complete,
     false,
@@ -1060,7 +1115,9 @@ test("requires exact worker model completion before traversing virtualized pages
   assert.equal(
     summarizePdfModelCompletion(
       events.map((event) =>
-        event.type === "progress" ? { ...event, pageCount: 7 } : event,
+        event.type === "progress" && event.jobId === 2
+          ? { ...event, pageCount: 7 }
+          : event,
       ),
       6,
     ).complete,
@@ -1082,12 +1139,62 @@ test("requires exact worker model completion before traversing virtualized pages
   assert.equal(
     summarizePdfModelCompletion(
       events.map((event) =>
-        event.type === "page" && event.pageNumber === 6
+        event.type === "page" && event.jobId === 2 && event.pageNumber === 6
           ? { ...event, revision: "substituted-revision" }
           : event,
       ),
       6,
     ).complete,
+    false,
+  );
+  assert.equal(
+    summarizePdfModelCompletion(
+      events.map((event) =>
+        event.type === "progress" && event.jobId === 2
+          ? { ...event, revision: "substituted-revision" }
+          : event,
+      ),
+      6,
+    ).complete,
+    false,
+  );
+  assert.equal(
+    summarizePdfModelCompletion(
+      events.map((event) =>
+        event.type === "page" && event.jobId === 2 && event.pageNumber === 6
+          ? { ...event, documentKey: restoredDocumentKey }
+          : event,
+      ),
+      6,
+    ).complete,
+    false,
+  );
+  assert.equal(
+    summarizePdfModelCompletion([
+      ...events,
+      {
+        at: 200,
+        direction: "to-worker",
+        documentKey: "new-document:new-revision",
+        jobId: 3,
+        revision: "new-revision",
+        type: "import",
+      },
+    ], 6).complete,
+    false,
+  );
+  assert.equal(
+    summarizePdfModelCompletion([
+      ...events,
+      {
+        at: 200,
+        direction: "to-worker",
+        documentKey: null,
+        jobId: 3,
+        revision: null,
+        type: "import",
+      },
+    ], 6).complete,
     false,
   );
 

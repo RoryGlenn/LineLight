@@ -65,35 +65,63 @@ const SHUTDOWN_TIMEOUT_MS = 3_000;
 const PDF_VIRTUAL_SCROLL_MAX_STEPS = 120;
 
 export function summarizePdfModelCompletion(workerEvents, expectedPageCount) {
+  const events = workerEvents ?? [];
+  const importRequests = events.filter(
+    (event) =>
+      event?.direction === "to-worker" &&
+      event?.type === "import",
+  );
+  const importRequestsValid = importRequests.every(
+    (event) =>
+      Number.isFinite(event?.at) &&
+      Number.isInteger(event?.jobId) &&
+      typeof event?.documentKey === "string" &&
+      event.documentKey.length > 0 &&
+      typeof event?.revision === "string" &&
+      event.revision.length > 0,
+  );
+  const importRequest = importRequestsValid
+    ? [...importRequests].sort((left, right) => left.at - right.at).at(-1)
+    : null;
   const expectedPages = Array.from(
     { length: expectedPageCount },
     (_, index) => index + 1,
   );
-  const pageEvents = (workerEvents ?? []).filter(
+  const matchesImport = (event) =>
+    Boolean(importRequest) &&
+    event?.at >= importRequest.at &&
+    event?.jobId === importRequest.jobId &&
+    event?.revision === importRequest.revision;
+  const pageEvents = events.filter(
     (event) =>
       event?.direction === "from-worker" &&
       event?.type === "page" &&
-      Number.isInteger(event?.pageNumber),
+      Number.isInteger(event?.pageNumber) &&
+      event?.documentKey === importRequest?.documentKey &&
+      matchesImport(event),
   );
   const pageNumbers = [...new Set(pageEvents.map((event) => event.pageNumber))]
     .sort((left, right) => left - right);
-  const progressEvents = (workerEvents ?? []).filter(
+  const progressEvents = events.filter(
     (event) =>
       event?.direction === "from-worker" &&
       event?.type === "progress" &&
       event?.completedPages === expectedPageCount &&
-      event?.pageCount === expectedPageCount,
+      event?.pageCount === expectedPageCount &&
+      matchesImport(event),
   );
-  const completeEvents = (workerEvents ?? []).filter(
+  const completeEvents = events.filter(
     (event) =>
       event?.direction === "from-worker" &&
       event?.type === "complete" &&
-      event?.pageCount === expectedPageCount,
+      event?.documentKey === importRequest?.documentKey &&
+      event?.pageCount === expectedPageCount &&
+      matchesImport(event),
   );
   const completion = completeEvents[0];
   const expectedPageKey = expectedPages.join(",");
   const pageNumberKey = pageNumbers.join(",");
-  const identityBound =
+  const identityBound = importRequestsValid && Boolean(importRequest) &&
     typeof completion?.documentKey === "string" &&
     completion.documentKey.length > 0 &&
     typeof completion?.revision === "string" &&
@@ -115,6 +143,9 @@ export function summarizePdfModelCompletion(workerEvents, expectedPageCount) {
     completeEventCount: completeEvents.length,
     completedProgressCount: progressEvents.length,
     documentKey: completion?.documentKey ?? null,
+    importAt: importRequest?.at ?? null,
+    importJobId: importRequest?.jobId ?? null,
+    importRequestCount: importRequests.length,
     pageEventCount: pageEvents.length,
     pageNumbers,
     revision: completion?.revision ?? null,
@@ -760,6 +791,7 @@ const INSTRUMENTATION_SOURCE = String.raw`
               ? documentId + ":" + revision
               : null,
             height: Number(message.height) || null,
+            jobId: Number(message.jobId) || null,
             pageHeight: Number(message.page?.layout?.height) || null,
             pageCount: Number(
               message.pageCount || message.document?.pdfPageCount
@@ -777,12 +809,19 @@ const INSTRUMENTATION_SOURCE = String.raw`
 
     postMessage(message, transferOrOptions) {
       if (this.__issue68PdfWorker) {
+        const documentId = message?.documentId;
+        const revision = message?.revision ?? null;
         workerEvents.push({
           at: performance.now(),
           direction: "to-worker",
           distance: Number(message?.distance),
+          documentKey: documentId && revision
+            ? documentId + ":" + revision
+            : null,
           enabled: message?.enabled,
+          jobId: Number(message?.jobId) || null,
           pageNumber: Number(message?.pageNumber) || null,
+          revision,
           scale: Number(message?.scale) || null,
           type: message?.type || null,
           visible: message?.visible
@@ -1718,8 +1757,10 @@ async function readPdfModelDiagnostic(cdp, expectedPageCount) {
           scrollTop: root.scrollTop
         } : null,
         workerEvents: workerEvents.filter((event) =>
-          event.direction === 'from-worker' &&
-          ['page', 'progress', 'complete'].includes(event.type)
+          (event.direction === 'from-worker' &&
+            ['page', 'progress', 'complete'].includes(event.type)) ||
+          (event.direction === 'to-worker' &&
+            ['import', 'open'].includes(event.type))
         )
       };
     `),
