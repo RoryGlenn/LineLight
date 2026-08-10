@@ -209,6 +209,10 @@ function validRenderedReferenceAnalysis(analysis) {
   const inkSpanPixels = finite(analysis?.inkSpanRatio)
     ? Math.round(analysis.inkSpanRatio * interiorWidth)
     : Number.NaN;
+  const maximumInkForBands = analysis?.inkRowBands === 0
+    ? 2 * interiorHeight
+    : (interiorHeight - 2 * (analysis?.inkRowBands - 1)) * inkSpanPixels +
+      4 * (analysis?.inkRowBands - 1);
   return (
     analysis?.renderedPage === true &&
     analysis?.proof === "white-page-with-rendered-ink" &&
@@ -259,6 +263,12 @@ function validRenderedReferenceAnalysis(analysis) {
     analysis.inkRowBands >= PDF_SHARPNESS_REFERENCE_MIN_INK_ROW_BANDS &&
     analysis.inkRowBands <= Math.ceil(interiorHeight / 3) &&
     analysis.inkPixels >= analysis.inkRowBands * 3 &&
+    inkSpanPixels >= 0 &&
+    inkSpanPixels <= interiorWidth &&
+    analysis.inkPixels >= Math.min(inkSpanPixels, 2) &&
+    analysis.inkPixels <= inkSpanPixels * interiorHeight &&
+    (analysis.inkRowBands === 0 || inkSpanPixels >= 3) &&
+    analysis.inkPixels <= maximumInkForBands &&
     finite(analysis?.inkSpanRatio) &&
     analysis.inkSpanRatio >= PDF_SHARPNESS_REFERENCE_MIN_INK_SPAN_RATIO &&
     analysis.inkSpanRatio <= 1 &&
@@ -709,6 +719,13 @@ export function validatePdfSharpnessEvidence(evidence) {
           referenceReadiness.inkSpanRatio * referenceInteriorWidth,
         )
       : Number.NaN;
+    const referenceMaximumInkForBands =
+      referenceReadiness?.inkRowBands === 0
+        ? 2 * referenceInteriorHeight
+        : (referenceInteriorHeight -
+            2 * (referenceReadiness?.inkRowBands - 1)) *
+            referenceInkSpanPixels +
+          4 * (referenceReadiness?.inkRowBands - 1);
     if (
       referenceReadiness?.renderedPage !== true ||
       referenceReadiness?.proof !== "white-page-with-rendered-ink" ||
@@ -771,6 +788,15 @@ export function validatePdfSharpnessEvidence(evidence) {
       referenceReadiness.inkRowBands >
         Math.ceil(referenceInteriorHeight / 3) ||
       referenceReadiness.inkPixels < referenceReadiness.inkRowBands * 3 ||
+      referenceInkSpanPixels < 0 ||
+      referenceInkSpanPixels > referenceInteriorWidth ||
+      referenceReadiness.inkPixels <
+        Math.min(referenceInkSpanPixels, 2) ||
+      referenceReadiness.inkPixels >
+        referenceInkSpanPixels * referenceInteriorHeight ||
+      (referenceReadiness.inkRowBands !== 0 &&
+        referenceInkSpanPixels < 3) ||
+      referenceReadiness.inkPixels > referenceMaximumInkForBands ||
       !finite(referenceReadiness?.inkSpanRatio) ||
       referenceReadiness.inkSpanRatio <
         PDF_SHARPNESS_REFERENCE_MIN_INK_SPAN_RATIO ||

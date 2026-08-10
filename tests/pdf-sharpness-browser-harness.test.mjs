@@ -5607,6 +5607,15 @@ test("rejects each material Issue 68 acceptance regression", async (t) => {
       value.matrix[0].comparison.referenceReadiness.winnerDominanceRatio +=
         5e-10;
     }, /rendered-page pixel proof/u],
+    ["reference full physical ink band capacity", (value) => {
+      const readiness = value.matrix[0].comparison.referenceReadiness;
+      const insetX = Math.max(2, Math.floor(readiness.pageBounds.width * 0.01));
+      const interiorWidth = readiness.pageBounds.width - insetX * 2;
+      readiness.inkPixels = 28_860;
+      readiness.inkRatio = readiness.inkPixels / readiness.pagePixels;
+      readiness.inkRowBands = 206;
+      readiness.inkSpanRatio = 130 / interiorWidth;
+    }, /rendered-page pixel proof/u],
     ["missing requested reference target", (value) => {
       delete value.matrix[0].comparison.referenceTarget;
     }, /requested top page/u],
@@ -5712,6 +5721,15 @@ test("rejects each material Issue 68 acceptance regression", async (t) => {
       const interiorWidth = readiness.pageBounds.width - insetX * 2;
       const spanPixels = Math.round(readiness.inkSpanRatio * interiorWidth);
       readiness.inkSpanRatio = (spanPixels + 5e-8) / interiorWidth;
+    }, /requested top page/u],
+    ["reference target physical ink band capacity", (value) => {
+      const readiness = value.matrix[0].comparison.referenceTarget.readiness;
+      const insetX = Math.max(2, Math.floor(readiness.pageBounds.width * 0.01));
+      const interiorWidth = readiness.pageBounds.width - insetX * 2;
+      readiness.inkPixels = 28_860;
+      readiness.inkRatio = readiness.inkPixels / readiness.pagePixels;
+      readiness.inkRowBands = 206;
+      readiness.inkSpanRatio = 130 / interiorWidth;
     }, /requested top page/u],
     ["reference target crop winner", (value) => {
       value.matrix[0].comparison.referenceTarget.readiness.winnerWhiteArea -= 1;
