@@ -8731,6 +8731,57 @@ test("retains a privacy-safe fixed-point timeout on the failed matrix row", () =
     "The bounded app-matrix runtime diagnostic runner reported a stage failure.",
   ]);
 
+  const attachFailureInput = passingAppMatrixRuntimeNetworkTimeoutInput(
+    outputDirectory,
+  );
+  const attachFailureDiagnostic =
+    attachFailureInput.rows[1].networkFailure.diagnostic;
+  const failedTarget = attachFailureDiagnostic.targets.find((target) =>
+    target.phase === attachFailureDiagnostic.label &&
+    target.urlClass === "pdf-document-worker"
+  );
+  const resumeCommand = failedTarget.commands.at(-1);
+  failedTarget.commands = [
+    { ...failedTarget.commands[0], status: "failed" },
+    failedTarget.commands[1],
+    {
+      ...resumeCommand,
+      dispatchSequence: 3,
+      resultSequence: 3,
+    },
+  ];
+  failedTarget.attachComplete = false;
+  attachFailureDiagnostic.attachErrors = [{
+    category: "setup",
+    command: "network-enable",
+    identityHash: diagnosticIdentity(
+      failedTarget.sessionId,
+      failedTarget.targetId,
+    ),
+    sessionId: failedTarget.sessionId,
+    targetId: failedTarget.targetId,
+    type: failedTarget.type,
+    urlClass: failedTarget.urlClass,
+  }];
+  attachFailureDiagnostic.counts.attachErrorCount = 1;
+  for (const sample of attachFailureDiagnostic.wait.recentSamples) {
+    sample.attachErrorCount = 1;
+    sample.incompleteTargetCount = 1;
+  }
+  const attachFailure = buildAppMatrixRuntimeDiagnosticReport(
+    attachFailureInput,
+  );
+  assert.equal(
+    attachFailure.execution.orderExact,
+    true,
+    attachFailure.failures.join("\n"),
+  );
+  assert.equal(attachFailure.rows[1].integrity, true);
+  assert.deepEqual(attachFailure.rows[1].networkFailure.failureClasses, [
+    "attach-setup",
+    "stability",
+  ]);
+
   const unexpectedInput = passingAppMatrixRuntimeNetworkTimeoutInput(
     outputDirectory,
   );
@@ -8745,6 +8796,28 @@ test("retains a privacy-safe fixed-point timeout on the failed matrix row", () =
     label: unexpected.rows[1].configurationId,
   });
 
+  const timeoutDiagnostic = (value) =>
+    value.rows[1].networkFailure.diagnostic;
+  const setInflightRequests = (value, count) => {
+    const diagnostic = timeoutDiagnostic(value);
+    const target = diagnostic.targets[0];
+    diagnostic.inflightRequests = Array.from({ length: count }, (_, index) => {
+      const requestId = `timeout-request-${index + 1}`;
+      return {
+        identityHash: diagnosticIdentity(target.sessionId, requestId),
+        method: "GET",
+        phase: target.phase,
+        requestId,
+        sessionId: target.sessionId,
+        type: "Script",
+        urlClass: target.urlClass,
+      };
+    });
+    diagnostic.counts.inflightRequestCount = count;
+    for (const sample of diagnostic.wait.recentSamples) {
+      sample.inflightRequestCount = count;
+    }
+  };
   const mutations = [
     ["timeout label", (value) => {
       value.rows[1].networkFailure.diagnostic.label = value.rows[0]
@@ -8766,6 +8839,126 @@ test("retains a privacy-safe fixed-point timeout on the failed matrix row", () =
     ["timeout settlement phase", (value) => {
       value.rows[1].networkFailure.diagnostic.targetBootstrapSettlements[0]
         .phase = value.rows[1].configurationId;
+    }],
+    ["timeout attach error item", (value) => {
+      const diagnostic = timeoutDiagnostic(value);
+      diagnostic.attachErrors = [{}];
+      diagnostic.counts.attachErrorCount = 1;
+      for (const sample of diagnostic.wait.recentSamples) {
+        sample.attachErrorCount = 1;
+      }
+    }],
+    ["timeout pending attach item", (value) => {
+      const diagnostic = timeoutDiagnostic(value);
+      diagnostic.pendingAttaches = [{}];
+      diagnostic.counts.pendingAttachCount = 1;
+      for (const sample of diagnostic.wait.recentSamples) {
+        sample.pendingAttachCount = 1;
+      }
+    }],
+    ["timeout inflight item", (value) => {
+      const diagnostic = timeoutDiagnostic(value);
+      diagnostic.inflightRequests = [{}];
+      diagnostic.counts.inflightRequestCount = 1;
+      diagnostic.counts.completedRequestCount -= 1;
+      for (const sample of diagnostic.wait.recentSamples) {
+        sample.inflightRequestCount = 1;
+      }
+    }],
+    ["timeout service request identity", (value) => {
+      const diagnostic = timeoutDiagnostic(value);
+      const observation = diagnostic.serviceWorkerBootstrapObservations[0];
+      observation.requestId = null;
+      observation.identityHash = diagnosticIdentity(
+        observation.requestSessionId,
+        observation.requestId,
+        observation.targetSessionId,
+        observation.targetId,
+      );
+    }],
+    ["timeout service resume", (value) => {
+      timeoutDiagnostic(value).serviceWorkerBootstrapObservations[0]
+        .resumeDispatchedAt += 1;
+    }],
+    ["timeout service request sequence", (value) => {
+      const diagnostic = timeoutDiagnostic(value);
+      diagnostic.serviceWorkerBootstrapObservations[0].requestSequence =
+        diagnostic.counts.requestCount + 1;
+    }],
+    ["timeout service session request count", (value) => {
+      const diagnostic = timeoutDiagnostic(value);
+      diagnostic.serviceWorkerBootstrapObservations[0].sessionRequestCount =
+        diagnostic.counts.requestCount + 1;
+    }],
+    ["timeout duplicate target command ID", (value) => {
+      const diagnostic = timeoutDiagnostic(value);
+      diagnostic.targets[1].commands[0].cdpId =
+        diagnostic.targets[0].commands[0].cdpId;
+    }],
+    ["timeout PDF target type", (value) => {
+      const diagnostic = timeoutDiagnostic(value);
+      const target = diagnostic.targets.find((entry) =>
+        entry.phase === diagnostic.label &&
+        entry.urlClass === "pdf-document-worker"
+      );
+      target.type = "shared_worker";
+      diagnostic.targetBootstrapSettlements.find((entry) =>
+        entry.targetSessionId === target.sessionId
+      ).targetType = "shared_worker";
+    }],
+    ["timeout external count exceeds requests", (value) => {
+      const diagnostic = timeoutDiagnostic(value);
+      diagnostic.counts.externalRequestCount =
+        diagnostic.counts.requestCount + 1;
+    }],
+    ["timeout inflight count exceeds requests", (value) => {
+      const diagnostic = timeoutDiagnostic(value);
+      diagnostic.counts.completedRequestCount = 0;
+      setInflightRequests(value, diagnostic.counts.requestCount + 1);
+    }],
+    ["timeout completed and inflight exceed requests", (value) => {
+      const diagnostic = timeoutDiagnostic(value);
+      setInflightRequests(value, 1);
+      diagnostic.counts.completedRequestCount = diagnostic.counts.requestCount;
+    }],
+    ["timeout pending count exceeds targets", (value) => {
+      const diagnostic = timeoutDiagnostic(value);
+      diagnostic.counts.pendingAttachCount = diagnostic.counts.targetCount + 1;
+      diagnostic.pendingAttaches = Array.from(
+        { length: diagnostic.counts.pendingAttachCount },
+        () => ({}),
+      );
+      for (const sample of diagnostic.wait.recentSamples) {
+        sample.pendingAttachCount = diagnostic.counts.pendingAttachCount;
+      }
+    }],
+    ["timeout unsafe request count", (value) => {
+      const diagnostic = timeoutDiagnostic(value);
+      diagnostic.counts.requestCount = Number.MAX_SAFE_INTEGER + 1;
+      for (const sample of diagnostic.wait.recentSamples) {
+        sample.requestCount = diagnostic.counts.requestCount;
+      }
+    }],
+    ["timeout fractional elapsed", (value) => {
+      timeoutDiagnostic(value).wait.elapsedMs += 0.5;
+    }],
+    ["timeout decreasing cumulative samples", (value) => {
+      timeoutDiagnostic(value).wait.recentSamples[0].requestCount += 1;
+    }],
+    ["timeout service-worker sample mismatch", (value) => {
+      timeoutDiagnostic(value).wait.recentSamples[0]
+        .serviceWorkerBypassed = false;
+    }],
+    ["timeout impossible stability recurrence", (value) => {
+      timeoutDiagnostic(value).wait.recentSamples[1].stableSamples = 1;
+    }],
+    ["timeout reached fixed point", (value) => {
+      const diagnostic = timeoutDiagnostic(value);
+      diagnostic.wait.recentSamples.forEach((sample, index) => {
+        sample.attachmentReady = true;
+        sample.stableSamples = index + 1;
+      });
+      diagnostic.wait.stableSamples = 3;
     }],
     ["unexpected with diagnostic", (value) => {
       value.rows[1].networkFailure = {

@@ -4774,11 +4774,63 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
     !targets || !settlements || !serviceWorkers || !samples ||
     !attachErrors || !pendingAttaches || !inflightRequests ||
     targets.length > 128 || settlements.length > 128 ||
-    serviceWorkers.length > 16 || samples.length < 1 || samples.length > 12
+    serviceWorkers.length > 16 || attachErrors.length > 256 ||
+    pendingAttaches.length > 128 || inflightRequests.length > 512 ||
+    samples.length < 1 || samples.length > 12
   ) {
     return { bound: false, value: null };
   }
-  const integer = (value) => Number.isInteger(value) && value >= 0;
+  const integer = (value) => Number.isSafeInteger(value) && value >= 0;
+  const positiveInteger = (value) => integer(value) && value > 0;
+  const safeClockOrNull = (value) => value === null || positiveInteger(value);
+  const urlClasses = new Set([
+    "about",
+    "app-asset",
+    "blob",
+    "data",
+    "external",
+    "other-local",
+    "page",
+    "pdf-document-worker",
+    "pdf-parser-worker",
+  ]);
+  const commandPlan = [
+    ["network-enable", "Network.enable"],
+    ["runtime-enable", "Runtime.enable"],
+    ["cache-disable", "Network.setCacheDisabled"],
+    ["auto-attach", "Target.setAutoAttach"],
+    ["resume", "Runtime.runIfWaitingForDebugger"],
+  ];
+  const validCommandSnapshot = (commands) => {
+    if (!Array.isArray(commands) || commands.length > commandPlan.length) {
+      return false;
+    }
+    const hasResume = commands.at(-1)?.name === "resume";
+    const setupCommandCount = commands.length - (hasResume ? 1 : 0);
+    const resultSequences = [];
+    const valid = commands.every((command, index) => {
+      const [name, method] = hasResume && index === commands.length - 1
+        ? commandPlan.at(-1)
+        : commandPlan[index];
+      const settled = ["completed", "failed"].includes(command?.status);
+      if (settled) resultSequences.push(command.resultSequence);
+      return command?.name === name && command?.method === method &&
+        command?.dispatchSequence === index + 1 &&
+        positiveInteger(command?.cdpId) &&
+        positiveInteger(command?.dispatchedAt) &&
+        safeClockOrNull(command?.deadlineAt) &&
+        (command?.deadlineAt === null ||
+          command.deadlineAt >= command.dispatchedAt) &&
+        ["pending", "completed", "failed"].includes(command?.status) &&
+        (settled
+          ? positiveInteger(command?.resultAt) &&
+            command.resultAt >= command.dispatchedAt &&
+            positiveInteger(command?.resultSequence)
+          : command?.resultAt === null && command?.resultSequence === null);
+    });
+    return setupCommandCount <= commandPlan.length - 1 && valid &&
+      new Set(resultSequences).size === resultSequences.length;
+  };
   const countKeys = [
     "attachErrorCount",
     "attachPromiseCount",
@@ -4800,7 +4852,17 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
     counts.targetBootstrapSettlementCount === settlements.length &&
     counts.serviceWorkerBootstrapObservationCount === serviceWorkers.length &&
     counts.attachPromiseCount === targets.length &&
-    counts.completedRequestCount <= counts.requestCount;
+    counts.pendingAttachCount <= counts.attachPromiseCount &&
+    counts.inflightRequestCount <= counts.requestCount &&
+    counts.completedRequestCount <= counts.requestCount &&
+    counts.completedRequestCount + counts.inflightRequestCount <=
+      counts.requestCount &&
+    counts.externalRequestCount <= counts.requestCount &&
+    counts.networkFailureCount <= counts.requestCount &&
+    counts.serviceWorkerBootstrapObservationCount <=
+      Math.min(counts.targetCount, counts.requestCount) &&
+    counts.targetBootstrapSettlementCount <=
+      Math.min(counts.targetCount, counts.requestCount);
   const nonEmptyString = (value) =>
     typeof value === "string" && value.length > 0;
   const targetBySession = new Map(
@@ -4808,6 +4870,11 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
   );
   const targetSessions = targets.map((target) => target?.sessionId);
   const targetIds = targets.map((target) => target?.targetId);
+  const targetCommandIds = targets.flatMap((target) =>
+    Array.isArray(target?.commands)
+      ? target.commands.map((command) => command?.cdpId)
+      : []
+  );
   const targetIdentitiesBound =
     targetSessions.every(nonEmptyString) &&
     new Set(targetSessions).size === targetSessions.length &&
@@ -4815,12 +4882,93 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
     new Set(targetIds).size === targetIds.length &&
     targets.every((target) =>
       nonEmptyString(target?.phase) &&
-      nonEmptyString(target?.type) &&
-      Array.isArray(target?.commands) &&
+      CDP_WORKER_TARGET_TYPES.has(target?.type) &&
+      urlClasses.has(target?.urlClass) &&
+      (target?.parentSessionId === null ||
+        nonEmptyString(target?.parentSessionId)) &&
+      safeClockOrNull(target?.commandDeadlineAt) &&
+      safeClockOrNull(target?.resumeDispatchedAt) &&
+      validCommandSnapshot(target?.commands) &&
       Array.isArray(target?.ancestry) &&
+      target.ancestry.every((ancestor) =>
+        nonEmptyString(ancestor?.sessionId) &&
+        nonEmptyString(ancestor?.phase) &&
+        CDP_WORKER_TARGET_TYPES.has(ancestor?.type) &&
+        urlClasses.has(ancestor?.urlClass)
+      ) &&
       target?.identityHash === cdpDiagnosticIdentity(
         target.sessionId,
         target.targetId,
+      )
+    ) &&
+    targetCommandIds.every(positiveInteger) &&
+    new Set(targetCommandIds).size === targetCommandIds.length;
+  const attachErrorCommands = new Set([
+    null,
+    ...commandPlan.map(([name]) => name),
+  ]);
+  const attachErrorsBound = attachErrors.every((entry) => {
+    const target = targetBySession.get(entry?.sessionId);
+    return entry && typeof entry === "object" &&
+      ["resume", "setup", "unhandled-setup"].includes(entry.category) &&
+      attachErrorCommands.has(entry.command) &&
+      (entry.category !== "resume" || entry.command === "resume") &&
+      nonEmptyString(entry.sessionId) && nonEmptyString(entry.targetId) &&
+      nonEmptyString(entry.type) && urlClasses.has(entry.urlClass) &&
+      entry.identityHash === cdpDiagnosticIdentity(
+        entry.sessionId,
+        entry.targetId,
+      ) &&
+      target?.targetId === entry.targetId && target?.type === entry.type &&
+      target?.urlClass === entry.urlClass &&
+      (entry.command === null || target?.commands?.some((command) =>
+        command?.name === entry.command && command?.status === "failed"
+      ));
+  });
+  const pendingSessions = pendingAttaches.map((entry) => entry?.sessionId);
+  const pendingAttachesBound =
+    new Set(pendingSessions).size === pendingSessions.length &&
+    pendingAttaches.every((entry) => {
+      const target = targetBySession.get(entry?.sessionId);
+      return entry && typeof entry === "object" &&
+        nonEmptyString(entry.sessionId) && nonEmptyString(entry.targetId) &&
+        nonEmptyString(entry.phase) &&
+        CDP_WORKER_TARGET_TYPES.has(entry.type) &&
+        (entry.parentSessionId === null ||
+          nonEmptyString(entry.parentSessionId)) &&
+        urlClasses.has(entry.urlClass) &&
+        entry.identityHash === cdpDiagnosticIdentity(
+          entry.sessionId,
+          entry.targetId,
+        ) &&
+        safeClockOrNull(entry.commandDeadlineAt) &&
+        safeClockOrNull(entry.resumeDispatchedAt) &&
+        validCommandSnapshot(entry.commands) &&
+        target?.targetId === entry.targetId &&
+        target?.parentSessionId === entry.parentSessionId &&
+        target?.phase === entry.phase && target?.type === entry.type &&
+        target?.urlClass === entry.urlClass &&
+        target?.commandDeadlineAt === entry.commandDeadlineAt &&
+        target?.resumeDispatchedAt === entry.resumeDispatchedAt &&
+        JSON.stringify(target?.commands) === JSON.stringify(entry.commands);
+    });
+  const inflightIdentities = inflightRequests.map((entry) =>
+    `${entry?.sessionId ?? "page"}:${entry?.requestId}`
+  );
+  const inflightRequestsBound =
+    new Set(inflightIdentities).size === inflightIdentities.length &&
+    inflightRequests.every((entry) =>
+      entry && typeof entry === "object" &&
+      nonEmptyString(entry.requestId) && nonEmptyString(entry.method) &&
+      /^[A-Z]+$/u.test(entry.method) && nonEmptyString(entry.phase) &&
+      nonEmptyString(entry.type) && urlClasses.has(entry.urlClass) &&
+      (entry.sessionId === null || (
+        nonEmptyString(entry.sessionId) &&
+        targetBySession.has(entry.sessionId)
+      )) &&
+      entry.identityHash === cdpDiagnosticIdentity(
+        entry.sessionId,
+        entry.requestId,
       )
     );
   const settlementIdentities = settlements.map((settlement) =>
@@ -4845,6 +4993,7 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
         target?.parentSessionId === settlement?.targetParentSessionId &&
         target?.parentSessionId === settlement?.requestSessionId &&
         target?.phase === settlement?.phase &&
+        target?.type === "worker" &&
         target?.type === settlement?.targetType &&
         target?.urlClass === settlement?.urlClass &&
         settlement?.method === "GET" &&
@@ -4857,7 +5006,8 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
     .every((target) => {
       const parent = targetBySession.get(target?.parentSessionId);
       const ancestor = target?.ancestry?.[0];
-      return parent?.urlClass === "pdf-document-worker" &&
+      return target?.type === "worker" && parent?.type === "worker" &&
+        parent?.urlClass === "pdf-document-worker" &&
         parent?.phase === target.phase &&
         ancestor?.sessionId === parent.sessionId &&
         ancestor?.phase === parent.phase &&
@@ -4867,9 +5017,17 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
   const serviceWorkerTargets = targets.filter(
     (target) => target?.type === "service_worker",
   );
+  const serviceWorkerRequestIdentities = serviceWorkers.map((entry) =>
+    `${entry?.requestSessionId ?? "page"}:${entry?.requestId}`
+  );
+  const serviceWorkerRequestSequences = serviceWorkers.map(
+    (entry) => entry?.requestSequence,
+  );
   const serviceWorkerIdentitiesBound =
     new Set(serviceWorkers.map((entry) => entry?.targetSessionId)).size ===
       serviceWorkers.length &&
+    new Set(serviceWorkerRequestIdentities).size === serviceWorkers.length &&
+    new Set(serviceWorkerRequestSequences).size === serviceWorkers.length &&
     serviceWorkers.every((entry) => {
       const target = targetBySession.get(entry?.targetSessionId);
       return target?.type === "service_worker" &&
@@ -4879,6 +5037,7 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
           entry.targetSessionId,
           entry.targetId,
         ) &&
+        nonEmptyString(entry?.requestId) &&
         entry?.requestSessionId === target.sessionId &&
         entry?.targetId === target.targetId &&
         entry?.phase === target.phase &&
@@ -4887,14 +5046,20 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
         entry?.method === "GET" && entry?.resourceType === "Script" &&
         entry?.targetDetachedAtObservation === false &&
         entry?.targetUrlMatched === true && entry?.requestIsFirst === true &&
-        integer(entry?.requestSequence) && entry.requestSequence > 0 &&
-        integer(entry?.earlierRequestCount) && entry.earlierRequestCount === 0 &&
-        integer(entry?.sessionRequestCount) && entry.sessionRequestCount > 0 &&
-        integer(entry?.sessionFailureCount) && entry.sessionFailureCount === 0 &&
-        Number.isFinite(entry?.resumeDispatchedAt) &&
-        Number.isFinite(entry?.requestStartedAt) &&
+        positiveInteger(entry?.requestSequence) &&
+        entry.requestSequence <= counts?.requestCount &&
+        integer(entry?.earlierRequestCount) &&
+        entry.earlierRequestCount === 0 &&
+        positiveInteger(entry?.sessionRequestCount) &&
+        entry.sessionRequestCount <= counts?.requestCount &&
+        entry.earlierRequestCount < entry.sessionRequestCount &&
+        integer(entry?.sessionFailureCount) &&
+        entry.sessionFailureCount === 0 &&
+        positiveInteger(entry?.resumeDispatchedAt) &&
+        entry.resumeDispatchedAt === target.resumeDispatchedAt &&
+        positiveInteger(entry?.requestStartedAt) &&
         entry.requestStartedAt >= entry.resumeDispatchedAt &&
-        Number.isFinite(entry?.terminalAt) &&
+        positiveInteger(entry?.terminalAt) &&
         entry.terminalAt >= entry.requestStartedAt &&
         entry?.terminalReason === "loading-finished";
     });
@@ -4911,19 +5076,47 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
     "stableSamples",
     "targetCount",
   ];
-  const samplesBound = samples.every((sample, index) =>
-    sampleKeys.every((key) => integer(sample?.[key])) &&
-    typeof sample?.attachmentReady === "boolean" &&
-    typeof sample?.serviceWorkerBypassed === "boolean" &&
-    (index === 0 || sample.elapsedMs >= samples[index - 1].elapsedMs)
-  );
+  const samplesBound =
+    typeof diagnostic?.serviceWorkerBypassed === "boolean" &&
+    samples.every((sample, index) => {
+      const previous = samples[index - 1];
+      const fieldsBound = sampleKeys.every((key) => integer(sample?.[key])) &&
+        typeof sample?.attachmentReady === "boolean" &&
+        typeof sample?.serviceWorkerBypassed === "boolean" &&
+        sample.serviceWorkerBypassed === diagnostic.serviceWorkerBypassed &&
+        sample.incompleteTargetCount <= sample.targetCount &&
+        sample.inflightRequestCount <= sample.requestCount &&
+        sample.pendingAttachCount <= sample.targetCount &&
+        sample.stableSamples < CDP_FIXED_POINT_STABLE_SAMPLES &&
+        (!sample.attachmentReady || (
+          sample.serviceWorkerBypassed === true &&
+          sample.attachErrorCount === 0 &&
+          sample.incompleteTargetCount === 0
+        ));
+      if (!fieldsBound) return false;
+      const quiet = sample.attachmentReady === true &&
+        sample.pendingAttachCount === 0 &&
+        sample.inflightRequestCount === 0;
+      if (!previous) return quiet || sample.stableSamples === 0;
+      const cumulative = sample.elapsedMs >= previous.elapsedMs &&
+        sample.requestCount >= previous.requestCount &&
+        sample.targetCount >= previous.targetCount &&
+        sample.attachErrorCount >= previous.attachErrorCount;
+      const quietSame = quiet &&
+        sample.requestCount === previous.requestCount &&
+        sample.targetCount === previous.targetCount;
+      return cumulative && sample.stableSamples === (
+        quietSame ? previous.stableSamples + 1 : 0
+      );
+    });
   const finalSample = samples.at(-1);
   const waitBound =
-    Number.isFinite(diagnostic?.wait?.elapsedMs) &&
+    integer(diagnostic?.wait?.elapsedMs) &&
     diagnostic.wait.elapsedMs >= 10_000 &&
     diagnostic?.wait?.timeoutMs === 10_000 &&
     diagnostic?.wait?.requiredStableSamples === CDP_FIXED_POINT_STABLE_SAMPLES &&
     integer(diagnostic?.wait?.stableSamples) &&
+    diagnostic.wait.stableSamples < CDP_FIXED_POINT_STABLE_SAMPLES &&
     diagnostic.wait.stableSamples === finalSample?.stableSamples &&
     finalSample?.elapsedMs <= diagnostic.wait.elapsedMs &&
     finalSample?.attachErrorCount === counts?.attachErrorCount &&
@@ -4936,10 +5129,12 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
       (diagnostic?.serviceWorkerBypassed === true);
   const currentDocumentTargets = targets.filter((target) =>
     target?.phase === expectedConfigurationId &&
+    target?.type === "worker" &&
     target?.urlClass === "pdf-document-worker"
   );
   const currentParserTargets = targets.filter((target) =>
     target?.phase === expectedConfigurationId &&
+    target?.type === "worker" &&
     target?.urlClass === "pdf-parser-worker"
   );
   const settlementCount = (target) => settlements.filter(
@@ -4990,7 +5185,8 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
   const failureClasses = gateEntries.flatMap(([name, passed]) =>
     passed ? [] : [name]
   );
-  const bound = countsBound && targetIdentitiesBound && settlementsBound &&
+  const bound = countsBound && targetIdentitiesBound && attachErrorsBound &&
+    pendingAttachesBound && inflightRequestsBound && settlementsBound &&
     parserAncestryBound && serviceWorkerIdentitiesBound && samplesBound &&
     waitBound && failureClasses.length > 0;
   return {
