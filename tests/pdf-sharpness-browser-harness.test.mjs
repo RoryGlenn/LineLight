@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, symlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -18,13 +18,17 @@ import {
 } from "../scripts/pdf-sharpness-evidence.mjs";
 import {
   analyzeReferencePixels,
+  advanceCdpFixedPointStability,
   buildCdpNetworkFixedPointDiagnostic,
+  buildFirstNetworkDiagnosticReport,
+  classifyCdpDiagnosticUrl,
   classifyPdfRasterTransition,
+  completeCdpNetworkRequest,
   decodePngScreenshot,
   matchesPdfFallbackInjection,
   planPdfVirtualScroll,
   probePdfBitmapBudget,
-  sanitizeCdpDiagnosticUrl,
+  recordCdpNetworkRequest,
   selectPdfFallbackAbortCandidate,
   selectPdfFallbackScenarioEvents,
   summarizePdfModelCompletion,
@@ -758,6 +762,7 @@ test("records fixed-point diagnostics without private URL or payload data", () =
   const appUrl = "http://127.0.0.1:4173/";
   const privateText = "private-reader-sentence";
   const privateProfile = "/tmp/linelight-private-profile/Default";
+  const diagnosticCapturedAt = Date.now();
   const pendingPromise = Promise.resolve();
   const requestKey = "worker-session:private-request-id";
   const workerUrl =
@@ -766,8 +771,10 @@ test("records fixed-point diagnostics without private URL or payload data", () =
     `${appUrl}assets/pdf-parser.worker-test.js?profile=${privateProfile}`;
   const networkState = {
     attachErrors: [{
+      command: "resume",
       error: `Could not resume target: ${privateProfile}?text=${privateText}`,
       sessionId: "worker-session",
+      targetId: "worker-target",
       type: "worker",
       url: parserUrl,
     }],
@@ -775,6 +782,7 @@ test("records fixed-point diagnostics without private URL or payload data", () =
     byId: new Map([[requestKey, {
       method: "GET",
       phase: "desktop-dpr1-zoom100",
+      requestId: "private-request-id",
       sessionId: "worker-session",
       type: "Script",
       url: parserUrl,
@@ -782,6 +790,10 @@ test("records fixed-point diagnostics without private URL or payload data", () =
     completedRequestCount: 4,
     inflightRequests: new Set([requestKey]),
     pendingAttachMetadata: new Map([[pendingPromise, {
+      commands: [
+        { name: "network-enable", status: "completed" },
+        { name: "runtime-enable", status: "pending" },
+      ],
       parentSessionId: null,
       phase: "desktop-dpr1-zoom100",
       sessionId: "worker-session",
@@ -790,6 +802,16 @@ test("records fixed-point diagnostics without private URL or payload data", () =
       url: parserUrl,
     }]]),
     pendingAttachPromises: new Set([pendingPromise]),
+    recentActivity: [{
+      at: diagnosticCapturedAt - 20,
+      command: "runtime-enable",
+      kind: "attach-command-start",
+      phase: "desktop-dpr1-zoom100",
+      sessionId: "worker-session",
+      targetId: "worker-target",
+      type: "worker",
+      url: parserUrl,
+    }],
     requests: [{ method: "GET", url: workerUrl }],
     targets: [
       {
@@ -803,7 +825,7 @@ test("records fixed-point diagnostics without private URL or payload data", () =
         waitingForDebugger: false,
       },
       {
-        detached: false,
+        detached: true,
         parentSessionId: "document-session",
         phase: "desktop-dpr1-zoom100",
         sessionId: "worker-session",
@@ -814,10 +836,26 @@ test("records fixed-point diagnostics without private URL or payload data", () =
       },
     ],
   };
+  const diagnosticWaitState = {
+    capturedAtMs: diagnosticCapturedAt,
+    elapsedMs: 10_001,
+    recentSamples: [{
+      elapsedMs: 9_950,
+      inflightRequestCount: 1,
+      pendingAttachCount: 1,
+      requestCount: 1,
+      stableSamples: 0,
+      targetCount: 2,
+    }],
+    stableSamples: 0,
+    timeoutMs: 10_000,
+  };
   const diagnostic = buildCdpNetworkFixedPointDiagnostic(
     networkState,
     appUrl,
     "desktop-dpr1-zoom100",
+    "timeout",
+    diagnosticWaitState,
   );
   assert.deepEqual(Object.keys(diagnostic).sort(), [
     "attachErrors",
@@ -826,18 +864,28 @@ test("records fixed-point diagnostics without private URL or payload data", () =
     "label",
     "outcome",
     "pendingAttaches",
+    "recentActivity",
     "targets",
+    "wait",
   ]);
-  assert.equal(diagnostic.inflightRequests[0].path,
-    "/assets/pdf-parser.worker-test.js");
-  assert.equal(diagnostic.pendingAttaches[0].url,
-    "/assets/pdf-parser.worker-test.js");
-  assert.equal(diagnostic.targets[0].url,
-    "/assets/pdf-document.worker-test.js");
-  assert.equal(diagnostic.targets[1].url,
-    "/assets/pdf-parser.worker-test.js");
-  assert.equal(diagnostic.targets[1].ancestry[0].url,
-    "/assets/pdf-document.worker-test.js");
+  assert.equal(diagnostic.inflightRequests[0].urlClass,
+    "pdf-parser-worker");
+  assert.equal(diagnostic.pendingAttaches[0].urlClass,
+    "pdf-parser-worker");
+  assert.deepEqual(diagnostic.pendingAttaches[0].commands, [
+    { name: "network-enable", status: "completed" },
+    { name: "runtime-enable", status: "pending" },
+  ]);
+  assert.equal(diagnostic.targets[0].urlClass,
+    "pdf-document-worker");
+  assert.equal(diagnostic.targets[1].urlClass,
+    "pdf-parser-worker");
+  assert.equal(diagnostic.targets[1].detached, true);
+  assert.equal(diagnostic.targets[1].ancestry[0].urlClass,
+    "pdf-document-worker");
+  assert.equal(diagnostic.recentActivity[0].command, "runtime-enable");
+  assert.equal(diagnostic.wait.elapsedMs, 10_001);
+  assert.equal(diagnostic.wait.recentSamples[0].inflightRequestCount, 1);
   assert.match(diagnostic.inflightRequests[0].identityHash, /^[a-f0-9]{64}$/u);
   assert.deepEqual(diagnostic.counts, {
     attachErrorCount: 1,
@@ -852,15 +900,386 @@ test("records fixed-point diagnostics without private URL or payload data", () =
   assert.doesNotMatch(serialized, /private-reader-sentence/u);
   assert.doesNotMatch(serialized, /linelight-private-profile/u);
   assert.doesNotMatch(serialized, /\?/u);
-  assert.doesNotMatch(serialized, /requestId|body|documentText/u);
-  assert.equal(
-    sanitizeCdpDiagnosticUrl("data:text/plain,private", appUrl),
-    "data:<redacted>",
+  assert.doesNotMatch(serialized, /"url":|"path":|"error":|body|documentText/u);
+
+  networkState.attachErrors[0].error =
+    "Could not resume target: entirely-different-private-error";
+  networkState.attachErrors[0].url = `${appUrl}assets/pdf-parser.worker-next.js?new=secret`;
+  networkState.byId.get(requestKey).url =
+    `${appUrl}assets/pdf-parser.worker-next.js?new=secret`;
+  networkState.pendingAttachMetadata.get(pendingPromise).url =
+    `${appUrl}assets/pdf-parser.worker-next.js?new=secret`;
+  networkState.recentActivity[0].url =
+    `${appUrl}assets/pdf-parser.worker-next.js?new=secret`;
+  networkState.requests[0].url =
+    `${appUrl}assets/pdf-document.worker-next.js?new=secret`;
+  networkState.targets[0].url =
+    `${appUrl}assets/pdf-document.worker-next.js?new=secret`;
+  networkState.targets[1].url =
+    `${appUrl}assets/pdf-parser.worker-next.js?new=secret`;
+  const changedPrivateInputs = buildCdpNetworkFixedPointDiagnostic(
+    networkState,
+    appUrl,
+    "desktop-dpr1-zoom100",
+    "timeout",
+    diagnosticWaitState,
   );
-  assert.equal(
-    sanitizeCdpDiagnosticUrl("https://example.test/private?token=secret", appUrl),
-    "<external-https>",
+  assert.deepEqual(changedPrivateInputs, diagnostic);
+
+  assert.deepEqual(
+    [
+      `${appUrl}`,
+      `${appUrl}assets/app.js`,
+      workerUrl,
+      parserUrl,
+      `blob:${appUrl}private-id`,
+      "about:blank",
+      "data:text/plain,private",
+      "https://example.test/private?token=secret",
+      "http://127.0.0.1:9999/internal?secret=true",
+    ].map((url) => classifyCdpDiagnosticUrl(url, appUrl)),
+    [
+      "page",
+      "app-asset",
+      "pdf-document-worker",
+      "pdf-parser-worker",
+      "blob",
+      "about",
+      "data",
+      "external",
+      "other-local",
+    ],
   );
+
+  const outputDirectory = path.join(
+    os.tmpdir(),
+    "issue-68-network-diagnostic",
+  );
+  const screenshot = {
+    ...artifact("linelight-desktop-dpr1-zoom100.png", 9),
+    path: path.relative(
+      path.resolve("."),
+      path.join(outputDirectory, "linelight-desktop-dpr1-zoom100.png"),
+    ),
+  };
+  const cleanDiagnosticTeardown = {
+    app: {
+      cdpClosed: true,
+      error: null,
+      present: true,
+      processClosed: true,
+      profileRemoved: true,
+    },
+    browserClosed: true,
+    cdpClosed: true,
+    errors: [],
+    profilesRemoved: true,
+    reference: {
+      cdpClosed: true,
+      error: null,
+      present: false,
+      processClosed: true,
+      profileRemoved: true,
+    },
+    referenceBrowserClosed: true,
+    server: {
+      error: null,
+      present: true,
+      processClosed: true,
+    },
+    serverClosed: true,
+  };
+  const report = buildFirstNetworkDiagnosticReport({
+    build: { localManifest: { deploymentId: DEPLOYMENT } },
+    fixture: { bytes: 4096, path: "fixture.pdf", sha256: SHA },
+    networkDiagnostic: { ...diagnostic, outcome: "fixed-point-reached" },
+    outputDirectory,
+    runnerFailure: null,
+    scenario: {
+      comparison: { lineLightScreenshot: screenshot },
+      id: "desktop-dpr1-zoom100",
+    },
+    source: { commit: COMMIT, tree: TREE },
+    teardown: cleanDiagnosticTeardown,
+  });
+  assert.equal(report.diagnostic, true);
+  assert.equal(report.diagnosticSchemaVersion, 1);
+  assert.equal(report.completed, true);
+  assert.equal(report.fixedPointReached, true);
+  assert.deepEqual(Object.keys(report).sort(), [
+    "artifacts",
+    "build",
+    "completed",
+    "diagnostic",
+    "diagnosticSchemaVersion",
+    "failures",
+    "fixedPointReached",
+    "fixture",
+    "mode",
+    "network",
+    "recordedAt",
+    "scenario",
+    "source",
+    "teardown",
+  ]);
+  assert.deepEqual(report.artifacts.screenshots, [screenshot]);
+  assert.equal("passed" in report, false);
+  assert.equal("schemaVersion" in report, false);
+  assert.deepEqual(report.failures, []);
+
+  const missingScreenshot = buildFirstNetworkDiagnosticReport({
+    build: report.build,
+    fixture: report.fixture,
+    networkDiagnostic: report.network,
+    outputDirectory,
+    runnerFailure: null,
+    scenario: {
+      comparison: {},
+      id: "desktop-dpr1-zoom100",
+    },
+    source: report.source,
+    teardown: cleanDiagnosticTeardown,
+  });
+  assert.equal(missingScreenshot.completed, false);
+  assert.match(
+    missingScreenshot.failures.join("\n"),
+    /screenshot manifest is not exact/u,
+  );
+  const substitutedScreenshot = buildFirstNetworkDiagnosticReport({
+    build: report.build,
+    fixture: report.fixture,
+    networkDiagnostic: report.network,
+    outputDirectory,
+    runnerFailure: null,
+    scenario: {
+      comparison: {
+        lineLightScreenshot: {
+          ...screenshot,
+          path: path.relative(
+            path.resolve("."),
+            path.join(
+              os.tmpdir(),
+              "other-output",
+              path.basename(screenshot.path),
+            ),
+          ),
+        },
+      },
+      id: "desktop-dpr1-zoom100",
+    },
+    source: report.source,
+    teardown: cleanDiagnosticTeardown,
+  });
+  assert.equal(substitutedScreenshot.completed, false);
+  assert.match(
+    substitutedScreenshot.failures.join("\n"),
+    /screenshot manifest is not exact/u,
+  );
+
+  const wrongScenario = buildFirstNetworkDiagnosticReport({
+    build: report.build,
+    fixture: report.fixture,
+    networkDiagnostic: report.network,
+    outputDirectory,
+    runnerFailure: null,
+    scenario: {
+      comparison: { lineLightScreenshot: screenshot },
+      id: "desktop-dpr2-zoom100",
+    },
+    source: report.source,
+    teardown: cleanDiagnosticTeardown,
+  });
+  assert.equal(wrongScenario.completed, false);
+  assert.equal(wrongScenario.scenario.screenshot, null);
+
+  const repositoryOutput = buildFirstNetworkDiagnosticReport({
+    build: report.build,
+    fixture: report.fixture,
+    networkDiagnostic: report.network,
+    outputDirectory: path.join(path.resolve("."), "outputs", "diagnostic"),
+    runnerFailure: null,
+    scenario: {
+      comparison: { lineLightScreenshot: screenshot },
+      id: "desktop-dpr1-zoom100",
+    },
+    source: report.source,
+    teardown: cleanDiagnosticTeardown,
+  });
+  assert.equal(repositoryOutput.completed, false);
+  assert.equal(repositoryOutput.artifacts.screenshots.length, 0);
+
+  const privateTeardown = structuredClone(cleanDiagnosticTeardown);
+  privateTeardown.app.error =
+    `Could not remove ${privateProfile}?text=${privateText}`;
+  privateTeardown.errors = [
+    `Browser cleanup failed for ${privateProfile}?text=${privateText}`,
+  ];
+  const privateFailureReport = buildFirstNetworkDiagnosticReport({
+    build: report.build,
+    fixture: report.fixture,
+    networkDiagnostic: report.network,
+    outputDirectory,
+    runnerFailure: new Error(
+      `Fixed point failed for ${privateProfile}?text=${privateText}`,
+    ),
+    scenario: {
+      comparison: { lineLightScreenshot: screenshot },
+      id: "desktop-dpr1-zoom100",
+    },
+    source: report.source,
+    teardown: privateTeardown,
+  });
+  const serializedPrivateFailure = JSON.stringify(privateFailureReport);
+  assert.equal(privateFailureReport.completed, false);
+  assert.equal(privateFailureReport.teardown.app.errorPresent, true);
+  assert.equal(privateFailureReport.teardown.errorCount, 1);
+  assert.doesNotMatch(serializedPrivateFailure, /private-reader-sentence/u);
+  assert.doesNotMatch(serializedPrivateFailure, /linelight-private-profile/u);
+  assert.doesNotMatch(serializedPrivateFailure, /Could not remove/u);
+  assert.doesNotMatch(serializedPrivateFailure, /Fixed point failed/u);
+
+  const timeoutReport = buildFirstNetworkDiagnosticReport({
+    build: report.build,
+    fixture: report.fixture,
+    networkDiagnostic: diagnostic,
+    outputDirectory,
+    runnerFailure: new Error(
+      `Timed out at ${privateProfile}?text=${privateText}`,
+    ),
+    scenario: {
+      comparison: { lineLightScreenshot: screenshot },
+      id: "desktop-dpr1-zoom100",
+    },
+    source: report.source,
+    teardown: cleanDiagnosticTeardown,
+  });
+  assert.equal(timeoutReport.completed, true);
+  assert.equal(timeoutReport.fixedPointReached, false);
+  assert.equal(timeoutReport.network, diagnostic);
+  assert.equal("passed" in timeoutReport, false);
+  assert.match(
+    timeoutReport.failures.join("\n"),
+    /did not reach a fixed point/u,
+  );
+  assert.doesNotMatch(
+    JSON.stringify(timeoutReport),
+    /linelight-private-profile/u,
+  );
+});
+
+test("keeps CDP requests bound to the exact flattened session", () => {
+  const appUrl = "http://127.0.0.1:4173/";
+  const networkState = {
+    attachErrors: [],
+    attachPromises: [],
+    byId: new Map(),
+    completedRequestCount: 0,
+    inflightRequests: new Set(),
+    pendingAttachMetadata: new Map(),
+    pendingAttachPromises: new Set(),
+    phase: "desktop-dpr1-zoom100",
+    recentActivity: [],
+    requests: [],
+    targets: [{
+      detached: true,
+      parentSessionId: null,
+      phase: "desktop-dpr1-zoom100",
+      sessionId: "current-session",
+      targetId: "current-target",
+      type: "worker",
+      url: `${appUrl}assets/pdf-parser.worker-test.js?secret=true`,
+      waitingForDebugger: false,
+    }],
+  };
+  const event = {
+    request: {
+      method: "GET",
+      url: `${appUrl}assets/pdf-parser.worker-test.js?secret=true`,
+    },
+    requestId: "shared-request-id",
+    type: "Script",
+  };
+  recordCdpNetworkRequest(networkState, event, "current-session");
+  const wrongSession = completeCdpNetworkRequest(
+    networkState,
+    { requestId: event.requestId },
+    "restored-session",
+  );
+  assert.equal(wrongSession, null);
+  assert.equal(networkState.completedRequestCount, 0);
+  assert.deepEqual(
+    [...networkState.inflightRequests],
+    ["current-session:shared-request-id"],
+  );
+
+  const detachedDiagnostic = buildCdpNetworkFixedPointDiagnostic(
+    networkState,
+    appUrl,
+    "desktop-dpr1-zoom100",
+    "timeout",
+  );
+  assert.equal(detachedDiagnostic.counts.inflightRequestCount, 1);
+  assert.equal(detachedDiagnostic.inflightRequests[0].requestId,
+    "shared-request-id");
+  assert.equal(detachedDiagnostic.inflightRequests[0].sessionId,
+    "current-session");
+  assert.equal(detachedDiagnostic.targets[0].targetId, "current-target");
+  assert.equal(detachedDiagnostic.targets[0].detached, true);
+
+  const exactSession = completeCdpNetworkRequest(
+    networkState,
+    { requestId: event.requestId },
+    "current-session",
+  );
+  assert.equal(exactSession?.requestId, "shared-request-id");
+  assert.equal(networkState.inflightRequests.size, 0);
+  assert.equal(networkState.completedRequestCount, 1);
+});
+
+test("requires three unchanged quiet CDP samples for a fixed point", () => {
+  const quiet = {
+    inflightRequestCount: 0,
+    pendingAttachCount: 0,
+    requestCount: 4,
+    targetCount: 2,
+  };
+  let stability = {
+    requestCount: -1,
+    stableSamples: 0,
+    targetCount: -1,
+  };
+  stability = advanceCdpFixedPointStability(stability, quiet);
+  assert.deepEqual(stability, {
+    fixedPointReached: false,
+    requestCount: 4,
+    stableSamples: 0,
+    targetCount: 2,
+  });
+  stability = advanceCdpFixedPointStability(stability, quiet);
+  assert.equal(stability.stableSamples, 1);
+  stability = advanceCdpFixedPointStability(stability, quiet);
+  assert.equal(stability.stableSamples, 2);
+  stability = advanceCdpFixedPointStability(stability, quiet);
+  assert.equal(stability.stableSamples, 3);
+  assert.equal(stability.fixedPointReached, true);
+
+  const almostStable = { ...stability, stableSamples: 2 };
+  assert.equal(advanceCdpFixedPointStability(almostStable, {
+    ...quiet,
+    pendingAttachCount: 1,
+  }).stableSamples, 0);
+  assert.equal(advanceCdpFixedPointStability(almostStable, {
+    ...quiet,
+    inflightRequestCount: 1,
+  }).stableSamples, 0);
+  assert.equal(advanceCdpFixedPointStability(almostStable, {
+    ...quiet,
+    requestCount: 5,
+  }).stableSamples, 0);
+  assert.equal(advanceCdpFixedPointStability(almostStable, {
+    ...quiet,
+    targetCount: 3,
+  }).stableSamples, 0);
 });
 
 test("keeps fallback probes armed through restored and wrong-page staging", async () => {
@@ -1757,6 +2176,52 @@ test("keeps the first-network diagnostic bounded and non-recording", async () =>
     ),
     /cannot be combined with --record/u,
   );
+  await assert.rejects(
+    execFileAsync(
+      process.execPath,
+      [
+        "scripts/run-pdf-sharpness-browser-regression.mjs",
+        "--diagnose-first-network-fixed-point",
+      ],
+      { cwd: path.resolve(".") },
+    ),
+    /requires an explicit --output/u,
+  );
+  await assert.rejects(
+    execFileAsync(
+      process.execPath,
+      [
+        "scripts/run-pdf-sharpness-browser-regression.mjs",
+        "--diagnose-first-network-fixed-point",
+        "--output",
+        "outputs/issue-68-diagnostic",
+      ],
+      { cwd: path.resolve(".") },
+    ),
+    /output must be outside the source repository/u,
+  );
+  const symlinkRoot = await mkdtemp(
+    path.join(os.tmpdir(), "issue-68-output-guard-"),
+  );
+  try {
+    const repositoryLink = path.join(symlinkRoot, "repository-link");
+    await symlink(path.resolve("."), repositoryLink, "dir");
+    await assert.rejects(
+      execFileAsync(
+        process.execPath,
+        [
+          "scripts/run-pdf-sharpness-browser-regression.mjs",
+          "--diagnose-first-network-fixed-point",
+          "--output",
+          path.join(repositoryLink, "outputs", "diagnostic"),
+        ],
+        { cwd: path.resolve(".") },
+      ),
+      /output must be outside the source repository/u,
+    );
+  } finally {
+    await rm(symlinkRoot, { force: true, recursive: true });
+  }
   const source = await readFile(
     "scripts/run-pdf-sharpness-browser-regression.mjs",
     "utf8",
@@ -1773,7 +2238,11 @@ test("keeps the first-network diagnostic bounded and non-recording", async () =>
     source,
     /evidence\.networkDiagnostics = \[\s*\.\.\.networkState\.fixedPointDiagnostics/u,
   );
-  assert.match(source, /diagnosticTeardownFailed/u);
+  assert.match(
+    source,
+    /const enableResults = await Promise\.allSettled\(\[/u,
+  );
+  assert.match(source, /buildFirstNetworkDiagnosticReport/u);
   assert.match(source, /pdf-sharpness-network-diagnostic\.json/u);
 });
 

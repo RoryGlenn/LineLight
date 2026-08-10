@@ -2,6 +2,7 @@
 
 import { spawn, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { existsSync, realpathSync } from "node:fs";
 import {
   access,
   mkdir,
@@ -63,6 +64,7 @@ const SERVER_TIMEOUT_MS = 60_000;
 const SCENARIO_TIMEOUT_MS = 90_000;
 const SHUTDOWN_TIMEOUT_MS = 3_000;
 const PDF_VIRTUAL_SCROLL_MAX_STEPS = 120;
+const CDP_FIXED_POINT_STABLE_SAMPLES = 3;
 
 export function summarizePdfModelCompletion(workerEvents, expectedPageCount) {
   const events = workerEvents ?? [];
@@ -228,28 +230,31 @@ export function selectPdfFallbackAbortCandidate(candidates) {
   };
 }
 
-export function sanitizeCdpDiagnosticUrl(value, appUrl) {
-  if (typeof value !== "string" || value.length === 0) return null;
-  if (value === "about:blank") return value;
-  if (value.startsWith("data:")) return "data:<redacted>";
-  if (value.startsWith("blob:")) {
-    try {
-      const blobSource = new URL(value.slice("blob:".length));
-      const app = new URL(appUrl);
-      return blobSource.origin === app.origin
-        ? "blob:<same-origin>"
-        : "blob:<redacted-origin>";
-    } catch {
-      return "blob:<redacted>";
-    }
-  }
+export function classifyCdpDiagnosticUrl(value, appUrl) {
+  if (typeof value !== "string" || value.length === 0) return "other-local";
+  if (value.startsWith("about:")) return "about";
+  if (value.startsWith("data:")) return "data";
+  if (value.startsWith("blob:")) return "blob";
   try {
     const parsed = new URL(value);
     const app = new URL(appUrl);
-    if (parsed.origin === app.origin) return parsed.pathname || "/";
-    return `<external-${parsed.protocol.replace(/:$/u, "")}>`;
+    const loopback = ["127.0.0.1", "localhost", "[::1]"].includes(
+      parsed.hostname,
+    );
+    if (parsed.origin !== app.origin) return loopback ? "other-local" : "external";
+    if (/pdf-document\.worker-[^/]+\.js$/u.test(parsed.pathname)) {
+      return "pdf-document-worker";
+    }
+    if (/pdf-parser\.worker-[^/]+\.js$/u.test(parsed.pathname)) {
+      return "pdf-parser-worker";
+    }
+    if (parsed.pathname.startsWith("/assets/")) return "app-asset";
+    if (parsed.pathname === "/" || parsed.pathname.endsWith(".html")) {
+      return "page";
+    }
+    return "other-local";
   } catch {
-    return "<unparseable-url>";
+    return "other-local";
   }
 }
 
@@ -259,31 +264,80 @@ function cdpDiagnosticIdentity(...parts) {
     .digest("hex");
 }
 
+function cdpRequestKey(requestId, sessionId) {
+  return `${sessionId ?? "page"}:${requestId}`;
+}
+
+export function recordCdpNetworkRequest(networkState, event, sessionId) {
+  const key = cdpRequestKey(event.requestId, sessionId);
+  const request = {
+    method: event.request.method,
+    phase: networkState.phase,
+    requestId: event.requestId,
+    sessionId: sessionId ?? null,
+    type: event.type,
+    url: event.request.url,
+  };
+  networkState.requests.push(request);
+  networkState.byId.set(key, request);
+  networkState.inflightRequests.add(key);
+  return request;
+}
+
+export function completeCdpNetworkRequest(networkState, event, sessionId) {
+  const key = cdpRequestKey(event.requestId, sessionId);
+  if (!networkState.inflightRequests.delete(key)) return null;
+  networkState.completedRequestCount += 1;
+  return networkState.byId.get(key) ?? null;
+}
+
+export function advanceCdpFixedPointStability(previous, sample) {
+  const unchangedAndQuiet =
+    sample.pendingAttachCount === 0 &&
+    sample.inflightRequestCount === 0 &&
+    sample.requestCount === previous.requestCount &&
+    sample.targetCount === previous.targetCount;
+  const stableSamples = unchangedAndQuiet
+    ? previous.stableSamples + 1
+    : 0;
+  return {
+    fixedPointReached: stableSamples >= CDP_FIXED_POINT_STABLE_SAMPLES,
+    requestCount: sample.requestCount,
+    stableSamples,
+    targetCount: sample.targetCount,
+  };
+}
+
 export function buildCdpNetworkFixedPointDiagnostic(
   networkState,
   appUrl,
   label,
   outcome = "timeout",
+  waitState = {},
 ) {
+  const capturedAt = Number.isFinite(waitState.capturedAtMs)
+    ? waitState.capturedAtMs
+    : Date.now();
   const requestForKey = (key) => networkState.byId.get(key) ?? null;
   const pendingAttachMetadata = networkState.pendingAttachMetadata ?? new Map();
   const pendingAttaches = [...networkState.pendingAttachPromises].map(
     (promise) => {
       const entry = pendingAttachMetadata.get(promise) ?? {};
       return {
+        commands: (entry.commands ?? []).map((command) => ({
+          name: command.name,
+          status: command.status,
+        })),
         identityHash: cdpDiagnosticIdentity(
-          entry.phase,
           entry.sessionId,
           entry.targetId,
-          entry.type,
-          entry.url,
         ),
         parentSessionId: entry.parentSessionId ?? null,
         phase: entry.phase ?? null,
         sessionId: entry.sessionId ?? null,
         targetId: entry.targetId ?? null,
         type: entry.type ?? null,
-        url: sanitizeCdpDiagnosticUrl(entry.url, appUrl),
+        urlClass: classifyCdpDiagnosticUrl(entry.url, appUrl),
       };
     },
   );
@@ -291,16 +345,15 @@ export function buildCdpNetworkFixedPointDiagnostic(
     const request = requestForKey(key) ?? {};
     return {
       identityHash: cdpDiagnosticIdentity(
-        key,
-        request.method,
-        request.type,
-        request.url,
+        request.sessionId,
+        request.requestId,
       ),
       method: request.method ?? null,
-      path: sanitizeCdpDiagnosticUrl(request.url, appUrl),
       phase: request.phase ?? null,
+      requestId: request.requestId ?? null,
       sessionId: request.sessionId ?? null,
       type: request.type ?? null,
+      urlClass: classifyCdpDiagnosticUrl(request.url, appUrl),
     };
   });
   const targets = withTargetAncestry(networkState.targets).map((target) => ({
@@ -308,22 +361,19 @@ export function buildCdpNetworkFixedPointDiagnostic(
       phase: ancestor.phase,
       sessionId: ancestor.sessionId,
       type: ancestor.type,
-      url: sanitizeCdpDiagnosticUrl(ancestor.url, appUrl),
+      urlClass: classifyCdpDiagnosticUrl(ancestor.url, appUrl),
     })),
     detached: target.detached === true,
     identityHash: cdpDiagnosticIdentity(
-      target.phase,
       target.sessionId,
       target.targetId,
-      target.type,
-      target.url,
     ),
     parentSessionId: target.parentSessionId ?? null,
     phase: target.phase ?? null,
     sessionId: target.sessionId ?? null,
     targetId: target.targetId ?? null,
     type: target.type ?? null,
-    url: sanitizeCdpDiagnosticUrl(target.url, appUrl),
+    urlClass: classifyCdpDiagnosticUrl(target.url, appUrl),
     waitingForDebugger: target.waitingForDebugger === true,
   }));
   const attachErrors = networkState.attachErrors.map((entry) => ({
@@ -332,16 +382,37 @@ export function buildCdpNetworkFixedPointDiagnostic(
       : String(entry.error).startsWith("Unhandled attach setup error:")
         ? "unhandled-setup"
         : "setup",
+    command: entry.command ?? null,
     identityHash: cdpDiagnosticIdentity(
-      entry.error,
       entry.sessionId,
-      entry.type,
-      entry.url,
+      entry.targetId,
     ),
     sessionId: entry.sessionId ?? null,
+    targetId: entry.targetId ?? null,
     type: entry.type ?? null,
-    url: sanitizeCdpDiagnosticUrl(entry.url, appUrl),
+    urlClass: classifyCdpDiagnosticUrl(entry.url, appUrl),
   }));
+  const recentActivity = (networkState.recentActivity ?? [])
+    .slice(-20)
+    .map((entry) => ({
+      ageMs: Number.isFinite(entry.at)
+        ? Math.max(0, capturedAt - entry.at)
+        : null,
+      command: entry.command ?? null,
+      identityHash: cdpDiagnosticIdentity(
+        entry.sessionId,
+        entry.targetId,
+        entry.requestId,
+      ),
+      kind: entry.kind,
+      method: entry.method ?? null,
+      phase: entry.phase ?? null,
+      requestId: entry.requestId ?? null,
+      sessionId: entry.sessionId ?? null,
+      targetId: entry.targetId ?? null,
+      type: entry.type ?? null,
+      urlClass: classifyCdpDiagnosticUrl(entry.url, appUrl),
+    }));
   return {
     attachErrors,
     counts: {
@@ -357,7 +428,167 @@ export function buildCdpNetworkFixedPointDiagnostic(
     label,
     outcome,
     pendingAttaches,
+    recentActivity,
     targets,
+    wait: {
+      elapsedMs: Number.isFinite(waitState.elapsedMs)
+        ? Math.max(0, waitState.elapsedMs)
+        : 0,
+      recentSamples: (waitState.recentSamples ?? []).slice(-12).map(
+        (sample) => ({
+          elapsedMs: sample.elapsedMs,
+          inflightRequestCount: sample.inflightRequestCount,
+          pendingAttachCount: sample.pendingAttachCount,
+          requestCount: sample.requestCount,
+          stableSamples: sample.stableSamples,
+          targetCount: sample.targetCount,
+        }),
+      ),
+      requiredStableSamples: CDP_FIXED_POINT_STABLE_SAMPLES,
+      stableSamples: Number.isInteger(waitState.stableSamples)
+        ? waitState.stableSamples
+        : 0,
+      timeoutMs: Number.isFinite(waitState.timeoutMs)
+        ? waitState.timeoutMs
+        : 0,
+    },
+  };
+}
+
+function resolveThroughExistingAncestor(candidatePath) {
+  let existingAncestor = candidatePath;
+  const missingSegments = [];
+  while (!existsSync(existingAncestor)) {
+    const parent = path.dirname(existingAncestor);
+    if (parent === existingAncestor) break;
+    missingSegments.unshift(path.basename(existingAncestor));
+    existingAncestor = parent;
+  }
+  const canonicalAncestor = realpathSync(existingAncestor);
+  return path.resolve(canonicalAncestor, ...missingSegments);
+}
+
+function isOutsideRepository(candidatePath) {
+  if (typeof candidatePath !== "string" || !path.isAbsolute(candidatePath)) {
+    return false;
+  }
+  const canonicalRepository = realpathSync(REPOSITORY_ROOT);
+  const canonicalCandidate = resolveThroughExistingAncestor(candidatePath);
+  const relative = path.relative(canonicalRepository, canonicalCandidate);
+  return (
+    relative !== "" &&
+    (relative.startsWith("..") || path.isAbsolute(relative))
+  );
+}
+
+export function buildFirstNetworkDiagnosticReport({
+  build,
+  fixture,
+  networkDiagnostic,
+  outputDirectory,
+  runnerFailure,
+  scenario,
+  source,
+  teardown,
+}) {
+  const screenshot = scenario?.comparison?.lineLightScreenshot ?? null;
+  const outputIsExternal = isOutsideRepository(outputDirectory);
+  const expectedScreenshotPath = outputIsExternal
+    ? path.relative(
+      REPOSITORY_ROOT,
+      path.join(outputDirectory, "linelight-desktop-dpr1-zoom100.png"),
+    )
+    : null;
+  const screenshotBound =
+    outputIsExternal &&
+    scenario?.id === "desktop-dpr1-zoom100" &&
+    typeof screenshot?.path === "string" &&
+    screenshot.path === expectedScreenshotPath &&
+    Number.isInteger(screenshot?.bytes) &&
+    screenshot.bytes > 0 &&
+    /^[a-f0-9]{64}$/u.test(screenshot?.sha256 ?? "");
+  const teardownFailed =
+    teardown?.app?.present !== true ||
+    teardown?.app?.cdpClosed !== true ||
+    teardown?.app?.processClosed !== true ||
+    teardown?.app?.profileRemoved !== true ||
+    Boolean(teardown?.app?.error) ||
+    teardown?.reference?.cdpClosed !== true ||
+    teardown?.reference?.processClosed !== true ||
+    teardown?.reference?.profileRemoved !== true ||
+    Boolean(teardown?.reference?.error) ||
+    teardown?.server?.present !== true ||
+    teardown?.server?.processClosed !== true ||
+    Boolean(teardown?.server?.error) ||
+    teardown?.browserClosed !== true ||
+    teardown?.cdpClosed !== true ||
+    teardown?.profilesRemoved !== true ||
+    teardown?.serverClosed !== true ||
+    teardown?.errors?.length > 0;
+  const summarizeBrowserShutdown = (shutdown) => ({
+    cdpClosed: shutdown?.cdpClosed === true,
+    errorPresent: Boolean(shutdown?.error),
+    present: shutdown?.present === true,
+    processClosed: shutdown?.processClosed === true,
+    profileRemoved: shutdown?.profileRemoved === true,
+  });
+  const teardownSummary = {
+    app: summarizeBrowserShutdown(teardown?.app),
+    browserClosed: teardown?.browserClosed === true,
+    cdpClosed: teardown?.cdpClosed === true,
+    errorCount: Array.isArray(teardown?.errors) ? teardown.errors.length : 0,
+    profilesRemoved: teardown?.profilesRemoved === true,
+    reference: summarizeBrowserShutdown(teardown?.reference),
+    referenceBrowserClosed: teardown?.referenceBrowserClosed === true,
+    server: {
+      errorPresent: Boolean(teardown?.server?.error),
+      present: teardown?.server?.present === true,
+      processClosed: teardown?.server?.processClosed === true,
+    },
+    serverClosed: teardown?.serverClosed === true,
+  };
+  const failures = [
+    ...(runnerFailure
+      ? ["The bounded network diagnostic runner reported a failure."]
+      : []),
+    ...(!networkDiagnostic
+      ? ["The bounded network diagnostic did not capture its fixed-point state."]
+      : []),
+    ...(networkDiagnostic &&
+        networkDiagnostic.outcome !== "fixed-point-reached"
+      ? ["The bounded network diagnostic did not reach a fixed point."]
+      : []),
+    ...(!screenshotBound
+      ? ["The bounded network diagnostic screenshot manifest is not exact."]
+      : []),
+    ...(teardownFailed
+      ? ["Owned diagnostic browser/server/CDP resources did not tear down cleanly."]
+      : []),
+  ];
+  return {
+    artifacts: {
+      deploymentId: build?.localManifest?.deploymentId ?? null,
+      screenshots: screenshotBound ? [screenshot] : [],
+      sourceCommit: source?.commit ?? null,
+      sourceTree: source?.tree ?? null,
+    },
+    build,
+    completed: Boolean(networkDiagnostic) && screenshotBound && !teardownFailed,
+    diagnostic: true,
+    diagnosticSchemaVersion: 1,
+    failures,
+    fixture,
+    fixedPointReached:
+      networkDiagnostic?.outcome === "fixed-point-reached",
+    mode: "first-network-fixed-point",
+    network: networkDiagnostic,
+    recordedAt: new Date().toISOString(),
+    scenario: {
+      configurationId: scenario?.id ?? null,
+      screenshot: screenshotBound ? screenshot : null,
+    },
+    source,
+    teardown: teardownSummary,
   };
 }
 
@@ -395,6 +626,7 @@ function parseArguments(argv) {
     outputDirectory:
       process.env.LINELIGHT_PDF_SHARPNESS_EVIDENCE ??
       DEFAULT_OUTPUT_DIRECTORY,
+    outputProvided: false,
     record: false,
   };
   for (let index = 0; index < argv.length; index += 1) {
@@ -404,7 +636,10 @@ function parseArguments(argv) {
       options.diagnoseFirstNetworkFixedPoint = true;
     }
     else if (argument === "--fixture") options.fixture = argv[++index];
-    else if (argument === "--output") options.outputDirectory = argv[++index];
+    else if (argument === "--output") {
+      options.outputDirectory = argv[++index];
+      options.outputProvided = true;
+    }
     else if (argument === "--record") options.record = true;
     else if (argument === "--help" || argument === "-h") {
       process.stdout.write(
@@ -437,10 +672,23 @@ function parseArguments(argv) {
       "First-network diagnostic mode cannot be combined with --record.",
     );
   }
+  if (options.diagnoseFirstNetworkFixedPoint && !options.outputProvided) {
+    throw new Error(
+      "First-network diagnostic mode requires an explicit --output directory.",
+    );
+  }
   if (options.record) options.outputDirectory = RECORDED_OUTPUT_DIRECTORY;
   options.browser = path.resolve(options.browser);
   options.fixture = path.resolve(options.fixture);
   options.outputDirectory = path.resolve(options.outputDirectory);
+  if (
+    options.diagnoseFirstNetworkFixedPoint &&
+    !isOutsideRepository(options.outputDirectory)
+  ) {
+    throw new Error(
+      "First-network diagnostic output must be outside the source repository.",
+    );
+  }
   if (
     options.record &&
     options.fixture !== path.resolve(DEFAULT_PDF_HIGHLIGHT_FIXTURE)
@@ -1849,24 +2097,30 @@ function sendToCdpSession(cdp, method, params, sessionId) {
 }
 
 async function configureAppSession(cdp, networkState) {
+  const recordActivity = (entry) => {
+    networkState.recentActivity.push({ at: Date.now(), ...entry });
+    if (networkState.recentActivity.length > 40) {
+      networkState.recentActivity.splice(
+        0,
+        networkState.recentActivity.length - 40,
+      );
+    }
+  };
   const recordRequest = (event, sessionId) => {
-    const key = `${sessionId ?? "page"}:${event.requestId}`;
-    const request = {
-      method: event.request.method,
-      phase: networkState.phase,
-      requestId: event.requestId,
-      sessionId: sessionId ?? null,
-      type: event.type,
-      url: event.request.url,
-    };
-    networkState.requests.push(request);
-    networkState.byId.set(key, request);
-    networkState.inflightRequests.add(key);
+    const request = recordCdpNetworkRequest(networkState, event, sessionId);
+    recordActivity({ kind: "request-start", ...request });
   };
   const completeRequest = (event, sessionId) => {
-    const key = `${sessionId ?? "page"}:${event.requestId}`;
-    if (networkState.inflightRequests.delete(key)) {
-      networkState.completedRequestCount += 1;
+    const request = completeCdpNetworkRequest(
+      networkState,
+      event,
+      sessionId,
+    );
+    if (request) {
+      recordActivity({
+        ...request,
+        kind: "request-complete",
+      });
     }
   };
   const recordFailure = (event, sessionId) => {
@@ -1918,10 +2172,21 @@ async function configureAppSession(cdp, networkState) {
       const target = networkState.targets.find(
         (candidate) => candidate.sessionId === event.sessionId,
       );
-      if (target) target.detached = true;
+      if (target) {
+        target.detached = true;
+        recordActivity({
+          kind: "target-detached",
+          phase: target.phase,
+          sessionId: target.sessionId,
+          targetId: target.targetId,
+          type: target.type,
+          url: target.url,
+        });
+      }
     } else if (message.method === "Target.attachedToTarget") {
       const { sessionId, targetInfo, waitingForDebugger } = event;
       const attachMetadata = {
+        commands: [],
         parentSessionId: message.sessionId ?? null,
         phase: networkState.phase,
         sessionId,
@@ -1929,7 +2194,39 @@ async function configureAppSession(cdp, networkState) {
         type: targetInfo.type,
         url: targetInfo.url,
       };
+      const runAttachCommand = async (name, method, params) => {
+        const command = { name, status: "pending" };
+        attachMetadata.commands.push(command);
+        recordActivity({
+          command: name,
+          kind: "attach-command-start",
+          phase: attachMetadata.phase,
+          sessionId,
+          targetId: targetInfo.targetId,
+          type: targetInfo.type,
+          url: targetInfo.url,
+        });
+        try {
+          const result = await sendToCdpSession(cdp, method, params, sessionId);
+          command.status = "completed";
+          return result;
+        } catch (error) {
+          command.status = "failed";
+          throw error;
+        } finally {
+          recordActivity({
+            command: name,
+            kind: `attach-command-${command.status}`,
+            phase: attachMetadata.phase,
+            sessionId,
+            targetId: targetInfo.targetId,
+            type: targetInfo.type,
+            url: targetInfo.url,
+          });
+        }
+      };
       networkState.targets.push({
+        detached: false,
         openerId: targetInfo.openerId ?? null,
         parentSessionId: message.sessionId ?? null,
         phase: networkState.phase,
@@ -1939,46 +2236,61 @@ async function configureAppSession(cdp, networkState) {
         url: targetInfo.url,
         waitingForDebugger: Boolean(waitingForDebugger),
       });
+      recordActivity({
+        kind: "target-attached",
+        phase: attachMetadata.phase,
+        sessionId,
+        targetId: targetInfo.targetId,
+        type: targetInfo.type,
+        url: targetInfo.url,
+      });
       const attachPromise = (async () => {
         try {
-          await Promise.all([
-            sendToCdpSession(cdp, "Network.enable", {}, sessionId),
-            sendToCdpSession(cdp, "Runtime.enable", {}, sessionId),
+          const enableResults = await Promise.allSettled([
+            runAttachCommand("network-enable", "Network.enable", {}),
+            runAttachCommand("runtime-enable", "Runtime.enable", {}),
           ]);
-          await sendToCdpSession(
-            cdp,
+          const enableFailure = enableResults.find(
+            (result) => result.status === "rejected",
+          );
+          if (enableFailure) throw enableFailure.reason;
+          await runAttachCommand(
+            "cache-disable",
             "Network.setCacheDisabled",
             { cacheDisabled: true },
-            sessionId,
           );
-          await sendToCdpSession(
-            cdp,
+          await runAttachCommand(
+            "auto-attach",
             "Target.setAutoAttach",
             {
               autoAttach: true,
               flatten: true,
               waitForDebuggerOnStart: true,
             },
-            sessionId,
           );
         } catch (error) {
           networkState.attachErrors.push({
+            command: attachMetadata.commands.find(
+              (command) => command.status === "failed",
+            )?.name ?? null,
             error: String(error),
             sessionId,
+            targetId: targetInfo.targetId,
             type: targetInfo.type,
             url: targetInfo.url,
           });
         } finally {
           if (waitingForDebugger) {
-            await sendToCdpSession(
-              cdp,
+            await runAttachCommand(
+              "resume",
               "Runtime.runIfWaitingForDebugger",
               {},
-              sessionId,
             ).catch((error) => {
               networkState.attachErrors.push({
+                command: "resume",
                 error: `Could not resume target: ${String(error)}`,
                 sessionId,
+                targetId: targetInfo.targetId,
                 type: targetInfo.type,
                 url: targetInfo.url,
               });
@@ -1998,8 +2310,12 @@ async function configureAppSession(cdp, networkState) {
           networkState.pendingAttachPromises.delete(attachPromise);
           networkState.pendingAttachMetadata.delete(attachPromise);
           networkState.attachErrors.push({
+            command: attachMetadata.commands.find(
+              (command) => command.status === "failed",
+            )?.name ?? null,
             error: `Unhandled attach setup error: ${String(error)}`,
             sessionId,
+            targetId: targetInfo.targetId,
             type: targetInfo.type,
             url: targetInfo.url,
           });
@@ -2032,9 +2348,12 @@ async function waitForCdpNetworkFixedPoint(
   timeoutMs = 10_000,
 ) {
   const startedAt = Date.now();
-  let previousRequestCount = -1;
-  let previousTargetCount = -1;
-  let stableSamples = 0;
+  const recentSamples = [];
+  let stability = {
+    requestCount: -1,
+    stableSamples: 0,
+    targetCount: -1,
+  };
   while (Date.now() - startedAt < timeoutMs) {
     const pending = [...networkState.pendingAttachPromises];
     if (pending.length) {
@@ -2046,19 +2365,22 @@ async function waitForCdpNetworkFixedPoint(
     await delay(75);
     const requestCount = networkState.requests.length;
     const targetCount = networkState.targets.length;
-    if (
-      networkState.pendingAttachPromises.size === 0 &&
-      networkState.inflightRequests.size === 0 &&
-      requestCount === previousRequestCount &&
-      targetCount === previousTargetCount
-    ) {
-      stableSamples += 1;
-    } else {
-      stableSamples = 0;
-    }
-    previousRequestCount = requestCount;
-    previousTargetCount = targetCount;
-    if (stableSamples >= 3) {
+    stability = advanceCdpFixedPointStability(stability, {
+      inflightRequestCount: networkState.inflightRequests.size,
+      pendingAttachCount: networkState.pendingAttachPromises.size,
+      requestCount,
+      targetCount,
+    });
+    recentSamples.push({
+      elapsedMs: Date.now() - startedAt,
+      inflightRequestCount: networkState.inflightRequests.size,
+      pendingAttachCount: networkState.pendingAttachPromises.size,
+      requestCount,
+      stableSamples: stability.stableSamples,
+      targetCount,
+    });
+    if (recentSamples.length > 12) recentSamples.shift();
+    if (stability.fixedPointReached) {
       const fixedPoint = {
         attachPromiseCount: networkState.attachPromises.length,
         completedRequestCount: networkState.completedRequestCount,
@@ -2069,13 +2391,34 @@ async function waitForCdpNetworkFixedPoint(
         targetCount,
       };
       networkState.networkFixedPoints.push(fixedPoint);
-      return fixedPoint;
+      return {
+        diagnostic: buildCdpNetworkFixedPointDiagnostic(
+          networkState,
+          appUrl,
+          label,
+          "fixed-point-reached",
+          {
+            elapsedMs: Date.now() - startedAt,
+            recentSamples,
+            stableSamples: stability.stableSamples,
+            timeoutMs,
+          },
+        ),
+        fixedPoint,
+      };
     }
   }
   const diagnostic = buildCdpNetworkFixedPointDiagnostic(
     networkState,
     appUrl,
     label,
+    "timeout",
+    {
+      elapsedMs: Date.now() - startedAt,
+      recentSamples,
+      stableSamples: stability.stableSamples,
+      timeoutMs,
+    },
   );
   networkState.fixedPointDiagnostics.push(diagnostic);
   throw new Error(
@@ -3645,9 +3988,6 @@ async function run(options) {
     bitmapBudget: probePdfBitmapBudget(),
     build: null,
     fixture,
-    diagnosticMode: options.diagnoseFirstNetworkFixedPoint
-      ? "first-network-fixed-point"
-      : null,
     issue: 68,
     matrix: [],
     network: null,
@@ -3668,6 +4008,7 @@ async function run(options) {
     phase: "startup",
     pendingAttachPromises: new Set(),
     pendingAttachMetadata: new Map(),
+    recentActivity: [],
     requests: [],
     responseFailures: [],
     targets: [],
@@ -3699,19 +4040,14 @@ async function run(options) {
       if (options.diagnoseFirstNetworkFixedPoint) {
         evidence.matrix.push(matrixRun);
       }
-      await waitForCdpNetworkFixedPoint(
+      const networkFixedPoint = await waitForCdpNetworkFixedPoint(
         networkState,
         server.appUrl,
         configuration.id,
       );
       if (options.diagnoseFirstNetworkFixedPoint) {
         networkState.fixedPointDiagnostics.push(
-          buildCdpNetworkFixedPointDiagnostic(
-            networkState,
-            server.appUrl,
-            configuration.id,
-            "fixed-point-reached",
-          ),
+          networkFixedPoint.diagnostic,
         );
         break;
       }
@@ -3808,46 +4144,55 @@ async function run(options) {
     ];
   }
 
-  const diagnosticTeardownFailed =
-    options.diagnoseFirstNetworkFixedPoint &&
-    (
-      evidence.teardown?.browserClosed !== true ||
-      evidence.teardown?.cdpClosed !== true ||
-      evidence.teardown?.profilesRemoved !== true ||
-      evidence.teardown?.serverClosed !== true ||
-      evidence.teardown?.errors?.length > 0
+  if (options.diagnoseFirstNetworkFixedPoint) {
+    const report = buildFirstNetworkDiagnosticReport({
+      build: evidence.build,
+      fixture,
+      networkDiagnostic: evidence.networkDiagnostics.at(-1) ?? null,
+      outputDirectory: options.outputDirectory,
+      runnerFailure,
+      scenario: evidence.matrix[0] ?? null,
+      source,
+      teardown: evidence.teardown,
+    });
+    const diagnosticPath = path.join(
+      options.outputDirectory,
+      "pdf-sharpness-network-diagnostic.json",
     );
+    await writeFile(diagnosticPath, `${JSON.stringify(report, null, 2)}\n`);
+    if (report.failures.length) {
+      throw new Error(
+        `Issue #68 network diagnostic completed with a failed fixed-point gate. Evidence: ${diagnosticPath}\n${report.failures.join("\n")}`,
+      );
+    }
+    process.stdout.write(
+      `Issue #68 network diagnostic completed: ${diagnosticPath}\n`,
+    );
+    return;
+  }
+
   const failures = [
     ...(runnerFailure
       ? [runnerFailure instanceof Error
           ? runnerFailure.stack
           : String(runnerFailure)]
       : []),
-    ...(diagnosticTeardownFailed
-      ? ["Owned diagnostic browser/server/CDP resources did not tear down cleanly."]
-      : []),
-    ...(options.diagnoseFirstNetworkFixedPoint
-      ? []
-      : validatePdfSharpnessEvidence(evidence)),
+    ...validatePdfSharpnessEvidence(evidence),
   ];
   evidence.failures = failures;
   evidence.passed = failures.length === 0;
   evidence.recordedAt = new Date().toISOString();
   const evidencePath = path.join(
     options.outputDirectory,
-    options.diagnoseFirstNetworkFixedPoint
-      ? "pdf-sharpness-network-diagnostic.json"
-      : "pdf-sharpness-browser.json",
+    "pdf-sharpness-browser.json",
   );
   await writeFile(evidencePath, `${JSON.stringify(evidence, null, 2)}\n`);
   if (failures.length) {
     throw new Error(
-      `Issue #68 ${options.diagnoseFirstNetworkFixedPoint ? "network diagnostic" : "browser regression"} failed. Evidence: ${evidencePath}\n${failures.join("\n")}`,
+      `Issue #68 browser regression failed. Evidence: ${evidencePath}\n${failures.join("\n")}`,
     );
   }
-  process.stdout.write(
-    `Issue #68 ${options.diagnoseFirstNetworkFixedPoint ? "network diagnostic" : "browser evidence"} passed: ${evidencePath}\n`,
-  );
+  process.stdout.write(`Issue #68 browser evidence passed: ${evidencePath}\n`);
 }
 
 const invokedPath = process.argv[1] ? path.resolve(process.argv[1]) : "";

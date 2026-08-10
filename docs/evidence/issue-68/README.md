@@ -21,12 +21,17 @@ node scripts/run-pdf-sharpness-browser-regression.mjs \
 
 That mode runs only the first desktop scenario, skips fallback and reference
 capture, and still closes its owned browser, CDP connection, profile, and
-server. On either success or timeout it writes a separate diagnostic JSON. The
-diagnostic contains counts, pending-attach metadata, inflight request method and
-resource type, same-origin paths without queries, opaque identity hashes, and
-sanitized target ancestry. It never records request bodies, headers, document
-text, query values, or browser-profile paths. It is a diagnosis aid, not Issue
-68 acceptance evidence.
+server. Its explicit output directory must resolve outside the source
+repository, including through existing symlinks. On
+either success or timeout it writes a separate `diagnostic: true` schema with
+`completed` and `fixedPointReached` states, never a canonical `passed` result.
+The diagnostic binds only `linelight-desktop-dpr1-zoom100.png` from that
+external output directory and contains counts,
+per-command pending-attach status, inflight request metadata, recent stability
+samples/activity, detached target ancestry, opaque request/session/target IDs,
+and fixed URL classes. It never records URL paths or queries, raw error text,
+request bodies or headers, document text, or browser-profile paths. It is a
+diagnosis aid, not Issue 68 acceptance evidence.
 
 The runner always makes a fresh production build, serves that exact artifact on
 an owned loopback Wrangler process, and opens visible Brave windows. It refuses
