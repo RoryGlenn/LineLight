@@ -69,6 +69,36 @@ const CDP_CHILD_COMMAND_TIMEOUT_MS = 5_000;
 const PUBLIC_PDF_FIXTURE_BYTES = 4_745;
 const PUBLIC_PDF_FIXTURE_SHA256 =
   "1addfceae4b869eec37dae4755d576ccd0fd7e1ce505dc856da3b96acbf3f06c";
+const CDP_WORKER_TARGET_TYPES = new Set([
+  "service_worker",
+  "shared_worker",
+  "worker",
+]);
+
+export function validateCdpInitialTargetBaseline(targetInfos) {
+  const targets = Array.isArray(targetInfos) ? targetInfos : [];
+  const pages = targets.filter((target) => target?.type === "page");
+  const workers = targets.filter((target) =>
+    CDP_WORKER_TARGET_TYPES.has(target?.type)
+  );
+  if (
+    pages.length !== 1 ||
+    pages[0]?.url !== "about:blank" ||
+    workers.length !== 0 ||
+    targets.length !== 1
+  ) {
+    throw new Error(
+      "Issue #68 requires one clean about:blank page and no preexisting worker targets.",
+    );
+  }
+  return {
+    checked: true,
+    pageCount: 1,
+    pageUrlClass: "about",
+    targetCount: targets.length,
+    workerCount: 0,
+  };
+}
 
 export function summarizePdfModelCompletion(workerEvents, expectedPageCount) {
   const events = workerEvents ?? [];
@@ -278,7 +308,11 @@ export function recordCdpNetworkRequest(networkState, event, sessionId) {
     method: event.request.method,
     phase: networkState.phase,
     requestId: event.requestId,
+    sequence: networkState.requests.length + 1,
     sessionId: sessionId ?? null,
+    startedAt: Date.now(),
+    terminalAt: null,
+    terminalReason: null,
     type: event.type,
     url: event.request.url,
   };
@@ -288,28 +322,176 @@ export function recordCdpNetworkRequest(networkState, event, sessionId) {
   return request;
 }
 
-export function completeCdpNetworkRequest(networkState, event, sessionId) {
+export function completeCdpNetworkRequest(
+  networkState,
+  event,
+  sessionId,
+  terminalReason = "loading-finished",
+) {
   const key = cdpRequestKey(event.requestId, sessionId);
   if (!networkState.inflightRequests.delete(key)) return null;
   networkState.completedRequestCount += 1;
-  return networkState.byId.get(key) ?? null;
+  const request = networkState.byId.get(key) ?? null;
+  if (request) {
+    request.terminalAt = Date.now();
+    request.terminalReason = terminalReason;
+  }
+  return request;
 }
 
+const expectedCdpTargetCommands = (target) => [
+  { method: "Network.enable", name: "network-enable" },
+  { method: "Runtime.enable", name: "runtime-enable" },
+  { method: "Network.setCacheDisabled", name: "cache-disable" },
+  { method: "Target.setAutoAttach", name: "auto-attach" },
+  ...(target?.waitingForDebugger === true
+    ? [{ method: "Runtime.runIfWaitingForDebugger", name: "resume" }]
+    : []),
+];
+
 export function isCdpTargetSetupComplete(target) {
-  const expectedCommands = [
-    "network-enable",
-    "runtime-enable",
-    "cache-disable",
-    "auto-attach",
-    ...(target?.waitingForDebugger === true ? ["resume"] : []),
-  ];
+  const expectedCommands = expectedCdpTargetCommands(target);
+  const commands = Array.isArray(target?.commands) ? target.commands : [];
+  const resume = commands.find((command) => command?.name === "resume");
+  const setupCommands = commands.filter((command) => command?.name !== "resume");
+  const resultSequences = commands.map((command) => command?.resultSequence);
+  const expectedResultSequences = commands.map((_, index) => index + 1);
+  const commandIds = commands.map((command) => command?.cdpId);
+  const commandsByResult = [...commands].sort(
+    (left, right) => left.resultSequence - right.resultSequence,
+  );
+  const serviceWorkerBarrier =
+    target?.type === "service_worker" &&
+    target?.waitingForDebugger === true;
+  const expectedStrategy = serviceWorkerBarrier
+    ? "setup-dispatched-before-resume"
+    : target?.waitingForDebugger === true
+      ? "setup-completed-before-resume"
+      : "already-running";
   return (
     target?.attachComplete === true &&
     target?.resumed === true &&
-    Array.isArray(target?.commands) &&
-    target.commands.map(({ name }) => name).join(",") ===
-      expectedCommands.join(",") &&
-    target.commands.every(({ status }) => status === "completed")
+    target?.lifecycleStrategy === expectedStrategy &&
+    commands.length === expectedCommands.length &&
+    commands.every(
+      (command, index) =>
+        command?.name === expectedCommands[index].name &&
+        command?.method === expectedCommands[index].method &&
+        command?.dispatchSequence === index + 1 &&
+        Number.isInteger(command?.cdpId) &&
+        command.cdpId > 0 &&
+        Number.isFinite(command?.dispatchedAt) &&
+        Number.isFinite(command?.resultAt) &&
+        command.resultAt >= command.dispatchedAt &&
+        Number.isInteger(command?.resultSequence) &&
+        command.resultSequence > 0 &&
+        command?.status === "completed",
+    ) &&
+    new Set(commands.map((command) => command.cdpId)).size ===
+      commands.length &&
+    commandIds.every(
+      (commandId, index) => index === 0 || commandId > commandIds[index - 1],
+    ) &&
+    commands.every(
+      (command, index) =>
+        index === 0 || command.dispatchedAt >= commands[index - 1].dispatchedAt,
+    ) &&
+    commandsByResult.every(
+      (command, index) =>
+        index === 0 ||
+        command.resultAt >= commandsByResult[index - 1].resultAt,
+    ) &&
+    [...resultSequences].sort((left, right) => left - right).join(",") ===
+      expectedResultSequences.join(",") &&
+    (target?.waitingForDebugger === true
+      ? Number.isFinite(target?.resumeDispatchedAt) &&
+        target.resumeDispatchedAt === resume?.dispatchedAt
+      : target?.resumeDispatchedAt === null) &&
+    (serviceWorkerBarrier
+      ? Number.isFinite(target?.commandDeadlineAt) &&
+        target.commandDeadlineAt > target.resumeDispatchedAt &&
+        commandIds.every(
+          (commandId, index) =>
+            index === 0 || commandId === commandIds[index - 1] + 1,
+        ) &&
+        setupCommands.every(
+          (command) => command.dispatchedAt <= target.resumeDispatchedAt,
+        ) &&
+        commands.every(
+          (command) =>
+            command.deadlineAt === target.commandDeadlineAt &&
+            command.resultAt >= target.resumeDispatchedAt &&
+            command.resultAt <= target.commandDeadlineAt,
+        )
+      : target?.commandDeadlineAt === null &&
+        (target?.waitingForDebugger !== true ||
+          setupCommands.every(
+            (command) => command.resultAt <= target.resumeDispatchedAt,
+          )))
+  );
+}
+
+function hasCdpServiceWorkerBootstrapCoverage(networkState) {
+  const targets = Array.isArray(networkState?.targets)
+    ? networkState.targets.filter((target) => target?.type === "service_worker")
+    : [];
+  const observations = Array.isArray(
+    networkState?.serviceWorkerBootstrapObservations,
+  )
+    ? networkState.serviceWorkerBootstrapObservations
+    : [];
+  const observationSessions = observations.map(
+    (observation) => observation?.targetSessionId,
+  );
+  return (
+    targets.length > 0 &&
+    observations.length === targets.length &&
+    new Set(observationSessions).size === observationSessions.length &&
+    targets.every((target) => {
+      const observation = observations.find(
+        (candidate) => candidate?.targetSessionId === target.sessionId,
+      );
+      const sessionRequests = (networkState.requests ?? []).filter(
+        (request) => request?.sessionId === target.sessionId,
+      );
+      const request = sessionRequests.find(
+        (candidate) => candidate?.requestId === observation?.requestId,
+      );
+      const requestKey = cdpRequestKey(request?.requestId, request?.sessionId);
+      const sessionFailureCount = (networkState.failures ?? []).filter(
+        (failure) => failure?.sessionId === target.sessionId,
+      ).length + (networkState.responseFailures ?? []).filter(
+        (failure) => failure?.sessionId === target.sessionId,
+      ).length;
+      return (
+        isCdpServiceWorkerBootstrapRequest(
+          request,
+          { ...target, detached: false },
+        ) &&
+        observation?.targetDetachedAtObservation === false &&
+        sessionRequests[0] === request &&
+        !sessionRequests.some(
+          (candidate) => candidate.startedAt < target.resumeDispatchedAt,
+        ) &&
+        sessionFailureCount === 0 &&
+        target.serviceWorkerBootstrapRequestKey === requestKey &&
+        request.serviceWorkerTargetSessionId === target.sessionId &&
+        observation?.method === request.method &&
+        observation?.phase === request.phase &&
+        observation?.requestId === request.requestId &&
+        observation?.requestSequence === request.sequence &&
+        observation?.requestSessionId === request.sessionId &&
+        observation?.requestStartedAt === request.startedAt &&
+        observation?.resourceType === request.type &&
+        observation?.resumeDispatchedAt === target.resumeDispatchedAt &&
+        observation?.targetId === target.targetId &&
+        observation?.targetSessionId === target.sessionId &&
+        observation?.targetType === target.type &&
+        observation?.terminalAt === request.terminalAt &&
+        observation?.terminalReason === request.terminalReason &&
+        observation?.url === request.url
+      );
+    })
   );
 }
 
@@ -320,7 +502,56 @@ export function isCdpAttachmentStateHealthy(networkState) {
     networkState.attachErrors.length === 0 &&
     Array.isArray(networkState?.targets) &&
     networkState.targets.length > 0 &&
-    networkState.targets.every(isCdpTargetSetupComplete)
+    networkState.targets.every(isCdpTargetSetupComplete) &&
+    hasCdpServiceWorkerBootstrapCoverage(networkState)
+  );
+}
+
+function cdpPhasePdfBootstrapCounts(networkState, appUrl, label) {
+  const phaseTargets = (networkState.targets ?? []).filter(
+    (target) => target?.phase === label,
+  );
+  const documentTargets = phaseTargets.filter(
+    (target) => classifyCdpDiagnosticUrl(target?.url, appUrl) ===
+      "pdf-document-worker",
+  );
+  const parserTargets = phaseTargets.filter(
+    (target) => classifyCdpDiagnosticUrl(target?.url, appUrl) ===
+      "pdf-parser-worker",
+  );
+  const settlements = networkState.targetBootstrapSettlements ?? [];
+  const documentTargetSessions = new Set(
+    documentTargets.map((target) => target.sessionId),
+  );
+  const parserTargetSessions = new Set(
+    parserTargets.map((target) => target.sessionId),
+  );
+  return {
+    documentBootstrapSettlementCount: settlements.filter(
+      (settlement) =>
+        settlement?.phase === label &&
+        documentTargetSessions.has(settlement?.targetSessionId),
+    ).length,
+    documentTargetCount: documentTargets.length,
+    parserBootstrapSettlementCount: settlements.filter(
+      (settlement) =>
+        settlement?.phase === label &&
+        parserTargetSessions.has(settlement?.targetSessionId),
+    ).length,
+    parserTargetCount: parserTargets.length,
+  };
+}
+
+export function hasCdpPhasePdfBootstrapCoverage(networkState, appUrl, label) {
+  if (!PDF_SHARPNESS_MATRIX.some((configuration) => configuration.id === label)) {
+    return true;
+  }
+  const counts = cdpPhasePdfBootstrapCounts(networkState, appUrl, label);
+  return (
+    counts.documentTargetCount > 0 &&
+    counts.parserTargetCount > 0 &&
+    counts.documentBootstrapSettlementCount === counts.documentTargetCount &&
+    counts.parserBootstrapSettlementCount === counts.parserTargetCount
   );
 }
 
@@ -351,6 +582,8 @@ export function reconcileCdpTargetBootstrapRequests(networkState) {
       }
       target.bootstrapRequestKey = requestKey;
       request.bootstrapTargetSessionId = target.sessionId;
+      request.terminalAt = Date.now();
+      request.terminalReason = "target-attached";
       networkState.inflightRequests.delete(requestKey);
       networkState.completedRequestCount += 1;
       const settlement = {
@@ -373,6 +606,78 @@ export function reconcileCdpTargetBootstrapRequests(networkState) {
     }
   }
   return settlements;
+}
+
+export function isCdpServiceWorkerBootstrapRequest(request, target) {
+  return (
+    isCdpTargetSetupComplete(target) &&
+    target?.type === "service_worker" &&
+    target?.detached !== true &&
+    target?.lifecycleStrategy === "setup-dispatched-before-resume" &&
+    request?.method === "GET" &&
+    request?.type === "Script" &&
+    request?.phase === target.phase &&
+    request?.sessionId === target.sessionId &&
+    request?.url === target.url &&
+    Number.isInteger(request?.sequence) &&
+    request.sequence > 0 &&
+    Number.isFinite(request?.startedAt) &&
+    request.startedAt >= target.resumeDispatchedAt &&
+    request?.terminalReason === "loading-finished" &&
+    Number.isFinite(request?.terminalAt) &&
+    request.terminalAt >= request.startedAt
+  );
+}
+
+export function reconcileCdpServiceWorkerBootstraps(networkState) {
+  networkState.serviceWorkerBootstrapObservations ??= [];
+  const observations = [];
+  for (const target of networkState.targets) {
+    if (
+      target.type !== "service_worker" ||
+      target.serviceWorkerBootstrapRequestKey
+    ) {
+      continue;
+    }
+    const sessionRequests = networkState.requests.filter(
+      (request) => request.sessionId === target.sessionId,
+    );
+    const firstRequest = sessionRequests[0];
+    if (
+      sessionRequests.some(
+        (request) => request.startedAt < target.resumeDispatchedAt,
+      ) ||
+      !isCdpServiceWorkerBootstrapRequest(firstRequest, target)
+    ) {
+      continue;
+    }
+    const requestKey = cdpRequestKey(
+      firstRequest.requestId,
+      firstRequest.sessionId,
+    );
+    target.serviceWorkerBootstrapRequestKey = requestKey;
+    firstRequest.serviceWorkerTargetSessionId = target.sessionId;
+    const observation = {
+      method: firstRequest.method,
+      phase: firstRequest.phase,
+      requestId: firstRequest.requestId,
+      requestSequence: firstRequest.sequence,
+      requestSessionId: firstRequest.sessionId,
+      requestStartedAt: firstRequest.startedAt,
+      resourceType: firstRequest.type,
+      resumeDispatchedAt: target.resumeDispatchedAt,
+      targetId: target.targetId,
+      targetDetachedAtObservation: false,
+      targetSessionId: target.sessionId,
+      targetType: target.type,
+      terminalAt: firstRequest.terminalAt,
+      terminalReason: firstRequest.terminalReason,
+      url: firstRequest.url,
+    };
+    networkState.serviceWorkerBootstrapObservations.push(observation);
+    observations.push(observation);
+  }
+  return observations;
 }
 
 export function advanceCdpFixedPointStability(previous, sample) {
@@ -410,15 +715,24 @@ export function buildCdpNetworkFixedPointDiagnostic(
       const entry = pendingAttachMetadata.get(promise) ?? {};
       return {
         commands: (entry.commands ?? []).map((command) => ({
+          cdpId: command.cdpId,
+          deadlineAt: command.deadlineAt,
+          dispatchedAt: command.dispatchedAt,
+          dispatchSequence: command.dispatchSequence,
+          method: command.method,
           name: command.name,
+          resultAt: command.resultAt,
+          resultSequence: command.resultSequence,
           status: command.status,
         })),
+        commandDeadlineAt: entry.commandDeadlineAt ?? null,
         identityHash: cdpDiagnosticIdentity(
           entry.sessionId,
           entry.targetId,
         ),
         parentSessionId: entry.parentSessionId ?? null,
         phase: entry.phase ?? null,
+        resumeDispatchedAt: entry.resumeDispatchedAt ?? null,
         sessionId: entry.sessionId ?? null,
         targetId: entry.targetId ?? null,
         type: entry.type ?? null,
@@ -450,9 +764,17 @@ export function buildCdpNetworkFixedPointDiagnostic(
     })),
     attachComplete: target.attachComplete === true,
     commands: (target.commands ?? []).map((command) => ({
+      cdpId: command.cdpId,
+      deadlineAt: command.deadlineAt,
+      dispatchedAt: command.dispatchedAt,
+      dispatchSequence: command.dispatchSequence,
+      method: command.method,
       name: command.name,
+      resultAt: command.resultAt,
+      resultSequence: command.resultSequence,
       status: command.status,
     })),
+    commandDeadlineAt: target.commandDeadlineAt ?? null,
     detached: target.detached === true,
     identityHash: cdpDiagnosticIdentity(
       target.sessionId,
@@ -460,7 +782,9 @@ export function buildCdpNetworkFixedPointDiagnostic(
     ),
     parentSessionId: target.parentSessionId ?? null,
     phase: target.phase ?? null,
+    lifecycleStrategy: target.lifecycleStrategy ?? null,
     resumed: target.resumed === true,
+    resumeDispatchedAt: target.resumeDispatchedAt ?? null,
     sessionId: target.sessionId ?? null,
     targetId: target.targetId ?? null,
     type: target.type ?? null,
@@ -489,6 +813,54 @@ export function buildCdpNetworkFixedPointDiagnostic(
     terminalReason: entry.terminalReason,
     urlClass: classifyCdpDiagnosticUrl(entry.url, appUrl),
   }));
+  const serviceWorkerBootstrapObservations = (
+    networkState.serviceWorkerBootstrapObservations ?? []
+  ).map((entry) => {
+    const target = networkState.targets.find(
+      (candidate) => candidate.sessionId === entry.targetSessionId,
+    );
+    const sessionRequests = networkState.requests.filter(
+      (request) => request.sessionId === entry.requestSessionId,
+    );
+    const request = sessionRequests.find(
+      (candidate) => candidate.requestId === entry.requestId,
+    );
+    return {
+      earlierRequestCount: sessionRequests.filter(
+        (candidate) => candidate.startedAt < entry.resumeDispatchedAt,
+      ).length,
+      identityHash: cdpDiagnosticIdentity(
+        entry.requestSessionId,
+        entry.requestId,
+        entry.targetSessionId,
+        entry.targetId,
+      ),
+      method: entry.method,
+      phase: entry.phase,
+      requestId: entry.requestId,
+      requestIsFirst: sessionRequests[0] === request,
+      requestSequence: entry.requestSequence,
+      requestSessionId: entry.requestSessionId,
+      requestStartedAt: entry.requestStartedAt,
+      resourceType: entry.resourceType,
+      resumeDispatchedAt: entry.resumeDispatchedAt,
+      sessionFailureCount: (networkState.failures ?? []).filter(
+        (failure) => failure.sessionId === entry.requestSessionId,
+      ).length + (networkState.responseFailures ?? []).filter(
+        (failure) => failure.sessionId === entry.requestSessionId,
+      ).length,
+      sessionRequestCount: sessionRequests.length,
+      targetId: entry.targetId,
+      targetDetachedAtObservation:
+        entry.targetDetachedAtObservation === true,
+      targetSessionId: entry.targetSessionId,
+      targetType: entry.targetType,
+      targetUrlMatched: request?.url === target?.url,
+      terminalAt: entry.terminalAt,
+      terminalReason: entry.terminalReason,
+      urlClass: classifyCdpDiagnosticUrl(entry.url, appUrl),
+    };
+  });
   const attachErrors = networkState.attachErrors.map((entry) => ({
     category: String(entry.error).startsWith("Could not resume target:")
       ? "resume"
@@ -511,7 +883,9 @@ export function buildCdpNetworkFixedPointDiagnostic(
       ageMs: Number.isFinite(entry.at)
         ? Math.max(0, capturedAt - entry.at)
         : null,
+      cdpId: entry.cdpId ?? null,
       command: entry.command ?? null,
+      dispatchSequence: entry.dispatchSequence ?? null,
       identityHash: cdpDiagnosticIdentity(
         entry.sessionId,
         entry.targetId,
@@ -521,6 +895,7 @@ export function buildCdpNetworkFixedPointDiagnostic(
       method: entry.method ?? null,
       phase: entry.phase ?? null,
       requestId: entry.requestId ?? null,
+      resultSequence: entry.resultSequence ?? null,
       sessionId: entry.sessionId ?? null,
       targetId: entry.targetId ?? null,
       type: entry.type ?? null,
@@ -532,18 +907,29 @@ export function buildCdpNetworkFixedPointDiagnostic(
       attachErrorCount: networkState.attachErrors.length,
       attachPromiseCount: networkState.attachPromises.length,
       completedRequestCount: networkState.completedRequestCount,
+      externalRequestCount: networkState.requests.filter(
+        (request) => !isLoopbackRequest(request.url, appUrl),
+      ).length,
       inflightRequestCount: networkState.inflightRequests.size,
       pendingAttachCount: networkState.pendingAttachPromises.size,
+      networkFailureCount:
+        (networkState.failures ?? []).filter(
+          (failure) => !failure.canceled,
+        ).length + (networkState.responseFailures ?? []).length,
       requestCount: networkState.requests.length,
+      serviceWorkerBootstrapObservationCount:
+        serviceWorkerBootstrapObservations.length,
       targetBootstrapSettlementCount: targetBootstrapSettlements.length,
       targetCount: networkState.targets.length,
     },
     inflightRequests,
+    initialTargetBaseline: networkState.initialTargetBaseline ?? null,
     label,
     outcome,
     pendingAttaches,
     recentActivity,
     serviceWorkerBypassed: networkState.serviceWorkerBypassed === true,
+    serviceWorkerBootstrapObservations,
     targetBootstrapSettlements,
     targets,
     wait: {
@@ -581,6 +967,11 @@ export function isCdpFixedPointDiagnosticHealthy(networkDiagnostic) {
     : [];
   const targetSessions = targets.map((target) => target?.sessionId);
   const targetIds = targets.map((target) => target?.targetId);
+  const targetCommandIds = targets.flatMap((target) =>
+    Array.isArray(target?.commands)
+      ? target.commands.map((command) => command?.cdpId)
+      : []
+  );
   const targetBySession = new Map(
     targets.map((target) => [target?.sessionId, target]),
   );
@@ -683,6 +1074,65 @@ export function isCdpFixedPointDiagnosticHealthy(networkDiagnostic) {
         directAncestor?.phase === parent.phase
       );
     });
+  const initialTargetBaseline = networkDiagnostic?.initialTargetBaseline;
+  const serviceWorkerTargets = targets.filter(
+    (target) => target?.type === "service_worker",
+  );
+  const serviceWorkerBootstrapObservations = Array.isArray(
+    networkDiagnostic?.serviceWorkerBootstrapObservations,
+  )
+    ? networkDiagnostic.serviceWorkerBootstrapObservations
+    : [];
+  const serviceWorkerObservationSessions =
+    serviceWorkerBootstrapObservations.map(
+      (observation) => observation?.targetSessionId,
+    );
+  const validServiceWorkerBootstrapObservations =
+    serviceWorkerTargets.length > 0 &&
+    serviceWorkerBootstrapObservations.length === serviceWorkerTargets.length &&
+    new Set(serviceWorkerObservationSessions).size ===
+      serviceWorkerObservationSessions.length &&
+    serviceWorkerTargets.every((target) =>
+      serviceWorkerObservationSessions.includes(target.sessionId)
+    ) &&
+    serviceWorkerBootstrapObservations.every((observation) => {
+      const target = targetBySession.get(observation?.targetSessionId);
+      return (
+        isCdpTargetSetupComplete(target) &&
+        target?.type === "service_worker" &&
+        target?.phase === networkDiagnostic?.label &&
+        observation?.identityHash === cdpDiagnosticIdentity(
+          observation.requestSessionId,
+          observation.requestId,
+          observation.targetSessionId,
+          observation.targetId,
+        ) &&
+        nonEmptyString(observation?.requestId) &&
+        observation?.requestSessionId === target.sessionId &&
+        observation?.targetId === target.targetId &&
+        observation?.targetDetachedAtObservation === false &&
+        observation?.targetType === target.type &&
+        observation?.phase === target.phase &&
+        observation?.method === "GET" &&
+        observation?.resourceType === "Script" &&
+        observation?.urlClass === target.urlClass &&
+        observation?.targetUrlMatched === true &&
+        observation?.requestIsFirst === true &&
+        Number.isInteger(observation?.requestSequence) &&
+        observation.requestSequence > 0 &&
+        Number.isFinite(observation?.resumeDispatchedAt) &&
+        observation.resumeDispatchedAt === target.resumeDispatchedAt &&
+        Number.isFinite(observation?.requestStartedAt) &&
+        observation.requestStartedAt >= observation.resumeDispatchedAt &&
+        observation?.earlierRequestCount === 0 &&
+        Number.isInteger(observation?.sessionRequestCount) &&
+        observation.sessionRequestCount > 0 &&
+        observation?.sessionFailureCount === 0 &&
+        observation?.terminalReason === "loading-finished" &&
+        Number.isFinite(observation?.terminalAt) &&
+        observation.terminalAt >= observation.requestStartedAt
+      );
+    });
   const recentSamples = Array.isArray(networkDiagnostic?.wait?.recentSamples)
     ? networkDiagnostic.wait.recentSamples
     : [];
@@ -699,22 +1149,27 @@ export function isCdpFixedPointDiagnosticHealthy(networkDiagnostic) {
     Array.isArray(networkDiagnostic?.inflightRequests) &&
     networkDiagnostic.inflightRequests.length === 0 &&
     counts?.attachErrorCount === 0 &&
+    counts?.externalRequestCount === 0 &&
+    counts?.networkFailureCount === 0 &&
     counts?.pendingAttachCount === 0 &&
     counts?.inflightRequestCount === 0 &&
     counts?.targetBootstrapSettlementCount ===
       targetBootstrapSettlements.length &&
+    counts?.serviceWorkerBootstrapObservationCount ===
+      serviceWorkerBootstrapObservations.length &&
     Number.isInteger(counts?.attachPromiseCount) &&
     counts.attachPromiseCount === targets.length &&
     Number.isInteger(counts?.completedRequestCount) &&
     counts.completedRequestCount > 0 &&
     Number.isInteger(counts?.requestCount) &&
     counts.requestCount > 0 &&
-    counts.completedRequestCount <= counts.requestCount &&
+    counts.completedRequestCount === counts.requestCount &&
     Number.isInteger(counts?.targetCount) &&
     counts.targetCount === targets.length &&
     targets.length > 0 &&
     targets.every(isCdpTargetSetupComplete) &&
     validTargetIdentities &&
+    new Set(targetCommandIds).size === targetCommandIds.length &&
     validBootstrapSettlements &&
     targetBootstrapSettlements.length > 0 &&
     new Set(bootstrapTargetSessions).size ===
@@ -723,6 +1178,12 @@ export function isCdpFixedPointDiagnosticHealthy(networkDiagnostic) {
       bootstrapRequestIdentities.length &&
     pdfBootstrapCoverage &&
     parserTargetsBoundToDocumentWorker &&
+    initialTargetBaseline?.checked === true &&
+    initialTargetBaseline?.pageCount === 1 &&
+    initialTargetBaseline?.pageUrlClass === "about" &&
+    initialTargetBaseline?.workerCount === 0 &&
+    initialTargetBaseline?.targetCount === 1 &&
+    validServiceWorkerBootstrapObservations &&
     networkDiagnostic?.wait?.requiredStableSamples === requiredStableSamples &&
     Number.isInteger(networkDiagnostic?.wait?.stableSamples) &&
     networkDiagnostic.wait.stableSamples === requiredStableSamples &&
@@ -2399,6 +2860,73 @@ function pageCanvasExpression(pageNumber) {
   `);
 }
 
+export function dispatchToCdpSession(
+  cdp,
+  method,
+  params,
+  sessionId,
+) {
+  if (!sessionId) {
+    throw new Error("A flattened child session ID is required for dispatch.");
+  }
+  const id = cdp.nextId++;
+  const promise = new Promise((resolve, reject) => {
+    cdp.pending.set(id, {
+      reject(error) {
+        reject(error);
+      },
+      resolve(result) {
+        resolve(result);
+      },
+    });
+    try {
+      cdp.webSocket.send(JSON.stringify({ id, method, params, sessionId }));
+    } catch (error) {
+      cdp.pending.delete(id);
+      reject(error);
+    }
+  });
+  return { id, method, promise, sessionId };
+}
+
+export async function settleCdpCommandDispatches(
+  cdp,
+  dispatches,
+  deadlineAt,
+) {
+  const settlement = Promise.allSettled(
+    dispatches.map((dispatch) => dispatch.promise),
+  );
+  const remainingMs = Math.max(0, deadlineAt - Date.now());
+  let timeoutId;
+  const outcome = await Promise.race([
+    settlement.then((results) => ({ results, timedOut: false })),
+    new Promise((resolve) => {
+      timeoutId = setTimeout(
+        () => resolve({ results: null, timedOut: true }),
+        remainingMs,
+      );
+    }),
+  ]);
+  clearTimeout(timeoutId);
+  if (outcome.timedOut) {
+    for (const dispatch of dispatches) {
+      const pending = cdp.pending.get(dispatch.id);
+      if (!pending) continue;
+      cdp.pending.delete(dispatch.id);
+      pending.reject(
+        new Error(
+          `Timed out waiting for CDP ${dispatch.method} (${dispatch.sessionId}).`,
+        ),
+      );
+    }
+  }
+  const results = outcome.results ?? await settlement;
+  const failure = results.find((result) => result.status === "rejected");
+  if (failure) throw failure.reason;
+  return results.map((result) => result.value);
+}
+
 export function sendToCdpSession(
   cdp,
   method,
@@ -2407,34 +2935,47 @@ export function sendToCdpSession(
   timeoutMs = CDP_CHILD_COMMAND_TIMEOUT_MS,
 ) {
   if (!sessionId) return cdp.send(method, params);
-  const id = cdp.nextId++;
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      if (!cdp.pending.delete(id)) return;
-      reject(
-        new Error(
-          `Timed out waiting for CDP ${method} (${sessionId}).`,
-        ),
-      );
-    }, timeoutMs);
-    cdp.pending.set(id, {
-      reject(error) {
-        clearTimeout(timeout);
-        reject(error);
-      },
-      resolve(result) {
-        clearTimeout(timeout);
-        resolve(result);
-      },
-    });
-    try {
-      cdp.webSocket.send(JSON.stringify({ id, method, params, sessionId }));
-    } catch (error) {
-      clearTimeout(timeout);
-      cdp.pending.delete(id);
-      reject(error);
-    }
-  });
+  const dispatch = dispatchToCdpSession(cdp, method, params, sessionId);
+  return settleCdpCommandDispatches(
+    cdp,
+    [dispatch],
+    Date.now() + timeoutMs,
+  ).then(([result]) => result);
+}
+
+const CDP_CHILD_SETUP_COMMANDS = Object.freeze([
+  ["network-enable", "Network.enable", {}],
+  ["runtime-enable", "Runtime.enable", {}],
+  ["cache-disable", "Network.setCacheDisabled", { cacheDisabled: true }],
+  ["auto-attach", "Target.setAutoAttach", {
+    autoAttach: true,
+    flatten: true,
+    waitForDebuggerOnStart: true,
+  }],
+]);
+
+export async function dispatchPausedServiceWorkerCommands(
+  dispatchCommand,
+  settleCommands,
+  timeoutMs = CDP_CHILD_COMMAND_TIMEOUT_MS,
+) {
+  const dispatches = [
+    ...CDP_CHILD_SETUP_COMMANDS.map(([name, method, params]) =>
+      dispatchCommand(name, method, params)
+    ),
+    dispatchCommand("resume", "Runtime.runIfWaitingForDebugger", {}),
+  ];
+  const resumeDispatch = dispatches.at(-1);
+  const deadlineAt = Date.now() + timeoutMs;
+  for (const dispatch of dispatches) {
+    dispatch.command.deadlineAt = deadlineAt;
+  }
+  await settleCommands(dispatches, deadlineAt);
+  return {
+    deadlineAt,
+    dispatches,
+    resumeDispatchedAt: resumeDispatch.command.dispatchedAt,
+  };
 }
 
 async function configureAppSession(cdp, networkState) {
@@ -2463,16 +3004,34 @@ async function configureAppSession(cdp, networkState) {
       });
     }
   };
+  const recordServiceWorkerBootstraps = () => {
+    for (const observation of reconcileCdpServiceWorkerBootstraps(
+      networkState,
+    )) {
+      recordActivity({
+        kind: "service-worker-bootstrap-observed",
+        method: observation.method,
+        phase: observation.phase,
+        requestId: observation.requestId,
+        sessionId: observation.requestSessionId,
+        targetId: observation.targetId,
+        type: observation.resourceType,
+        url: observation.url,
+      });
+    }
+  };
   const recordRequest = (event, sessionId) => {
     const request = recordCdpNetworkRequest(networkState, event, sessionId);
     recordActivity({ kind: "request-start", ...request });
     recordBootstrapSettlements();
+    recordServiceWorkerBootstraps();
   };
-  const completeRequest = (event, sessionId) => {
+  const completeRequest = (event, sessionId, terminalReason) => {
     const request = completeCdpNetworkRequest(
       networkState,
       event,
       sessionId,
+      terminalReason,
     );
     if (request) {
       recordActivity({
@@ -2480,6 +3039,7 @@ async function configureAppSession(cdp, networkState) {
         kind: "request-complete",
       });
     }
+    recordServiceWorkerBootstraps();
   };
   const recordFailure = (event, sessionId) => {
     const request = networkState.byId.get(
@@ -2513,9 +3073,9 @@ async function configureAppSession(cdp, networkState) {
       recordRequest(event, message.sessionId);
     } else if (message.method === "Network.loadingFailed") {
       recordFailure(event, message.sessionId);
-      completeRequest(event, message.sessionId);
+      completeRequest(event, message.sessionId, "loading-failed");
     } else if (message.method === "Network.loadingFinished") {
-      completeRequest(event, message.sessionId);
+      completeRequest(event, message.sessionId, "loading-finished");
     } else if (message.method === "Network.responseReceived") {
       recordResponse(event, message.sessionId);
     } else if (message.method === "Target.targetInfoChanged") {
@@ -2526,6 +3086,7 @@ async function configureAppSession(cdp, networkState) {
         target.type = event.targetInfo.type;
         target.url = event.targetInfo.url;
         recordBootstrapSettlements();
+        recordServiceWorkerBootstraps();
       }
     } else if (message.method === "Target.detachedFromTarget") {
       const target = networkState.targets.find(
@@ -2546,8 +3107,16 @@ async function configureAppSession(cdp, networkState) {
       const { sessionId, targetInfo, waitingForDebugger } = event;
       const attachMetadata = {
         commands: [],
+        commandDeadlineAt: null,
+        lifecycleStrategy:
+          targetInfo.type === "service_worker" && waitingForDebugger
+            ? "setup-dispatched-before-resume"
+            : waitingForDebugger
+              ? "setup-completed-before-resume"
+              : "already-running",
         parentSessionId: message.sessionId ?? null,
         phase: networkState.phase,
+        resumeDispatchedAt: null,
         sessionId,
         targetId: targetInfo.targetId,
         type: targetInfo.type,
@@ -2556,49 +3125,97 @@ async function configureAppSession(cdp, networkState) {
       const target = {
         attachComplete: false,
         bootstrapRequestKey: null,
+        commandDeadlineAt: null,
         commands: attachMetadata.commands,
         detached: false,
+        lifecycleStrategy: attachMetadata.lifecycleStrategy,
         openerId: targetInfo.openerId ?? null,
         parentSessionId: message.sessionId ?? null,
         phase: networkState.phase,
         resumed: !waitingForDebugger,
+        resumeDispatchedAt: null,
+        serviceWorkerBootstrapRequestKey: null,
         sessionId,
         targetId: targetInfo.targetId,
         type: targetInfo.type,
         url: targetInfo.url,
         waitingForDebugger: Boolean(waitingForDebugger),
       };
-      const runAttachCommand = async (name, method, params) => {
-        const command = { name, status: "pending" };
+      let commandResultSequence = 0;
+      const dispatchAttachCommand = (name, method, params) => {
+        const command = {
+          cdpId: null,
+          deadlineAt: null,
+          dispatchedAt: Date.now(),
+          dispatchSequence: attachMetadata.commands.length + 1,
+          method,
+          name,
+          resultAt: null,
+          resultSequence: null,
+          status: "pending",
+        };
         attachMetadata.commands.push(command);
+        const dispatch = dispatchToCdpSession(
+          cdp,
+          method,
+          params,
+          sessionId,
+        );
+        command.cdpId = dispatch.id;
+        if (name === "resume") {
+          attachMetadata.resumeDispatchedAt = command.dispatchedAt;
+          target.resumeDispatchedAt = command.dispatchedAt;
+        }
         recordActivity({
+          cdpId: command.cdpId,
           command: name,
+          dispatchSequence: command.dispatchSequence,
           kind: "attach-command-start",
+          method,
           phase: attachMetadata.phase,
           sessionId,
           targetId: targetInfo.targetId,
           type: targetInfo.type,
           url: targetInfo.url,
         });
-        try {
-          const result = await sendToCdpSession(cdp, method, params, sessionId);
-          command.status = "completed";
-          if (name === "resume") target.resumed = true;
-          return result;
-        } catch (error) {
-          command.status = "failed";
-          throw error;
-        } finally {
+        const promise = dispatch.promise.then(
+          (result) => {
+            command.status = "completed";
+            if (name === "resume") target.resumed = true;
+            return result;
+          },
+          (error) => {
+            command.status = "failed";
+            throw error;
+          },
+        ).finally(() => {
+          command.resultAt = Date.now();
+          command.resultSequence = ++commandResultSequence;
           recordActivity({
+            cdpId: command.cdpId,
             command: name,
+            dispatchSequence: command.dispatchSequence,
             kind: `attach-command-${command.status}`,
+            method,
             phase: attachMetadata.phase,
+            resultSequence: command.resultSequence,
             sessionId,
             targetId: targetInfo.targetId,
             type: targetInfo.type,
             url: targetInfo.url,
           });
-        }
+        });
+        return { ...dispatch, command, promise };
+      };
+      const settleAttachCommands = async (dispatches, deadlineAt) => {
+        await settleCdpCommandDispatches(cdp, dispatches, deadlineAt);
+      };
+      const runAttachCommand = async (name, method, params) => {
+        const dispatch = dispatchAttachCommand(name, method, params);
+        await settleAttachCommands(
+          [dispatch],
+          Date.now() + CDP_CHILD_COMMAND_TIMEOUT_MS,
+        );
       };
       networkState.targets.push(target);
       recordActivity({
@@ -2611,29 +3228,47 @@ async function configureAppSession(cdp, networkState) {
       });
       const attachPromise = (async () => {
         let setupSucceeded = false;
+        let resumeDispatched = false;
         try {
-          const enableResults = await Promise.allSettled([
-            runAttachCommand("network-enable", "Network.enable", {}),
-            runAttachCommand("runtime-enable", "Runtime.enable", {}),
-          ]);
-          const enableFailure = enableResults.find(
-            (result) => result.status === "rejected",
-          );
-          if (enableFailure) throw enableFailure.reason;
-          await runAttachCommand(
-            "cache-disable",
-            "Network.setCacheDisabled",
-            { cacheDisabled: true },
-          );
-          await runAttachCommand(
-            "auto-attach",
-            "Target.setAutoAttach",
-            {
-              autoAttach: true,
-              flatten: true,
-              waitForDebuggerOnStart: true,
-            },
-          );
+          if (target.lifecycleStrategy === "setup-dispatched-before-resume") {
+            resumeDispatched = true;
+            const barrier = await dispatchPausedServiceWorkerCommands(
+              dispatchAttachCommand,
+              async (dispatches, deadlineAt) => {
+                attachMetadata.commandDeadlineAt = deadlineAt;
+                target.commandDeadlineAt = deadlineAt;
+                await settleAttachCommands(dispatches, deadlineAt);
+              },
+            );
+            if (barrier.resumeDispatchedAt !== target.resumeDispatchedAt) {
+              throw new Error(
+                "Service-worker resume dispatch did not match its barrier.",
+              );
+            }
+          } else {
+            const enableResults = await Promise.allSettled([
+              runAttachCommand("network-enable", "Network.enable", {}),
+              runAttachCommand("runtime-enable", "Runtime.enable", {}),
+            ]);
+            const enableFailure = enableResults.find(
+              (result) => result.status === "rejected",
+            );
+            if (enableFailure) throw enableFailure.reason;
+            await runAttachCommand(
+              "cache-disable",
+              "Network.setCacheDisabled",
+              { cacheDisabled: true },
+            );
+            await runAttachCommand(
+              "auto-attach",
+              "Target.setAutoAttach",
+              {
+                autoAttach: true,
+                flatten: true,
+                waitForDebuggerOnStart: true,
+              },
+            );
+          }
           setupSucceeded = true;
         } catch (error) {
           networkState.attachErrors.push({
@@ -2647,7 +3282,8 @@ async function configureAppSession(cdp, networkState) {
             url: targetInfo.url,
           });
         } finally {
-          if (waitingForDebugger) {
+          if (waitingForDebugger && !resumeDispatched) {
+            resumeDispatched = true;
             await runAttachCommand(
               "resume",
               "Runtime.runIfWaitingForDebugger",
@@ -2678,6 +3314,7 @@ async function configureAppSession(cdp, networkState) {
             url: target.url,
           });
           recordBootstrapSettlements();
+          recordServiceWorkerBootstraps();
         }
       })();
       networkState.attachPromises.push(attachPromise);
@@ -2749,7 +3386,19 @@ async function waitForCdpNetworkFixedPoint(
     await delay(75);
     const requestCount = networkState.requests.length;
     const targetCount = networkState.targets.length;
-    const attachmentReady = isCdpAttachmentStateHealthy(networkState);
+    const phaseBootstrapCounts = cdpPhasePdfBootstrapCounts(
+      networkState,
+      appUrl,
+      label,
+    );
+    const attachmentReady =
+      isCdpAttachmentStateHealthy(networkState) &&
+      hasCdpPhasePdfBootstrapCoverage(networkState, appUrl, label) &&
+      (networkState.failures ?? []).every((failure) => failure?.canceled) &&
+      (networkState.responseFailures ?? []).length === 0 &&
+      networkState.requests.every(
+        (request) => isLoopbackRequest(request?.url, appUrl),
+      );
     const incompleteTargetCount = networkState.targets.filter(
       (target) => !isCdpTargetSetupComplete(target),
     ).length;
@@ -2779,11 +3428,17 @@ async function waitForCdpNetworkFixedPoint(
         attachmentReady,
         attachPromiseCount: networkState.attachPromises.length,
         completedRequestCount: networkState.completedRequestCount,
+        documentBootstrapSettlementCount:
+          phaseBootstrapCounts.documentBootstrapSettlementCount,
         inflightRequestCount: 0,
         label,
         pendingAttachCount: 0,
+        parserBootstrapSettlementCount:
+          phaseBootstrapCounts.parserBootstrapSettlementCount,
         requestCount,
         serviceWorkerBypassed: networkState.serviceWorkerBypassed === true,
+        serviceWorkerBootstrapObservationCount:
+          networkState.serviceWorkerBootstrapObservations.length,
         targetBootstrapSettlementCount:
           networkState.targetBootstrapSettlements.length,
         targetCount,
@@ -4260,6 +4915,7 @@ function summarizeNetwork(
     coverageTargets,
     externalRequests,
     failures,
+    initialTargetBaseline: networkState.initialTargetBaseline,
     localRequestCount: networkState.requests.length - externalRequests.length,
     inflightRequestCount: networkState.inflightRequests.size,
     matrixCoverage,
@@ -4268,6 +4924,9 @@ function summarizeNetwork(
     referenceScheme,
     requests: [...networkState.requests],
     serviceWorkerBypassed: networkState.serviceWorkerBypassed === true,
+    serviceWorkerBootstrapObservations: [
+      ...networkState.serviceWorkerBootstrapObservations,
+    ],
     sourceRequest: sourceRequest ?? null,
     sourceSha256: fixtureSha256,
     sourceStayedLocal: !sourceRequest && externalRequests.length === 0,
@@ -4424,6 +5083,7 @@ async function run(options) {
     failures: [],
     inflightRequests: new Set(),
     fixedPointDiagnostics: [],
+    initialTargetBaseline: null,
     networkFixedPoints: [],
     phase: "startup",
     pendingAttachPromises: new Set(),
@@ -4432,6 +5092,7 @@ async function run(options) {
     requests: [],
     responseFailures: [],
     serviceWorkerBypassed: false,
+    serviceWorkerBootstrapObservations: [],
     targetBootstrapSettlements: [],
     targets: [],
   };
@@ -4447,6 +5108,19 @@ async function run(options) {
 
     appBrowser = await startBrowser(options.browser, true);
     appCdp = await CdpSession.connect(appBrowser.webSocketDebuggerUrl);
+    const { targetInfos: initialTargetInfos } = await appCdp.send(
+      "Target.getTargets",
+      {
+        filter: [
+          { type: "page" },
+          { type: "worker" },
+          { type: "shared_worker" },
+          { type: "service_worker" },
+        ],
+      },
+    );
+    networkState.initialTargetBaseline =
+      validateCdpInitialTargetBaseline(initialTargetInfos);
     await configureAppSession(appCdp, networkState);
     const targetPages = new Map();
     for (const configuration of PDF_SHARPNESS_MATRIX) {

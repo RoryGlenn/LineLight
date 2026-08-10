@@ -266,8 +266,12 @@ continuation arms that restored-document staging cannot consume,
 exact `AbortSignal`- and attempt-bound cancellation terminals, per-scenario
 measured narration alignment, Long Tasks, per-scenario document/parser worker
 traffic settled to a network-quiet fixed point through bounded attach commands,
-service-worker bypass, and exact one-to-one attached-target bootstrap
-settlements. Fixed-point stability also requires zero attach errors and every
+an exact clean pre-navigation target baseline, service-worker bypass, and exact
+one-to-one attached-target bootstrap settlements. Paused service-worker setup
+uses a synchronous four-command dispatch plus resume barrier with one shared
+post-resume deadline, then binds the first terminal session `GET` `Script` to
+the exact raw target URL; PDF/shared workers retain setup-before-resume
+ordering. Fixed-point stability also requires zero attach errors and every
 observed target's exact command sequence, attachment, and resume to complete;
 it cannot become quiet merely because a timed-out command left no pending
 promise. The harness also requires exact source/screenshot manifests and

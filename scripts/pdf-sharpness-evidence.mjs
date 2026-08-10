@@ -1075,19 +1075,96 @@ export function validatePdfSharpnessEvidence(evidence) {
   );
   const targetSetupComplete = (target) => {
     const expectedCommands = [
-      "network-enable",
-      "runtime-enable",
-      "cache-disable",
-      "auto-attach",
-      ...(target?.waitingForDebugger === true ? ["resume"] : []),
+      { method: "Network.enable", name: "network-enable" },
+      { method: "Runtime.enable", name: "runtime-enable" },
+      { method: "Network.setCacheDisabled", name: "cache-disable" },
+      { method: "Target.setAutoAttach", name: "auto-attach" },
+      ...(target?.waitingForDebugger === true
+        ? [{ method: "Runtime.runIfWaitingForDebugger", name: "resume" }]
+        : []),
     ];
+    const commands = Array.isArray(target?.commands) ? target.commands : [];
+    const resume = commands.find((command) => command?.name === "resume");
+    const setupCommands = commands.filter(
+      (command) => command?.name !== "resume",
+    );
+    const resultSequences = commands.map(
+      (command) => command?.resultSequence,
+    );
+    const expectedResultSequences = commands.map((_, index) => index + 1);
+    const commandIds = commands.map((command) => command?.cdpId);
+    const commandsByResult = [...commands].sort(
+      (left, right) => left.resultSequence - right.resultSequence,
+    );
+    const serviceWorkerBarrier =
+      target?.type === "service_worker" &&
+      target?.waitingForDebugger === true;
+    const expectedStrategy = serviceWorkerBarrier
+      ? "setup-dispatched-before-resume"
+      : target?.waitingForDebugger === true
+        ? "setup-completed-before-resume"
+        : "already-running";
     return (
       target?.attachComplete === true &&
       target?.resumed === true &&
-      Array.isArray(target?.commands) &&
-      target.commands.map(({ name }) => name).join(",") ===
-        expectedCommands.join(",") &&
-      target.commands.every(({ status }) => status === "completed")
+      target?.lifecycleStrategy === expectedStrategy &&
+      commands.length === expectedCommands.length &&
+      commands.every(
+        (command, index) =>
+          command?.name === expectedCommands[index].name &&
+          command?.method === expectedCommands[index].method &&
+          command?.dispatchSequence === index + 1 &&
+          Number.isInteger(command?.cdpId) &&
+          command.cdpId > 0 &&
+          finite(command?.dispatchedAt) &&
+          finite(command?.resultAt) &&
+          command.resultAt >= command.dispatchedAt &&
+          Number.isInteger(command?.resultSequence) &&
+          command.resultSequence > 0 &&
+          command?.status === "completed",
+      ) &&
+      new Set(commands.map((command) => command.cdpId)).size ===
+        commands.length &&
+      commandIds.every(
+        (commandId, index) => index === 0 || commandId > commandIds[index - 1],
+      ) &&
+      commands.every(
+        (command, index) =>
+          index === 0 ||
+          command.dispatchedAt >= commands[index - 1].dispatchedAt,
+      ) &&
+      commandsByResult.every(
+        (command, index) =>
+          index === 0 ||
+          command.resultAt >= commandsByResult[index - 1].resultAt,
+      ) &&
+      [...resultSequences].sort((left, right) => left - right).join(",") ===
+        expectedResultSequences.join(",") &&
+      (target?.waitingForDebugger === true
+        ? finite(target?.resumeDispatchedAt) &&
+          target.resumeDispatchedAt === resume?.dispatchedAt
+        : target?.resumeDispatchedAt === null) &&
+      (serviceWorkerBarrier
+        ? finite(target?.commandDeadlineAt) &&
+          target.commandDeadlineAt > target.resumeDispatchedAt &&
+          commandIds.every(
+            (commandId, index) =>
+              index === 0 || commandId === commandIds[index - 1] + 1,
+          ) &&
+          setupCommands.every(
+            (command) => command.dispatchedAt <= target.resumeDispatchedAt,
+          ) &&
+          commands.every(
+            (command) =>
+              command.deadlineAt === target.commandDeadlineAt &&
+              command.resultAt >= target.resumeDispatchedAt &&
+              command.resultAt <= target.commandDeadlineAt,
+          )
+        : target?.commandDeadlineAt === null &&
+          (target?.waitingForDebugger !== true ||
+            setupCommands.every(
+              (command) => command.resultAt <= target.resumeDispatchedAt,
+            )))
     );
   };
   const validBootstrapSettlement = (settlement) => {
@@ -1158,6 +1235,80 @@ export function validatePdfSharpnessEvidence(evidence) {
     normalBootstrapTargets.every((target) =>
       bootstrapTargetSessions.includes(target.sessionId),
     );
+  const serviceWorkerTargets = networkTargets.filter(
+    (target) => target?.type === "service_worker",
+  );
+  const targetCommandIds = networkTargets.flatMap((target) =>
+    Array.isArray(target?.commands)
+      ? target.commands.map((command) => command?.cdpId)
+      : []
+  );
+  const serviceWorkerBootstrapObservations = Array.isArray(
+    network?.serviceWorkerBootstrapObservations,
+  )
+    ? network.serviceWorkerBootstrapObservations
+    : [];
+  const serviceWorkerObservationSessions =
+    serviceWorkerBootstrapObservations.map(
+      (observation) => observation?.targetSessionId,
+    );
+  const serviceWorkerBootstrapComplete =
+    serviceWorkerTargets.length > 0 &&
+    serviceWorkerBootstrapObservations.length === serviceWorkerTargets.length &&
+    new Set(serviceWorkerObservationSessions).size ===
+      serviceWorkerObservationSessions.length &&
+    serviceWorkerTargets.every((target) =>
+      serviceWorkerObservationSessions.includes(target.sessionId)
+    ) &&
+    serviceWorkerBootstrapObservations.every((observation) => {
+      const target = targetBySession.get(observation?.targetSessionId);
+      const request = requestByIdentity.get(
+        requestIdentity(
+          observation?.requestSessionId,
+          observation?.requestId,
+        ),
+      );
+      const sessionRequests = networkRequests.filter(
+        (candidate) => candidate?.sessionId === observation?.requestSessionId,
+      );
+      return (
+        targetSetupComplete(target) &&
+        target?.type === "service_worker" &&
+        target?.lifecycleStrategy === "setup-dispatched-before-resume" &&
+        target?.serviceWorkerBootstrapRequestKey ===
+          requestIdentity(request?.sessionId, request?.requestId) &&
+        request?.serviceWorkerTargetSessionId === target.sessionId &&
+        request?.method === "GET" &&
+        request?.type === "Script" &&
+        request?.phase === target.phase &&
+        request?.sessionId === target.sessionId &&
+        request?.url === target.url &&
+        request?.terminalReason === "loading-finished" &&
+        finite(request?.startedAt) &&
+        request.startedAt >= target.resumeDispatchedAt &&
+        finite(request?.terminalAt) &&
+        request.terminalAt >= request.startedAt &&
+        sessionRequests[0] === request &&
+        !sessionRequests.some(
+          (candidate) => candidate.startedAt < target.resumeDispatchedAt,
+        ) &&
+        observation?.method === request.method &&
+        observation?.phase === request.phase &&
+        observation?.requestId === request.requestId &&
+        observation?.requestSequence === request.sequence &&
+        observation?.requestSessionId === request.sessionId &&
+        observation?.requestStartedAt === request.startedAt &&
+        observation?.resourceType === request.type &&
+        observation?.resumeDispatchedAt === target.resumeDispatchedAt &&
+        observation?.targetId === target.targetId &&
+        observation?.targetDetachedAtObservation === false &&
+        observation?.targetSessionId === target.sessionId &&
+        observation?.targetType === target.type &&
+        observation?.terminalAt === request.terminalAt &&
+        observation?.terminalReason === request.terminalReason &&
+        observation?.url === request.url
+      );
+    });
   const coverageTargets = network?.coverageTargets;
   const coverageNames = [
     "normalDocumentWorker",
@@ -1281,6 +1432,11 @@ export function validatePdfSharpnessEvidence(evidence) {
     network?.sourceSha256 !== fixture?.sha256 ||
     network?.sourceStayedLocal !== true ||
     network?.serviceWorkerBypassed !== true ||
+    network?.initialTargetBaseline?.checked !== true ||
+    network?.initialTargetBaseline?.pageCount !== 1 ||
+    network?.initialTargetBaseline?.pageUrlClass !== "about" ||
+    network?.initialTargetBaseline?.targetCount !== 1 ||
+    network?.initialTargetBaseline?.workerCount !== 0 ||
     network?.referenceScheme !== "file:" ||
     network?.sourceRequest !== null ||
     !nonNegativeInteger(network?.localRequestCount) ||
@@ -1306,10 +1462,11 @@ export function validatePdfSharpnessEvidence(evidence) {
     !Array.isArray(network?.requests) ||
     network.requests.length !== network.localRequestCount ||
     network.requests.some(
-      (request) =>
+      (request, index) =>
         !nonEmptyString(request?.method) ||
         !nonEmptyString(request?.phase) ||
         !nonEmptyString(request?.requestId) ||
+        request?.sequence !== index + 1 ||
         !nonEmptyString(request?.type) ||
         typeof request?.url !== "string" ||
         !(request?.sessionId === null || nonEmptyString(request.sessionId)),
@@ -1326,6 +1483,8 @@ export function validatePdfSharpnessEvidence(evidence) {
     !coverageComplete ||
     !requestCoverageComplete ||
     !bootstrapCoverageComplete ||
+    !serviceWorkerBootstrapComplete ||
+    new Set(targetCommandIds).size !== targetCommandIds.length ||
     !matrixCoverageComplete ||
     !Array.isArray(network?.networkFixedPoints) ||
     fixedPoints.map(({ label }) => label).join(",") !==
@@ -1337,23 +1496,40 @@ export function validatePdfSharpnessEvidence(evidence) {
         !nonNegativeInteger(point?.attachPromiseCount) ||
         !nonNegativeInteger(point?.completedRequestCount) ||
         point.completedRequestCount === 0 ||
+        !nonNegativeInteger(point?.documentBootstrapSettlementCount) ||
         point?.inflightRequestCount !== 0 ||
         !nonNegativeInteger(point?.requestCount) ||
         point.requestCount === 0 ||
         point.completedRequestCount > point.requestCount ||
         !nonNegativeInteger(point?.targetCount) ||
         point.targetCount === 0 ||
-        point.attachPromiseCount < point.targetCount ||
+        point.attachPromiseCount !== point.targetCount ||
+        !nonNegativeInteger(point?.parserBootstrapSettlementCount) ||
+        !nonNegativeInteger(
+          point?.serviceWorkerBootstrapObservationCount,
+        ) ||
+        point.serviceWorkerBootstrapObservationCount === 0 ||
+        point.serviceWorkerBootstrapObservationCount >
+          serviceWorkerBootstrapObservations.length ||
         !nonNegativeInteger(point?.targetBootstrapSettlementCount) ||
         point.targetBootstrapSettlementCount >
           targetBootstrapSettlements.length ||
         point?.pendingAttachCount !== 0 ||
-        point?.serviceWorkerBypassed !== true,
+        point?.serviceWorkerBypassed !== true ||
+        (normalPhaseIds.has(point?.label) &&
+          (point.documentBootstrapSettlementCount !==
+              matrixCoverage?.[point.label]
+                ?.documentBootstrapSettlementCount ||
+            point.parserBootstrapSettlementCount !==
+              matrixCoverage?.[point.label]
+                ?.parserBootstrapSettlementCount)),
     ) ||
     finalFixedPoint?.requestCount !== network.localRequestCount ||
     finalFixedPoint?.completedRequestCount !== network.completedRequestCount ||
     finalFixedPoint?.targetBootstrapSettlementCount !==
-      targetBootstrapSettlements.length
+      targetBootstrapSettlements.length ||
+    finalFixedPoint?.serviceWorkerBootstrapObservationCount !==
+      serviceWorkerBootstrapObservations.length
   ) {
     fail("PDF source or recursively attached worker network evidence failed");
   }

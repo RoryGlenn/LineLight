@@ -26,19 +26,26 @@ import {
   classifyPdfRasterTransition,
   completeCdpNetworkRequest,
   decodePngScreenshot,
+  dispatchPausedServiceWorkerCommands,
+  dispatchToCdpSession,
+  hasCdpPhasePdfBootstrapCoverage,
   isCdpAttachmentStateHealthy,
   isCdpFixedPointDiagnosticHealthy,
+  isCdpServiceWorkerBootstrapRequest,
   isCdpTargetBootstrapRequest,
   isCdpTargetSetupComplete,
   matchesPdfFallbackInjection,
   planPdfVirtualScroll,
   probePdfBitmapBudget,
   recordCdpNetworkRequest,
+  reconcileCdpServiceWorkerBootstraps,
   reconcileCdpTargetBootstrapRequests,
   selectPdfFallbackAbortCandidate,
   selectPdfFallbackScenarioEvents,
   sendToCdpSession,
+  settleCdpCommandDispatches,
   summarizePdfModelCompletion,
+  validateCdpInitialTargetBaseline,
 } from
   "../scripts/run-pdf-sharpness-browser-regression.mjs";
 
@@ -55,6 +62,47 @@ const REVISION = "issue-68-revision";
 const FAILED_ABORT_SIGNAL_ID = 1;
 const RETRY_ABORT_SIGNAL_ID = 2;
 const CANCELLATION_ABORT_SIGNAL_ID = 3;
+const completedCdpTargetSetup = ({
+  cdpIdStart = 1,
+  serviceWorker = false,
+  startedAt = 10,
+} = {}) => {
+  const dispatchTimes = serviceWorker
+    ? [startedAt, startedAt + 1, startedAt + 2, startedAt + 3, startedAt + 4]
+    : [startedAt, startedAt + 1, startedAt + 4, startedAt + 6, startedAt + 8];
+  const resultTimes = serviceWorker
+    ? [startedAt + 6, startedAt + 7, startedAt + 8, startedAt + 9,
+      startedAt + 5]
+    : [startedAt + 2, startedAt + 3, startedAt + 5, startedAt + 7,
+      startedAt + 9];
+  const resultOrder = serviceWorker ? [2, 3, 4, 5, 1] : [1, 2, 3, 4, 5];
+  const deadlineAt = serviceWorker ? startedAt + 100 : null;
+  const definitions = [
+    ["network-enable", "Network.enable"],
+    ["runtime-enable", "Runtime.enable"],
+    ["cache-disable", "Network.setCacheDisabled"],
+    ["auto-attach", "Target.setAutoAttach"],
+    ["resume", "Runtime.runIfWaitingForDebugger"],
+  ];
+  return {
+    commandDeadlineAt: deadlineAt,
+    commands: definitions.map(([name, method], index) => ({
+      cdpId: cdpIdStart + index,
+      deadlineAt,
+      dispatchedAt: dispatchTimes[index],
+      dispatchSequence: index + 1,
+      method,
+      name,
+      resultAt: resultTimes[index],
+      resultSequence: resultOrder[index],
+      status: "completed",
+    })),
+    lifecycleStrategy: serviceWorker
+      ? "setup-dispatched-before-resume"
+      : "setup-completed-before-resume",
+    resumeDispatchedAt: dispatchTimes[4],
+  };
+};
 const PUBLIC_PDF_FIXTURE =
   "tests/fixtures/pdf-highlights/issue-60-geometry.pdf";
 const PUBLIC_PDF_FIXTURE_BYTES = 4_745;
@@ -536,20 +584,54 @@ function passingEvidence() {
     issue: 68,
     matrix,
     network: (() => {
-      const completedAttachCommands = () => [
-        { name: "network-enable", status: "completed" },
-        { name: "runtime-enable", status: "completed" },
-        { name: "cache-disable", status: "completed" },
-        { name: "auto-attach", status: "completed" },
-        { name: "resume", status: "completed" },
-      ];
+      let nextCdpId = 1;
+      const completedTargetSetup = (type, startedAt) => {
+        const serviceWorker = type === "service_worker";
+        const dispatchTimes = serviceWorker
+          ? [startedAt, startedAt + 1, startedAt + 2, startedAt + 3,
+            startedAt + 4]
+          : [startedAt, startedAt + 1, startedAt + 4, startedAt + 6,
+            startedAt + 8];
+        const resultTimes = serviceWorker
+          ? [startedAt + 6, startedAt + 7, startedAt + 8, startedAt + 9,
+            startedAt + 5]
+          : [startedAt + 2, startedAt + 3, startedAt + 5, startedAt + 7,
+            startedAt + 9];
+        const resultOrder = serviceWorker ? [2, 3, 4, 5, 1] : [1, 2, 3, 4, 5];
+        const deadlineAt = serviceWorker ? startedAt + 100 : null;
+        const definitions = [
+          ["network-enable", "Network.enable"],
+          ["runtime-enable", "Runtime.enable"],
+          ["cache-disable", "Network.setCacheDisabled"],
+          ["auto-attach", "Target.setAutoAttach"],
+          ["resume", "Runtime.runIfWaitingForDebugger"],
+        ];
+        return {
+          commandDeadlineAt: deadlineAt,
+          commands: definitions.map(([name, method], index) => ({
+            cdpId: nextCdpId++,
+            deadlineAt,
+            dispatchedAt: dispatchTimes[index],
+            dispatchSequence: index + 1,
+            method,
+            name,
+            resultAt: resultTimes[index],
+            resultSequence: resultOrder[index],
+            status: "completed",
+          })),
+          lifecycleStrategy: serviceWorker
+            ? "setup-dispatched-before-resume"
+            : "setup-completed-before-resume",
+          resumeDispatchedAt: dispatchTimes[4],
+        };
+      };
       const normalPairs = PDF_SHARPNESS_MATRIX.map(({ id }, index) => {
         const documentTarget = {
           ancestry: [],
           attachComplete: true,
           bootstrapRequestKey: null,
-          commands: completedAttachCommands(),
           detached: false,
+          ...completedTargetSetup("worker", 1_000 + index * 100),
           parentSessionId: null,
           phase: id,
           resumed: true,
@@ -563,8 +645,8 @@ function passingEvidence() {
           ancestry: [documentTarget],
           attachComplete: true,
           bootstrapRequestKey: null,
-          commands: completedAttachCommands(),
           detached: false,
+          ...completedTargetSetup("worker", 1_050 + index * 100),
           parentSessionId: documentTarget.sessionId,
           phase: id,
           resumed: true,
@@ -580,8 +662,8 @@ function passingEvidence() {
         ancestry: [],
         attachComplete: true,
         bootstrapRequestKey: null,
-        commands: completedAttachCommands(),
         detached: false,
+        ...completedTargetSetup("worker", 2_000),
         parentSessionId: null,
         phase: "forced-main-fallback",
         resumed: true,
@@ -595,8 +677,8 @@ function passingEvidence() {
         ancestry: [forcedWrapper],
         attachComplete: true,
         bootstrapRequestKey: null,
-        commands: completedAttachCommands(),
         detached: false,
+        ...completedTargetSetup("worker", 2_050),
         parentSessionId: forcedWrapper.sessionId,
         phase: "forced-main-fallback",
         resumed: true,
@@ -606,7 +688,24 @@ function passingEvidence() {
         url: "http://127.0.0.1/assets/pdf-parser.worker-test.js",
         waitingForDebugger: true,
       };
+      const serviceWorker = {
+        ancestry: [],
+        attachComplete: true,
+        bootstrapRequestKey: null,
+        detached: false,
+        ...completedTargetSetup("service_worker", 900),
+        parentSessionId: null,
+        phase: PDF_SHARPNESS_MATRIX[0].id,
+        resumed: true,
+        serviceWorkerBootstrapRequestKey: null,
+        sessionId: "service-worker-session",
+        targetId: "service-worker-target",
+        type: "service_worker",
+        url: "http://127.0.0.1/sw.js",
+        waitingForDebugger: true,
+      };
       const targets = [
+        serviceWorker,
         ...normalPairs.flatMap(({ documentTarget, parserTarget }) => [
           documentTarget,
           parserTarget,
@@ -677,7 +776,50 @@ function passingEvidence() {
           url: `http://127.0.0.1/assets/forced-request-${index}.bin`,
         })),
       ];
-      const requests = [...bootstrapRequests, ...runtimeRequests];
+      const serviceWorkerRequest = {
+        method: "GET",
+        phase: serviceWorker.phase,
+        requestId: "service-worker-bootstrap-request",
+        serviceWorkerTargetSessionId: serviceWorker.sessionId,
+        sessionId: serviceWorker.sessionId,
+        startedAt: 905,
+        terminalAt: 910,
+        terminalReason: "loading-finished",
+        type: "Script",
+        url: serviceWorker.url,
+      };
+      serviceWorker.serviceWorkerBootstrapRequestKey =
+        `${serviceWorker.sessionId}:${serviceWorkerRequest.requestId}`;
+      const requests = [
+        serviceWorkerRequest,
+        ...bootstrapRequests,
+        ...runtimeRequests,
+      ];
+      requests.forEach((request, index) => {
+        request.sequence = index + 1;
+        request.startedAt ??= 3_000 + index * 2;
+        request.terminalAt ??= request.startedAt + 1;
+        request.terminalReason ??= request.bootstrapTargetSessionId
+          ? "target-attached"
+          : "loading-finished";
+      });
+      const serviceWorkerBootstrapObservations = [{
+        method: serviceWorkerRequest.method,
+        phase: serviceWorkerRequest.phase,
+        requestId: serviceWorkerRequest.requestId,
+        requestSequence: serviceWorkerRequest.sequence,
+        requestSessionId: serviceWorkerRequest.sessionId,
+        requestStartedAt: serviceWorkerRequest.startedAt,
+        resourceType: serviceWorkerRequest.type,
+        resumeDispatchedAt: serviceWorker.resumeDispatchedAt,
+        targetId: serviceWorker.targetId,
+        targetDetachedAtObservation: false,
+        targetSessionId: serviceWorker.sessionId,
+        targetType: serviceWorker.type,
+        terminalAt: serviceWorkerRequest.terminalAt,
+        terminalReason: serviceWorkerRequest.terminalReason,
+        url: serviceWorkerRequest.url,
+      }];
       const nonPageRequests = requests.filter(
         (request) => request.sessionId !== null,
       );
@@ -693,11 +835,16 @@ function passingEvidence() {
           attachmentReady: true,
           attachPromiseCount: targets.length,
           completedRequestCount: requestCount,
+          documentBootstrapSettlementCount:
+            PDF_SHARPNESS_MATRIX.some(({ id }) => id === label) ? 1 : 0,
           inflightRequestCount: 0,
           label,
           pendingAttachCount: 0,
+          parserBootstrapSettlementCount:
+            PDF_SHARPNESS_MATRIX.some(({ id }) => id === label) ? 1 : 0,
           requestCount,
           serviceWorkerBypassed: true,
+          serviceWorkerBootstrapObservationCount: 1,
           targetBootstrapSettlementCount:
             targetBootstrapSettlements.length,
           targetCount: targets.length,
@@ -715,6 +862,13 @@ function passingEvidence() {
         },
         externalRequests: [],
         failures: [],
+        initialTargetBaseline: {
+          checked: true,
+          pageCount: 1,
+          pageUrlClass: "about",
+          targetCount: 1,
+          workerCount: 0,
+        },
         inflightRequestCount: 0,
         localRequestCount: requestCount,
         matrixCoverage: Object.fromEntries(
@@ -741,6 +895,7 @@ function passingEvidence() {
         referenceScheme: "file:",
         requests,
         serviceWorkerBypassed: true,
+        serviceWorkerBootstrapObservations,
         sourceRequest: null,
         sourceSha256: SHA,
         sourceStayedLocal: true,
@@ -1003,10 +1158,12 @@ test("records fixed-point diagnostics without private URL or payload data", () =
     "attachErrors",
     "counts",
     "inflightRequests",
+    "initialTargetBaseline",
     "label",
     "outcome",
     "pendingAttaches",
     "recentActivity",
+    "serviceWorkerBootstrapObservations",
     "serviceWorkerBypassed",
     "targetBootstrapSettlements",
     "targets",
@@ -1016,10 +1173,15 @@ test("records fixed-point diagnostics without private URL or payload data", () =
     "pdf-parser-worker");
   assert.equal(diagnostic.pendingAttaches[0].urlClass,
     "pdf-parser-worker");
-  assert.deepEqual(diagnostic.pendingAttaches[0].commands, [
-    { name: "network-enable", status: "completed" },
-    { name: "runtime-enable", status: "pending" },
-  ]);
+  assert.deepEqual(
+    diagnostic.pendingAttaches[0].commands.map(
+      ({ name, status }) => ({ name, status }),
+    ),
+    [
+      { name: "network-enable", status: "completed" },
+      { name: "runtime-enable", status: "pending" },
+    ],
+  );
   assert.equal(diagnostic.targets[0].urlClass,
     "pdf-document-worker");
   assert.equal(diagnostic.targets[1].urlClass,
@@ -1034,15 +1196,20 @@ test("records fixed-point diagnostics without private URL or payload data", () =
   );
   assert.equal(diagnostic.wait.elapsedMs, 10_001);
   assert.equal(diagnostic.serviceWorkerBypassed, false);
+  assert.equal(diagnostic.initialTargetBaseline, null);
+  assert.deepEqual(diagnostic.serviceWorkerBootstrapObservations, []);
   assert.equal(diagnostic.wait.recentSamples[0].inflightRequestCount, 1);
   assert.match(diagnostic.inflightRequests[0].identityHash, /^[a-f0-9]{64}$/u);
   assert.deepEqual(diagnostic.counts, {
     attachErrorCount: 1,
     attachPromiseCount: 1,
     completedRequestCount: 4,
+    externalRequestCount: 0,
     inflightRequestCount: 1,
+    networkFailureCount: 0,
     pendingAttachCount: 1,
     requestCount: 1,
+    serviceWorkerBootstrapObservationCount: 0,
     targetBootstrapSettlementCount: 1,
     targetCount: 2,
   });
@@ -1144,29 +1311,57 @@ test("records fixed-point diagnostics without private URL or payload data", () =
   const healthyDiagnostic = structuredClone(diagnostic);
   healthyDiagnostic.attachErrors = [];
   healthyDiagnostic.counts.attachErrorCount = 0;
-  healthyDiagnostic.counts.attachPromiseCount = 2;
-  healthyDiagnostic.counts.completedRequestCount = 2;
+  healthyDiagnostic.counts.attachPromiseCount = 3;
+  healthyDiagnostic.counts.completedRequestCount = 3;
+  healthyDiagnostic.counts.externalRequestCount = 0;
   healthyDiagnostic.counts.inflightRequestCount = 0;
+  healthyDiagnostic.counts.networkFailureCount = 0;
   healthyDiagnostic.counts.pendingAttachCount = 0;
-  healthyDiagnostic.counts.requestCount = 2;
+  healthyDiagnostic.counts.requestCount = 3;
   healthyDiagnostic.inflightRequests = [];
+  healthyDiagnostic.initialTargetBaseline = {
+    checked: true,
+    pageCount: 1,
+    pageUrlClass: "about",
+    targetCount: 1,
+    workerCount: 0,
+  };
   healthyDiagnostic.outcome = "fixed-point-reached";
   healthyDiagnostic.pendingAttaches = [];
   healthyDiagnostic.serviceWorkerBypassed = true;
-  healthyDiagnostic.targets = healthyDiagnostic.targets.map((target) => ({
-    ...target,
+  healthyDiagnostic.targets = healthyDiagnostic.targets.map(
+    (target, index) => ({
+      ...target,
+      attachComplete: true,
+      ...completedCdpTargetSetup({
+        cdpIdStart: 100 + index * 10,
+        startedAt: 100 + index * 20,
+      }),
+      resumed: true,
+      waitingForDebugger: true,
+    }),
+  );
+  const serviceWorkerSetup = completedCdpTargetSetup({
+    cdpIdStart: 200,
+    serviceWorker: true,
+    startedAt: 500,
+  });
+  const serviceWorkerTarget = {
+    ancestry: [],
     attachComplete: true,
-    commands: [
-      { name: "network-enable", status: "completed" },
-      { name: "runtime-enable", status: "completed" },
-      { name: "cache-disable", status: "completed" },
-      { name: "auto-attach", status: "completed" },
-      ...(target.waitingForDebugger
-        ? [{ name: "resume", status: "completed" }]
-        : []),
-    ],
+    ...serviceWorkerSetup,
+    detached: false,
+    identityHash: diagnosticIdentity("service-worker-session", "service-worker-target"),
+    parentSessionId: null,
+    phase: "desktop-dpr1-zoom100",
     resumed: true,
-  }));
+    sessionId: "service-worker-session",
+    targetId: "service-worker-target",
+    type: "service_worker",
+    urlClass: "app-asset",
+    waitingForDebugger: true,
+  };
+  healthyDiagnostic.targets.push(serviceWorkerTarget);
   healthyDiagnostic.targetBootstrapSettlements = [
     healthyDiagnostic.targetBootstrapSettlements[0],
     {
@@ -1191,6 +1386,36 @@ test("records fixed-point diagnostics without private URL or payload data", () =
     },
   ];
   healthyDiagnostic.counts.targetBootstrapSettlementCount = 2;
+  healthyDiagnostic.serviceWorkerBootstrapObservations = [{
+    earlierRequestCount: 0,
+    identityHash: diagnosticIdentity(
+      "service-worker-session",
+      "service-worker-bootstrap-request",
+      "service-worker-session",
+      "service-worker-target",
+    ),
+    method: "GET",
+    phase: "desktop-dpr1-zoom100",
+    requestId: "service-worker-bootstrap-request",
+    requestIsFirst: true,
+    requestSequence: 3,
+    requestSessionId: "service-worker-session",
+    requestStartedAt: serviceWorkerSetup.resumeDispatchedAt + 1,
+    resourceType: "Script",
+    resumeDispatchedAt: serviceWorkerSetup.resumeDispatchedAt,
+    sessionFailureCount: 0,
+    sessionRequestCount: 1,
+    targetId: "service-worker-target",
+    targetDetachedAtObservation: false,
+    targetSessionId: "service-worker-session",
+    targetType: "service_worker",
+    targetUrlMatched: true,
+    terminalAt: serviceWorkerSetup.resumeDispatchedAt + 2,
+    terminalReason: "loading-finished",
+    urlClass: "app-asset",
+  }];
+  healthyDiagnostic.counts.serviceWorkerBootstrapObservationCount = 1;
+  healthyDiagnostic.counts.targetCount = 3;
   healthyDiagnostic.wait.recentSamples = [1, 2, 3].map(
     (stableSamples) => ({
       attachErrorCount: 0,
@@ -1207,6 +1432,14 @@ test("records fixed-point diagnostics without private URL or payload data", () =
   );
   healthyDiagnostic.wait.stableSamples = 3;
   assert.equal(isCdpFixedPointDiagnosticHealthy(healthyDiagnostic), true);
+  const naturallyDetachedServiceWorker = structuredClone(healthyDiagnostic);
+  naturallyDetachedServiceWorker.targets.find(
+    (target) => target.type === "service_worker",
+  ).detached = true;
+  assert.equal(
+    isCdpFixedPointDiagnosticHealthy(naturallyDetachedServiceWorker),
+    true,
+  );
   const report = buildFirstNetworkDiagnosticReport({
     build: { localManifest: { deploymentId: DEPLOYMENT } },
     fixture: {
@@ -1271,6 +1504,111 @@ test("records fixed-point diagnostics without private URL or payload data", () =
     ["service worker bypass disabled", (value) => {
       value.serviceWorkerBypassed = false;
     }],
+    ["dirty initial target baseline", (value) => {
+      value.initialTargetBaseline.workerCount = 1;
+      value.initialTargetBaseline.targetCount = 2;
+    }],
+    ["service worker resumed before setup dispatch", (value) => {
+      const target = value.targets.find(
+        (entry) => entry.type === "service_worker",
+      );
+      target.resumeDispatchedAt = target.commands[0].dispatchedAt - 1;
+      target.commands.at(-1).dispatchedAt = target.resumeDispatchedAt;
+      value.serviceWorkerBootstrapObservations[0].resumeDispatchedAt =
+        target.resumeDispatchedAt;
+    }],
+    ["missing service worker command", (value) => {
+      value.targets.find(
+        (entry) => entry.type === "service_worker",
+      ).commands.pop();
+    }],
+    ["failed service worker command", (value) => {
+      value.targets.find(
+        (entry) => entry.type === "service_worker",
+      ).commands[0].status = "failed";
+    }],
+    ["late service worker command", (value) => {
+      const target = value.targets.find(
+        (entry) => entry.type === "service_worker",
+      );
+      target.commands[0].resultAt = target.commandDeadlineAt + 1;
+    }],
+    ["service worker command completed before resume", (value) => {
+      const target = value.targets.find(
+        (entry) => entry.type === "service_worker",
+      );
+      target.commands[0].resultAt = target.resumeDispatchedAt - 1;
+    }],
+    ["nonconsecutive service worker command IDs", (value) => {
+      const target = value.targets.find(
+        (entry) => entry.type === "service_worker",
+      );
+      target.commands[2].cdpId += 10;
+    }],
+    ["duplicate global target command ID", (value) => {
+      const firstId = value.targets.find(
+        (entry) => entry.type === "worker",
+      ).commands[0].cdpId;
+      const serviceWorker = value.targets.find(
+        (entry) => entry.type === "service_worker",
+      );
+      serviceWorker.commands.forEach((command, index) => {
+        command.cdpId = firstId + index;
+      });
+    }],
+    ["reversed command dispatch timestamp", (value) => {
+      const target = value.targets.find((entry) => entry.type === "worker");
+      target.commands[1].dispatchedAt = target.commands[0].dispatchedAt - 1;
+    }],
+    ["reversed command result timestamp", (value) => {
+      const target = value.targets.find((entry) => entry.type === "worker");
+      const firstResultAt = target.commands[0].resultAt;
+      target.commands[0].resultAt = target.commands[1].resultAt;
+      target.commands[1].resultAt = firstResultAt;
+    }],
+    ["missing service worker bootstrap request", (value) => {
+      value.serviceWorkerBootstrapObservations[0].requestId = null;
+    }],
+    ["wrong service worker bootstrap target", (value) => {
+      value.serviceWorkerBootstrapObservations[0].targetUrlMatched = false;
+    }],
+    ["nonterminal service worker bootstrap", (value) => {
+      value.serviceWorkerBootstrapObservations[0].terminalReason =
+        "loading-failed";
+    }],
+    ["service worker event before resume barrier", (value) => {
+      const observation = value.serviceWorkerBootstrapObservations[0];
+      observation.requestStartedAt = observation.resumeDispatchedAt - 1;
+      observation.earlierRequestCount = 1;
+    }],
+    ["detached service worker target", (value) => {
+      value.serviceWorkerBootstrapObservations[0]
+        .targetDetachedAtObservation = true;
+    }],
+    ["external request counted", (value) => {
+      value.counts.externalRequestCount = 1;
+    }],
+    ["service worker network failure", (value) => {
+      value.counts.networkFailureCount = 1;
+      value.serviceWorkerBootstrapObservations[0].sessionFailureCount = 1;
+    }],
+    ["service worker cannot settle PDF coverage", (value) => {
+      const serviceWorker = value.targets.find(
+        (entry) => entry.type === "service_worker",
+      );
+      const parserSettlement = value.targetBootstrapSettlements.find(
+        (entry) => entry.urlClass === "pdf-parser-worker",
+      );
+      parserSettlement.targetId = serviceWorker.targetId;
+      parserSettlement.targetSessionId = serviceWorker.sessionId;
+      parserSettlement.targetType = serviceWorker.type;
+      parserSettlement.identityHash = diagnosticIdentity(
+        parserSettlement.requestSessionId,
+        parserSettlement.requestId,
+        parserSettlement.targetSessionId,
+        parserSettlement.targetId,
+      );
+    }],
     ["missing parser bootstrap settlement", (value) => {
       value.targetBootstrapSettlements.pop();
       value.counts.targetBootstrapSettlementCount -= 1;
@@ -1289,6 +1627,9 @@ test("records fixed-point diagnostics without private URL or payload data", () =
       }
       for (const settlement of value.targetBootstrapSettlements) {
         settlement.phase = laterPhase;
+      }
+      for (const observation of value.serviceWorkerBootstrapObservations) {
+        observation.phase = laterPhase;
       }
     }],
     ["missing bootstrap request ID", (value) => {
@@ -1684,13 +2025,7 @@ test("settles exact worker bootstraps one-to-one in either event order", () => {
   const target = {
     attachComplete: true,
     bootstrapRequestKey: null,
-    commands: [
-      { name: "network-enable", status: "completed" },
-      { name: "runtime-enable", status: "completed" },
-      { name: "cache-disable", status: "completed" },
-      { name: "auto-attach", status: "completed" },
-      { name: "resume", status: "completed" },
-    ],
+    ...completedCdpTargetSetup({ cdpIdStart: 100, startedAt: 100 }),
     detached: false,
     parentSessionId: "document-session",
     phase: "desktop-dpr1-zoom100",
@@ -1755,7 +2090,7 @@ test("settles exact worker bootstraps one-to-one in either event order", () => {
     attachErrors: [],
     serviceWorkerBypassed: true,
     targets: [target],
-  }), true);
+  }), false);
   for (const [name, request, changedTarget] of [
     ["URL", { ...matchingRequest, url: `${target.url}?wrong=1` }, target],
     ["session", { ...matchingRequest, sessionId: "wrong-session" }, target],
@@ -1771,6 +2106,305 @@ test("settles exact worker bootstraps one-to-one in either event order", () => {
       `${name} mismatch settled`,
     );
   }
+});
+
+test("requires a clean pre-navigation CDP target baseline", () => {
+  assert.deepEqual(
+    validateCdpInitialTargetBaseline([
+      { targetId: "initial-page", type: "page", url: "about:blank" },
+    ]),
+    {
+      checked: true,
+      pageCount: 1,
+      pageUrlClass: "about",
+      targetCount: 1,
+      workerCount: 0,
+    },
+  );
+  for (const [name, targets] of [
+    ["missing page", []],
+    ["nonblank page", [
+      { targetId: "initial-page", type: "page", url: "http://127.0.0.1/" },
+    ]],
+    ["extra page", [
+      { targetId: "initial-page", type: "page", url: "about:blank" },
+      { targetId: "second-page", type: "page", url: "about:blank" },
+    ]],
+    ["unexpected target type", [
+      { targetId: "initial-page", type: "page", url: "about:blank" },
+      { targetId: "unexpected", type: "other", url: "about:blank" },
+    ]],
+    ...["worker", "shared_worker", "service_worker"].map((type) => [
+      `preexisting ${type}`,
+      [
+        { targetId: "initial-page", type: "page", url: "about:blank" },
+        { targetId: `${type}-target`, type, url: "http://127.0.0.1/worker.js" },
+      ],
+    ]),
+  ]) {
+    assert.throws(
+      () => validateCdpInitialTargetBaseline(targets),
+      /one clean about:blank page and no preexisting worker targets/u,
+      name,
+    );
+  }
+});
+
+test("requires exact current-phase PDF bootstrap settlements", () => {
+  const appUrl = "http://127.0.0.1/";
+  const phase = "desktop-dpr1-zoom100";
+  const documentTarget = {
+    phase,
+    sessionId: "document-session",
+    url: `${appUrl}assets/pdf-document.worker-test.js`,
+  };
+  const parserTarget = {
+    phase,
+    sessionId: "parser-session",
+    url: `${appUrl}assets/pdf-parser.worker-test.js`,
+  };
+  const state = {
+    targetBootstrapSettlements: [documentTarget, parserTarget].map(
+      (target) => ({ phase, targetSessionId: target.sessionId }),
+    ),
+    targets: [documentTarget, parserTarget],
+  };
+  assert.equal(
+    hasCdpPhasePdfBootstrapCoverage(state, appUrl, phase),
+    true,
+  );
+  state.targetBootstrapSettlements.pop();
+  assert.equal(
+    hasCdpPhasePdfBootstrapCoverage(state, appUrl, phase),
+    false,
+  );
+  assert.equal(
+    hasCdpPhasePdfBootstrapCoverage(state, appUrl, "forced-main-fallback"),
+    true,
+  );
+});
+
+test("dispatches paused service-worker setup before one shared deadline", async () => {
+  const sent = [];
+  const cdp = {
+    nextId: 1,
+    pending: new Map(),
+    webSocket: {
+      send(payload) {
+        sent.push(JSON.parse(payload));
+      },
+    },
+  };
+  const commands = [];
+  let settlementStarted = false;
+  const result = await dispatchPausedServiceWorkerCommands(
+    (name, method, params) => {
+      assert.equal(settlementStarted, false);
+      const command = {
+        cdpId: null,
+        deadlineAt: null,
+        dispatchedAt: Date.now(),
+        dispatchSequence: commands.length + 1,
+        method,
+        name,
+      };
+      commands.push(command);
+      const dispatch = dispatchToCdpSession(
+        cdp,
+        method,
+        params,
+        "service-worker-session",
+      );
+      command.cdpId = dispatch.id;
+      return { ...dispatch, command };
+    },
+    async (dispatches, deadlineAt) => {
+      settlementStarted = true;
+      assert.equal(sent.length, 5);
+      assert.deepEqual(
+        sent.map(({ id, method }) => [id, method]),
+        [
+          [1, "Network.enable"],
+          [2, "Runtime.enable"],
+          [3, "Network.setCacheDisabled"],
+          [4, "Target.setAutoAttach"],
+          [5, "Runtime.runIfWaitingForDebugger"],
+        ],
+      );
+      assert.ok(dispatches.every(
+        (dispatch) => dispatch.command.deadlineAt === deadlineAt,
+      ));
+      for (const id of [5, 1, 2, 3, 4]) {
+        const pending = cdp.pending.get(id);
+        cdp.pending.delete(id);
+        pending.resolve({ id });
+      }
+      return settleCdpCommandDispatches(cdp, dispatches, deadlineAt);
+    },
+    1_000,
+  );
+  assert.equal(cdp.pending.size, 0);
+  assert.equal(result.dispatches.length, 5);
+  assert.equal(result.resumeDispatchedAt, commands[4].dispatchedAt);
+  assert.ok(result.deadlineAt > result.resumeDispatchedAt);
+  assert.ok(commands.slice(0, 4).every(
+    (command) => command.dispatchedAt <= commands[4].dispatchedAt,
+  ));
+
+  const partialCdp = {
+    nextId: 1,
+    pending: new Map(),
+    webSocket: { send() {} },
+  };
+  const partialCommands = [];
+  let partialDispatches = [];
+  await assert.rejects(
+    dispatchPausedServiceWorkerCommands(
+      (name, method, params) => {
+        const command = {
+          cdpId: null,
+          deadlineAt: null,
+          dispatchedAt: Date.now(),
+          dispatchSequence: partialCommands.length + 1,
+          method,
+          name,
+        };
+        partialCommands.push(command);
+        const dispatch = dispatchToCdpSession(
+          partialCdp,
+          method,
+          params,
+          "partial-service-worker-session",
+        );
+        command.cdpId = dispatch.id;
+        return { ...dispatch, command };
+      },
+      (dispatches, deadlineAt) => {
+        partialDispatches = dispatches;
+        for (const id of [1, 5]) {
+          const pending = partialCdp.pending.get(id);
+          partialCdp.pending.delete(id);
+          pending.resolve({ id });
+        }
+        return settleCdpCommandDispatches(
+          partialCdp,
+          dispatches,
+          deadlineAt,
+        );
+      },
+      5,
+    ),
+    /Timed out waiting for CDP/u,
+  );
+  assert.equal(partialCdp.pending.size, 0);
+  const partialOutcomes = await Promise.allSettled(
+    partialDispatches.map((dispatch) => dispatch.promise),
+  );
+  assert.equal(
+    partialOutcomes.filter(({ status }) => status === "fulfilled").length,
+    2,
+  );
+  assert.equal(
+    partialOutcomes.filter(({ status }) => status === "rejected").length,
+    3,
+  );
+});
+
+test("observes the exact first terminal service-worker bootstrap", () => {
+  const setup = completedCdpTargetSetup({
+    cdpIdStart: 300,
+    serviceWorker: true,
+    startedAt: 1_000,
+  });
+  const target = {
+    attachComplete: true,
+    ...setup,
+    detached: false,
+    phase: "desktop-dpr1-zoom100",
+    resumed: true,
+    serviceWorkerBootstrapRequestKey: null,
+    sessionId: "service-worker-session",
+    targetId: "service-worker-target",
+    type: "service_worker",
+    url: "http://127.0.0.1/assets/service-worker.js",
+    waitingForDebugger: true,
+  };
+  const request = {
+    method: "GET",
+    phase: target.phase,
+    requestId: "service-worker-request",
+    sequence: 1,
+    sessionId: target.sessionId,
+    startedAt: target.resumeDispatchedAt + 1,
+    terminalAt: target.resumeDispatchedAt + 2,
+    terminalReason: "loading-finished",
+    type: "Script",
+    url: target.url,
+  };
+  assert.equal(isCdpServiceWorkerBootstrapRequest(request, target), true);
+  const state = {
+    attachErrors: [],
+    failures: [],
+    requests: [request],
+    responseFailures: [],
+    serviceWorkerBypassed: true,
+    serviceWorkerBootstrapObservations: [],
+    targets: [target],
+  };
+  const observations = reconcileCdpServiceWorkerBootstraps(state);
+  assert.equal(observations.length, 1);
+  assert.equal(observations[0].requestId, request.requestId);
+  assert.equal(target.serviceWorkerBootstrapRequestKey,
+    `${target.sessionId}:${request.requestId}`);
+  assert.equal(request.serviceWorkerTargetSessionId, target.sessionId);
+  assert.equal(isCdpAttachmentStateHealthy(state), true);
+  target.detached = true;
+  assert.equal(isCdpAttachmentStateHealthy(state), true);
+  target.detached = false;
+  assert.deepEqual(reconcileCdpServiceWorkerBootstraps(state), []);
+
+  for (const [name, changedRequest, changedTarget] of [
+    ["URL", { ...request, url: `${request.url}?wrong=1` }, target],
+    ["session", { ...request, sessionId: "wrong-session" }, target],
+    ["method", { ...request, method: "POST" }, target],
+    ["resource type", { ...request, type: "Fetch" }, target],
+    ["target type", request, { ...target, type: "worker" }],
+    ["detached target", request, { ...target, detached: true }],
+    ["unattached target", request, { ...target, attachComplete: false }],
+    ["failed target", request, {
+      ...target,
+      commands: target.commands.map((command, index) => index === 0
+        ? { ...command, status: "failed" }
+        : command),
+    }],
+    ["pre-resume event", {
+      ...request,
+      startedAt: target.resumeDispatchedAt - 1,
+    }, target],
+    ["nonterminal request", {
+      ...request,
+      terminalAt: null,
+      terminalReason: null,
+    }, target],
+  ]) {
+    assert.equal(
+      isCdpServiceWorkerBootstrapRequest(changedRequest, changedTarget),
+      false,
+      `${name} mismatch qualified`,
+    );
+  }
+
+  const earlierRequest = {
+    ...request,
+    requestId: "earlier-service-worker-request",
+    sequence: 0,
+    startedAt: target.resumeDispatchedAt - 1,
+  };
+  assert.deepEqual(reconcileCdpServiceWorkerBootstraps({
+    requests: [earlierRequest, { ...request }],
+    serviceWorkerBootstrapObservations: [],
+    targets: [{ ...target, serviceWorkerBootstrapRequestKey: null }],
+  }), []);
 });
 
 test("bounds every flattened child-target CDP command", async () => {
@@ -2295,6 +2929,109 @@ test("rejects each material Issue 68 acceptance regression", async (t) => {
     }, /recursively attached worker network/u],
     ["service worker bypass", (value) => {
       value.network.serviceWorkerBypassed = false;
+    }, /recursively attached worker network/u],
+    ["clean initial target baseline", (value) => {
+      value.network.initialTargetBaseline.workerCount = 1;
+      value.network.initialTargetBaseline.targetCount = 2;
+    }, /recursively attached worker network/u],
+    ["service worker resume dispatch ordering", (value) => {
+      const target = value.network.targets.find(
+        (entry) => entry.type === "service_worker",
+      );
+      target.resumeDispatchedAt = target.commands[0].dispatchedAt - 1;
+      target.commands.at(-1).dispatchedAt = target.resumeDispatchedAt;
+    }, /recursively attached worker network/u],
+    ["service worker missing setup command", (value) => {
+      value.network.targets.find(
+        (entry) => entry.type === "service_worker",
+      ).commands.pop();
+    }, /recursively attached worker network/u],
+    ["service worker failed setup command", (value) => {
+      value.network.targets.find(
+        (entry) => entry.type === "service_worker",
+      ).commands[0].status = "failed";
+    }, /recursively attached worker network/u],
+    ["service worker late setup result", (value) => {
+      const target = value.network.targets.find(
+        (entry) => entry.type === "service_worker",
+      );
+      target.commands[0].resultAt = target.commandDeadlineAt + 1;
+    }, /recursively attached worker network/u],
+    ["service worker setup result before resume", (value) => {
+      const target = value.network.targets.find(
+        (entry) => entry.type === "service_worker",
+      );
+      target.commands[0].resultAt = target.resumeDispatchedAt - 1;
+    }, /recursively attached worker network/u],
+    ["service worker nonconsecutive command IDs", (value) => {
+      value.network.targets.find(
+        (entry) => entry.type === "service_worker",
+      ).commands[2].cdpId += 10;
+    }, /recursively attached worker network/u],
+    ["duplicate global target command ID", (value) => {
+      const firstId = value.network.targets.find(
+        (entry) => entry.type === "worker",
+      ).commands[0].cdpId;
+      const serviceWorker = value.network.targets.find(
+        (entry) => entry.type === "service_worker",
+      );
+      serviceWorker.commands.forEach((command, index) => {
+        command.cdpId = firstId + index;
+      });
+    }, /recursively attached worker network/u],
+    ["reversed command dispatch timestamp", (value) => {
+      const target = value.network.targets.find(
+        (entry) => entry.type === "worker",
+      );
+      target.commands[1].dispatchedAt = target.commands[0].dispatchedAt - 1;
+    }, /recursively attached worker network/u],
+    ["reversed command result timestamp", (value) => {
+      const target = value.network.targets.find(
+        (entry) => entry.type === "worker",
+      );
+      const firstResultAt = target.commands[0].resultAt;
+      target.commands[0].resultAt = target.commands[1].resultAt;
+      target.commands[1].resultAt = firstResultAt;
+    }, /recursively attached worker network/u],
+    ["service worker missing bootstrap observation", (value) => {
+      value.network.serviceWorkerBootstrapObservations = [];
+    }, /recursively attached worker network/u],
+    ["service worker wrong bootstrap URL", (value) => {
+      value.network.serviceWorkerBootstrapObservations[0].url += "?wrong=1";
+    }, /recursively attached worker network/u],
+    ["service worker nonterminal bootstrap", (value) => {
+      const request = value.network.requests.find(
+        (entry) => entry.serviceWorkerTargetSessionId,
+      );
+      request.terminalReason = "loading-failed";
+      value.network.serviceWorkerBootstrapObservations[0].terminalReason =
+        request.terminalReason;
+    }, /recursively attached worker network/u],
+    ["service worker bootstrap before resume", (value) => {
+      const target = value.network.targets.find(
+        (entry) => entry.type === "service_worker",
+      );
+      const request = value.network.requests.find(
+        (entry) => entry.serviceWorkerTargetSessionId,
+      );
+      request.startedAt = target.resumeDispatchedAt - 1;
+      value.network.serviceWorkerBootstrapObservations[0].requestStartedAt =
+        request.startedAt;
+    }, /recursively attached worker network/u],
+    ["detached service worker bootstrap", (value) => {
+      value.network.serviceWorkerBootstrapObservations[0]
+        .targetDetachedAtObservation = true;
+    }, /recursively attached worker network/u],
+    ["service worker cannot satisfy PDF bootstrap", (value) => {
+      const serviceWorker = value.network.targets.find(
+        (entry) => entry.type === "service_worker",
+      );
+      const settlement = value.network.targetBootstrapSettlements.find(
+        (entry) => entry.targetType === "worker",
+      );
+      settlement.targetId = serviceWorker.targetId;
+      settlement.targetSessionId = serviceWorker.sessionId;
+      settlement.targetType = serviceWorker.type;
     }, /recursively attached worker network/u],
     ["fixed-point attach health", (value) => {
       value.network.networkFixedPoints[0].attachmentReady = false;

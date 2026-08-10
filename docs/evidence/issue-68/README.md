@@ -30,7 +30,9 @@ The diagnostic binds only `linelight-desktop-dpr1-zoom100.png` from that
 external output directory and contains counts,
 per-command pending-attach status, inflight request metadata, recent stability
 samples/activity, detached target ancestry, opaque request/session/target IDs,
-service-worker bypass state, and fixed URL classes. A reported fixed point is
+the clean pre-navigation target baseline, service-worker bypass state, the
+first service-worker bootstrap request outcome, and fixed URL classes. A
+reported fixed point is
 independently rejected when any attach error, incomplete target, failed or
 pending target command, pending request, or missing service-worker bypass is
 present, even if the recorded outcome says that the network became quiet. The
@@ -116,8 +118,18 @@ validator additionally requires:
 - recursive CDP attachment to a fixed point covering normal document/parser
   workers and the forced blob-wrapper/parser chain, with their session ancestry
   and non-page request counts in every one of the six matrix phases; attachment
-  commands are explicitly bounded and must complete before a paused target is
-  resumed. The page bypasses its service worker for direct origin observation.
+  commands are explicitly bounded. Before the initial navigation, an exact CDP
+  baseline must contain one `about:blank` page and no worker, shared-worker, or
+  service-worker target. Paused PDF/shared workers must complete setup before
+  resume. A paused service worker uses the observed Chromium-safe barrier:
+  `Network.enable`, `Runtime.enable`, cache disable, and recursive auto-attach
+  are sent synchronously in that order, resume is sent fifth without awaiting
+  an earlier response, and all five results must arrive at or after resume and
+  before one shared post-resume deadline. Its exact first session request must
+  be a terminal local `GET` `Script` for the target's raw URL, with no request
+  before the resume barrier and no session failure. A service worker can never
+  satisfy document/parser-worker settlement coverage. The page bypasses its
+  service worker for direct origin observation.
   A worker script request transferred into an attached target settles only when
   one fully attached and resumed `worker` has the exact raw URL, parent session,
   phase, `GET` method, and `Script` resource type; the request remains in the
