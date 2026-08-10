@@ -4887,10 +4887,12 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
       return {
         bound: false,
         firstFailedName,
+        firstFailedSetupName: null,
         failedNames,
         pending,
         pendingFailureMayPrecedeError: false,
         pendingSetupErrorAllowed: false,
+        resumeFailed: false,
         serviceWorkerBarrier,
         setupComplete: false,
       };
@@ -4921,6 +4923,9 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
     const setupFailed = setupCommands.some((command) =>
       command.status === "failed"
     );
+    const firstFailedSetupName = setupCommands.find((command) =>
+      command.status === "failed"
+    )?.name ?? null;
     const setupCompleted = setupCommands.length === 4 &&
       setupCommands.every((command) => command.status === "completed");
     const normalResumeBound = !hasResume || (
@@ -4977,10 +4982,12 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
       bound: commandOrderBound && setupProgressionBound && deadlineBound &&
         resumeStateBound && attachStateBound,
       firstFailedName,
+      firstFailedSetupName,
       failedNames,
       pending,
       pendingFailureMayPrecedeError,
       pendingSetupErrorAllowed,
+      resumeFailed: resume?.status === "failed",
       serviceWorkerBarrier,
       setupComplete: setupStateComplete,
     };
@@ -5178,23 +5185,36 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
       return targetState?.setupComplete === true &&
         targetState.pending === false && errors.length === 0;
     }
-    if (targetState?.pending === true) {
-      if (targetState.pendingSetupErrorAllowed === true) {
-        if (
-          errors.length !== 1 || errors[0]?.category !== "setup" ||
-          errors[0]?.command !== targetState.firstFailedName
-        ) {
-          return false;
-        }
-      } else if (errors.length > 0) {
-        return false;
-      }
-    }
-    const explained = targetState?.pending === true || errors.length > 0;
-    const failedCommandExplained = targetState?.failedNames.size === 0 ||
-      targetState?.pendingFailureMayPrecedeError === true ||
-      errors.some((entry) => targetState.failedNames.has(entry?.command));
-    return explained && failedCommandExplained;
+    const expectedErrors = targetState?.pending === true
+      ? targetState.pendingSetupErrorAllowed === true
+        ? [{
+            category: "setup",
+            command: targetState.firstFailedSetupName,
+          }]
+        : []
+      : targetState?.serviceWorkerBarrier === true
+        ? targetState.firstFailedName === null
+          ? []
+          : [{ category: "setup", command: targetState.firstFailedName }]
+        : [
+            ...(targetState?.firstFailedSetupName === null
+              ? []
+              : [{
+                  category: "setup",
+                  command: targetState.firstFailedSetupName,
+                }]),
+            ...(targetState?.resumeFailed === true
+              ? [{ category: "resume", command: "resume" }]
+              : []),
+          ];
+    const errorsExact = errors.length === expectedErrors.length &&
+      errors.every((entry, index) =>
+        entry?.category === expectedErrors[index].category &&
+        entry?.command === expectedErrors[index].command
+      );
+    return errorsExact && (
+      targetState?.pending === true || expectedErrors.length > 0
+    );
   });
   const inflightIdentities = inflightRequests.map((entry) =>
     `${entry?.sessionId ?? "page"}:${entry?.requestId}`
@@ -5543,15 +5563,46 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
   };
 }
 
-function appMatrixRuntimeWorkerInstancesBound(diagnostic) {
-  return Array.isArray(diagnostic?.targets) &&
-    diagnostic.targets.every((target) =>
-      target?.workerInstanceId === null || (
+function appMatrixRuntimeTargetMetadataBound(diagnostic) {
+  if (!Array.isArray(diagnostic?.targets)) return false;
+  const targetBySession = new Map(
+    diagnostic.targets.map((target) => [target?.sessionId, target]),
+  );
+  return diagnostic.targets.every((target) => {
+    const ancestry = [];
+    const visited = new Set([target?.sessionId]);
+    let cycleFree = true;
+    let parentSessionId = target?.parentSessionId;
+    while (parentSessionId) {
+      if (visited.has(parentSessionId)) {
+        cycleFree = false;
+        break;
+      }
+      visited.add(parentSessionId);
+      const parent = targetBySession.get(parentSessionId);
+      if (!parent) break;
+      ancestry.push({
+        phase: parent.phase,
+        sessionId: parent.sessionId,
+        type: parent.type,
+        urlClass: parent.urlClass,
+      });
+      parentSessionId = parent.parentSessionId;
+    }
+    return cycleFree && typeof target?.detached === "boolean" &&
+      (target?.workerInstanceId === null || (
         Number.isSafeInteger(target?.workerInstanceId) &&
         target.workerInstanceId > 0 && target?.type === "worker" &&
         target?.urlClass === "blob"
-      )
-    );
+      )) && Array.isArray(target?.ancestry) &&
+      target.ancestry.length === ancestry.length &&
+      target.ancestry.every((entry, index) =>
+        entry?.phase === ancestry[index].phase &&
+        entry?.sessionId === ancestry[index].sessionId &&
+        entry?.type === ancestry[index].type &&
+        entry?.urlClass === ancestry[index].urlClass
+      );
+  });
 }
 
 function isAppMatrixRuntimeCdpHistoryContinuous(
@@ -5746,8 +5797,8 @@ function isAppMatrixRuntimeCdpHistoryContinuous(
     Number.isSafeInteger(current?.counts?.[field]) &&
     current.counts[field] >= previous.counts[field]
   );
-  return appMatrixRuntimeWorkerInstancesBound(previous) &&
-    appMatrixRuntimeWorkerInstancesBound(current) && priorTargetsRetained &&
+  return appMatrixRuntimeTargetMetadataBound(previous) &&
+    appMatrixRuntimeTargetMetadataBound(current) && priorTargetsRetained &&
     newTargetsCurrent && priorRecordsRetained && noPriorPhaseWork &&
     cumulativeCountsBound;
 }
@@ -5820,7 +5871,7 @@ export function buildAppMatrixRuntimeDiagnosticReport({
     const networkHealthy = networkExpected &&
       row?.networkFixedPoint?.label === expected?.id &&
       isCdpFixedPointDiagnosticHealthy(row.networkFixedPoint) &&
-      appMatrixRuntimeWorkerInstancesBound(row.networkFixedPoint);
+      appMatrixRuntimeTargetMetadataBound(row.networkFixedPoint);
     const networkFixedPoint = networkHealthy
       ? {
           attachErrorCount: row.networkFixedPoint.counts.attachErrorCount,

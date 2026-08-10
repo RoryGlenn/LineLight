@@ -8649,6 +8649,37 @@ test("binds all six app-matrix runtime rows and the exact sixth timeout", () => 
     row.timing.longAnimationFrames.total === 0
   ));
 
+  const completedMetadataMutations = [
+    ["omitted detached state", (diagnostic) => {
+      delete diagnostic.targets[0].detached;
+    }],
+    ["null detached state", (diagnostic) => {
+      diagnostic.targets[0].detached = null;
+    }],
+    ["string detached state", (diagnostic) => {
+      diagnostic.targets[0].detached = "false";
+    }],
+    ["phantom ancestry", (diagnostic) => {
+      diagnostic.targets[0].ancestry.push({
+        phase: "private-phase",
+        sessionId: "private-parent",
+        type: "worker",
+        urlClass: "other-local",
+      });
+    }],
+    ["cyclic ancestry", (diagnostic) => {
+      diagnostic.targets[0].parentSessionId = diagnostic.targets[0].sessionId;
+      diagnostic.targets[0].ancestry = [];
+    }],
+  ];
+  for (const [label, mutate] of completedMetadataMutations) {
+    const changed = structuredClone(completedInput);
+    mutate(changed.rows.at(-1).networkFixedPoint);
+    const report = buildAppMatrixRuntimeDiagnosticReport(changed);
+    assert.equal(report.completed, false, label);
+    assert.equal(report.rows.at(-1).integrity, false, label);
+  }
+
   const retainedEventsInput = structuredClone(completedInput);
   retainedEventsInput.rows[0].releaseSnapshot.workerEvents =
     passingAppMatrixRuntimeReleaseEvents(retainedEventsInput.rows[0]);
@@ -8909,6 +8940,44 @@ test("retains a privacy-safe fixed-point timeout on the failed matrix row", () =
       pendingAttachCount: 1,
     });
     return { diagnostic, target };
+  };
+  const makeSetupAndResumeFailureTarget = (
+    value,
+    { errorOrder = ["setup", "resume"] } = {},
+  ) => {
+    const state = makeFailedTarget(value);
+    const { diagnostic, target } = state;
+    const resume = target.commands.at(-1);
+    resume.status = "failed";
+    target.resumed = false;
+    const errorByCategory = {
+      resume: {
+        category: "resume",
+        command: "resume",
+        identityHash: diagnosticIdentity(target.sessionId, target.targetId),
+        sessionId: target.sessionId,
+        targetId: target.targetId,
+        type: target.type,
+        urlClass: target.urlClass,
+      },
+      setup: {
+        category: "setup",
+        command: "network-enable",
+        identityHash: diagnosticIdentity(target.sessionId, target.targetId),
+        sessionId: target.sessionId,
+        targetId: target.targetId,
+        type: target.type,
+        urlClass: target.urlClass,
+      },
+    };
+    diagnostic.attachErrors = errorOrder.map((category) => ({
+      ...errorByCategory[category],
+    }));
+    diagnostic.counts.attachErrorCount = diagnostic.attachErrors.length;
+    bindIncompleteSamples(diagnostic, {
+      attachErrorCount: diagnostic.attachErrors.length,
+    });
+    return state;
   };
   const makePendingTarget = (value, { withPending = false } = {}) => {
     const diagnostic = timeoutDiagnostic(value);
@@ -9187,6 +9256,19 @@ test("retains a privacy-safe fixed-point timeout on the failed matrix row", () =
     resumeFailure.failures.join("\n"),
   );
   assert.equal(resumeFailure.rows[1].integrity, true);
+
+  const setupAndResumeFailureInput =
+    passingAppMatrixRuntimeNetworkTimeoutInput(outputDirectory);
+  makeSetupAndResumeFailureTarget(setupAndResumeFailureInput);
+  const setupAndResumeFailure = buildAppMatrixRuntimeDiagnosticReport(
+    setupAndResumeFailureInput,
+  );
+  assert.equal(
+    setupAndResumeFailure.execution.orderExact,
+    true,
+    setupAndResumeFailure.failures.join("\n"),
+  );
+  assert.equal(setupAndResumeFailure.rows[1].integrity, true);
 
   const resumePendingErrorInput = passingAppMatrixRuntimeNetworkTimeoutInput(
     outputDirectory,
@@ -9560,6 +9642,17 @@ test("retains a privacy-safe fixed-point timeout on the failed matrix row", () =
     ["timeout failed target without attach error", (value) => {
       makeFailedTarget(value);
     }],
+    ["timeout setup and resume failures omit setup error", (value) => {
+      makeSetupAndResumeFailureTarget(value, { errorOrder: ["resume"] });
+    }],
+    ["timeout setup and resume failures omit resume error", (value) => {
+      makeSetupAndResumeFailureTarget(value, { errorOrder: ["setup"] });
+    }],
+    ["timeout setup and resume failures reverse errors", (value) => {
+      makeSetupAndResumeFailureTarget(value, {
+        errorOrder: ["resume", "setup"],
+      });
+    }],
     ["timeout multiple normal failures name second failure", (value) => {
       makeFailedTarget(value, {
         errorCommand: "runtime-enable",
@@ -9576,6 +9669,14 @@ test("retains a privacy-safe fixed-point timeout on the failed matrix row", () =
     }],
     ["timeout multiple service failures name second failure", (value) => {
       makeServiceFailedTarget(value, { errorCommand: "runtime-enable" });
+    }],
+    ["timeout service failures omit setup error", (value) => {
+      const { diagnostic } = makeServiceFailedTarget(value);
+      diagnostic.attachErrors = [];
+      diagnostic.counts.attachErrorCount = 0;
+      diagnostic.wait.recentSamples.forEach((sample) => {
+        sample.attachErrorCount = 0;
+      });
     }],
     ["timeout resume-pending failed setup without attach error", (value) => {
       const { diagnostic, target } = makeFailedTarget(value);
