@@ -65,6 +65,9 @@ const SCENARIO_TIMEOUT_MS = 90_000;
 const SHUTDOWN_TIMEOUT_MS = 3_000;
 const PDF_VIRTUAL_SCROLL_MAX_STEPS = 120;
 const CDP_FIXED_POINT_STABLE_SAMPLES = 3;
+const PUBLIC_PDF_FIXTURE_BYTES = 4_745;
+const PUBLIC_PDF_FIXTURE_SHA256 =
+  "1addfceae4b869eec37dae4755d576ccd0fd7e1ce505dc856da3b96acbf3f06c";
 
 export function summarizePdfModelCompletion(workerEvents, expectedPageCount) {
   const events = workerEvents ?? [];
@@ -498,9 +501,8 @@ export function buildFirstNetworkDiagnosticReport({
   );
   const fixtureBound =
     fixture?.path === expectedFixturePath &&
-    Number.isInteger(fixture?.bytes) &&
-    fixture.bytes > 0 &&
-    /^[a-f0-9]{64}$/u.test(fixture?.sha256 ?? "");
+    fixture?.bytes === PUBLIC_PDF_FIXTURE_BYTES &&
+    fixture?.sha256 === PUBLIC_PDF_FIXTURE_SHA256;
   const outputIsExternal = isOutsideRepository(outputDirectory);
   const expectedScreenshotPath = outputIsExternal
     ? path.relative(

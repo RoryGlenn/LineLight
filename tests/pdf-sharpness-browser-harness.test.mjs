@@ -47,6 +47,9 @@ const RETRY_ABORT_SIGNAL_ID = 2;
 const CANCELLATION_ABORT_SIGNAL_ID = 3;
 const PUBLIC_PDF_FIXTURE =
   "tests/fixtures/pdf-highlights/issue-60-geometry.pdf";
+const PUBLIC_PDF_FIXTURE_BYTES = 4_745;
+const PUBLIC_PDF_FIXTURE_SHA256 =
+  "1addfceae4b869eec37dae4755d576ccd0fd7e1ce505dc856da3b96acbf3f06c";
 
 function artifact(name, digit) {
   return {
@@ -993,7 +996,11 @@ test("records fixed-point diagnostics without private URL or payload data", () =
   };
   const report = buildFirstNetworkDiagnosticReport({
     build: { localManifest: { deploymentId: DEPLOYMENT } },
-    fixture: { bytes: 4096, path: PUBLIC_PDF_FIXTURE, sha256: SHA },
+    fixture: {
+      bytes: PUBLIC_PDF_FIXTURE_BYTES,
+      path: PUBLIC_PDF_FIXTURE,
+      sha256: PUBLIC_PDF_FIXTURE_SHA256,
+    },
     networkDiagnostic: { ...diagnostic, outcome: "fixed-point-reached" },
     outputDirectory,
     runnerFailure: null,
@@ -1138,6 +1145,30 @@ test("records fixed-point diagnostics without private URL or payload data", () =
     JSON.stringify(privateFixtureReport),
     /private-reader-document/u,
   );
+  for (const [name, fixture] of [
+    ["size", { ...report.fixture, bytes: PUBLIC_PDF_FIXTURE_BYTES + 1 }],
+    ["hash", { ...report.fixture, sha256: SHA }],
+  ]) {
+    const substitutedFixtureReport = buildFirstNetworkDiagnosticReport({
+      build: report.build,
+      fixture,
+      networkDiagnostic: report.network,
+      outputDirectory,
+      runnerFailure: null,
+      scenario: {
+        comparison: { lineLightScreenshot: screenshot },
+        id: "desktop-dpr1-zoom100",
+      },
+      source: report.source,
+      teardown: cleanDiagnosticTeardown,
+    });
+    assert.equal(
+      substitutedFixtureReport.completed,
+      false,
+      `${name} substitution passed`,
+    );
+    assert.equal(substitutedFixtureReport.fixture, null);
+  }
 
   const privateTeardown = structuredClone(cleanDiagnosticTeardown);
   privateTeardown.app.error =
