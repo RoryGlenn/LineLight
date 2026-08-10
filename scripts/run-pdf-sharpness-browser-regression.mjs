@@ -4833,14 +4833,14 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
       return { bound: false, failedNames: new Set(), pending: false };
     }
     const lifecycleStrategy = target.lifecycleStrategy;
-    const serviceWorkerBarrier =
-      lifecycleStrategy === "setup-dispatched-before-resume";
-    const lifecycleBound = target.waitingForDebugger === false
-      ? lifecycleStrategy === "already-running"
-      : [
-          "setup-completed-before-resume",
-          "setup-dispatched-before-resume",
-        ].includes(lifecycleStrategy);
+    const serviceWorkerBarrier = target?.type === "service_worker" &&
+      target.waitingForDebugger === true;
+    const expectedLifecycleStrategy = serviceWorkerBarrier
+      ? "setup-dispatched-before-resume"
+      : target.waitingForDebugger === true
+        ? "setup-completed-before-resume"
+        : "already-running";
+    const lifecycleBound = lifecycleStrategy === expectedLifecycleStrategy;
     const resumeIndexes = commands.flatMap((command, index) =>
       command?.name === "resume" ? [index] : []
     );
@@ -4883,7 +4883,14 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
     );
     const pending = commands.some((command) => command?.status === "pending");
     if (!lifecycleBound || !planBound || !commandFieldsBound) {
-      return { bound: false, failedNames, pending, setupComplete: false };
+      return {
+        bound: false,
+        failedNames,
+        pending,
+        pendingFailureMayPrecedeError: false,
+        serviceWorkerBarrier,
+        setupComplete: false,
+      };
     }
     const settledByResult = [...settledCommands].sort(
       (left, right) => left.resultSequence - right.resultSequence,
@@ -4958,11 +4965,16 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
         command.resultAt <= target.commandDeadlineAt
       ));
     const attachStateBound = target.attachComplete === setupStateComplete;
+    const pendingFailureMayPrecedeError = pending && (
+      serviceWorkerBarrier || (!hasResume && commands.length === 2)
+    );
     return {
       bound: commandOrderBound && setupProgressionBound && deadlineBound &&
         resumeStateBound && attachStateBound,
       failedNames,
       pending,
+      pendingFailureMayPrecedeError,
+      serviceWorkerBarrier,
       setupComplete: setupStateComplete,
     };
   };
@@ -5016,6 +5028,32 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
       validateTargetCommandState(target),
     ]),
   );
+  const exactTargetAncestry = (target) => {
+    const expected = [];
+    const visited = new Set([target?.sessionId]);
+    let parentSessionId = target?.parentSessionId;
+    while (parentSessionId && !visited.has(parentSessionId)) {
+      visited.add(parentSessionId);
+      const parent = targetBySession.get(parentSessionId);
+      if (!parent) break;
+      expected.push({
+        phase: parent.phase,
+        sessionId: parent.sessionId,
+        type: parent.type,
+        urlClass: parent.urlClass,
+      });
+      parentSessionId = parent.parentSessionId;
+    }
+    return Array.isArray(target?.ancestry) &&
+      target.ancestry.length === expected.length &&
+      target.ancestry.every((ancestor, index) =>
+        ancestor && typeof ancestor === "object" &&
+        ancestor.sessionId === expected[index].sessionId &&
+        ancestor.phase === expected[index].phase &&
+        ancestor.type === expected[index].type &&
+        ancestor.urlClass === expected[index].urlClass
+      );
+  };
   const targetIdentitiesBound =
     targetSessions.every(nonEmptyString) &&
     new Set(targetSessions).size === targetSessions.length &&
@@ -5029,14 +5067,10 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
         nonEmptyString(target?.parentSessionId)) &&
       safeClockOrNull(target?.commandDeadlineAt) &&
       safeClockOrNull(target?.resumeDispatchedAt) &&
+      (target?.workerInstanceId === null ||
+        positiveInteger(target?.workerInstanceId)) &&
       targetStates.get(target.sessionId)?.bound === true &&
-      Array.isArray(target?.ancestry) &&
-      target.ancestry.every((ancestor) =>
-        nonEmptyString(ancestor?.sessionId) &&
-        nonEmptyString(ancestor?.phase) &&
-        CDP_WORKER_TARGET_TYPES.has(ancestor?.type) &&
-        urlClasses.has(ancestor?.urlClass)
-      ) &&
+      exactTargetAncestry(target) &&
       target?.identityHash === cdpDiagnosticIdentity(
         target.sessionId,
         target.targetId,
@@ -5051,10 +5085,15 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
   const attachErrorsBound = attachErrors.every((entry) => {
     const target = targetBySession.get(entry?.sessionId);
     const targetState = targetStates.get(entry?.sessionId);
+    const errorCategoryBound = entry?.command === "resume"
+      ? entry.category === (
+          targetState?.serviceWorkerBarrier === true ? "setup" : "resume"
+        )
+      : entry?.category !== "resume";
     return entry && typeof entry === "object" &&
       ["resume", "setup", "unhandled-setup"].includes(entry.category) &&
       attachErrorCommands.has(entry.command) &&
-      (entry.category !== "resume" || entry.command === "resume") &&
+      errorCategoryBound &&
       nonEmptyString(entry.sessionId) && nonEmptyString(entry.targetId) &&
       CDP_WORKER_TARGET_TYPES.has(entry.type) &&
       urlClasses.has(entry.urlClass) &&
@@ -5128,7 +5167,7 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
     }
     const explained = targetState?.pending === true || errors.length > 0;
     const failedCommandExplained = targetState?.failedNames.size === 0 ||
-      targetState?.pending === true ||
+      targetState?.pendingFailureMayPrecedeError === true ||
       errors.some((entry) => targetState.failedNames.has(entry?.command));
     return explained && failedCommandExplained;
   });
@@ -5175,6 +5214,7 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
         target?.phase === settlement?.phase &&
         target?.type === "worker" &&
         targetStates.get(target.sessionId)?.setupComplete === true &&
+        isCdpTargetSetupComplete(target) &&
         target?.type === settlement?.targetType &&
         target?.urlClass === settlement?.urlClass &&
         settlement?.method === "GET" &&
