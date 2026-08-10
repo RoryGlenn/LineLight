@@ -7,6 +7,7 @@ import {
   AttachedCdpSession,
   analyzeOfflineCacheTransition,
   attachCdpChildTarget,
+  classifyCpuProcessRole,
   classifyTargetAttachFailures,
   correlateWorkerMessageSessionGeneration,
   countTrackedProcessSurvivors,
@@ -58,6 +59,40 @@ function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
 }
 
+function cpuSample(
+  monotonicMs,
+  { pid = 42, role = "browser", ticks = 10 } = {},
+) {
+  return {
+    monotonicMs,
+    processes: [
+      {
+        pid,
+        role,
+        startTimeTicks: 1,
+        ticks,
+      },
+    ],
+    wallTimeMs: 1_000_000 + monotonicMs,
+  };
+}
+
+function cpuInterval(
+  startMonotonicMs,
+  cpuPercent,
+  { endAfterActionMs } = {},
+) {
+  const interval = {
+    cpuPercent,
+    elapsedMs: 50,
+    endMonotonicMs: startMonotonicMs + 50,
+    processCount: 1,
+    startMonotonicMs,
+  };
+  if (endAfterActionMs !== undefined) interval.endAfterActionMs = endAfterActionMs;
+  return interval;
+}
+
 function passingCacheInventory() {
   const entries = [
     ...Array.from({ length: 24 }, (_, index) => ({
@@ -92,6 +127,11 @@ function passingCacheInventory() {
 
 function cancellation(index) {
   const actionAtMs = 1_000 + index * 2_000;
+  const intervals = [
+    cpuInterval(actionAtMs - 50, 90, { endAfterActionMs: -50 }),
+    cpuInterval(actionAtMs, 10, { endAfterActionMs: 0 }),
+    cpuInterval(actionAtMs + 50, 4, { endAfterActionMs: 50 }),
+  ];
   return {
     actionAtMs,
     actionNodeMonotonicMs: actionAtMs + 50,
@@ -100,22 +140,16 @@ function cancellation(index) {
     audiblePauseLatencyMs: 3,
     cooperative: true,
     cpu: {
-      activeIntervals: [
-        { cpuPercent: 90, elapsedMs: 50, endAfterActionMs: -50 },
-      ],
+      activeIntervals: structuredClone(intervals.slice(0, 2)),
       cpuPercentAtIdle: 4,
-      idleByMs: 180,
-      intervals: [
-        { cpuPercent: 90, elapsedMs: 50 },
-        { cpuPercent: 10, elapsedMs: 50 },
-        { cpuPercent: 4, elapsedMs: 50 },
-      ],
+      idleByMs: 50,
+      intervals,
       peakActiveCpuPercent: 90,
       samples: [
-        { monotonicMs: actionAtMs - 50, processes: [] },
-        { monotonicMs: actionAtMs, processes: [] },
-        { monotonicMs: actionAtMs + 50, processes: [] },
-        { monotonicMs: actionAtMs + 100, processes: [] },
+        cpuSample(actionAtMs - 50, { ticks: 10 }),
+        cpuSample(actionAtMs, { ticks: 15 }),
+        cpuSample(actionAtMs + 50, { ticks: 16 }),
+        cpuSample(actionAtMs + 100, { ticks: 16 }),
       ],
     },
     endToEndPauseUpperBoundMs: 15,
@@ -333,14 +367,14 @@ function passingEvidence() {
       cpuBaseline: {
         derivedIdleThresholdPercent: 14,
         intervals: [
-          { cpuPercent: 4, elapsedMs: 50 },
-          { cpuPercent: 3, elapsedMs: 50 },
+          cpuInterval(100, 4),
+          cpuInterval(150, 3),
         ],
         p95CpuPercent: 4,
         samples: [
-          { monotonicMs: 100, processes: [] },
-          { monotonicMs: 150, processes: [] },
-          { monotonicMs: 200, processes: [] },
+          cpuSample(100, { ticks: 10 }),
+          cpuSample(150, { ticks: 11 }),
+          cpuSample(200, { ticks: 11 }),
         ],
       },
       events: [
@@ -569,6 +603,76 @@ test("fails closed on every source, timing, lifecycle, and fallback gate", () =>
         evidence.threadedWasm.cpuBaseline.intervals[0].elapsedMs = 101;
       },
       "measured idle CPU baseline",
+    ],
+    [
+      "CPU baseline unknown field",
+      (evidence) => {
+        evidence.threadedWasm.cpuBaseline.debugTag = "safe-looking";
+      },
+      "measured idle CPU baseline",
+    ],
+    [
+      "CPU baseline interval unknown field",
+      (evidence) => {
+        evidence.threadedWasm.cpuBaseline.intervals[0].debugTag =
+          "safe-looking";
+      },
+      "measured idle CPU baseline",
+    ],
+    [
+      "CPU role command leak",
+      (evidence) => {
+        evidence.threadedWasm.cancellations[0].cpu.samples[0].processes[0].role =
+          "renderer --user-data-dir=/tmp/private-profile";
+      },
+      "enum-only owned-process CPU evidence",
+    ],
+    [
+      "CPU process unknown field",
+      (evidence) => {
+        evidence.threadedWasm.cpuBaseline.samples[0].processes[0].debugTag =
+          "safe-looking";
+      },
+      "measured idle CPU baseline",
+    ],
+    [
+      "CPU unknown role",
+      (evidence) => {
+        evidence.threadedWasm.cancellations[0].cpu.samples[0].processes[0].role =
+          "broker";
+      },
+      "enum-only owned-process CPU evidence",
+    ],
+    [
+      "CPU sample unknown field",
+      (evidence) => {
+        evidence.threadedWasm.cancellations[0].cpu.samples[0].debugTag =
+          "safe-looking";
+      },
+      "enum-only owned-process CPU evidence",
+    ],
+    [
+      "CPU cancellation unknown field",
+      (evidence) => {
+        evidence.threadedWasm.cancellations[0].cpu.debugTag = "safe-looking";
+      },
+      "enum-only owned-process CPU evidence",
+    ],
+    [
+      "CPU cancellation interval unknown field",
+      (evidence) => {
+        evidence.threadedWasm.cancellations[0].cpu.intervals[0].debugTag =
+          "safe-looking";
+      },
+      "enum-only owned-process CPU evidence",
+    ],
+    [
+      "CPU active interval unknown field",
+      (evidence) => {
+        evidence.threadedWasm.cancellations[0].cpu.activeIntervals[0].debugTag =
+          "safe-looking";
+      },
+      "enum-only owned-process CPU evidence",
     ],
     [
       "active count",
@@ -1153,24 +1257,156 @@ test("success audio inherits its same-worker run session identity", () => {
   );
 });
 
-test("rejects private prose, absolute paths, raw payloads, and textLength", () => {
+test("CPU sampling reduces process command lines to exact role enums", () => {
+  assert.equal(
+    classifyCpuProcessRole(
+      "/usr/bin/brave\0--type=renderer\0--user-data-dir=/tmp/private\0",
+    ),
+    "renderer",
+  );
+  assert.equal(
+    classifyCpuProcessRole(
+      "/usr/bin/brave\0--type=gpu-process\0--profile-directory=Private\0",
+    ),
+    "gpu-process",
+  );
+  assert.equal(
+    classifyCpuProcessRole("/usr/bin/brave\0--type=renderer --secret\0"),
+    "other",
+  );
+  assert.equal(
+    classifyCpuProcessRole("/usr/bin/brave\0--private-switch=/tmp/value\0"),
+    "other",
+  );
+  assert.equal(
+    classifyCpuProcessRole("/usr/bin/brave\0--type=broker\0"),
+    "other",
+  );
+  assert.equal(
+    classifyCpuProcessRole("/usr/bin/brave\0--type=renderer\0", {
+      isGroupLeader: true,
+    }),
+    "browser",
+  );
+});
+
+test("recursively rejects private prose, filesystem paths, process arguments, and raw fields", () => {
   const evidence = passingEvidence();
   evidence.debug = {
+    argv: ["--user-data-dir=/tmp/linelight-private-profile"],
+    commandLine: "/usr/bin/brave --type=renderer",
+    cwd: "/opt/linelight-private",
+    embeddedFileUrl: "argument=file:///tmp/linelight-private",
+    embeddedUnixPath: "worker=/srv/private/worker.js",
+    encodedUnixPath: "argument=%2Ftmp%2Flinelight-private",
+    homePath: "~/linelight-private",
     payload: { id: 12 },
     profile: "/tmp/linelight-private-profile",
     prose: "I like my friend Tiarnan and regretted attrition",
+    tempPrefix: "TMPDIR=/var/tmp/linelight-private",
     text: "private excerpt",
     textLength: 12,
+    uncPath: "\\\\private-host\\private-share\\profile",
+    unreviewedAbsoluteUrlPath: "/assets/private-profile.js",
+    userDataSwitch: "--user-data-dir=C:\\Users\\Private\\Profile",
+    windowsPath: "C:\\Users\\Private\\Profile",
   };
   const violations = findEvidencePrivacyViolations(evidence);
+  assert.ok(violations.includes("$evidence.debug.argv"));
+  assert.ok(violations.includes("$evidence.debug.commandLine"));
+  assert.ok(violations.includes("$evidence.debug.cwd"));
+  assert.ok(violations.includes("$evidence.debug.embeddedFileUrl"));
+  assert.ok(violations.includes("$evidence.debug.embeddedUnixPath"));
+  assert.ok(violations.includes("$evidence.debug.encodedUnixPath"));
+  assert.ok(violations.includes("$evidence.debug.homePath"));
   assert.ok(violations.includes("$evidence.debug.payload"));
   assert.ok(violations.includes("$evidence.debug.profile"));
   assert.ok(violations.includes("$evidence.debug.prose"));
+  assert.ok(violations.includes("$evidence.debug.tempPrefix"));
   assert.ok(violations.includes("$evidence.debug.text"));
   assert.ok(violations.includes("$evidence.debug.textLength"));
+  assert.ok(violations.includes("$evidence.debug.uncPath"));
+  assert.ok(violations.includes("$evidence.debug.unreviewedAbsoluteUrlPath"));
+  assert.ok(violations.includes("$evidence.debug.userDataSwitch"));
+  assert.ok(violations.includes("$evidence.debug.windowsPath"));
   assert.ok(
     validateOfflineCancellationEvidence(evidence).some((failure) =>
       failure.includes("forbidden private/raw fields"),
+    ),
+  );
+});
+
+test("privacy scanning rejects each filesystem and process fragment independently", () => {
+  const privateValues = [
+    "/",
+    "/用户/private",
+    "//private-host/private-share",
+    "x]/etc/passwd",
+    "x;/etc/passwd",
+    "x;file:///tmp/private",
+    "x;%2Ftmp%2Fprivate",
+    "%2F%2Fprivate-host%2Fprivate-share",
+    "x]C:\\Users\\Private",
+    "x]\\\\private-host\\private-share",
+    "x;~/private",
+    "--profile=Private",
+    "x;TMPDIR=opaque",
+    "--type=renderer",
+    "private\0fragment",
+  ];
+  for (const privateValue of privateValues) {
+    assert.deepEqual(
+      findEvidencePrivacyViolations({ debug: { probe: privateValue } }),
+      ["$evidence.debug.probe"],
+      privateValue.replaceAll("\0", "\\0"),
+    );
+  }
+
+  for (const privateKey of [
+    "/tmp/private",
+    "C:\\Users\\Private",
+    "--type=renderer",
+  ]) {
+    const violations = findEvidencePrivacyViolations({
+      debug: { [privateKey]: "safe-looking" },
+    });
+    assert.equal(violations.length, 1);
+    assert.match(violations[0], /^\$evidence\.debug\.\$key\[[a-f\d]{12}\]$/u);
+    assert.equal(violations[0].includes(privateKey), false);
+  }
+
+  assert.deepEqual(
+    findEvidencePrivacyViolations({ debug: { PrOfIlEpAtH: "opaque" } }),
+    ["$evidence.debug.PrOfIlEpAtH"],
+  );
+});
+
+test("absolute URL-path exceptions are field, prefix, and encoding bound", () => {
+  assert.deepEqual(findEvidencePrivacyViolations(passingEvidence()), []);
+
+  const filesystemPrefix = passingEvidence();
+  filesystemPrefix.cache.before.entries[0].url = "/tmp/private-profile";
+  assert.ok(
+    findEvidencePrivacyViolations(filesystemPrefix).includes(
+      "$evidence.cache.before.entries[0].url",
+    ),
+  );
+
+  const encodedSeparator = passingEvidence();
+  encodedSeparator.artifact.loadedWorkerPath =
+    "/assets/%2Ftmp/private-worker.js";
+  assert.ok(
+    findEvidencePrivacyViolations(encodedSeparator).includes(
+      "$evidence.artifact.loadedWorkerPath",
+    ),
+  );
+
+  const dotSegment = passingEvidence();
+  dotSegment.network.targetBootstrapSettlements[0].url =
+    "http://127.0.0.1:5212/assets/../tmp/private-worker.js";
+  assert.ok(
+    findEvidencePrivacyViolations(dotSegment).includes(
+      "$evidence.network.targetBootstrapSettlements[0].url",
     ),
   );
 });

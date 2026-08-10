@@ -455,7 +455,11 @@ session-less success message; classifies the speech worker and same-URL
 pthreads by exact target ancestry; and accepts only hashed, detached
 service-worker attach races during
 the deliberate unregister phase. Its worker-event schema rejects unknown or
-raw-text fields. Final teardown proves the exact active speech roots and all
+raw-text fields, while owned-process CPU samples retain only exact-schema
+numeric counters and a bounded browser-process role enum rather than command
+lines, working directories, or profile paths. The recursive privacy gate
+rejects unreviewed Unix, Windows, profile, and temporary-path strings anywhere
+in the evidence. Final teardown proves the exact active speech roots and all
 recursive pthread descendants detached through privacy-safe session-ancestry
 hashes. Persisted console and uncaught-exception evidence contains only
 privacy-safe category, phase, target class, severity, count, and digest fields

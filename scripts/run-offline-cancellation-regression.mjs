@@ -63,6 +63,50 @@ const MAX_CPU_SAMPLE_INTERVAL_MS = 100;
 const MAX_PAUSE_LATENCY_MS = 50;
 const MAX_CPU_QUIESCENCE_MS = 500;
 const MAX_QUIESCENT_CPU_PERCENT = 50;
+const CPU_PROCESS_ROLES = new Set([
+  "browser",
+  "gpu-process",
+  "other",
+  "renderer",
+  "utility",
+  "zygote",
+]);
+const CPU_PROCESS_SAMPLE_KEYS = Object.freeze(
+  ["pid", "role", "startTimeTicks", "ticks"].sort(),
+);
+const CPU_SAMPLE_KEYS = Object.freeze(
+  ["monotonicMs", "processes", "wallTimeMs"].sort(),
+);
+const CPU_BASELINE_KEYS = Object.freeze(
+  [
+    "derivedIdleThresholdPercent",
+    "intervals",
+    "p95CpuPercent",
+    "samples",
+  ].sort(),
+);
+const CPU_CANCELLATION_KEYS = Object.freeze(
+  [
+    "activeIntervals",
+    "cpuPercentAtIdle",
+    "idleByMs",
+    "intervals",
+    "peakActiveCpuPercent",
+    "samples",
+  ].sort(),
+);
+const CPU_INTERVAL_KEYS = Object.freeze(
+  [
+    "cpuPercent",
+    "elapsedMs",
+    "endMonotonicMs",
+    "processCount",
+    "startMonotonicMs",
+  ].sort(),
+);
+const CPU_ACTION_INTERVAL_KEYS = Object.freeze(
+  [...CPU_INTERVAL_KEYS, "endAfterActionMs"].sort(),
+);
 const MAX_FAR_SEEK_START_MS = 500;
 const CANCELLATION_TIMEOUT_MS = 750;
 const CANCELLATION_TIMEOUT_TOLERANCE_MS = 250;
@@ -351,6 +395,163 @@ function uint32(value) {
   return Number.isInteger(value) && value >= 0 && value <= 0xffffffff;
 }
 
+function validCpuProcessSample(process_) {
+  return (
+    exactObjectKeys(process_, CPU_PROCESS_SAMPLE_KEYS) &&
+    Number.isSafeInteger(process_.pid) &&
+    process_.pid >= 1 &&
+    typeof process_.role === "string" &&
+    CPU_PROCESS_ROLES.has(process_.role) &&
+    Number.isSafeInteger(process_.startTimeTicks) &&
+    process_.startTimeTicks >= 0 &&
+    Number.isSafeInteger(process_.ticks) &&
+    process_.ticks >= 0
+  );
+}
+
+function validCpuSample(sample) {
+  if (
+    !exactObjectKeys(sample, CPU_SAMPLE_KEYS) ||
+    !finiteNumber(sample.monotonicMs) ||
+    sample.monotonicMs < 0 ||
+    !finiteNumber(sample.wallTimeMs) ||
+    sample.wallTimeMs < 0 ||
+    !Array.isArray(sample.processes) ||
+    sample.processes.length < 1 ||
+    sample.processes.length > 1_024 ||
+    !sample.processes.every(validCpuProcessSample)
+  ) {
+    return false;
+  }
+  const processIdentities = sample.processes.map(
+    (process_) => `${process_.pid}:${process_.startTimeTicks}`,
+  );
+  return new Set(processIdentities).size === processIdentities.length;
+}
+
+function validCpuSampleTimeline(samples, minimum = 3) {
+  if (
+    !Array.isArray(samples) ||
+    samples.length < minimum ||
+    samples.length > 10_000
+  ) {
+    return false;
+  }
+  let previousMonotonicMs = -Infinity;
+  let previousWallTimeMs = -Infinity;
+  for (const sample of samples) {
+    if (
+      !validCpuSample(sample) ||
+      sample.monotonicMs <= previousMonotonicMs ||
+      sample.wallTimeMs < previousWallTimeMs
+    ) {
+      return false;
+    }
+    previousMonotonicMs = sample.monotonicMs;
+    previousWallTimeMs = sample.wallTimeMs;
+  }
+  return true;
+}
+
+function validCpuInterval(interval, { actionRelative = false } = {}) {
+  const expectedKeys = actionRelative
+    ? CPU_ACTION_INTERVAL_KEYS
+    : CPU_INTERVAL_KEYS;
+  return (
+    exactObjectKeys(interval, expectedKeys) &&
+    finiteNumber(interval.cpuPercent) &&
+    interval.cpuPercent >= 0 &&
+    finiteNumber(interval.elapsedMs) &&
+    interval.elapsedMs > 0 &&
+    interval.elapsedMs <= MAX_CPU_SAMPLE_INTERVAL_MS &&
+    finiteNumber(interval.startMonotonicMs) &&
+    interval.startMonotonicMs >= 0 &&
+    finiteNumber(interval.endMonotonicMs) &&
+    interval.endMonotonicMs > interval.startMonotonicMs &&
+    Math.abs(
+      interval.endMonotonicMs -
+        interval.startMonotonicMs -
+        interval.elapsedMs,
+    ) < 0.001 &&
+    Number.isInteger(interval.processCount) &&
+    interval.processCount >= 1 &&
+    interval.processCount <= 1_024 &&
+    (!actionRelative || finiteNumber(interval.endAfterActionMs))
+  );
+}
+
+function validCpuIntervalTimeline(
+  intervals,
+  samples,
+  { actionRelative = false } = {},
+) {
+  if (
+    !Array.isArray(intervals) ||
+    !Array.isArray(samples) ||
+    intervals.length < 2 ||
+    intervals.length !== samples.length - 1
+  ) {
+    return false;
+  }
+  return intervals.every(
+    (interval, index) =>
+      validCpuInterval(interval, { actionRelative }) &&
+      Math.abs(interval.startMonotonicMs - samples[index].monotonicMs) <
+        0.001 &&
+      Math.abs(interval.endMonotonicMs - samples[index + 1].monotonicMs) <
+        0.001 &&
+      interval.processCount === samples[index + 1].processes.length,
+  );
+}
+
+function validCpuBaseline(baseline) {
+  return (
+    exactObjectKeys(baseline, CPU_BASELINE_KEYS) &&
+    validCpuSampleTimeline(baseline.samples) &&
+    validCpuIntervalTimeline(baseline.intervals, baseline.samples) &&
+    finiteNumber(baseline.p95CpuPercent) &&
+    finiteNumber(baseline.derivedIdleThresholdPercent) &&
+    baseline.p95CpuPercent <= baseline.derivedIdleThresholdPercent &&
+    baseline.derivedIdleThresholdPercent <= MAX_QUIESCENT_CPU_PERCENT &&
+    baseline.derivedIdleThresholdPercent ===
+      Math.min(
+        MAX_QUIESCENT_CPU_PERCENT,
+        Math.max(10, Math.ceil(baseline.p95CpuPercent + 10)),
+      )
+  );
+}
+
+function validCpuCancellation(cpu) {
+  if (
+    !exactObjectKeys(cpu, CPU_CANCELLATION_KEYS) ||
+    !validCpuSampleTimeline(cpu.samples) ||
+    !validCpuIntervalTimeline(cpu.intervals, cpu.samples, {
+      actionRelative: true,
+    }) ||
+    !Array.isArray(cpu.activeIntervals) ||
+    cpu.activeIntervals.length < 1 ||
+    !cpu.activeIntervals.every((interval) =>
+      validCpuInterval(interval, { actionRelative: true }),
+    ) ||
+    JSON.stringify(cpu.activeIntervals) !==
+      JSON.stringify(
+        cpu.intervals.filter((interval) => interval.endAfterActionMs <= 0),
+      ) ||
+    !finiteNumber(cpu.cpuPercentAtIdle) ||
+    cpu.cpuPercentAtIdle < 0 ||
+    !finiteNumber(cpu.idleByMs) ||
+    cpu.idleByMs < 0 ||
+    !finiteNumber(cpu.peakActiveCpuPercent) ||
+    cpu.peakActiveCpuPercent < 0
+  ) {
+    return false;
+  }
+  return (
+    cpu.peakActiveCpuPercent ===
+    Math.max(...cpu.activeIntervals.map((interval) => interval.cpuPercent))
+  );
+}
+
 function validProtocolWorkerEvent(event) {
   const validDirectionAndType =
     (event.direction === "out" &&
@@ -467,13 +668,14 @@ function validateCpuRecord(record, index, failures, idleThresholdPercent) {
   const samples = record.cpu?.samples ?? [];
   pushFailure(
     failures,
-    samples.length >= 3,
-    `${prefix} did not retain enough raw owned-process CPU samples`,
+    validCpuCancellation(record.cpu),
+    `${prefix} did not retain exact-schema, enum-only owned-process CPU evidence`,
   );
   const intervals = record.cpu?.intervals ?? [];
   pushFailure(
     failures,
-    intervals.every(
+    validCpuIntervalTimeline(intervals, samples, { actionRelative: true }) &&
+      intervals.every(
       (entry) =>
         finiteNumber(entry.elapsedMs) &&
         entry.elapsedMs > 0 &&
@@ -495,7 +697,11 @@ function validateCpuRecord(record, index, failures, idleThresholdPercent) {
   );
   pushFailure(
     failures,
-    (record.cpu?.activeIntervals?.length ?? 0) >= 1 &&
+    Array.isArray(record.cpu?.activeIntervals) &&
+      record.cpu.activeIntervals.length >= 1 &&
+      record.cpu.activeIntervals.every((entry) =>
+        validCpuInterval(entry, { actionRelative: true }),
+      ) &&
       finiteNumber(record.cpu?.peakActiveCpuPercent) &&
       record.cpu.peakActiveCpuPercent > idleThresholdPercent,
     `${prefix} did not retain a raw CPU sample above its measured idle threshold`,
@@ -600,23 +806,7 @@ export function validateOfflineCancellationEvidence(evidence) {
   );
   pushFailure(
     failures,
-    (cpuBaseline?.samples?.length ?? 0) >= 3 &&
-      (cpuBaseline?.intervals?.length ?? 0) >= 2 &&
-      cpuBaseline.intervals.every(
-        (entry) =>
-          finiteNumber(entry.elapsedMs) &&
-          entry.elapsedMs > 0 &&
-          entry.elapsedMs <= MAX_CPU_SAMPLE_INTERVAL_MS,
-      ) &&
-      finiteNumber(cpuBaseline?.p95CpuPercent) &&
-      finiteNumber(cpuBaseline?.derivedIdleThresholdPercent) &&
-      cpuBaseline.p95CpuPercent <= cpuBaseline.derivedIdleThresholdPercent &&
-      cpuBaseline.derivedIdleThresholdPercent <= MAX_QUIESCENT_CPU_PERCENT &&
-      cpuBaseline.derivedIdleThresholdPercent ===
-        Math.min(
-          MAX_QUIESCENT_CPU_PERCENT,
-          Math.max(10, Math.ceil(cpuBaseline.p95CpuPercent + 10)),
-        ),
+    validCpuBaseline(cpuBaseline),
     "threaded-WASM evidence lacks a measured idle CPU baseline and derived threshold",
   );
   pushFailure(
@@ -1196,28 +1386,157 @@ function firstCancellationIdentity(cancellations) {
 
 export function findEvidencePrivacyViolations(value) {
   const violations = [];
-  const forbiddenKeys = new Set([
-    "consoleEntries",
-    "documentText",
-    "message",
-    "narrationText",
-    "payload",
-    "profileDirectory",
-    "profilePath",
-    "requestText",
-    "stack",
-    "text",
-    "textLength",
-    "values",
-  ]);
+  const forbiddenKeys = new Set(
+    [
+      "arguments",
+      "argv",
+      "commandArguments",
+      "consoleEntries",
+      "commandLine",
+      "cwd",
+      "directory",
+      "documentText",
+      "homeDirectory",
+      "homePath",
+      "message",
+      "narrationText",
+      "payload",
+      "pidDirectory",
+      "pidFile",
+      "pidPath",
+      "processArguments",
+      "processCommand",
+      "procPath",
+      "profile",
+      "profileDirectory",
+      "profilePath",
+      "requestText",
+      "stack",
+      "tempDirectory",
+      "tempPath",
+      "text",
+      "textLength",
+      "temporaryDirectory",
+      "temporaryPath",
+      "tmpDirectory",
+      "tmpPath",
+      "userDataDir",
+      "values",
+      "workingDirectory",
+    ].map((key) => key.toLowerCase()),
+  );
+  const urlPathRules = [
+    {
+      path: /^\$evidence\.artifact\.loaded(?:JsepWasm|Worker)Path$/u,
+      value: /^\/assets\/[A-Za-z\d._/-]+$/u,
+    },
+    {
+      path: /^\$evidence\.cache\.(?:after|before)\.entries\[\d+\]\.url$/u,
+      value: /^\/(?:assets|offline-model|onnx-community)\/[A-Za-z\d._/-]+$/u,
+    },
+    {
+      path: /^\$evidence\.cache\.currentRuntimeManifest\.assetPaths\[\d+\]$/u,
+      value: /^\/assets\/[A-Za-z\d._/-]+$/u,
+    },
+    {
+      path: /^\$evidence\.cache\.transition\.(?:added|retiredRuntimeDeletions|unexplainedRemovals)\[\d+\]\.url$/u,
+      value: /^\/(?:assets|offline-model|onnx-community)\/[A-Za-z\d._/-]+$/u,
+    },
+    {
+      path: /^\$evidence\.cache\.transition\.required(?:After|Before)\.entries\[\d+\]\.url$/u,
+      value: /^\/(?:assets|offline-model|onnx-community)\/[A-Za-z\d._/-]+$/u,
+    },
+    {
+      path: /^\$evidence\.finalIsolation\.teardownPath$/u,
+      value: /^\/offline-voice-license\.txt$/u,
+    },
+    {
+      path: /^\$evidence\.threadedWasm\.timeoutRecovery\.requiredCache(?:After|Before)\.entries\[\d+\]\.url$/u,
+      value: /^\/(?:assets|offline-model|onnx-community)\/[A-Za-z\d._/-]+$/u,
+    },
+  ];
+  const isReviewedUrlPath = (current, currentPath) => {
+    const rule = urlPathRules.find((candidate) =>
+      candidate.path.test(currentPath),
+    );
+    if (
+      !rule?.value.test(current) ||
+      !current.startsWith("/") ||
+      current.startsWith("//") ||
+      current.includes("\\") ||
+      /[?#\0]|%(?:2f|5c)/iu.test(current)
+    ) {
+      return false;
+    }
+    try {
+      return new URL(current, "http://127.0.0.1").pathname === current;
+    } catch {
+      return false;
+    }
+  };
+  const fullUrlRules = [
+    {
+      path: /^\$evidence\.(?:environment|run)\.appOrigin$/u,
+      value: /^http:\/\/127\.0\.0\.1:5212$/u,
+    },
+    {
+      path: /^\$evidence\.isolation\.baselinePageUrl$/u,
+      value: /^about:\/\/non-http-resource$/u,
+    },
+    {
+      path: /^\$evidence\.network\.targetBootstrapSettlements\[\d+\]\.url$/u,
+      value:
+        /^http:\/\/127\.0\.0\.1:5212\/assets\/[A-Za-z\d._/-]+$/u,
+    },
+  ];
+  const isReviewedFullUrl = (current, currentPath) => {
+    if (
+      !fullUrlRules.some(
+        (rule) => rule.path.test(currentPath) && rule.value.test(current),
+      )
+    ) {
+      return false;
+    }
+    if (current === "about://non-http-resource") return true;
+    try {
+      const parsed = new URL(current);
+      return (
+        parsed.search === "" &&
+        parsed.hash === "" &&
+        (parsed.origin === current || parsed.href === current)
+      );
+    } catch {
+      return false;
+    }
+  };
+  const violatesPrivacy = (current, currentPath, { allowUrls = true } = {}) => {
+    const containsProfileOrTempPrefix =
+      /(?:HOME|TEMP|TMP|TMPDIR|USERPROFILE)=|(?:profile|temp(?:orary)?|tmp|user-?data)(?:-?(?:directory|dir|path))?=|linelight-issue55-(?:browser|profile)-/iu.test(
+        current,
+      );
+    const reviewedUrl =
+      allowUrls &&
+      (isReviewedUrlPath(current, currentPath) ||
+        isReviewedFullUrl(current, currentPath));
+    const containsFilesystemPath =
+      !reviewedUrl &&
+      (current.includes("\\") ||
+        /[A-Za-z]:\//u.test(current) ||
+        /(?:^|[^\p{L}\p{N}._~-])\/(?:\/|[^\s]*)/u.test(current) ||
+        /%(?:2f|5c)/iu.test(current) ||
+        /file:\/\//iu.test(current) ||
+        /(?:~|\$HOME|\$\{HOME\})[\\/]/u.test(current));
+    return (
+      containsProfileOrTempPrefix ||
+      containsFilesystemPath ||
+      current.includes("--") ||
+      current.includes("\0") ||
+      /I like my friend Tiarn|regretted attrition/iu.test(current)
+    );
+  };
   const visit = (current, currentPath) => {
     if (typeof current === "string") {
-      if (
-        /(?:^|[\s"'])(?:\/tmp\/|\/home\/ubuntu\/)/u.test(current) ||
-        /I like my friend Tiarn|regretted attrition/iu.test(current)
-      ) {
-        violations.push(currentPath);
-      }
+      if (violatesPrivacy(current, currentPath)) violations.push(currentPath);
       return;
     }
     if (!current || typeof current !== "object") return;
@@ -1228,9 +1547,14 @@ export function findEvidencePrivacyViolations(value) {
       return;
     }
     for (const [key, entry] of Object.entries(current)) {
-      const entryPath = `${currentPath}.${key}`;
-      if (forbiddenKeys.has(key)) violations.push(entryPath);
-      else visit(entry, entryPath);
+      const unsafeKey = violatesPrivacy(key, currentPath, { allowUrls: false });
+      const entryPath = unsafeKey
+        ? `${currentPath}.$key[${hashDiagnostic(key).slice(0, 12)}]`
+        : `${currentPath}.${key}`;
+      if (forbiddenKeys.has(key.toLowerCase()) || unsafeKey) {
+        violations.push(entryPath);
+      }
+      visit(entry, entryPath);
     }
   };
   visit(value, "$evidence");
@@ -1665,14 +1989,15 @@ async function sampleProcessGroup(processGroupId) {
             await readFile(path.join("/proc", entry, "stat"), "utf8"),
           );
           if (!parsed || parsed.pgrp !== processGroupId) return;
-          let role = "browser";
+          let role = pid === processGroupId ? "browser" : "other";
           try {
             const commandLine = await readFile(
               path.join("/proc", entry, "cmdline"),
               "utf8",
             );
-            const match = commandLine.match(/--type=([^\0]+)/u);
-            if (match) role = match[1];
+            role = classifyCpuProcessRole(commandLine, {
+              isGroupLeader: pid === processGroupId,
+            });
           } catch {
             // A short-lived process may exit between stat and cmdline.
           }
@@ -1693,6 +2018,19 @@ async function sampleProcessGroup(processGroupId) {
     wallTimeMs: Date.now(),
     processes,
   };
+}
+
+export function classifyCpuProcessRole(
+  commandLine,
+  { isGroupLeader = false } = {},
+) {
+  if (isGroupLeader) return "browser";
+  if (typeof commandLine !== "string") return "other";
+  const typeArgument = commandLine
+    .split("\0")
+    .find((argument) => argument.startsWith("--type="));
+  const type = typeArgument?.slice("--type=".length) ?? "";
+  return CPU_PROCESS_ROLES.has(type) && type !== "browser" ? type : "other";
 }
 
 function startCpuSampler(processGroupId) {
