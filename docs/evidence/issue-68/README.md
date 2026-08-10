@@ -53,11 +53,13 @@ validator additionally requires:
   failure followed by recovery on the same document revision and target, and
   page-3 cancellation after its PDF.js continuation is delayed; page 3 and a
   unique attempt ID are derived from the sole real visible, unsatisfied fallback
-  flow rather than supplied by the test caller. Abort request, viewport exit,
-  continuation resume, exact cancelled terminal outcome, and no-late-compose
-  proof must share that document/revision/attempt identity, and the harness waits
-  for the continuation to resume more than one second later before accepting a
-  retained zero-sized canvas;
+  flow rather than supplied by the test caller. Each attempt is bound to the
+  unique `AbortSignal` registered by its production PDF.js cancel listener. The
+  page-exit action, exact controller abort, cancelled terminal outcome, viewport
+  exit confirmation, delayed continuation resume, and no-late-compose proof must
+  share that signal/document/revision/attempt identity and occur in that order;
+  the terminal cancellation must happen before the held continuation resumes
+  more than one second later, while the zero-sized canvas and text shell remain;
 - deterministic local narration advancing a word inside its measured sentence
   highlight in every desktop/mobile/zoom scenario, with no Window Long Task
   above 50 ms;

@@ -732,24 +732,54 @@ const INSTRUMENTATION_SOURCE = String.raw`
   let delayNextContinuation = null;
   const fallbackAttempts = new Map();
   const stagingSymbol = Symbol("issue68FallbackStaging");
+  const fallbackAbortCandidates = [];
+  const fallbackAttemptBySignal = new WeakMap();
+  let abortSignalSequence = 0;
+  const nativeAbortListener = AbortSignal.prototype.addEventListener;
+  AbortSignal.prototype.addEventListener = function issue68AbortListener(
+    type,
+    listener,
+    options
+  ) {
+    if (
+      forceFallback &&
+      type === "abort" &&
+      typeof listener === "function" &&
+      /\.cancel\s*\(/u.test(Function.prototype.toString.call(listener)) &&
+      !fallbackAbortCandidates.some((candidate) => candidate.signal === this)
+    ) {
+      const candidate = {
+        bound: false,
+        registeredAt: performance.now(),
+        signal: this,
+        signalId: ++abortSignalSequence
+      };
+      fallbackAbortCandidates.push(candidate);
+      state.fallback.events.push({
+        abortSignalId: candidate.signalId,
+        at: candidate.registeredAt,
+        type: "abort-signal-registered"
+      });
+    }
+    return nativeAbortListener.call(this, type, listener, options);
+  };
   const nativeAbort = AbortController.prototype.abort;
   AbortController.prototype.abort = function issue68Abort(reason) {
     if (forceFallback) {
-      const activeAttempts = Array.from(fallbackAttempts.values()).filter(
-        (attempt) => !attempt.finished
-      );
-      const attempt = activeAttempts.length === 1 ? activeAttempts[0] : null;
+      const attempt = fallbackAttemptBySignal.get(this.signal) ?? null;
       const delayedAttempt = attempt && state.fallback.events.some((event) =>
         event.type === "continuation-delay" &&
         event.renderAttemptId === attempt.renderAttemptId
       );
       if (
         attempt &&
+        !attempt.finished &&
         attempt.cancelRequestedAt === null &&
         delayedAttempt
       ) {
         attempt.cancelRequestedAt = performance.now();
         state.fallback.events.push({
+          abortSignalId: attempt.abortSignalId,
           at: attempt.cancelRequestedAt,
           documentKey: attempt.documentKey,
           page: attempt.page,
@@ -901,6 +931,7 @@ const INSTRUMENTATION_SOURCE = String.raw`
       const attempt = activeAttempts.length === 1 ? activeAttempts[0] : null;
       const delayedAt = performance.now();
       state.fallback.events.push({
+        abortSignalId: attempt?.abortSignalId ?? null,
         at: delayedAt,
         armedAt,
         callbackName: callback?.name || null,
@@ -915,6 +946,7 @@ const INSTRUMENTATION_SOURCE = String.raw`
       return setTimeout(() => {
         const resumedAt = performance.now();
         state.fallback.events.push({
+          abortSignalId: attempt?.abortSignalId ?? null,
           afterMs: resumedAt - delayedAt,
           at: resumedAt,
           documentKey: attempt?.documentKey ?? null,
@@ -943,6 +975,7 @@ const INSTRUMENTATION_SOURCE = String.raw`
       : "cancelled";
     state.fallback.activeStaging = Math.max(0, state.fallback.activeStaging - 1);
     state.fallback.events.push({
+      abortSignalId: staging.abortSignalId,
       at: performance.now(),
       cancelRequestedAt: staging.cancelRequestedAt,
       documentKey: staging.documentKey,
@@ -1016,8 +1049,17 @@ const INSTRUMENTATION_SOURCE = String.raw`
     if (staging && !this[stagingSymbol]) {
       const id = ++state.fallback.stagingStarted;
       const derivedPage = deriveFallbackPage(this.width, this.height);
+      const abortCandidates = fallbackAbortCandidates.filter(
+        (candidate) => !candidate.bound
+      );
+      const abortCandidate = abortCandidates.length === 1
+        ? abortCandidates[0]
+        : null;
       const attempt = {
         ...derivedPage,
+        abortSignalCandidateCount: abortCandidates.length,
+        abortSignalId: abortCandidate?.signalId ?? null,
+        abortSignalRegisteredAt: abortCandidate?.registeredAt ?? null,
         cancelRequestedAt: null,
         finished: false,
         id,
@@ -1026,6 +1068,10 @@ const INSTRUMENTATION_SOURCE = String.raw`
         targetKey: this.width + "x" + this.height,
         targetWidth: this.width
       };
+      if (abortCandidate) {
+        abortCandidate.bound = true;
+        fallbackAttemptBySignal.set(abortCandidate.signal, attempt);
+      }
       this[stagingSymbol] = attempt;
       fallbackAttempts.set(id, attempt);
       state.fallback.activeStaging += 1;
@@ -1034,6 +1080,9 @@ const INSTRUMENTATION_SOURCE = String.raw`
         state.fallback.activeStaging
       );
       state.fallback.events.push({
+        abortSignalCandidateCount: attempt.abortSignalCandidateCount,
+        abortSignalId: attempt.abortSignalId,
+        abortSignalRegisteredAt: attempt.abortSignalRegisteredAt,
         at: performance.now(),
         candidatePages: derivedPage.candidatePages,
         documentKey: attempt.documentKey,
@@ -1082,6 +1131,7 @@ const INSTRUMENTATION_SOURCE = String.raw`
         if (currentPriorityProbe) currentPriorityProbe.compositions.push(draw);
         if (fallbackCompose) {
           state.fallback.events.push({
+            abortSignalId: fallbackAttempt.abortSignalId,
             at: draw.at,
             documentKey: fallbackAttempt.documentKey,
             page: draw.page,
@@ -1221,6 +1271,26 @@ const INSTRUMENTATION_SOURCE = String.raw`
       delay: Math.max(0, Number(milliseconds) || 0)
     };
   };
+  state.markFallbackViewportExitRequest = (renderAttemptId, destinationPage) => {
+    const attempt = fallbackAttempts.get(Number(renderAttemptId));
+    const block = Number.isInteger(attempt?.page)
+      ? document.querySelector('#pdf-page-' + attempt.page)
+      : null;
+    const event = {
+      abortSignalId: attempt?.abortSignalId ?? null,
+      at: performance.now(),
+      destinationPage: Number(destinationPage),
+      documentKey: attempt?.documentKey ?? null,
+      page: attempt?.page ?? null,
+      pageDerivation: attempt?.pageDerivation ?? null,
+      renderAttemptId: attempt?.renderAttemptId ?? null,
+      revision: attempt?.revision ?? null,
+      type: "viewport-exit-request",
+      visibleBeforeRequest: block?.dataset.pdfPageVisible === "true"
+    };
+    state.fallback.events.push(event);
+    return structuredClone(event);
+  };
   state.markFallbackViewportExit = (renderAttemptId) => {
     const attempt = fallbackAttempts.get(Number(renderAttemptId));
     const block = Number.isInteger(attempt?.page)
@@ -1229,6 +1299,7 @@ const INSTRUMENTATION_SOURCE = String.raw`
     const canvas = block?.querySelector("canvas") ?? null;
     const at = performance.now();
     const event = {
+      abortSignalId: attempt?.abortSignalId ?? null,
       at,
       cancelRequestedAt: attempt?.cancelRequestedAt ?? null,
       canvasHeight: canvas?.height ?? null,
@@ -2220,12 +2291,15 @@ async function collectFallbackEvidence(
         event.type === 'staging-finish' &&
         event.outcome === 'injected-failure' &&
         event.documentKey && event.revision &&
+        Number.isInteger(event.abortSignalId) &&
         Number.isInteger(event.renderAttemptId) &&
         Number.isInteger(event.page) &&
         event.targetKey
       );
       const failedStart = failure && events.find((event) =>
         event.type === 'staging-start' &&
+        event.abortSignalCandidateCount === 1 &&
+        event.abortSignalId === failure.abortSignalId &&
         event.renderAttemptId === failure.renderAttemptId &&
         event.documentKey === failure.documentKey &&
         event.page === failure.page &&
@@ -2235,6 +2309,9 @@ async function collectFallbackEvidence(
       );
       const retryStart = failure && events.find((event) =>
         event.type === 'staging-start' &&
+        event.abortSignalCandidateCount === 1 &&
+        Number.isInteger(event.abortSignalId) &&
+        event.abortSignalId !== failure.abortSignalId &&
         event.renderAttemptId !== failure.renderAttemptId &&
         event.documentKey === failure.documentKey &&
         event.page === failure.page &&
@@ -2244,6 +2321,7 @@ async function collectFallbackEvidence(
       );
       const retryCompose = retryStart && events.find((event) =>
         event.type === 'visible-compose' &&
+        event.abortSignalId === retryStart.abortSignalId &&
         event.renderAttemptId === retryStart.renderAttemptId &&
         event.documentKey === retryStart.documentKey &&
         event.page === retryStart.page &&
@@ -2254,11 +2332,13 @@ async function collectFallbackEvidence(
       return failure && failedStart && retryStart && retryCompose && {
         composedAt: retryCompose.at,
         documentKey: failure.documentKey,
+        failedAbortSignalId: failure.abortSignalId,
         failedAttemptId: failure.renderAttemptId,
         failedAt: failure.at,
         page: failure.page,
         pageDerivation: failure.pageDerivation,
         retryAttemptId: retryStart.renderAttemptId,
+        retryAbortSignalId: retryStart.abortSignalId,
         retryStartedAt: retryStart.at,
         revision: failure.revision,
         targetHeight: failure.targetHeight,
@@ -2289,6 +2369,7 @@ async function collectFallbackEvidence(
   if (
     continuationDelay.page !== 3 ||
     continuationDelay.pageDerivation !== "sole-visible-unsatisfied-page" ||
+    !Number.isInteger(continuationDelay.abortSignalId) ||
     !continuationDelay.documentKey ||
     !continuationDelay.revision
   ) {
@@ -2298,6 +2379,10 @@ async function collectFallbackEvidence(
   }
   const cancelledPage = continuationDelay.page;
   const renderAttemptId = continuationDelay.renderAttemptId;
+  const viewportExitRequest = await evaluate(
+    cdp,
+    `globalThis.__lineLightIssue68.markFallbackViewportExitRequest(${renderAttemptId}, 5)`,
+  );
   await scrollPageIntoView(cdp, 5);
   await waitForExpression(
     cdp,
@@ -2315,35 +2400,39 @@ async function collectFallbackEvidence(
     cdp,
     `globalThis.__lineLightIssue68.markFallbackViewportExit(${renderAttemptId})`,
   );
-  const continuationResume = await waitForExpression(
-    cdp,
-    browserExpression(`
-      return globalThis.__lineLightIssue68.fallback.events.find(
-        (event) => event.type === 'continuation-resume' &&
-          event.renderAttemptId === ${renderAttemptId} &&
-          event.documentKey === ${JSON.stringify(continuationDelay.documentKey)} &&
-          event.revision === ${JSON.stringify(continuationDelay.revision)} &&
-          event.page === ${cancelledPage} && event.afterMs >= 950
-      ) || false;
-    `),
-    `page ${cancelledPage} delayed continuation to resume after one second`,
-    SCENARIO_TIMEOUT_MS,
-  );
   const cancellationTerminal = await waitForExpression(
     cdp,
     browserExpression(`
       return globalThis.__lineLightIssue68.fallback.events.find(
         (event) => event.type === 'staging-finish' &&
+          event.abortSignalId === ${continuationDelay.abortSignalId} &&
           event.outcome === 'cancelled' &&
           event.renderAttemptId === ${renderAttemptId} &&
           event.documentKey === ${JSON.stringify(continuationDelay.documentKey)} &&
           event.revision === ${JSON.stringify(continuationDelay.revision)} &&
           event.page === ${cancelledPage} &&
           event.cancelRequestedAt === ${viewportExit.cancelRequestedAt} &&
-          event.at >= ${continuationResume.at}
+          event.cancelRequestedAt >= ${viewportExitRequest.at} &&
+          event.at <= ${viewportExit.at}
       ) || false;
     `),
     `page ${cancelledPage} delayed attempt to reach its cancellation terminal`,
+    SCENARIO_TIMEOUT_MS,
+  );
+  const continuationResume = await waitForExpression(
+    cdp,
+    browserExpression(`
+      return globalThis.__lineLightIssue68.fallback.events.find(
+        (event) => event.type === 'continuation-resume' &&
+          event.abortSignalId === ${continuationDelay.abortSignalId} &&
+          event.renderAttemptId === ${renderAttemptId} &&
+          event.documentKey === ${JSON.stringify(continuationDelay.documentKey)} &&
+          event.revision === ${JSON.stringify(continuationDelay.revision)} &&
+          event.page === ${cancelledPage} && event.afterMs >= 950 &&
+          event.at > ${cancellationTerminal.at}
+      ) || false;
+    `),
+    `page ${cancelledPage} delayed continuation to resume after one second`,
     SCENARIO_TIMEOUT_MS,
   );
   await waitForSharpCanvas(cdp, 5, "main-fallback");
@@ -2401,6 +2490,7 @@ async function collectFallbackEvidence(
     importedSource: snapshot.sourceFiles[0] ?? null,
     injectedFailures: snapshot.fallback.injectedFailures,
     invisibleCancellation: {
+      abortSignalId: continuationDelay.abortSignalId,
       canvasHeightAfterExit: releasedCancelledPage?.height ?? 0,
       canvasPresentAfterExit: Boolean(releasedCancelledPage),
       canvasWidthAfterExit: releasedCancelledPage?.width ?? 0,
@@ -2412,6 +2502,7 @@ async function collectFallbackEvidence(
       continuationResumeObserved: true,
       continuationResumedAfterMs: continuationResume.afterMs,
       documentKey: continuationDelay.documentKey,
+      exitRequestedAt: viewportExitRequest.at,
       exitedAt: viewportExit.at,
       lateComposes: cancelledAttemptLateComposes,
       page: cancelledPage,
@@ -2421,6 +2512,7 @@ async function collectFallbackEvidence(
       textOverlayRetainedAfterExit:
         (releasedCancelledPage?.wordOverlays ?? 0) > 0,
       viewportExit,
+      viewportExitRequest,
     },
     longTasks: snapshot.longTasks.slice(
       scenario.longTaskStart,

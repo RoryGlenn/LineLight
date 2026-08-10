@@ -603,21 +603,30 @@ export function validatePdfSharpnessEvidence(evidence) {
   const cancelledStagingStart = stagingStartEvents.find(
     (event) => event?.renderAttemptId === renderAttemptId,
   );
-  const continuationDelayEvent = stagingEvents.find(
+  const continuationDelayEvents = stagingEvents.filter(
     (event) =>
       event?.type === "continuation-delay" &&
       event?.renderAttemptId === renderAttemptId,
   );
-  const viewportExitEvent = stagingEvents.find(
+  const continuationDelayEvent = continuationDelayEvents[0];
+  const viewportExitRequestEvents = stagingEvents.filter(
+    (event) =>
+      event?.type === "viewport-exit-request" &&
+      event?.renderAttemptId === renderAttemptId,
+  );
+  const viewportExitRequestEvent = viewportExitRequestEvents[0];
+  const viewportExitEvents = stagingEvents.filter(
     (event) =>
       event?.type === "viewport-exit" &&
       event?.renderAttemptId === renderAttemptId,
   );
-  const continuationResumeEvent = stagingEvents.find(
+  const viewportExitEvent = viewportExitEvents[0];
+  const continuationResumeEvents = stagingEvents.filter(
     (event) =>
       event?.type === "continuation-resume" &&
       event?.renderAttemptId === renderAttemptId,
   );
+  const continuationResumeEvent = continuationResumeEvents[0];
   const lateComposesForAttempt = stagingEvents.filter(
     (event) =>
       event?.type === "visible-compose" &&
@@ -645,6 +654,11 @@ export function validatePdfSharpnessEvidence(evidence) {
         event?.page === event?.sourcePage,
     );
   const recordedViewportExit = invisibleCancellation?.viewportExit;
+  const recordedViewportExitRequest =
+    invisibleCancellation?.viewportExitRequest;
+  const signalRegistrationEvents = stagingEvents.filter(
+    (event) => event?.type === "abort-signal-registered",
+  );
   const retry = fallback?.retry;
   const failedAttemptId = retry?.failedAttemptId;
   const retryAttemptId = retry?.retryAttemptId;
@@ -673,7 +687,18 @@ export function validatePdfSharpnessEvidence(evidence) {
       event?.renderAttemptId === failedAttemptId,
   );
   const retryTargetKey = `${retry?.targetWidth}x${retry?.targetHeight}`;
+  const failedSignalRegistrations = signalRegistrationEvents.filter(
+    (event) => event?.abortSignalId === retry?.failedAbortSignalId,
+  );
+  const retrySignalRegistrations = signalRegistrationEvents.filter(
+    (event) => event?.abortSignalId === retry?.retryAbortSignalId,
+  );
   const retryIdentityBound =
+    Number.isInteger(retry?.failedAbortSignalId) &&
+    retry.failedAbortSignalId > 0 &&
+    Number.isInteger(retry?.retryAbortSignalId) &&
+    retry.retryAbortSignalId > 0 &&
+    retry.retryAbortSignalId !== retry.failedAbortSignalId &&
     Number.isInteger(failedAttemptId) &&
     failedAttemptId > 0 &&
     Number.isInteger(retryAttemptId) &&
@@ -689,10 +714,17 @@ export function validatePdfSharpnessEvidence(evidence) {
     Number.isInteger(retry?.targetHeight) &&
     retry.targetHeight > 0 &&
     retry?.targetKey === retryTargetKey &&
+    failedSignalRegistrations.length === 1 &&
+    retrySignalRegistrations.length === 1 &&
     failedFinishEvents.length === 1 &&
     [failedStart, failedFinish, retryStart, retryCompose].every(
       (event) =>
         event?.page === retry.page &&
+        event?.abortSignalId === (
+          event?.renderAttemptId === failedAttemptId
+            ? retry.failedAbortSignalId
+            : retry.retryAbortSignalId
+        ) &&
         event?.pageDerivation === retry.pageDerivation &&
         event?.documentKey === retry.documentKey &&
         event?.revision === retry.revision &&
@@ -702,10 +734,17 @@ export function validatePdfSharpnessEvidence(evidence) {
     ) &&
     [failedStart, retryStart].every(
       (event) =>
+        event?.abortSignalCandidateCount === 1 &&
+        finite(event?.abortSignalRegisteredAt) &&
         Array.isArray(event?.candidatePages) &&
         event.candidatePages.length === 1 &&
         event.candidatePages[0] === retry.page,
     ) &&
+    failedSignalRegistrations[0]?.at ===
+      failedStart?.abortSignalRegisteredAt &&
+    failedSignalRegistrations[0]?.at <= failedStart?.at &&
+    retrySignalRegistrations[0]?.at === retryStart?.abortSignalRegisteredAt &&
+    retrySignalRegistrations[0]?.at <= retryStart?.at &&
     failedFinish?.outcome === "injected-failure" &&
     failedStart?.at <= failedFinish?.at &&
     failedFinish?.at === retry?.failedAt &&
@@ -730,9 +769,28 @@ export function validatePdfSharpnessEvidence(evidence) {
       event?.renderAttemptId === renderAttemptId,
   );
   const cancelRequestEvent = cancelRequestEvents[0];
+  const cancellationSignalId = invisibleCancellation?.abortSignalId;
+  const cancellationSignalRegistrations = signalRegistrationEvents.filter(
+    (event) => event?.abortSignalId === cancellationSignalId,
+  );
   const cancellationIdentityBound =
+    Number.isInteger(cancellationSignalId) &&
+    cancellationSignalId > 0 &&
+    cancellationSignalId !== retry?.failedAbortSignalId &&
+    cancellationSignalId !== retry?.retryAbortSignalId &&
     nonEmptyString(invisibleCancellation?.documentKey) &&
     nonEmptyString(invisibleCancellation?.revision) &&
+    cancelledStagingStart?.abortSignalCandidateCount === 1 &&
+    cancelledStagingStart?.abortSignalId === cancellationSignalId &&
+    finite(cancelledStagingStart?.abortSignalRegisteredAt) &&
+    cancellationSignalRegistrations.length === 1 &&
+    cancellationSignalRegistrations[0]?.at ===
+      cancelledStagingStart?.abortSignalRegisteredAt &&
+    cancellationSignalRegistrations[0]?.at <= cancelledStagingStart?.at &&
+    continuationDelayEvents.length === 1 &&
+    viewportExitRequestEvents.length === 1 &&
+    viewportExitEvents.length === 1 &&
+    continuationResumeEvents.length === 1 &&
     cancellationTerminalEvents.length === 1 &&
     cancellationTerminalEvent?.outcome === "cancelled" &&
     cancellationTerminalEvent?.documentKey ===
@@ -741,12 +799,22 @@ export function validatePdfSharpnessEvidence(evidence) {
     cancellationTerminalEvent?.page === cancelledPage &&
     cancellationTerminalEvent?.pageDerivation ===
       invisibleCancellation.pageDerivation &&
+    cancellationTerminalEvent?.targetWidth ===
+      cancelledStagingStart?.targetWidth &&
+    cancellationTerminalEvent?.targetHeight ===
+      cancelledStagingStart?.targetHeight &&
+    cancellationTerminalEvent?.targetKey === cancelledStagingStart?.targetKey &&
     cancelRequestEvents.length === 1 &&
-    cancelRequestEvent?.at <= viewportExitEvent?.at &&
+    continuationDelayEvent?.at <= viewportExitRequestEvent?.at &&
+    viewportExitRequestEvent?.at <= cancelRequestEvent?.at &&
+    cancelRequestEvent?.at <= cancellationTerminalEvent?.at &&
+    cancellationTerminalEvent?.at <= viewportExitEvent?.at &&
+    viewportExitEvent?.at < continuationResumeEvent?.at &&
     viewportExitEvent?.cancelRequestedAt === cancelRequestEvent?.at &&
     cancellationTerminalEvent?.cancelRequestedAt === cancelRequestEvent?.at &&
-    cancellationTerminalEvent?.at >= continuationResumeEvent?.at &&
+    cancellationTerminalEvent?.abortSignalId === cancellationSignalId &&
     cancellationTerminal?.at === cancellationTerminalEvent?.at &&
+    cancellationTerminal?.abortSignalId === cancellationSignalId &&
     cancellationTerminal?.outcome === cancellationTerminalEvent?.outcome &&
     cancellationTerminal?.renderAttemptId === renderAttemptId &&
     cancellationTerminal?.documentKey === invisibleCancellation.documentKey &&
@@ -756,6 +824,7 @@ export function validatePdfSharpnessEvidence(evidence) {
   const matchingIdentity = [
     cancelledStagingStart,
     continuationDelayEvent,
+    viewportExitRequestEvent,
     viewportExitEvent,
     continuationResumeEvent,
     cancelRequestEvent,
@@ -768,6 +837,15 @@ export function validatePdfSharpnessEvidence(evidence) {
       event?.documentKey === invisibleCancellation?.documentKey &&
       event?.revision === invisibleCancellation?.revision,
   );
+  const matchingCancellationSignal = [
+    cancelledStagingStart,
+    continuationDelayEvent,
+    viewportExitRequestEvent,
+    viewportExitEvent,
+    continuationResumeEvent,
+    cancelRequestEvent,
+    cancellationTerminalEvent,
+  ].every((event) => event?.abortSignalId === cancellationSignalId);
   if (
     !artifactIsBound(fallback?.artifact) ||
     fallback?.signaledBeforeDocumentReady !== true ||
@@ -785,6 +863,7 @@ export function validatePdfSharpnessEvidence(evidence) {
     invisibleCancellation?.pageDerivation !==
       "sole-visible-unsatisfied-page" ||
     !matchingIdentity ||
+    !matchingCancellationSignal ||
     !uniqueStagingIdentities ||
     !composeIdentitiesMatch ||
     !Array.isArray(cancelledStagingStart?.candidatePages) ||
@@ -797,11 +876,14 @@ export function validatePdfSharpnessEvidence(evidence) {
     invisibleCancellation?.continuationDelayObserved !== true ||
     invisibleCancellation?.continuationResumeObserved !== true ||
     !finite(invisibleCancellation?.continuationDelayAt) ||
+    !finite(invisibleCancellation?.exitRequestedAt) ||
     !finite(invisibleCancellation?.exitedAt) ||
     !finite(invisibleCancellation?.continuationResumeAt) ||
     !finite(invisibleCancellation?.continuationResumedAfterMs) ||
     invisibleCancellation.continuationResumedAfterMs < 950 ||
-    invisibleCancellation.continuationDelayAt > invisibleCancellation.exitedAt ||
+    invisibleCancellation.continuationDelayAt >
+      invisibleCancellation.exitRequestedAt ||
+    invisibleCancellation.exitRequestedAt > invisibleCancellation.exitedAt ||
     invisibleCancellation.exitedAt >= invisibleCancellation.continuationResumeAt ||
     !emptyArray(invisibleCancellation?.lateComposes) ||
     lateComposesForAttempt.length !== 0 ||
@@ -816,6 +898,7 @@ export function validatePdfSharpnessEvidence(evidence) {
     !finite(cancelledStagingStart?.at) ||
     cancelledStagingStart.at > continuationDelayEvent?.at ||
     continuationDelayEvent?.at !== invisibleCancellation?.continuationDelayAt ||
+    viewportExitRequestEvent?.at !== invisibleCancellation?.exitRequestedAt ||
     viewportExitEvent?.at !== invisibleCancellation?.exitedAt ||
     continuationResumeEvent?.at !== invisibleCancellation?.continuationResumeAt ||
     continuationResumeEvent?.afterMs !==
@@ -825,6 +908,8 @@ export function validatePdfSharpnessEvidence(evidence) {
     viewportExitEvent?.canvasWidth !== 0 ||
     viewportExitEvent?.canvasHeight !== 0 ||
     viewportExitEvent?.cancelRequestedAt !== cancelRequestEvent?.at ||
+    viewportExitRequestEvent?.destinationPage !== 5 ||
+    viewportExitRequestEvent?.visibleBeforeRequest !== true ||
     !Number.isInteger(viewportExitEvent?.textOverlayCount) ||
     viewportExitEvent.textOverlayCount < 1 ||
     recordedViewportExit?.renderAttemptId !== renderAttemptId ||
@@ -840,6 +925,17 @@ export function validatePdfSharpnessEvidence(evidence) {
     recordedViewportExit?.canvasWidth !== viewportExitEvent?.canvasWidth ||
     recordedViewportExit?.canvasHeight !== viewportExitEvent?.canvasHeight ||
     recordedViewportExit?.textOverlayCount !== viewportExitEvent?.textOverlayCount ||
+    recordedViewportExitRequest?.abortSignalId !== cancellationSignalId ||
+    recordedViewportExitRequest?.renderAttemptId !== renderAttemptId ||
+    recordedViewportExitRequest?.documentKey !==
+      invisibleCancellation?.documentKey ||
+    recordedViewportExitRequest?.revision !== invisibleCancellation?.revision ||
+    recordedViewportExitRequest?.page !== cancelledPage ||
+    recordedViewportExitRequest?.pageDerivation !==
+      "sole-visible-unsatisfied-page" ||
+    recordedViewportExitRequest?.at !== viewportExitRequestEvent?.at ||
+    recordedViewportExitRequest?.destinationPage !== 5 ||
+    recordedViewportExitRequest?.visibleBeforeRequest !== true ||
     fallback?.workerFallbackEvent?.type !== "render-fallback" ||
     fallback?.noLateLowOverwrite !== true
   ) {

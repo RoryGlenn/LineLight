@@ -30,6 +30,9 @@ const SHA = "c".repeat(64);
 const DEPLOYMENT = "issue-68-test-deployment";
 const DOCUMENT_KEY = "issue-68-document:issue-68-revision";
 const REVISION = "issue-68-revision";
+const FAILED_ABORT_SIGNAL_ID = 1;
+const RETRY_ABORT_SIGNAL_ID = 2;
+const CANCELLATION_ABORT_SIGNAL_ID = 3;
 
 function artifact(name, digit) {
   return {
@@ -173,7 +176,8 @@ function passingEvidence() {
   });
   const fallbackArtifact = artifact("fallback-visible-retry.png", 9);
   const cancellationTerminal = {
-    at: 1101,
+    abortSignalId: CANCELLATION_ABORT_SIGNAL_ID,
+    at: 145,
     cancelRequestedAt: 140,
     documentKey: DOCUMENT_KEY,
     outcome: "cancelled",
@@ -228,6 +232,7 @@ function passingEvidence() {
       importedSource: { sha256: SHA, size: fixture.bytes },
       injectedFailures: 1,
       invisibleCancellation: {
+        abortSignalId: CANCELLATION_ABORT_SIGNAL_ID,
         canvasHeightAfterExit: 0,
         canvasPresentAfterExit: true,
         canvasWidthAfterExit: 0,
@@ -239,6 +244,7 @@ function passingEvidence() {
         continuationResumeObserved: true,
         continuationResumedAfterMs: 1000,
         documentKey: DOCUMENT_KEY,
+        exitRequestedAt: 130,
         exitedAt: 150,
         lateComposes: [],
         page: 3,
@@ -247,6 +253,7 @@ function passingEvidence() {
         revision: REVISION,
         textOverlayRetainedAfterExit: true,
         viewportExit: {
+          abortSignalId: CANCELLATION_ABORT_SIGNAL_ID,
           at: 150,
           cancelRequestedAt: 140,
           canvasHeight: 0,
@@ -261,6 +268,18 @@ function passingEvidence() {
           type: "viewport-exit",
           visible: false,
         },
+        viewportExitRequest: {
+          abortSignalId: CANCELLATION_ABORT_SIGNAL_ID,
+          at: 130,
+          destinationPage: 5,
+          documentKey: DOCUMENT_KEY,
+          page: 3,
+          pageDerivation: "sole-visible-unsatisfied-page",
+          renderAttemptId: 7,
+          revision: REVISION,
+          type: "viewport-exit-request",
+          visibleBeforeRequest: true,
+        },
       },
       longTasks: [{ duration: 49.9, name: "self", startTime: 1 }],
       maximumConcurrentStaging: 1,
@@ -268,11 +287,13 @@ function passingEvidence() {
       retry: {
         composedAt: 20,
         documentKey: DOCUMENT_KEY,
+        failedAbortSignalId: FAILED_ABORT_SIGNAL_ID,
         failedAttemptId: 1,
         failedAt: 11,
         page: 1,
         pageDerivation: "sole-visible-unsatisfied-page",
         retryAttemptId: 2,
+        retryAbortSignalId: RETRY_ABORT_SIGNAL_ID,
         retryStartedAt: 12,
         revision: REVISION,
         targetHeight: 800,
@@ -284,6 +305,14 @@ function passingEvidence() {
       signaledBeforeDocumentReady: true,
       stagingEvents: [
         {
+          abortSignalId: FAILED_ABORT_SIGNAL_ID,
+          at: 9,
+          type: "abort-signal-registered",
+        },
+        {
+          abortSignalCandidateCount: 1,
+          abortSignalId: FAILED_ABORT_SIGNAL_ID,
+          abortSignalRegisteredAt: 9,
           at: 10,
           candidatePages: [1],
           documentKey: DOCUMENT_KEY,
@@ -297,6 +326,7 @@ function passingEvidence() {
           type: "staging-start",
         },
         {
+          abortSignalId: FAILED_ABORT_SIGNAL_ID,
           at: 11,
           cancelRequestedAt: null,
           documentKey: DOCUMENT_KEY,
@@ -311,6 +341,14 @@ function passingEvidence() {
           type: "staging-finish",
         },
         {
+          abortSignalId: RETRY_ABORT_SIGNAL_ID,
+          at: 11.5,
+          type: "abort-signal-registered",
+        },
+        {
+          abortSignalCandidateCount: 1,
+          abortSignalId: RETRY_ABORT_SIGNAL_ID,
+          abortSignalRegisteredAt: 11.5,
           at: 12,
           candidatePages: [1],
           documentKey: DOCUMENT_KEY,
@@ -324,6 +362,7 @@ function passingEvidence() {
           type: "staging-start",
         },
         {
+          abortSignalId: RETRY_ABORT_SIGNAL_ID,
           at: 20,
           documentKey: DOCUMENT_KEY,
           page: 1,
@@ -338,6 +377,14 @@ function passingEvidence() {
           type: "visible-compose",
         },
         {
+          abortSignalId: CANCELLATION_ABORT_SIGNAL_ID,
+          at: 89,
+          type: "abort-signal-registered",
+        },
+        {
+          abortSignalCandidateCount: 1,
+          abortSignalId: CANCELLATION_ABORT_SIGNAL_ID,
+          abortSignalRegisteredAt: 89,
           at: 90,
           candidatePages: [3],
           documentKey: DOCUMENT_KEY,
@@ -351,6 +398,7 @@ function passingEvidence() {
           type: "staging-start",
         },
         {
+          abortSignalId: CANCELLATION_ABORT_SIGNAL_ID,
           at: 100,
           armedAt: 80,
           callbackName: "bound _scheduleNext",
@@ -363,6 +411,19 @@ function passingEvidence() {
           type: "continuation-delay",
         },
         {
+          abortSignalId: CANCELLATION_ABORT_SIGNAL_ID,
+          at: 130,
+          destinationPage: 5,
+          documentKey: DOCUMENT_KEY,
+          page: 3,
+          pageDerivation: "sole-visible-unsatisfied-page",
+          renderAttemptId: 7,
+          revision: REVISION,
+          type: "viewport-exit-request",
+          visibleBeforeRequest: true,
+        },
+        {
+          abortSignalId: CANCELLATION_ABORT_SIGNAL_ID,
           at: 140,
           documentKey: DOCUMENT_KEY,
           page: 3,
@@ -371,7 +432,9 @@ function passingEvidence() {
           revision: REVISION,
           type: "cancel-request",
         },
+        cancellationTerminal,
         {
+          abortSignalId: CANCELLATION_ABORT_SIGNAL_ID,
           at: 150,
           cancelRequestedAt: 140,
           canvasHeight: 0,
@@ -387,6 +450,7 @@ function passingEvidence() {
           visible: false,
         },
         {
+          abortSignalId: CANCELLATION_ABORT_SIGNAL_ID,
           afterMs: 1000,
           at: 1100,
           documentKey: DOCUMENT_KEY,
@@ -396,7 +460,6 @@ function passingEvidence() {
           revision: REVISION,
           type: "continuation-resume",
         },
-        cancellationTerminal,
       ],
       workerFallbackEvent: { type: "render-fallback" },
       workerQueueClosed: true,
@@ -553,6 +616,16 @@ test("accepts complete Issue 68 sharpness evidence", () => {
   assert.deepEqual(validatePdfSharpnessEvidence(passingEvidence()), []);
 });
 
+test("accepts synchronous cancellation before a delayed PDF.js continuation resumes", () => {
+  const evidence = passingEvidence();
+  const cancellation = evidence.fallback.invisibleCancellation;
+  assert.ok(
+    cancellation.cancellationTerminal.at < cancellation.exitedAt &&
+    cancellation.exitedAt < cancellation.continuationResumeAt,
+  );
+  assert.deepEqual(validatePdfSharpnessEvidence(evidence), []);
+});
+
 test("independently validates a safety-capped physical-pixel target", () => {
   const evidence = passingEvidence();
   const run = evidence.matrix.at(-1);
@@ -641,6 +714,17 @@ test("rejects each material Issue 68 acceptance regression", async (t) => {
     ["fallback retry revision", (value) => {
       value.fallback.retry.revision = "substituted-revision";
     }, /fallback cancellation\/retry/u],
+    ["fallback retry abort signal", (value) => {
+      value.fallback.stagingEvents.find(
+        (event) => event.type === "visible-compose" && event.page === 1,
+      ).abortSignalId = 99;
+    }, /fallback cancellation\/retry/u],
+    ["fallback retry ambiguous signal binding", (value) => {
+      value.fallback.stagingEvents.find(
+        (event) =>
+          event.type === "staging-start" && event.renderAttemptId === 2,
+      ).abortSignalCandidateCount = 2;
+    }, /fallback cancellation\/retry/u],
     ["fallback missing injected outcome", (value) => {
       value.fallback.stagingEvents = value.fallback.stagingEvents.filter(
         (event) => event.outcome !== "injected-failure",
@@ -648,6 +732,36 @@ test("rejects each material Issue 68 acceptance regression", async (t) => {
     }, /fallback cancellation\/retry/u],
     ["fallback cancellation", (value) => {
       value.fallback.invisibleCancellation.completedAfterExit = true;
+    }, /fallback cancellation\/retry/u],
+    ["fallback cancellation signal mismatch", (value) => {
+      value.fallback.stagingEvents.find(
+        (event) => event.type === "cancel-request",
+      ).abortSignalId = 99;
+    }, /fallback cancellation\/retry/u],
+    ["fallback cancellation signal reuse", (value) => {
+      const replacement = value.fallback.retry.retryAbortSignalId;
+      const cancellation = value.fallback.invisibleCancellation;
+      cancellation.abortSignalId = replacement;
+      cancellation.viewportExit.abortSignalId = replacement;
+      cancellation.viewportExitRequest.abortSignalId = replacement;
+      for (const event of value.fallback.stagingEvents) {
+        if (event.abortSignalId === CANCELLATION_ABORT_SIGNAL_ID) {
+          event.abortSignalId = replacement;
+        }
+      }
+    }, /fallback cancellation\/retry/u],
+    ["fallback cancellation ambiguous signal binding", (value) => {
+      value.fallback.stagingEvents.find(
+        (event) =>
+          event.type === "staging-start" && event.renderAttemptId === 7,
+      ).abortSignalCandidateCount = 2;
+    }, /fallback cancellation\/retry/u],
+    ["fallback cancellation signal registration", (value) => {
+      value.fallback.stagingEvents = value.fallback.stagingEvents.filter(
+        (event) =>
+          event.type !== "abort-signal-registered" ||
+          event.abortSignalId !== CANCELLATION_ABORT_SIGNAL_ID,
+      );
     }, /fallback cancellation\/retry/u],
     ["missing cancellation terminal", (value) => {
       value.fallback.stagingEvents = value.fallback.stagingEvents.filter(
@@ -662,6 +776,12 @@ test("rejects each material Issue 68 acceptance regression", async (t) => {
       value.fallback.stagingEvents.find(
         (event) => event.outcome === "cancelled",
       ).outcome = "released";
+    }, /fallback cancellation\/retry/u],
+    ["cancellation terminal before cancel request", (value) => {
+      value.fallback.invisibleCancellation.cancellationTerminal.at = 139;
+    }, /fallback cancellation\/retry/u],
+    ["cancellation terminal after continuation resume", (value) => {
+      value.fallback.invisibleCancellation.cancellationTerminal.at = 1101;
     }, /fallback cancellation\/retry/u],
     ["fallback continuation delay", (value) => {
       value.fallback.invisibleCancellation.continuationDelayObserved = false;
@@ -683,6 +803,26 @@ test("rejects each material Issue 68 acceptance regression", async (t) => {
     }, /fallback cancellation\/retry/u],
     ["fallback exit attempt mismatch", (value) => {
       value.fallback.invisibleCancellation.viewportExit.renderAttemptId = 8;
+    }, /fallback cancellation\/retry/u],
+    ["fallback missing exit request", (value) => {
+      value.fallback.stagingEvents = value.fallback.stagingEvents.filter(
+        (event) => event.type !== "viewport-exit-request",
+      );
+    }, /fallback cancellation\/retry/u],
+    ["fallback duplicate continuation event", (value) => {
+      value.fallback.stagingEvents.push({
+        ...value.fallback.stagingEvents.find(
+          (event) => event.type === "continuation-resume",
+        ),
+      });
+    }, /fallback cancellation\/retry/u],
+    ["fallback abort before exit request", (value) => {
+      const request = value.fallback.stagingEvents.find(
+        (event) => event.type === "viewport-exit-request",
+      );
+      request.at = 141;
+      value.fallback.invisibleCancellation.viewportExitRequest.at = 141;
+      value.fallback.invisibleCancellation.exitRequestedAt = 141;
     }, /fallback cancellation\/retry/u],
     ["fallback continuation resume", (value) => {
       value.fallback.invisibleCancellation.continuationResumeObserved = false;
