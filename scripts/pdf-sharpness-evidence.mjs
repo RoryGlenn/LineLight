@@ -189,11 +189,7 @@ function validRenderedReferenceAnalysis(analysis) {
     ? analysis?.winnerDominanceRatio === null
     : finite(analysis?.winnerDominanceRatio) &&
       analysis.winnerDominanceRatio > 1 &&
-      closeTo(
-        analysis.winnerDominanceRatio,
-        winnerWhiteArea / runnerUpWhiteArea,
-        1e-9,
-      );
+      analysis.winnerDominanceRatio === winnerWhiteArea / runnerUpWhiteArea;
   const insetX = Number.isInteger(bounds?.width)
     ? Math.max(2, Math.floor(bounds.width * 0.01))
     : 0;
@@ -210,6 +206,9 @@ function validRenderedReferenceAnalysis(analysis) {
   const interiorWidth = Number.isInteger(bounds?.width)
     ? bounds.width - insetX * 2
     : 0;
+  const inkSpanPixels = finite(analysis?.inkSpanRatio)
+    ? Math.round(analysis.inkSpanRatio * interiorWidth)
+    : Number.NaN;
   return (
     analysis?.renderedPage === true &&
     analysis?.proof === "white-page-with-rendered-ink" &&
@@ -243,24 +242,19 @@ function validRenderedReferenceAnalysis(analysis) {
     nonNegativeInteger(analysis?.pageWhitePixels) &&
     analysis.pageWhitePixels <= analysis.pagePixels &&
     analysis.pageWhitePixels <= winnerWhiteArea &&
+    analysis.pageWhitePixels >=
+      winnerWhiteArea - (bounds.width * bounds.height - analysis.pagePixels) &&
     finite(analysis?.pageWhiteRatio) &&
     analysis.pageWhiteRatio >= PDF_SHARPNESS_REFERENCE_MIN_WHITE_RATIO &&
-    closeTo(
-      analysis.pageWhiteRatio,
-      analysis.pageWhitePixels / analysis.pagePixels,
-      1e-6,
-    ) &&
+    analysis.pageWhiteRatio ===
+      analysis.pageWhitePixels / analysis.pagePixels &&
     nonNegativeInteger(analysis?.inkPixels) &&
     analysis.inkPixels >= PDF_SHARPNESS_REFERENCE_MIN_INK_PIXELS &&
     analysis.inkPixels <= analysis.pagePixels &&
     analysis.pageWhitePixels + analysis.inkPixels <= analysis.pagePixels &&
     finite(analysis?.inkRatio) &&
     analysis.inkRatio <= PDF_SHARPNESS_REFERENCE_MAX_INK_RATIO &&
-    closeTo(
-      analysis.inkRatio,
-      analysis.inkPixels / analysis.pagePixels,
-      1e-6,
-    ) &&
+    analysis.inkRatio === analysis.inkPixels / analysis.pagePixels &&
     Number.isInteger(analysis?.inkRowBands) &&
     analysis.inkRowBands >= PDF_SHARPNESS_REFERENCE_MIN_INK_ROW_BANDS &&
     analysis.inkRowBands <= Math.ceil(interiorHeight / 3) &&
@@ -270,8 +264,9 @@ function validRenderedReferenceAnalysis(analysis) {
     analysis.inkSpanRatio <= 1 &&
     Math.abs(
       analysis.inkSpanRatio * interiorWidth -
-        Math.round(analysis.inkSpanRatio * interiorWidth),
-    ) <= 1e-7
+        inkSpanPixels,
+    ) <= 1e-7 &&
+    analysis.inkSpanRatio === inkSpanPixels / interiorWidth
   );
 }
 
@@ -693,11 +688,8 @@ export function validatePdfSharpnessEvidence(evidence) {
       ? referenceReadiness?.winnerDominanceRatio === null
       : finite(referenceReadiness?.winnerDominanceRatio) &&
         referenceReadiness.winnerDominanceRatio > 1 &&
-        closeTo(
-          referenceReadiness.winnerDominanceRatio,
-          winnerWhiteArea / runnerUpWhiteArea,
-          1e-9,
-        );
+        referenceReadiness.winnerDominanceRatio ===
+          winnerWhiteArea / runnerUpWhiteArea;
     const referenceInsetY = Number.isInteger(pageBounds?.height)
       ? Math.max(2, Math.floor(pageBounds.height * 0.01))
       : 0;
@@ -710,6 +702,13 @@ export function validatePdfSharpnessEvidence(evidence) {
     const referenceInteriorWidth = Number.isInteger(pageBounds?.width)
       ? pageBounds.width - referenceInsetX * 2
       : 0;
+    const referenceExpectedPagePixels =
+      referenceInteriorWidth * referenceInteriorHeight;
+    const referenceInkSpanPixels = finite(referenceReadiness?.inkSpanRatio)
+      ? Math.round(
+          referenceReadiness.inkSpanRatio * referenceInteriorWidth,
+        )
+      : Number.NaN;
     if (
       referenceReadiness?.renderedPage !== true ||
       referenceReadiness?.proof !== "white-page-with-rendered-ink" ||
@@ -742,19 +741,21 @@ export function validatePdfSharpnessEvidence(evidence) {
       (referenceReadiness.substantialComponentCount > 1 &&
         runnerUpWhiteArea < 1) ||
       !Number.isInteger(referenceReadiness?.pagePixels) ||
-      referenceReadiness.pagePixels < 1 ||
+      referenceReadiness.pagePixels !== referenceExpectedPagePixels ||
       referenceReadiness.pagePixels > pageBounds.width * pageBounds.height ||
       !nonNegativeInteger(referenceReadiness?.pageWhitePixels) ||
       referenceReadiness.pageWhitePixels > referenceReadiness.pagePixels ||
       referenceReadiness.pageWhitePixels > winnerWhiteArea ||
+      referenceReadiness.pageWhitePixels <
+        winnerWhiteArea -
+          (pageBounds.width * pageBounds.height -
+            referenceReadiness.pagePixels) ||
       !finite(referenceReadiness?.pageWhiteRatio) ||
       referenceReadiness.pageWhiteRatio <
         PDF_SHARPNESS_REFERENCE_MIN_WHITE_RATIO ||
-      !closeTo(
-        referenceReadiness.pageWhiteRatio,
-        referenceReadiness.pageWhitePixels / referenceReadiness.pagePixels,
-        1e-6,
-      ) ||
+      referenceReadiness.pageWhiteRatio !==
+        referenceReadiness.pageWhitePixels /
+          referenceReadiness.pagePixels ||
       !nonNegativeInteger(referenceReadiness?.inkPixels) ||
       referenceReadiness.inkPixels < PDF_SHARPNESS_REFERENCE_MIN_INK_PIXELS ||
       referenceReadiness.inkPixels > referenceReadiness.pagePixels ||
@@ -762,11 +763,8 @@ export function validatePdfSharpnessEvidence(evidence) {
         referenceReadiness.pagePixels ||
       !finite(referenceReadiness?.inkRatio) ||
       referenceReadiness.inkRatio > PDF_SHARPNESS_REFERENCE_MAX_INK_RATIO ||
-      !closeTo(
-        referenceReadiness.inkRatio,
-        referenceReadiness.inkPixels / referenceReadiness.pagePixels,
-        1e-6,
-      ) ||
+      referenceReadiness.inkRatio !==
+        referenceReadiness.inkPixels / referenceReadiness.pagePixels ||
       !Number.isInteger(referenceReadiness?.inkRowBands) ||
       referenceReadiness.inkRowBands <
         PDF_SHARPNESS_REFERENCE_MIN_INK_ROW_BANDS ||
@@ -779,10 +777,10 @@ export function validatePdfSharpnessEvidence(evidence) {
       referenceReadiness.inkSpanRatio > 1 ||
       Math.abs(
         referenceReadiness.inkSpanRatio * referenceInteriorWidth -
-          Math.round(
-            referenceReadiness.inkSpanRatio * referenceInteriorWidth,
-          ),
-      ) > 1e-7
+          referenceInkSpanPixels,
+      ) > 1e-7 ||
+      referenceReadiness.inkSpanRatio !==
+        referenceInkSpanPixels / referenceInteriorWidth
     ) {
       fail(`${expected.id} original PDF reference lacks rendered-page pixel proof`);
     }

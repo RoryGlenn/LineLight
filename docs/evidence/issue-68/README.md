@@ -164,9 +164,10 @@ ambiguous tied components therefore cannot satisfy readiness. The JSON
 validator independently checks those global segmentation metrics, including
 each connected component's minimum spanning area, the disjoint-component area
 sum, disjoint white/ink pixel counts, the minimum-pixel and row-spacing
-implications of each ink band, the integer-pixel horizontal ink span, and the
-runner-up interval implied by listed substantial and omitted sub-threshold
-components. It proves
+implications of each ink band, the physically feasible integer-pixel horizontal
+ink span, exact inset area and ratio quotients, the winner's interior-white
+capacity, and the runner-up interval implied by listed substantial and omitted
+sub-threshold components. It proves
 the requested page separately instead of assuming that page is the largest
 visible component: all substantial components are retained in deterministic
 top-first order, exactly one must be anchored in the top quarter after the

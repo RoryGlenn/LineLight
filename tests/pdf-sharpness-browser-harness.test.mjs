@@ -1836,6 +1836,17 @@ test("builds a noncanonical privacy-safe reference-capture diagnostic", () => {
     assert.deepEqual(failed.artifacts.candidates, []);
   }
 
+  const diagnosticDominanceIdentity = structuredClone(input);
+  for (const candidate of diagnosticDominanceIdentity.capture.candidates) {
+    candidate.analysis.winnerDominanceRatio += 5e-10;
+  }
+  const diagnosticDominanceReport = buildReferenceCaptureDiagnosticReport(
+    diagnosticDominanceIdentity,
+  );
+  assert.equal(diagnosticDominanceReport.completed, false);
+  assert.ok(diagnosticDominanceReport.failures.length > 0);
+  assert.deepEqual(diagnosticDominanceReport.artifacts.candidates, []);
+
   for (const mutateTargetReadiness of [
     (readiness) => {
       const insetY = Math.max(2, Math.floor(readiness.pageBounds.height * 0.01));
@@ -1850,10 +1861,63 @@ test("builds a noncanonical privacy-safe reference-capture diagnostic", () => {
     (readiness) => {
       readiness.inkSpanRatio = 0.6500001;
     },
+    (readiness) => {
+      readiness.pageWhitePixels =
+        readiness.winnerWhiteArea -
+          (readiness.pageBounds.width * readiness.pageBounds.height -
+            readiness.pagePixels) - 1;
+      readiness.pageWhiteRatio =
+        readiness.pageWhitePixels / readiness.pagePixels;
+    },
+    (readiness) => {
+      readiness.pageWhiteRatio += 5e-10;
+    },
+    (readiness) => {
+      readiness.inkRatio += 5e-10;
+    },
+    (readiness) => {
+      const insetX = Math.max(2, Math.floor(readiness.pageBounds.width * 0.01));
+      const interiorWidth = readiness.pageBounds.width - insetX * 2;
+      const spanPixels = Math.round(readiness.inkSpanRatio * interiorWidth);
+      readiness.inkSpanRatio = (spanPixels + 5e-8) / interiorWidth;
+    },
   ]) {
     const value = structuredClone(input);
     for (const candidate of value.capture.candidates) {
       mutateTargetReadiness(candidate.referenceTarget.readiness);
+    }
+    const failed = buildReferenceCaptureDiagnosticReport(value);
+    assert.equal(failed.completed, false);
+    assert.ok(failed.failures.length > 0);
+    assert.deepEqual(failed.artifacts.candidates, []);
+  }
+
+
+  const diagnosticFalseInkStates = [
+    () => ({ bands: 0, ink: 50, span: 0 }),
+    () => ({ bands: 0, ink: 0, span: 1 }),
+    ({ height }) => ({ bands: 0, ink: 2 * height + 1, span: 3 }),
+    () => ({ bands: 2, ink: 6, span: 1 }),
+    ({ height }) => ({
+      bands: 2,
+      ink: (height - 2) * 3 + 5,
+      span: 3,
+    }),
+  ];
+  for (const createInkState of diagnosticFalseInkStates) {
+    const value = structuredClone(input);
+    for (const candidate of value.capture.candidates) {
+      const readiness = candidate.referenceTarget.readiness;
+      const insetX = Math.max(2, Math.floor(readiness.pageBounds.width * 0.01));
+      const insetY = Math.max(2, Math.floor(readiness.pageBounds.height * 0.01));
+      const interiorWidth = readiness.pageBounds.width - insetX * 2;
+      const interiorHeight = readiness.pageBounds.height - insetY * 2;
+      const state = createInkState({ height: interiorHeight });
+      readiness.inkPixels = state.ink;
+      readiness.inkRatio = state.ink / readiness.pagePixels;
+      readiness.inkRowBands = state.bands;
+      readiness.inkSpanRatio = state.span / interiorWidth;
+      readiness.renderedPage = false;
     }
     const failed = buildReferenceCaptureDiagnosticReport(value);
     assert.equal(failed.completed, false);
@@ -5517,6 +5581,32 @@ test("rejects each material Issue 68 acceptance regression", async (t) => {
     ["forged reference dominance", (value) => {
       value.matrix[0].comparison.referenceReadiness.winnerDominanceRatio += 1;
     }, /rendered-page pixel proof/u],
+    ["reference full inset page pixels", (value) => {
+      const readiness = value.matrix[0].comparison.referenceReadiness;
+      readiness.pagePixels -= 1;
+      readiness.pageWhiteRatio =
+        readiness.pageWhitePixels / readiness.pagePixels;
+      readiness.inkRatio = readiness.inkPixels / readiness.pagePixels;
+    }, /rendered-page pixel proof/u],
+    ["reference full interior white capacity", (value) => {
+      const readiness = value.matrix[0].comparison.referenceReadiness;
+      readiness.pageWhitePixels =
+        readiness.winnerWhiteArea -
+          (readiness.pageBounds.width * readiness.pageBounds.height -
+            readiness.pagePixels) - 1;
+      readiness.pageWhiteRatio =
+        readiness.pageWhitePixels / readiness.pagePixels;
+    }, /rendered-page pixel proof/u],
+    ["reference full exact white ratio", (value) => {
+      value.matrix[0].comparison.referenceReadiness.pageWhiteRatio += 9e-7;
+    }, /rendered-page pixel proof/u],
+    ["reference full exact ink ratio", (value) => {
+      value.matrix[0].comparison.referenceReadiness.inkRatio += 9e-7;
+    }, /rendered-page pixel proof/u],
+    ["reference full exact dominance ratio", (value) => {
+      value.matrix[0].comparison.referenceReadiness.winnerDominanceRatio +=
+        5e-10;
+    }, /rendered-page pixel proof/u],
     ["missing requested reference target", (value) => {
       delete value.matrix[0].comparison.referenceTarget;
     }, /requested top page/u],
@@ -5588,6 +5678,15 @@ test("rejects each material Issue 68 acceptance regression", async (t) => {
       value.matrix[0].comparison.referenceTarget.readiness.pageWhiteRatio +=
         0.01;
     }, /requested top page/u],
+    ["reference target interior white capacity", (value) => {
+      const readiness = value.matrix[0].comparison.referenceTarget.readiness;
+      readiness.pageWhitePixels =
+        readiness.winnerWhiteArea -
+          (readiness.pageBounds.width * readiness.pageBounds.height -
+            readiness.pagePixels) - 1;
+      readiness.pageWhiteRatio =
+        readiness.pageWhitePixels / readiness.pagePixels;
+    }, /requested top page/u],
     ["reference target crop ink gates", (value) => {
       value.matrix[0].comparison.referenceTarget.readiness.inkRowBands = 1;
     }, /requested top page/u],
@@ -5606,6 +5705,13 @@ test("rejects each material Issue 68 acceptance regression", async (t) => {
     ["reference target fractional ink span", (value) => {
       value.matrix[0].comparison.referenceTarget.readiness.inkSpanRatio =
         0.6500001;
+    }, /requested top page/u],
+    ["reference target exact ink span quotient", (value) => {
+      const readiness = value.matrix[0].comparison.referenceTarget.readiness;
+      const insetX = Math.max(2, Math.floor(readiness.pageBounds.width * 0.01));
+      const interiorWidth = readiness.pageBounds.width - insetX * 2;
+      const spanPixels = Math.round(readiness.inkSpanRatio * interiorWidth);
+      readiness.inkSpanRatio = (spanPixels + 5e-8) / interiorWidth;
     }, /requested top page/u],
     ["reference target crop winner", (value) => {
       value.matrix[0].comparison.referenceTarget.readiness.winnerWhiteArea -= 1;

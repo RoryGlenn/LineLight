@@ -1774,10 +1774,6 @@ function sanitizeReferenceDiagnosticAnalysis(analysis) {
     Number.isFinite(value) && value >= 0;
   const ratio = (value) =>
     Number.isFinite(value) && value >= 0 && value <= 1;
-  const closeTo = (left, right) =>
-    Number.isFinite(left) &&
-    Number.isFinite(right) &&
-    Math.abs(left - right) <= 1e-9;
   const bounds = analysis?.pageBounds;
   const dimensionsValid =
     Number.isInteger(analysis?.height) &&
@@ -1901,17 +1897,13 @@ function sanitizeReferenceDiagnosticAnalysis(analysis) {
       ? analysis.winnerDominanceRatio === null
       : nonNegativeFinite(analysis.winnerDominanceRatio) &&
         analysis.winnerDominanceRatio > 1 &&
-        closeTo(
-          analysis.winnerDominanceRatio,
-          analysis.winnerWhiteArea / analysis.runnerUpWhiteArea,
-        )
+        analysis.winnerDominanceRatio ===
+          analysis.winnerWhiteArea / analysis.runnerUpWhiteArea
     : analysis?.winnerWhiteArea > 0 &&
       analysis?.runnerUpWhiteArea > 0 &&
       nonNegativeFinite(analysis?.winnerDominanceRatio) &&
-      closeTo(
-        analysis.winnerDominanceRatio,
-        analysis.winnerWhiteArea / analysis.runnerUpWhiteArea,
-      );
+      analysis.winnerDominanceRatio ===
+        analysis.winnerWhiteArea / analysis.runnerUpWhiteArea;
   const emptyAnalysis =
     analysis?.renderedPage === false &&
     bounds === null &&
@@ -1954,6 +1946,13 @@ function sanitizeReferenceDiagnosticAnalysis(analysis) {
       (bounds.width - insetX * 2) * (bounds.height - insetY * 2);
     const interiorHeight = bounds.height - insetY * 2;
     const interiorWidth = bounds.width - insetX * 2;
+    const inkSpanPixels = Math.round(
+      analysis.inkSpanRatio * interiorWidth,
+    );
+    const maximumInkForBands = analysis.inkRowBands === 0
+      ? 2 * interiorHeight
+      : (interiorHeight - 2 * (analysis.inkRowBands - 1)) * inkSpanPixels +
+        4 * (analysis.inkRowBands - 1);
     const renderedPage =
       analysis.pageWhiteRatio >= PDF_SHARPNESS_REFERENCE_MIN_WHITE_RATIO &&
       analysis.inkPixels >= PDF_SHARPNESS_REFERENCE_MIN_INK_PIXELS &&
@@ -1965,22 +1964,27 @@ function sanitizeReferenceDiagnosticAnalysis(analysis) {
       analysis.pagePixels === expectedPagePixels &&
       analysis.pageWhitePixels <= analysis.pagePixels &&
       analysis.pageWhitePixels <= analysis.winnerWhiteArea &&
-      closeTo(
-        analysis.pageWhiteRatio,
-        analysis.pageWhitePixels / analysis.pagePixels,
-      ) &&
+      analysis.pageWhitePixels >=
+        analysis.winnerWhiteArea -
+          (bounds.width * bounds.height - analysis.pagePixels) &&
+      analysis.pageWhiteRatio ===
+        analysis.pageWhitePixels / analysis.pagePixels &&
       analysis.inkPixels <= analysis.pagePixels &&
       analysis.pageWhitePixels + analysis.inkPixels <= analysis.pagePixels &&
       analysis.inkRowBands <= Math.ceil(interiorHeight / 3) &&
       analysis.inkPixels >= analysis.inkRowBands * 3 &&
+      inkSpanPixels >= 0 &&
+      inkSpanPixels <= interiorWidth &&
+      analysis.inkPixels >= Math.min(inkSpanPixels, 2) &&
+      analysis.inkPixels <= inkSpanPixels * interiorHeight &&
+      (analysis.inkRowBands === 0 || inkSpanPixels >= 3) &&
+      analysis.inkPixels <= maximumInkForBands &&
       Math.abs(
         analysis.inkSpanRatio * interiorWidth -
-          Math.round(analysis.inkSpanRatio * interiorWidth),
+          inkSpanPixels,
       ) <= 1e-7 &&
-      closeTo(
-        analysis.inkRatio,
-        analysis.inkPixels / analysis.pagePixels,
-      ) &&
+      analysis.inkSpanRatio === inkSpanPixels / interiorWidth &&
+      analysis.inkRatio === analysis.inkPixels / analysis.pagePixels &&
       analysis.renderedPage === renderedPage;
   }
   const analysisStateValid =
