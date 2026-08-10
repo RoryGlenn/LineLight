@@ -4888,6 +4888,7 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
         failedNames,
         pending,
         pendingFailureMayPrecedeError: false,
+        pendingSetupErrorAllowed: false,
         serviceWorkerBarrier,
         setupComplete: false,
       };
@@ -4917,6 +4918,10 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
     );
     const setupFailed = setupCommands.some((command) =>
       command.status === "failed"
+    );
+    const failedSetupNames = new Set(
+      setupCommands.filter((command) => command.status === "failed")
+        .map((command) => command.name),
     );
     const setupCompleted = setupCommands.length === 4 &&
       setupCommands.every((command) => command.status === "completed");
@@ -4968,14 +4973,18 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
     const pendingFailureMayPrecedeError = pending && (
       serviceWorkerBarrier || (!hasResume && commands.length === 2)
     );
+    const pendingSetupErrorAllowed = !serviceWorkerBarrier &&
+      resume?.status === "pending" && setupSettled && setupFailed;
     return {
       bound: commandOrderBound && setupProgressionBound && deadlineBound &&
         resumeStateBound && attachStateBound,
       failedNames,
       pending,
       pendingFailureMayPrecedeError,
+      pendingSetupErrorAllowed,
       serviceWorkerBarrier,
       setupComplete: setupStateComplete,
+      failedSetupNames,
     };
   };
   const countKeys = [
@@ -5068,7 +5077,8 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
       safeClockOrNull(target?.commandDeadlineAt) &&
       safeClockOrNull(target?.resumeDispatchedAt) &&
       (target?.workerInstanceId === null ||
-        positiveInteger(target?.workerInstanceId)) &&
+        (positiveInteger(target?.workerInstanceId) &&
+          target?.type === "worker" && target?.urlClass === "blob")) &&
       targetStates.get(target.sessionId)?.bound === true &&
       exactTargetAncestry(target) &&
       target?.identityHash === cdpDiagnosticIdentity(
@@ -5165,11 +5175,17 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
       return targetState?.setupComplete === true &&
         targetState.pending === false && errors.length === 0;
     }
-    if (
-      targetState?.pendingFailureMayPrecedeError === true &&
-      errors.length > 0
-    ) {
-      return false;
+    if (targetState?.pending === true) {
+      if (targetState.pendingSetupErrorAllowed === true) {
+        if (
+          errors.length !== 1 || errors[0]?.category !== "setup" ||
+          !targetState.failedSetupNames.has(errors[0]?.command)
+        ) {
+          return false;
+        }
+      } else if (errors.length > 0) {
+        return false;
+      }
     }
     const explained = targetState?.pending === true || errors.length > 0;
     const failedCommandExplained = targetState?.failedNames.size === 0 ||
@@ -5524,6 +5540,17 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
   };
 }
 
+function appMatrixRuntimeWorkerInstancesBound(diagnostic) {
+  return Array.isArray(diagnostic?.targets) &&
+    diagnostic.targets.every((target) =>
+      target?.workerInstanceId === null || (
+        Number.isSafeInteger(target?.workerInstanceId) &&
+        target.workerInstanceId > 0 && target?.type === "worker" &&
+        target?.urlClass === "blob"
+      )
+    );
+}
+
 function isAppMatrixRuntimeCdpHistoryContinuous(
   previous,
   current,
@@ -5587,9 +5614,11 @@ function isAppMatrixRuntimeCdpHistoryContinuous(
   const previousSessions = new Set(
     previousTargets.map((target) => target?.sessionId),
   );
-  const priorTargetsRetained = previousTargets.every((prior) => {
-    const retained = currentBySession.get(prior?.sessionId);
+  const priorTargetsRetained = previousTargets.length <=
+      currentTargets.length && previousTargets.every((prior, index) => {
+    const retained = currentTargets[index];
     return retained?.targetId === prior?.targetId &&
+      retained?.sessionId === prior?.sessionId &&
       retained?.identityHash === prior?.identityHash &&
       retained?.phase === prior?.phase &&
       retained?.parentSessionId === prior?.parentSessionId &&
@@ -5598,26 +5627,37 @@ function isAppMatrixRuntimeCdpHistoryContinuous(
       retained?.commandDeadlineAt === prior?.commandDeadlineAt &&
       retained?.resumeDispatchedAt === prior?.resumeDispatchedAt &&
       commandsEqual(retained?.commands, prior?.commands) &&
+      !(prior?.detached === true && retained?.detached !== true) &&
+      (prior?.workerInstanceId === null ||
+        retained?.workerInstanceId === prior?.workerInstanceId) &&
       isCdpTargetSetupComplete(retained);
   });
-  const newTargetsCurrent = currentTargets.every((target) =>
-    previousSessions.has(target?.sessionId) ||
-    target?.phase === currentConfigurationId
+  const newTargetsCurrent = currentTargets.slice(previousTargets.length)
+    .every((target) =>
+      !previousSessions.has(target?.sessionId) &&
+      target?.phase === currentConfigurationId
   );
-  const recordsRetained = (priorRecords, currentRecords, fields) => {
-    const currentByIdentity = new Map(
-      currentRecords.map((record) => [record?.identityHash, record]),
-    );
+  const recordsRetained = (
+    priorRecords,
+    currentRecords,
+    fields,
+    monotonicFields = [],
+  ) => {
     const priorIdentities = new Set(
       priorRecords.map((record) => record?.identityHash),
     );
-    return priorRecords.every((prior) => {
-      const retained = currentByIdentity.get(prior?.identityHash);
+    return priorRecords.length <= currentRecords.length &&
+      priorRecords.every((prior, index) => {
+      const retained = currentRecords[index];
       return retained && fields.every((field) =>
         retained[field] === prior[field]
+      ) && monotonicFields.every((field) =>
+        Number.isSafeInteger(prior[field]) &&
+        Number.isSafeInteger(retained[field]) &&
+        retained[field] >= prior[field]
       );
-    }) && currentRecords.every((record) =>
-      priorIdentities.has(record?.identityHash) ||
+    }) && currentRecords.slice(priorRecords.length).every((record) =>
+      !priorIdentities.has(record?.identityHash) &&
       record?.phase === currentConfigurationId
     );
   };
@@ -5664,6 +5704,7 @@ function isAppMatrixRuntimeCdpHistoryContinuous(
     previousServiceWorkers,
     currentServiceWorkers,
     serviceWorkerFields,
+    ["sessionRequestCount"],
   );
   const currentTargetForSession = (sessionId) =>
     currentBySession.get(sessionId) ?? null;
@@ -5682,8 +5723,7 @@ function isAppMatrixRuntimeCdpHistoryContinuous(
     current.inflightRequests.every((entry) =>
       entry?.phase === currentConfigurationId &&
       (entry?.sessionId === null ||
-        currentTargetForSession(entry.sessionId)?.phase ===
-          currentConfigurationId)
+        currentTargetForSession(entry.sessionId) !== null)
     )
   );
   const cumulativeCountFields = [
@@ -5702,8 +5742,10 @@ function isAppMatrixRuntimeCdpHistoryContinuous(
     Number.isSafeInteger(current?.counts?.[field]) &&
     current.counts[field] >= previous.counts[field]
   );
-  return priorTargetsRetained && newTargetsCurrent && priorRecordsRetained &&
-    noPriorPhaseWork && cumulativeCountsBound;
+  return appMatrixRuntimeWorkerInstancesBound(previous) &&
+    appMatrixRuntimeWorkerInstancesBound(current) && priorTargetsRetained &&
+    newTargetsCurrent && priorRecordsRetained && noPriorPhaseWork &&
+    cumulativeCountsBound;
 }
 
 export function buildAppMatrixRuntimeDiagnosticReport({
@@ -5773,7 +5815,8 @@ export function buildAppMatrixRuntimeDiagnosticReport({
     const networkExpected = stageHistory.includes("network-fixed-point-completed");
     const networkHealthy = networkExpected &&
       row?.networkFixedPoint?.label === expected?.id &&
-      isCdpFixedPointDiagnosticHealthy(row.networkFixedPoint);
+      isCdpFixedPointDiagnosticHealthy(row.networkFixedPoint) &&
+      appMatrixRuntimeWorkerInstancesBound(row.networkFixedPoint);
     const networkFixedPoint = networkHealthy
       ? {
           attachErrorCount: row.networkFixedPoint.counts.attachErrorCount,
