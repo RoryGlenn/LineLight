@@ -100,7 +100,8 @@ retains only opaque ID hashes, fixed protocol/content classes, and the actual
 DPR, screen, layout, and visual-viewport metrics. Native mobile PDF viewing is
 validated relationally: pre-navigation and viewer layouts remain stable,
 the named 980-CSS-pixel Chromium default mobile layout width is exact, layout
-height follows the emulated screen aspect, visual dimensions multiplied by
+width and height remain integer DOM dimensions, height follows the emulated
+screen aspect, visual dimensions multiplied by
 their scale map back to that screen within the DPR tolerance, and viewer scale
 derives from the requested pinch and screen-to-layout ratio. Observed fractional
 heights and scales are derived rather than hardcoded. The mode
@@ -163,7 +164,9 @@ ambiguous tied components therefore cannot satisfy readiness. The JSON
 validator independently checks those global segmentation metrics, including
 each connected component's minimum spanning area, the disjoint-component area
 sum, disjoint white/ink pixel counts, the minimum-pixel and row-spacing
-implications of each ink band, and the integer-pixel horizontal ink span. It proves
+implications of each ink band, the integer-pixel horizontal ink span, and the
+runner-up interval implied by listed substantial and omitted sub-threshold
+components. It proves
 the requested page separately instead of assuming that page is the largest
 visible component: all substantial components are retained in deterministic
 top-first order, exactly one must be anchored in the top quarter after the

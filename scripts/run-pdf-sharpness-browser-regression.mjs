@@ -1800,6 +1800,12 @@ function sanitizeReferenceDiagnosticAnalysis(analysis) {
   const substantialComponents = Array.isArray(analysis?.substantialComponents)
     ? analysis.substantialComponents
     : null;
+  const minimumComponentWidth = dimensionsValid
+    ? Math.max(120, Math.ceil(analysis.width * 0.25))
+    : Number.POSITIVE_INFINITY;
+  const minimumComponentHeight = dimensionsValid
+    ? Math.max(80, Math.ceil(analysis.height * 0.25))
+    : Number.POSITIVE_INFINITY;
   const componentValid = (component) => {
     const componentBounds = component?.pageBounds;
     return (
@@ -1807,8 +1813,8 @@ function sanitizeReferenceDiagnosticAnalysis(analysis) {
       nonNegativeInteger(componentBounds?.y) &&
       Number.isInteger(componentBounds?.width) &&
       Number.isInteger(componentBounds?.height) &&
-      componentBounds.width >= Math.max(120, Math.ceil(analysis.width * 0.25)) &&
-      componentBounds.height >= Math.max(80, Math.ceil(analysis.height * 0.25)) &&
+      componentBounds.width >= minimumComponentWidth &&
+      componentBounds.height >= minimumComponentHeight &&
       componentBounds.x + componentBounds.width <= analysis.width &&
       componentBounds.y + componentBounds.height <= analysis.height &&
       Number.isInteger(component?.whiteArea) &&
@@ -1855,6 +1861,25 @@ function sanitizeReferenceDiagnosticAnalysis(analysis) {
         : Math.max(...substantialComponents.map((component) =>
             component.whiteArea
           )) === analysis?.winnerWhiteArea
+    );
+  const sortedComponentAreas = substantialComponentsValid
+    ? substantialComponents
+        .map((component) => component.whiteArea)
+        .sort((left, right) => right - left)
+    : null;
+  const listedRunnerUpWhiteArea = sortedComponentAreas?.[1] ?? 0;
+  const maximumNonSubstantialWhiteArea = dimensionsValid
+    ? Math.max(
+        (minimumComponentWidth - 1) * analysis.height,
+        analysis.width * (minimumComponentHeight - 1),
+      )
+    : Number.NEGATIVE_INFINITY;
+  const runnerUpIntervalValid =
+    (sortedComponentAreas?.[0] ?? 0) === analysis?.winnerWhiteArea &&
+    analysis?.runnerUpWhiteArea >= listedRunnerUpWhiteArea &&
+    analysis?.runnerUpWhiteArea <= Math.max(
+      listedRunnerUpWhiteArea,
+      maximumNonSubstantialWhiteArea,
     );
   const boundsValid = bounds &&
     nonNegativeInteger(bounds.height) &&
@@ -1963,6 +1988,7 @@ function sanitizeReferenceDiagnosticAnalysis(analysis) {
     metricsValid &&
     segmentationShapeValid &&
     substantialComponentsValid &&
+    runnerUpIntervalValid &&
     (noWinnerStateValid || uniqueWinnerStateValid);
   if (
     analysis?.proof !== "white-page-with-rendered-ink" ||
@@ -2157,6 +2183,8 @@ export function referenceViewportContract(expected, configured, viewer) {
     closeTo(viewport.screenWidth, expected.layoutWidth) &&
     closeTo(viewport.screenHeight, expected.layoutHeight);
   const innerAspectBound = (viewport) =>
+    Number.isInteger(viewport.innerWidth) &&
+    Number.isInteger(viewport.innerHeight) &&
     Math.abs(
       viewport.innerHeight -
         viewport.innerWidth * expected.layoutHeight / expected.layoutWidth,

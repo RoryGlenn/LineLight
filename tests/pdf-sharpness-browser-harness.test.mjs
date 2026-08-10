@@ -1709,6 +1709,15 @@ test("builds a noncanonical privacy-safe reference-capture diagnostic", () => {
   assert.equal(forgedMobileLayoutReport.completed, false);
   assert.ok(forgedMobileLayoutReport.failures.length > 0);
 
+  const fractionalMobileLayout = structuredClone(mobileObservation);
+  fractionalMobileLayout.capture.configuredViewport.innerHeight += 0.5;
+  fractionalMobileLayout.capture.viewer.viewport.innerHeight += 0.5;
+  const fractionalMobileLayoutReport = buildReferenceCaptureDiagnosticReport(
+    fractionalMobileLayout,
+  );
+  assert.equal(fractionalMobileLayoutReport.completed, false);
+  assert.ok(fractionalMobileLayoutReport.failures.length > 0);
+
   const impossibleStableAnalyses = [
     (analysis) => {
       analysis.winnerWhiteArea = analysis.runnerUpWhiteArea;
@@ -1774,6 +1783,58 @@ test("builds a noncanonical privacy-safe reference-capture diagnostic", () => {
   assert.equal(impossibleComponentReport.completed, false);
   assert.ok(impossibleComponentReport.failures.length > 0);
   assert.deepEqual(impossibleComponentReport.artifacts.candidates, []);
+
+  const diagnosticRunnerMutations = [
+    (candidate) => {
+      const readiness = candidate.referenceTarget.readiness;
+      const minimumWidth = Math.max(120, Math.ceil(readiness.width * 0.25));
+      const minimumHeight = Math.max(80, Math.ceil(readiness.height * 0.25));
+      const maximumNonSubstantial = Math.max(
+        (minimumWidth - 1) * readiness.height,
+        readiness.width * (minimumHeight - 1),
+      );
+      readiness.runnerUpWhiteArea = maximumNonSubstantial + 1;
+      readiness.winnerDominanceRatio =
+        readiness.winnerWhiteArea / readiness.runnerUpWhiteArea;
+    },
+    (candidate) => {
+      const listed = {
+        pageBounds: { height: 674, width: 600, x: 0, y: 226 },
+        whiteArea: 200_000,
+      };
+      candidate.analysis.substantialComponents.push(listed);
+      candidate.analysis.substantialComponentCount = 2;
+      candidate.analysis.runnerUpWhiteArea = 1;
+      candidate.analysis.winnerDominanceRatio =
+        candidate.analysis.winnerWhiteArea;
+      candidate.referenceTarget = passingReferenceTarget(candidate.analysis, 2);
+    },
+    (candidate) => {
+      const tiedArea = 400_000;
+      const tied = {
+        pageBounds: { height: 674, width: 600, x: 0, y: 226 },
+        whiteArea: tiedArea,
+      };
+      candidate.analysis.substantialComponents[0].whiteArea = tiedArea;
+      candidate.analysis.substantialComponents.push(tied);
+      candidate.analysis.substantialComponentCount = 2;
+      candidate.analysis.winnerWhiteArea = tiedArea;
+      candidate.analysis.runnerUpWhiteArea = 1;
+      candidate.analysis.winnerDominanceRatio = tiedArea;
+      candidate.analysis.pageWhitePixels = 350_000;
+      candidate.analysis.pageWhiteRatio =
+        candidate.analysis.pageWhitePixels / candidate.analysis.pagePixels;
+      candidate.referenceTarget = passingReferenceTarget(candidate.analysis, 2);
+    },
+  ];
+  for (const mutateRunner of diagnosticRunnerMutations) {
+    const value = structuredClone(input);
+    for (const candidate of value.capture.candidates) mutateRunner(candidate);
+    const failed = buildReferenceCaptureDiagnosticReport(value);
+    assert.equal(failed.completed, false);
+    assert.ok(failed.failures.length > 0);
+    assert.deepEqual(failed.artifacts.candidates, []);
+  }
 
   for (const mutateTargetReadiness of [
     (readiness) => {
@@ -2218,7 +2279,9 @@ function passingCanonicalReference(configuration, targetPage, index) {
   );
   const dpr = configuration.baseDevicePixelRatio * configuration.browserZoom;
   const innerWidth = configuration.kind === "mobile" ? 980 : layoutWidth;
-  const innerHeight = innerWidth * layoutHeight / layoutWidth;
+  const innerHeight = configuration.kind === "mobile"
+    ? Math.round(innerWidth * layoutHeight / layoutWidth)
+    : layoutHeight;
   const configuredScale = configuration.pinchZoom;
   const viewerScale = configuredScale * layoutWidth / innerWidth;
   const viewport = (scale) => ({
@@ -3371,6 +3434,28 @@ function forgeImpossibleConnectedReferenceComponent(run) {
   target.components.push({
     bounds: { ...impossible.pageBounds },
     whiteArea: impossible.whiteArea,
+  });
+}
+
+function forgeListedReferenceRunner(run, { tied = false } = {}) {
+  const readiness = run.comparison.referenceReadiness;
+  const target = run.comparison.referenceTarget;
+  const winner = readiness.substantialComponents[0];
+  const listed = {
+    pageBounds: {
+      ...winner.pageBounds,
+      x: 20,
+      y: target.anchorLimit + 1,
+    },
+    whiteArea: tied ? winner.whiteArea : winner.whiteArea - 1,
+  };
+  readiness.substantialComponents.push(listed);
+  readiness.substantialComponentCount = 2;
+  readiness.runnerUpWhiteArea = 1;
+  readiness.winnerDominanceRatio = readiness.winnerWhiteArea;
+  target.components.push({
+    bounds: { ...listed.pageBounds },
+    whiteArea: listed.whiteArea,
   });
 }
 
@@ -5455,6 +5540,34 @@ test("rejects each material Issue 68 acceptance regression", async (t) => {
     ["reference impossible connected component area", (value) => {
       forgeImpossibleConnectedReferenceComponent(value.matrix[0]);
     }, /requested top page/u],
+    ["reference full runner exceeds omitted-component maximum", (value) => {
+      const readiness = value.matrix[0].comparison.referenceReadiness;
+      const minimumWidth = Math.max(120, Math.ceil(readiness.width * 0.25));
+      const minimumHeight = Math.max(80, Math.ceil(readiness.height * 0.25));
+      readiness.runnerUpWhiteArea = Math.max(
+        (minimumWidth - 1) * readiness.height,
+        readiness.width * (minimumHeight - 1),
+      ) + 1;
+      readiness.winnerDominanceRatio =
+        readiness.winnerWhiteArea / readiness.runnerUpWhiteArea;
+    }, /requested top page/u],
+    ["reference target runner exceeds omitted-component maximum", (value) => {
+      const readiness = value.matrix[0].comparison.referenceTarget.readiness;
+      const minimumWidth = Math.max(120, Math.ceil(readiness.width * 0.25));
+      const minimumHeight = Math.max(80, Math.ceil(readiness.height * 0.25));
+      readiness.runnerUpWhiteArea = Math.max(
+        (minimumWidth - 1) * readiness.height,
+        readiness.width * (minimumHeight - 1),
+      ) + 1;
+      readiness.winnerDominanceRatio =
+        readiness.winnerWhiteArea / readiness.runnerUpWhiteArea;
+    }, /requested top page/u],
+    ["reference listed runner exceeds reported runner", (value) => {
+      forgeListedReferenceRunner(value.matrix[0]);
+    }, /requested top page/u],
+    ["reference listed winner tie is hidden by runner", (value) => {
+      forgeListedReferenceRunner(value.matrix[0], { tied: true });
+    }, /requested top page/u],
     ["reference target anchor ambiguity", (value) => {
       makeAdjacentReferenceComponentTheGlobalWinner(value.matrix[0]);
       const run = value.matrix[0];
@@ -5555,6 +5668,12 @@ test("rejects each material Issue 68 acceptance regression", async (t) => {
         visualViewportScale: 390 / innerWidth,
         visualViewportWidth: innerWidth,
       });
+    }, /isolated loader lifecycle/u],
+    ["reference lifecycle fractional DOM layout height", (value) => {
+      const lifecycle = value.matrix[4].comparison.referenceReadiness
+        .captureLifecycle;
+      lifecycle.configuredViewport.innerHeight += 0.5;
+      lifecycle.viewer.viewport.innerHeight += 0.5;
     }, /isolated loader lifecycle/u],
     ["stale priority", (value) => {
       value.matrix[0].visibleFirst.firstPostScrollCompositionPage = 3;

@@ -163,6 +163,28 @@ function validRenderedReferenceAnalysis(analysis) {
   const minimumHeight = Number.isInteger(analysis?.height)
     ? Math.max(80, Math.ceil(analysis.height * 0.25))
     : Number.POSITIVE_INFINITY;
+  const componentAreas = Array.isArray(analysis?.substantialComponents)
+    ? analysis.substantialComponents.map((component) => component?.whiteArea)
+    : null;
+  const sortedComponentAreas = componentAreas?.every(nonNegativeInteger)
+    ? [...componentAreas].sort((left, right) => right - left)
+    : null;
+  const listedRunnerUpWhiteArea = sortedComponentAreas?.[1] ?? 0;
+  const maximumNonSubstantialWhiteArea =
+    Number.isInteger(analysis?.width) && Number.isInteger(analysis?.height)
+      ? Math.max(
+          (minimumWidth - 1) * analysis.height,
+          analysis.width * (minimumHeight - 1),
+        )
+      : Number.NEGATIVE_INFINITY;
+  const runnerUpIntervalValid =
+    sortedComponentAreas?.length === analysis?.substantialComponentCount &&
+    sortedComponentAreas?.[0] === winnerWhiteArea &&
+    runnerUpWhiteArea >= listedRunnerUpWhiteArea &&
+    runnerUpWhiteArea <= Math.max(
+      listedRunnerUpWhiteArea,
+      maximumNonSubstantialWhiteArea,
+    );
   const dominanceValid = runnerUpWhiteArea === 0
     ? analysis?.winnerDominanceRatio === null
     : finite(analysis?.winnerDominanceRatio) &&
@@ -199,6 +221,7 @@ function validRenderedReferenceAnalysis(analysis) {
     nonNegativeInteger(runnerUpWhiteArea) &&
     winnerWhiteArea > runnerUpWhiteArea &&
     dominanceValid &&
+    runnerUpIntervalValid &&
     Number.isInteger(analysis?.width) &&
     Number.isInteger(analysis?.height) &&
     analysis.width >= 1 &&
@@ -265,8 +288,8 @@ function validNativeReferenceViewport(expected, configured, viewer) {
     exact(viewport?.screenWidth, expectedWidth) &&
     exact(viewport?.screenHeight, expectedHeight);
   const innerAspectBound = (viewport) =>
-    finite(viewport?.innerWidth) &&
-    finite(viewport?.innerHeight) &&
+    Number.isInteger(viewport?.innerWidth) &&
+    Number.isInteger(viewport?.innerHeight) &&
     viewport.innerWidth > 0 &&
     viewport.innerHeight > 0 &&
     Math.abs(
@@ -853,6 +876,16 @@ export function validatePdfSharpnessEvidence(evidence) {
             .map((component) => component.whiteArea),
         )
       : Number.POSITIVE_INFINITY;
+    const maximumNonSubstantialWhiteArea = Math.max(
+      (minimumReferencePageWidth - 1) * expectedPhysicalHeight,
+      expectedPhysicalWidth * (minimumReferencePageHeight - 1),
+    );
+    const runnerUpIntervalValid = fullComponentsValid &&
+      referenceReadiness?.runnerUpWhiteArea >= listedRunnerUpWhiteArea &&
+      referenceReadiness?.runnerUpWhiteArea <= Math.max(
+        listedRunnerUpWhiteArea,
+        maximumNonSubstantialWhiteArea,
+      );
     const targetReadiness = referenceTarget?.readiness;
     const targetCropBound =
       referenceTarget?.selectionVersion === 1 &&
@@ -872,7 +905,7 @@ export function validatePdfSharpnessEvidence(evidence) {
       maximumComponentUnique &&
       maximumComponent?.whiteArea === referenceReadiness?.winnerWhiteArea &&
       sameBounds(maximumComponent?.pageBounds, referenceReadiness?.pageBounds) &&
-      referenceReadiness?.runnerUpWhiteArea >= listedRunnerUpWhiteArea &&
+      runnerUpIntervalValid &&
       validRenderedReferenceAnalysis(targetReadiness) &&
       targetReadiness?.width === selectedComponent?.bounds?.width &&
       targetReadiness?.height === selectedComponent?.bounds?.height &&
