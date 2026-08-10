@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
+import { runInNewContext } from "node:vm";
 import { deflateSync } from "node:zlib";
 
 import {
@@ -407,8 +408,25 @@ function passingFallbackNetworkDiagnostic() {
     urlClass: "pdf-parser-worker",
     waitingForDebugger: true,
   };
+  const appWorkerTarget = {
+    ancestry: [],
+    attachComplete: true,
+    ...completedCdpTargetSetup({ cdpIdStart: 70 }),
+    identityHash: diagnosticIdentity(
+      "fallback-app-worker-session",
+      "fallback-app-worker-target",
+    ),
+    parentSessionId: null,
+    phase: "fallback-import-diagnostic",
+    resumed: true,
+    sessionId: "fallback-app-worker-session",
+    targetId: "fallback-app-worker-target",
+    type: "worker",
+    urlClass: "app-asset",
+    waitingForDebugger: true,
+  };
   blobTarget.workerInstanceId = 2;
-  const targets = [...oldTargets, blobTarget, parserTarget];
+  const targets = [...oldTargets, blobTarget, appWorkerTarget, parserTarget];
   const settlement = ({ requestId, requestSessionId, target }) => ({
     identityHash: diagnosticIdentity(
       requestSessionId,
@@ -444,6 +462,11 @@ function passingFallbackNetworkDiagnostic() {
       requestId: "fallback-blob-request",
       requestSessionId: null,
       target: blobTarget,
+    }),
+    settlement({
+      requestId: "fallback-app-worker-request",
+      requestSessionId: null,
+      target: appWorkerTarget,
     }),
     settlement({
       requestId: "fallback-parser-request",
@@ -528,14 +551,32 @@ function passingFallbackNetworkDiagnostic() {
 
 test("builds the forced fallback worker with one static dependency import", async () => {
   const source = buildFallbackWorkerModuleSource(
-    "https://local.test/pdf-document.worker.js",
+    "https://local.test/assets/pdf-document.worker.js",
     2,
   );
-  const staticImport = 'import "https://local.test/pdf-document.worker.js";';
+  const staticImport =
+    'import "https://local.test/assets/pdf-document.worker.js";';
   assert.equal(source.split("\n")[0], staticImport);
   assert.equal(source.match(/^import\s+/gmu)?.length, 1);
   assert.doesNotMatch(source, /\bawait\s+import\s*\(/u);
   assert.doesNotMatch(source, /\bimport\s*\(/u);
+  assert.match(source, /globalThis\.Worker = new Proxy\(NativeNestedWorker/u);
+  assert.match(
+    source,
+    /const resolved = new URL\(url, "https:\/\/local\.test\/assets\/pdf-document\.worker\.js"\);/u,
+  );
+  assert.match(
+    source,
+    /Reflect\.construct\(target, \[resolved, \.\.\.rest\], newTarget\)/u,
+  );
+  const proxyBody = source.slice(
+    source.indexOf("const NativeNestedWorker"),
+    source.indexOf("try { Object.defineProperty"),
+  );
+  assert.doesNotMatch(proxyBody, /catch|ready|replay/u);
+  assert.ok(
+    source.indexOf("NativeNestedWorker") > source.indexOf(staticImport),
+  );
   assert.ok(source.indexOf("OffscreenCanvas") > source.indexOf(staticImport));
   assert.ok(
     source.indexOf("__linelight_issue68_worker__") >
@@ -550,6 +591,61 @@ test("builds the forced fallback worker with one static dependency import", asyn
     () => buildFallbackWorkerModuleSource("https://local.test/worker.js", 0),
     /Fallback worker identity is invalid/u,
   );
+  assert.throws(
+    () => buildFallbackWorkerModuleSource("/relative-worker.js", 2),
+    /Fallback worker identity is invalid/u,
+  );
+
+  const nativeFailure = new Error("native-constructor-sentinel");
+  const zeroArgumentFailure = new Error("native-zero-argument-sentinel");
+  class NativeWorker {
+    static surface = "native-worker-surface";
+
+    constructor(url, options) {
+      if (arguments.length === 0) throw zeroArgumentFailure;
+      if (url.pathname === "/native-failure.js") throw nativeFailure;
+      this.options = options;
+      this.url = url;
+    }
+  }
+  const sentinelCalls = [];
+  const context = {
+    OffscreenCanvas: class OffscreenCanvas {},
+    URL,
+    Worker: NativeWorker,
+    console: {
+      debug: (...args) => sentinelCalls.push(args),
+    },
+  };
+  runInNewContext(source.split("\n").slice(1).join("\n"), context);
+  const WrappedWorker = context.Worker;
+  const options = { type: "module" };
+  const rootRelative = new WrappedWorker("/assets/pdf-parser.worker.js", options);
+  const relative = new WrappedWorker("pdf-parser.worker.js", options);
+  const absolute = new WrappedWorker("https://other.test/parser.js", options);
+  const urlObject = new URL("https://third.test/parser.js");
+  const fromUrlObject = new WrappedWorker(urlObject, options);
+  assert.equal(rootRelative.url.href, "https://local.test/assets/pdf-parser.worker.js");
+  assert.equal(relative.url.href, "https://local.test/assets/pdf-parser.worker.js");
+  assert.equal(absolute.url.href, "https://other.test/parser.js");
+  assert.equal(fromUrlObject.url.href, urlObject.href);
+  assert.equal(rootRelative.options, options);
+  assert.equal(WrappedWorker.surface, NativeWorker.surface);
+  assert.equal(WrappedWorker.prototype, NativeWorker.prototype);
+  assert.ok(rootRelative instanceof NativeWorker);
+  assert.throws(() => WrappedWorker("/assets/parser.js"), TypeError);
+  assert.throws(() => new WrappedWorker(), (error) => error === zeroArgumentFailure);
+  assert.throws(
+    () => new WrappedWorker("/native-failure.js"),
+    (error) => error === nativeFailure,
+  );
+  class DerivedWorker extends WrappedWorker {}
+  const derived = new DerivedWorker("/assets/derived-parser.js", options);
+  assert.ok(derived instanceof DerivedWorker);
+  assert.ok(derived instanceof NativeWorker);
+  assert.equal(derived.url.href, "https://local.test/assets/derived-parser.js");
+  assert.equal(context.OffscreenCanvas, undefined);
+  assert.deepEqual(sentinelCalls, [["__linelight_issue68_worker__", 2]]);
 
   const runnerSource = await readFile(
     new URL("../scripts/run-pdf-sharpness-browser-regression.mjs", import.meta.url),
@@ -817,6 +913,14 @@ test("requires a clean fallback blob/parser CDP lifecycle after the setup bounda
   const diagnostic = passingFallbackNetworkDiagnostic();
   const boundary = passingFallbackImportCapture().networkBoundary;
   assert.equal(
+    diagnostic.targetBootstrapSettlements.some(
+      (entry) =>
+        entry.phase === "fallback-import-diagnostic" &&
+        entry.urlClass === "app-asset",
+    ),
+    true,
+  );
+  assert.equal(
     isFallbackImportNetworkDiagnosticHealthy(diagnostic, boundary, 2),
     true,
   );
@@ -841,6 +945,26 @@ test("requires a clean fallback blob/parser CDP lifecycle after the setup bounda
         (entry) => entry.urlClass === "blob",
       );
       value.targetBootstrapSettlements.push(structuredClone(blobSettlement));
+      value.counts.targetBootstrapSettlementCount += 1;
+    },
+    (value) => {
+      const parserSettlement = value.targetBootstrapSettlements.find(
+        (entry) =>
+          entry.phase === "fallback-import-diagnostic" &&
+          entry.urlClass === "pdf-parser-worker",
+      );
+      value.targetBootstrapSettlements = value.targetBootstrapSettlements.filter(
+        (entry) => entry !== parserSettlement,
+      );
+      value.counts.targetBootstrapSettlementCount -= 1;
+    },
+    (value) => {
+      const parserSettlement = value.targetBootstrapSettlements.find(
+        (entry) =>
+          entry.phase === "fallback-import-diagnostic" &&
+          entry.urlClass === "pdf-parser-worker",
+      );
+      value.targetBootstrapSettlements.push(structuredClone(parserSettlement));
       value.counts.targetBootstrapSettlementCount += 1;
     },
     (value) => {
@@ -899,6 +1023,86 @@ test("requires a clean fallback blob/parser CDP lifecycle after the setup bounda
       ).urlClass = "pdf-document-worker";
     },
     (value) => {
+      value.targets.find(
+        (target) =>
+          target.phase === "fallback-import-diagnostic" &&
+          target.urlClass === "pdf-parser-worker",
+      ).ancestry[0].sessionId = "forged-parser-ancestor";
+    },
+    (value) => {
+      const appSettlement = value.targetBootstrapSettlements.find(
+        (entry) =>
+          entry.phase === "fallback-import-diagnostic" &&
+          entry.urlClass === "app-asset",
+      );
+      appSettlement.identityHash = "0".repeat(64);
+    },
+    (value) => {
+      const appSettlement = value.targetBootstrapSettlements.find(
+        (entry) =>
+          entry.phase === "fallback-import-diagnostic" &&
+          entry.urlClass === "app-asset",
+      );
+      appSettlement.targetType = "service_worker";
+    },
+    (value) => {
+      const appSettlement = value.targetBootstrapSettlements.find(
+        (entry) =>
+          entry.phase === "fallback-import-diagnostic" &&
+          entry.urlClass === "app-asset",
+      );
+      appSettlement.phase = "wrong-phase";
+    },
+    (value) => {
+      const appSettlement = value.targetBootstrapSettlements.find(
+        (entry) =>
+          entry.phase === "fallback-import-diagnostic" &&
+          entry.urlClass === "app-asset",
+      );
+      appSettlement.method = "POST";
+    },
+    (value) => {
+      const appSettlement = value.targetBootstrapSettlements.find(
+        (entry) =>
+          entry.phase === "fallback-import-diagnostic" &&
+          entry.urlClass === "app-asset",
+      );
+      appSettlement.resourceType = "Other";
+    },
+    (value) => {
+      const appSettlement = value.targetBootstrapSettlements.find(
+        (entry) =>
+          entry.phase === "fallback-import-diagnostic" &&
+          entry.urlClass === "app-asset",
+      );
+      appSettlement.terminalReason = "loading-finished";
+    },
+    (value) => {
+      const appSettlement = value.targetBootstrapSettlements.find(
+        (entry) =>
+          entry.phase === "fallback-import-diagnostic" &&
+          entry.urlClass === "app-asset",
+      );
+      appSettlement.targetDetachedAtSettlement = true;
+    },
+    (value) => {
+      const blobSettlement = value.targetBootstrapSettlements.find(
+        (entry) => entry.urlClass === "blob",
+      );
+      const appSettlement = value.targetBootstrapSettlements.find(
+        (entry) =>
+          entry.phase === "fallback-import-diagnostic" &&
+          entry.urlClass === "app-asset",
+      );
+      appSettlement.requestId = blobSettlement.requestId;
+      appSettlement.identityHash = diagnosticIdentity(
+        appSettlement.requestSessionId,
+        appSettlement.requestId,
+        appSettlement.targetSessionId,
+        appSettlement.targetId,
+      );
+    },
+    (value) => {
       value.targetBootstrapSettlements.push({
         ...structuredClone(value.targetBootstrapSettlements.at(-1)),
         identityHash: diagnosticIdentity(
@@ -947,6 +1151,14 @@ test("requires a clean fallback blob/parser CDP lifecycle after the setup bounda
     ),
     false,
   );
+  assert.equal(
+    isFallbackImportNetworkDiagnosticHealthy(
+      diagnostic,
+      { ...boundary, settlementCount: boundary.settlementCount + 1 },
+      2,
+    ),
+    false,
+  );
 });
 
 test("rejects a fallback parser attached to a different wrapped worker", () => {
@@ -965,7 +1177,7 @@ test("rejects a fallback parser attached to a different wrapped worker", () => {
   const restoredBlob = {
     ancestry: [],
     attachComplete: true,
-    ...completedCdpTargetSetup({ cdpIdStart: 70 }),
+    ...completedCdpTargetSetup({ cdpIdStart: 80 }),
     identityHash: diagnosticIdentity(
       "restored-blob-session",
       "restored-blob-target",
@@ -1015,6 +1227,71 @@ test("rejects a fallback parser attached to a different wrapped worker", () => {
     targetType: "worker",
     terminalReason: "target-attached",
     urlClass: "blob",
+  });
+  diagnostic.counts.attachPromiseCount += 1;
+  diagnostic.counts.completedRequestCount += 1;
+  diagnostic.counts.requestCount += 1;
+  diagnostic.counts.targetBootstrapSettlementCount += 1;
+  diagnostic.counts.targetCount += 1;
+  for (const sample of diagnostic.wait.recentSamples) {
+    sample.requestCount += 1;
+    sample.targetCount += 1;
+  }
+
+  assert.equal(
+    isFallbackImportNetworkDiagnosticHealthy(diagnostic, boundary, 2),
+    false,
+  );
+});
+
+test("rejects a second parser child for the exact fallback import worker", () => {
+  const diagnostic = passingFallbackNetworkDiagnostic();
+  const boundary = passingFallbackImportCapture().networkBoundary;
+  const importBlob = diagnostic.targets.find(
+    (target) => target.urlClass === "blob" && target.workerInstanceId === 2,
+  );
+  const secondParser = {
+    ancestry: [{
+      phase: importBlob.phase,
+      sessionId: importBlob.sessionId,
+      type: importBlob.type,
+      urlClass: importBlob.urlClass,
+    }],
+    attachComplete: true,
+    ...completedCdpTargetSetup({ cdpIdStart: 90 }),
+    identityHash: diagnosticIdentity(
+      "second-parser-session",
+      "second-parser-target",
+    ),
+    parentSessionId: importBlob.sessionId,
+    phase: "fallback-import-diagnostic",
+    resumed: true,
+    sessionId: "second-parser-session",
+    targetId: "second-parser-target",
+    type: "worker",
+    urlClass: "pdf-parser-worker",
+    waitingForDebugger: true,
+  };
+  diagnostic.targets.push(secondParser);
+  diagnostic.targetBootstrapSettlements.push({
+    identityHash: diagnosticIdentity(
+      importBlob.sessionId,
+      "second-parser-request",
+      secondParser.sessionId,
+      secondParser.targetId,
+    ),
+    method: "GET",
+    phase: secondParser.phase,
+    requestId: "second-parser-request",
+    requestSessionId: importBlob.sessionId,
+    resourceType: "Script",
+    targetDetachedAtSettlement: false,
+    targetId: secondParser.targetId,
+    targetParentSessionId: importBlob.sessionId,
+    targetSessionId: secondParser.sessionId,
+    targetType: "worker",
+    terminalReason: "target-attached",
+    urlClass: "pdf-parser-worker",
   });
   diagnostic.counts.attachPromiseCount += 1;
   diagnostic.counts.completedRequestCount += 1;

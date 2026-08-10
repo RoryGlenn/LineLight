@@ -287,13 +287,18 @@ re-imports, and binds success to that new import's worker/model/fallback chain,
 sanitized CDP lifecycle, external screenshot, and complete teardown. Its
 generated module wrapper statically imports the document worker so the real
 message listener is installed before the worker port queue opens; the wrapper
-body then disables `OffscreenCanvas` and emits its fixed identity sentinel. The
-network proof requires one exact bootstrap settlement for every post-boundary
-wrapper blob and parser target, including a null-parent root blob and exact
-parser-to-wrapper ancestry. The mode is noncanonical and cannot satisfy
-acceptance. Its exact before/after stage sequence and stage-derived fixed
-failure category retain partial, privacy-safe setup hash/count/condition
-evidence without serializing raw exceptions.
+body first proxies native nested-worker construction to resolve built asset
+paths against the absolute document-worker URL, then disables
+`OffscreenCanvas` and emits its fixed identity sentinel. Every post-boundary
+bootstrap settlement must bind to an exact new target, while import proof
+separately requires exactly one null-parent wrapper blob for the selected worker
+and exactly one parser child with matching ancestry and settlements. Unrelated
+local workers with valid settlements therefore cannot substitute for or
+invalidate that chain. The mode is noncanonical and cannot satisfy acceptance.
+Its exact before/after
+stage sequence and stage-derived fixed failure category retain partial,
+privacy-safe setup hash/count/condition evidence without serializing raw
+exceptions.
 The independently testable acceptance contract lives in
 [`scripts/pdf-sharpness-evidence.mjs`](../scripts/pdf-sharpness-evidence.mjs),
 its fast and opt-in browser gates live in

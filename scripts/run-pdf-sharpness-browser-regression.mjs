@@ -132,8 +132,27 @@ export function buildFallbackWorkerModuleSource(
   ) {
     throw new Error("Fallback worker identity is invalid.");
   }
+  let absoluteWorkerUrl;
+  try {
+    absoluteWorkerUrl = new URL(resolvedWorkerUrl);
+  } catch {
+    throw new Error("Fallback worker identity is invalid.");
+  }
+  if (!["http:", "https:"].includes(absoluteWorkerUrl.protocol)) {
+    throw new Error("Fallback worker identity is invalid.");
+  }
+  const serializedWorkerUrl = JSON.stringify(absoluteWorkerUrl.href);
   return [
-    "import " + JSON.stringify(resolvedWorkerUrl) + ";",
+    "import " + serializedWorkerUrl + ";",
+    "const NativeNestedWorker = globalThis.Worker;",
+    "globalThis.Worker = new Proxy(NativeNestedWorker, {",
+    "  construct(target, args, newTarget) {",
+    "    if (args.length === 0) return Reflect.construct(target, args, newTarget);",
+    "    const [url, ...rest] = args;",
+    "    const resolved = new URL(url, " + serializedWorkerUrl + ");",
+    "    return Reflect.construct(target, [resolved, ...rest], newTarget);",
+    "  }",
+    "});",
     "try { Object.defineProperty(globalThis, 'OffscreenCanvas', { configurable: true, value: undefined }); } catch {}",
     "console.debug('__linelight_issue68_worker__', " + workerInstanceId + ");",
   ].join("\n");
@@ -1798,7 +1817,7 @@ export function isFallbackImportNetworkDiagnosticHealthy(
     settlementStart <= settlements.length &&
     requestStart <= counts.requestCount;
   const newTargets = validBoundary ? targets.slice(targetStart) : [];
-  const newSettlements = validBoundary
+  const postBoundarySettlements = validBoundary
     ? settlements.slice(settlementStart)
     : [];
   const blobTargets = newTargets.filter(
@@ -1886,43 +1905,28 @@ export function isFallbackImportNetworkDiagnosticHealthy(
         entry.terminalAt >= entry.requestStartedAt
       );
     });
-  const bootstrapTargets = [...blobTargets, ...parserTargets];
-  const validNewSettlements =
-    newSettlements.length === bootstrapTargets.length &&
-    new Set(newSettlements.map((entry) => entry?.targetSessionId)).size ===
-      newSettlements.length &&
+  const newTargetBySession = new Map(
+    newTargets.map((target) => [target?.sessionId, target]),
+  );
+  const validPostBoundarySettlements =
     new Set(
-      newSettlements.map(
+      postBoundarySettlements.map((entry) => entry?.targetSessionId),
+    ).size === postBoundarySettlements.length &&
+    new Set(
+      postBoundarySettlements.map(
         (entry) => JSON.stringify([
           entry?.requestSessionId ?? null,
           entry?.requestId,
         ]),
       ),
-    ).size === newSettlements.length &&
-    bootstrapTargets.every(
-      (target) =>
-        newSettlements.filter(
-          (entry) => entry?.targetSessionId === target.sessionId,
-        ).length === 1,
-    ) &&
-    newSettlements.every((entry) => {
-      const target = targetBySession.get(entry?.targetSessionId);
-      const blobTarget = blobTargets.includes(target);
-      const parserTarget = parserTargets.includes(target);
-      const parentBound = blobTarget
-        ? target?.parentSessionId === null &&
-          entry?.targetParentSessionId === null &&
-          entry?.requestSessionId === null
-        : parserTarget &&
-          nonEmptyString(target?.parentSessionId) &&
-          entry?.targetParentSessionId === target.parentSessionId &&
-          entry?.requestSessionId === target.parentSessionId &&
-          blobTargets.some(
-            (candidate) => candidate.sessionId === target.parentSessionId,
-          );
+    ).size === postBoundarySettlements.length &&
+    postBoundarySettlements.every((entry) => {
+      const target = newTargetBySession.get(entry?.targetSessionId);
       return (
-        (blobTarget || parserTarget) &&
+        target?.type === "worker" &&
         nonEmptyString(entry?.requestId) &&
+        (entry?.requestSessionId === null ||
+          nonEmptyString(entry?.requestSessionId)) &&
         entry?.identityHash === cdpDiagnosticIdentity(
           entry.requestSessionId,
           entry.requestId,
@@ -1930,17 +1934,50 @@ export function isFallbackImportNetworkDiagnosticHealthy(
           entry.targetId,
         ) &&
         entry?.targetId === target.targetId &&
-        parentBound &&
+        entry?.targetParentSessionId === target.parentSessionId &&
+        entry?.requestSessionId === target.parentSessionId &&
         entry?.phase === FALLBACK_IMPORT_DIAGNOSTIC_LABEL &&
         entry?.phase === target.phase &&
         entry?.method === "GET" &&
         entry?.resourceType === "Script" &&
-        entry?.targetType === "worker" &&
+        entry?.targetType === target.type &&
         entry?.urlClass === target.urlClass &&
         entry?.targetDetachedAtSettlement === false &&
         entry?.terminalReason === "target-attached"
       );
     });
+  const currentTargets = [importBlobTarget, ...importParserTargets].filter(
+    Boolean,
+  );
+  const currentTargetSessions = new Set(
+    currentTargets.map((target) => target.sessionId),
+  );
+  const currentSettlements = postBoundarySettlements.filter((entry) =>
+    currentTargetSessions.has(entry?.targetSessionId)
+  );
+  const currentBlobSettlement = currentSettlements.find(
+    (entry) => entry?.targetSessionId === importBlobTarget?.sessionId,
+  );
+  const currentParserTarget = importParserTargets[0] ?? null;
+  const currentParserSettlement = currentSettlements.find(
+    (entry) => entry?.targetSessionId === currentParserTarget?.sessionId,
+  );
+  const validCurrentSettlements =
+    importBlobTargets.length === 1 &&
+    importParserTargets.length === 1 &&
+    currentSettlements.length === 2 &&
+    currentTargets.every(
+      (target) =>
+        currentSettlements.filter(
+          (entry) => entry?.targetSessionId === target.sessionId,
+        ).length === 1,
+    ) &&
+    importBlobTarget?.parentSessionId === null &&
+    currentBlobSettlement?.targetParentSessionId === null &&
+    currentBlobSettlement?.requestSessionId === null &&
+    currentParserTarget?.parentSessionId === importBlobTarget?.sessionId &&
+    currentParserSettlement?.targetParentSessionId === importBlobTarget?.sessionId &&
+    currentParserSettlement?.requestSessionId === importBlobTarget?.sessionId;
   const stableTail = Array.isArray(diagnostic?.wait?.recentSamples)
     ? diagnostic.wait.recentSamples.slice(-CDP_FIXED_POINT_STABLE_SAMPLES)
     : [];
@@ -1983,23 +2020,32 @@ export function isFallbackImportNetworkDiagnosticHealthy(
     Number.isInteger(expectedWorkerInstanceId) &&
     expectedWorkerInstanceId > 0 &&
     importBlobTargets.length === 1 &&
-    importParserTargets.length >= 1 &&
+    importParserTargets.length === 1 &&
     parserTargets.every((target) => {
       const parent = blobTargets.find(
         (candidate) => candidate.sessionId === target.parentSessionId,
       );
+      const directAncestor = Array.isArray(target?.ancestry)
+        ? target.ancestry[0]
+        : null;
       return (
         parent &&
         target.phase === FALLBACK_IMPORT_DIAGNOSTIC_LABEL &&
-        target.ancestry?.[0]?.sessionId === parent.sessionId &&
-        settlements.some(
+        Array.isArray(target.ancestry) &&
+        target.ancestry.length === 1 &&
+        directAncestor?.sessionId === parent.sessionId &&
+        directAncestor?.phase === parent.phase &&
+        directAncestor?.type === parent.type &&
+        directAncestor?.urlClass === parent.urlClass &&
+        postBoundarySettlements.some(
           (settlement) =>
             settlement?.targetSessionId === target.sessionId &&
             settlement?.terminalReason === "target-attached",
         )
       );
     }) &&
-    validNewSettlements &&
+    validPostBoundarySettlements &&
+    validCurrentSettlements &&
     diagnostic?.wait?.requiredStableSamples ===
       CDP_FIXED_POINT_STABLE_SAMPLES &&
     diagnostic?.wait?.stableSamples === CDP_FIXED_POINT_STABLE_SAMPLES &&

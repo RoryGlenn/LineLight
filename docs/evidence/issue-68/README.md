@@ -175,13 +175,16 @@ validator additionally requires:
 The forced-fallback diagnostic generates a module wrapper whose first statement
 is a static import of the resolved document-worker module. That dependency
 installs the real worker message listener before the worker port queue opens;
-the wrapper body then disables `OffscreenCanvas` and emits the fixed,
-integer-only worker sentinel before any import message can dispatch. Its CDP
-proof requires exactly one bootstrap settlement for every post-file-selection
-blob and parser target. Root blob settlements have no parent/request session,
-while every parser settlement and ancestry entry must bind to its exact wrapper
-blob; the parser for another restored wrapper cannot satisfy the selected
-import.
+the wrapper body then proxies native nested `Worker` construction so root- and
+asset-relative parser URLs resolve against the absolute document-worker URL,
+disables `OffscreenCanvas`, and emits the fixed, integer-only worker sentinel
+before any import message can dispatch. The proxy preserves native construction,
+options, prototype, static, error, and subclass semantics and does not queue or
+replay messages. Every post-file-selection bootstrap settlement must bind to an
+exact new target. Separately, the selected import must have exactly one
+null-parent wrapper blob and exactly one direct parser child, each with one
+matching settlement and exact ancestry. A restored wrapper, unrelated local
+worker, or second parser cannot substitute for that chain.
 
 The validator also requires the exact reviewed source-file key set and one
 unique, expected filename/path/hash/byte reference for every screenshot. A
