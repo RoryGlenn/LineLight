@@ -8932,6 +8932,8 @@ test("retains a privacy-safe fixed-point timeout on the failed matrix row", () =
     outputDirectory,
   );
   const pendingState = makePendingTarget(pendingInput, { withPending: true });
+  pendingState.target.commands[0].status = "failed";
+  pendingState.diagnostic.pendingAttaches[0].commands[0].status = "failed";
   pendingState.diagnostic.pendingAttaches[0].type = "shared_worker";
   pendingState.diagnostic.pendingAttaches[0].urlClass = "other-local";
   const pendingReport = buildAppMatrixRuntimeDiagnosticReport(pendingInput);

@@ -5128,6 +5128,7 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
     }
     const explained = targetState?.pending === true || errors.length > 0;
     const failedCommandExplained = targetState?.failedNames.size === 0 ||
+      targetState?.pending === true ||
       errors.some((entry) => targetState.failedNames.has(entry?.command));
     return explained && failedCommandExplained;
   });
