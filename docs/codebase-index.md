@@ -368,11 +368,28 @@ network stage retains the already-built label-bound timeout diagnostic as fixed
 failure classes, derived gates/counts, and bounded ID-free stability samples;
 unexpected failures remain a separate fixed category. Its
 fresh-build/source, external-output, privacy, single-session, and full
-app/server teardown bindings are fail-closed. Noncanonical diagnostic schema 6
+app/server teardown bindings are fail-closed. Noncanonical diagnostic schema 7
 also exposes fixed boolean-only row-identity and network-history conjuncts plus
 their exact aggregates, without document, revision, session, path, URL, or raw
 error values; nonrequired first-row history is explicitly true with
-`required: false`. The report is explicitly
+`required: false`. A priority-mount failure additionally retains one
+non-polling browser snapshot bound to the exact import and
+`priority-mount-started` worker-event boundaries. Its fixed checkpoint and
+failure class, final page-centering samples, intermediate/target shell and
+reader state, and at most sixteen ordered target render/bitmap entries expose
+whether a strictly enabled, nonvisible distance-one request received a later
+identity-bound bitmap. The live priority-mount wait uses that same stage
+boundary and the exact import worker/job/revision, so an earlier or colliding
+worker pair cannot settle the stage. The report distinguishes any bitmap later
+than the selected request from a later identity-bound bitmap after the strict
+request, and recomputes those predicates from opaque
+worker/job/revision identity hashes and match booleans; target render/bitmap
+events must retain the producer's null document key. Centering ranges are
+parsed into bounded numeric pages/ranges before publication. The report
+publishes no raw event, worker, job, document, revision, URL, path, or exception
+identities, and truncation or a
+malformed snapshot invalidates the partial row. Success and every other failure
+stage require this snapshot to be null. The report is explicitly
 noncanonical and cannot satisfy Issue 68 acceptance.
 A third, reference-only diagnostic allowlists the first desktop/page-2 and
 mobile-DPR-3/page-3 native-viewer configurations for the exact public fixture

@@ -574,6 +574,70 @@ export function summarizePdfModelCompletion(workerEvents, expectedPageCount) {
   };
 }
 
+export function selectPdfPriorityPreviewSettlement({
+  importEvent,
+  priorityBoundaryWorkerEventId,
+  priorityTarget,
+  workerEvents,
+} = {}) {
+  const positiveSafeInteger = (value) =>
+    Number.isSafeInteger(value) && value > 0;
+  if (
+    !Array.isArray(workerEvents) ||
+    !Number.isSafeInteger(priorityBoundaryWorkerEventId) ||
+    priorityBoundaryWorkerEventId < 0 ||
+    !positiveSafeInteger(priorityTarget) ||
+    importEvent?.direction !== "to-worker" || importEvent?.type !== "import" ||
+    !positiveSafeInteger(importEvent?.eventId) ||
+    importEvent.eventId > priorityBoundaryWorkerEventId ||
+    !positiveSafeInteger(importEvent?.workerInstanceId) ||
+    !positiveSafeInteger(importEvent?.jobId) ||
+    typeof importEvent?.documentKey !== "string" || !importEvent.documentKey ||
+    typeof importEvent?.revision !== "string" || !importEvent.revision
+  ) {
+    return null;
+  }
+  const matchesIdentity = (event) =>
+    event?.workerInstanceId === importEvent.workerInstanceId &&
+    event?.jobId === importEvent.jobId &&
+    event?.revision === importEvent.revision;
+  const previewRequest = workerEvents.find((event) =>
+    event?.direction === "to-worker" && event?.type === "render" &&
+    event?.documentKey === null &&
+    positiveSafeInteger(event?.eventId) &&
+    event.eventId > priorityBoundaryWorkerEventId &&
+    event?.pageNumber === priorityTarget && event?.enabled === true &&
+    event?.visible === false && event?.distance === 1 &&
+    Number.isFinite(event?.scale) && event.scale > 0 &&
+    [event?.width, event?.height].every((value) =>
+      value === null || value === undefined
+    ) &&
+    matchesIdentity(event)
+  ) ?? null;
+  if (!previewRequest) return null;
+  const bitmap = workerEvents.find((event) =>
+    event?.direction === "from-worker" && event?.type === "bitmap" &&
+    event?.documentKey === null &&
+    positiveSafeInteger(event?.eventId) &&
+    event.eventId > priorityBoundaryWorkerEventId &&
+    event.eventId > previewRequest.eventId &&
+    event?.pageNumber === priorityTarget &&
+    [event?.enabled, event?.visible, event?.distance].every(
+      (value) => value === null || value === undefined,
+    ) &&
+    Number.isFinite(event?.scale) && event.scale > 0 &&
+    Number.isInteger(event?.width) && event.width > 0 &&
+    Number.isInteger(event?.height) && event.height > 0 &&
+    matchesIdentity(event)
+  ) ?? null;
+  return bitmap
+    ? {
+        bitmapEventId: bitmap.eventId,
+        requestEventId: previewRequest.eventId,
+      }
+    : null;
+}
+
 /**
  * Prove the startup-library branch has settled before the matrix import starts.
  * The app's restore promise resolves from PdfDocumentClient.open only after its
@@ -4215,7 +4279,10 @@ function sanitizeAppMatrixRuntimeRange(value, expectedPages) {
     const [start, end] = entry.split(":").map(Number);
     return { end, start };
   });
-  const valid = ranges.every(
+  const canonical = ranges.map((range) =>
+    `${range.start}:${range.end}`
+  ).join(",") === value;
+  const valid = canonical && ranges.every(
     (range, index) =>
       Number.isInteger(range.start) && Number.isInteger(range.end) &&
       range.start >= 0 && range.end >= range.start && range.end <= 5 &&
@@ -4600,6 +4667,468 @@ function sanitizeAppMatrixRuntimePriorityProbe(raw, expectedTarget) {
         targetPage: expectedTarget,
       }
     : null;
+}
+
+const APP_MATRIX_PRIORITY_MOUNT_CHECKPOINTS = new Set([
+  "intermediate-scroll",
+  "target-shell",
+  "preview-settle",
+]);
+const APP_MATRIX_PRIORITY_MOUNT_FAILURE_CATEGORIES = new Set([
+  "timeout",
+  "unexpected",
+]);
+const APP_MATRIX_PRIORITY_MOUNT_LEDGER_LIMIT = 16;
+
+function appMatrixRuntimeExactObject(value, keys) {
+  return Boolean(
+    value && typeof value === "object" && !Array.isArray(value) &&
+    Object.keys(value).sort().join("\0") === [...keys].sort().join("\0")
+  );
+}
+
+function sanitizeAppMatrixPriorityMountCentering(raw, expectedPage) {
+  const proofKeys = ["pageNumber", "samples", "summary"];
+  const sampleKeys = [
+    "cssScrollBehavior",
+    "page",
+    "pageNumber",
+    "range",
+    "reader",
+    "visible",
+  ];
+  const pageKeys = ["bottom", "height", "left", "right", "top", "width"];
+  const readerKeys = ["bottom", "scrollTop", "top"];
+  const summaryKeys = ["centered", "ready", "stableSampleCount"];
+  const parseRange = (value) => {
+    if (
+      typeof value !== "string" ||
+      !/^\d+:\d+(?:,\d+:\d+)*$/u.test(value)
+    ) {
+      return null;
+    }
+    const mountedRanges = value.split(",").map((entry) => {
+      const [start, end] = entry.split(":").map(Number);
+      return { end, start };
+    });
+    if (
+      mountedRanges.map((range) => `${range.start}:${range.end}`).join(",") !==
+        value ||
+      !mountedRanges.every((range, index) =>
+      Number.isInteger(range.start) && Number.isInteger(range.end) &&
+      range.start >= 0 && range.end >= range.start && range.end <= 5 &&
+      (index === 0 || range.start > mountedRanges[index - 1].end)
+      )
+    ) {
+      return null;
+    }
+    return {
+      mountedPages: mountedRanges.flatMap((range) =>
+        Array.from(
+          { length: range.end - range.start + 1 },
+          (_, index) => range.start + index + 1,
+        )
+      ),
+      mountedRanges,
+    };
+  };
+  if (
+    !appMatrixRuntimeExactObject(raw, proofKeys) ||
+    raw.pageNumber !== expectedPage ||
+    !Array.isArray(raw.samples) ||
+    raw.samples.length > PDF_PAGE_CENTER_STABLE_SAMPLE_COUNT ||
+    !appMatrixRuntimeExactObject(raw.summary, summaryKeys)
+  ) {
+    return null;
+  }
+  const samples = raw.samples.map((sample) => {
+    const range = parseRange(sample?.range);
+    if (
+      !appMatrixRuntimeExactObject(sample, sampleKeys) ||
+      !appMatrixRuntimeExactObject(sample.page, pageKeys) ||
+      !appMatrixRuntimeExactObject(sample.reader, readerKeys) ||
+      sample.pageNumber !== expectedPage ||
+      typeof sample.visible !== "boolean" ||
+      range === null || !range.mountedPages.includes(expectedPage) ||
+      !pageKeys.every((key) => Number.isFinite(sample.page[key])) ||
+      !readerKeys.every((key) => Number.isFinite(sample.reader[key]))
+    ) {
+      return null;
+    }
+    return {
+      page: { ...sample.page },
+      pageNumber: expectedPage,
+      range,
+      reader: { ...sample.reader },
+      scrollBehaviorClass: ["auto", "smooth"].includes(
+          sample.cssScrollBehavior,
+        )
+        ? sample.cssScrollBehavior
+        : sample.cssScrollBehavior == null ? "missing" : "other",
+      visible: sample.visible,
+    };
+  });
+  if (samples.includes(null)) return null;
+  const recomputed = summarizePdfPageCenteringStability(
+    raw.samples,
+    expectedPage,
+  );
+  if (
+    typeof raw.summary.centered !== "boolean" ||
+    typeof raw.summary.ready !== "boolean" ||
+    !Number.isInteger(raw.summary.stableSampleCount) ||
+    raw.summary.stableSampleCount < 0 ||
+    raw.summary.centered !== recomputed.centered ||
+    raw.summary.ready !== recomputed.ready ||
+    raw.summary.stableSampleCount !== recomputed.stableSampleCount
+  ) {
+    return null;
+  }
+  return {
+    page: expectedPage,
+    samples,
+    summary: { ...recomputed },
+  };
+}
+
+function sanitizeAppMatrixPriorityMountPage(raw, expectedPage) {
+  const pageKeys = [
+    "canvas",
+    "distance",
+    "page",
+    "present",
+    "rect",
+    "visible",
+  ];
+  const canvasKeys = ["height", "present", "scale", "source", "width"];
+  if (
+    !appMatrixRuntimeExactObject(raw, pageKeys) ||
+    !appMatrixRuntimeExactObject(raw.canvas, canvasKeys) ||
+    raw.page !== expectedPage || typeof raw.present !== "boolean" ||
+    ![true, false, null].includes(raw.visible) ||
+    !(raw.distance === null || (
+      Number.isInteger(raw.distance) && raw.distance >= 0
+    )) ||
+    typeof raw.canvas.present !== "boolean" ||
+    !(raw.canvas.height === null || (
+      Number.isInteger(raw.canvas.height) && raw.canvas.height >= 0
+    )) ||
+    !(raw.canvas.width === null || (
+      Number.isInteger(raw.canvas.width) && raw.canvas.width >= 0
+    )) ||
+    !(raw.canvas.scale === null || (
+      Number.isFinite(raw.canvas.scale) && raw.canvas.scale > 0
+    )) ||
+    !(raw.canvas.source === null || typeof raw.canvas.source === "string")
+  ) {
+    return null;
+  }
+  const rect = raw.rect === null ? null : sanitizeAppMatrixRuntimeRectangle(
+    raw.rect,
+  );
+  if (
+    (raw.rect !== null && !appMatrixRuntimeExactObject(
+      raw.rect,
+      ["bottom", "left", "right", "top"],
+    )) ||
+    (raw.present && rect === null) || (!raw.present && raw.rect !== null) ||
+    (raw.visible === true && !raw.present) ||
+    (raw.canvas.present && !raw.present) ||
+    (raw.canvas.present && (
+      raw.canvas.height === null || raw.canvas.width === null
+    )) ||
+    (!raw.canvas.present && (
+      raw.canvas.height !== null || raw.canvas.width !== null ||
+      raw.canvas.scale !== null || raw.canvas.source !== null
+    ))
+  ) {
+    return null;
+  }
+  return {
+    canvas: {
+      height: raw.canvas.height,
+      present: raw.canvas.present,
+      scale: raw.canvas.scale,
+      sourceClass: appMatrixRuntimeRenderSourceClass(raw.canvas.source),
+      width: raw.canvas.width,
+    },
+    distance: raw.distance,
+    page: expectedPage,
+    present: raw.present,
+    rect,
+    visible: raw.visible,
+  };
+}
+
+export function sanitizeAppMatrixRuntimePriorityMountDiagnostic(raw, row) {
+  try {
+    const rawKeys = [
+      "atFailureEventCount",
+      "centeringProof",
+      "checkpoint",
+      "failureCategory",
+      "importEventId",
+      "ledgerItems",
+      "mountedPages",
+      "pages",
+      "priorityBoundaryWorkerEventId",
+      "range",
+      "reader",
+      "targetEventCount",
+      "truncated",
+      "visiblePages",
+    ];
+    const ledgerKeys = [
+      "direction",
+      "distance",
+      "documentKey",
+      "enabled",
+      "eventId",
+      "height",
+      "jobId",
+      "pageNumber",
+      "revision",
+      "scale",
+      "type",
+      "visible",
+      "width",
+      "workerInstanceId",
+    ];
+    if (
+      !appMatrixRuntimeExactObject(raw, rawKeys) ||
+      !APP_MATRIX_PRIORITY_MOUNT_CHECKPOINTS.has(raw.checkpoint) ||
+      !APP_MATRIX_PRIORITY_MOUNT_FAILURE_CATEGORIES.has(raw.failureCategory)
+    ) {
+      return { bound: false, value: null };
+    }
+    const targetPage = row?.priorityTarget;
+    const intermediatePage = targetPage - 1;
+    const identity = row?.modelIdentity;
+    const identityBound =
+      Number.isSafeInteger(identity?.importEventId) &&
+      identity.importEventId > 0 &&
+      Number.isSafeInteger(identity?.workerInstanceId) &&
+      identity.workerInstanceId > 0 &&
+      Number.isSafeInteger(identity?.importJobId) && identity.importJobId > 0 &&
+      typeof identity?.documentKey === "string" && identity.documentKey.length > 0 &&
+      typeof identity?.revision === "string" && identity.revision.length > 0 &&
+      raw.importEventId === identity.importEventId;
+    const priorityMarker = Array.isArray(row?.completedSnapshot?.phaseMarkers)
+      ? row.completedSnapshot.phaseMarkers.findLast((marker) =>
+          marker?.stage === "priority-mount-started" &&
+          marker?.configurationId === row.configurationId
+        )
+      : null;
+    const boundaryBound = identityBound &&
+      Number.isSafeInteger(raw.priorityBoundaryWorkerEventId) &&
+      raw.priorityBoundaryWorkerEventId >= raw.importEventId &&
+      raw.priorityBoundaryWorkerEventId === priorityMarker?.workerEventId &&
+      Number.isSafeInteger(raw.atFailureEventCount) &&
+      raw.atFailureEventCount >= raw.priorityBoundaryWorkerEventId;
+    const centering = sanitizeAppMatrixPriorityMountCentering(
+      raw.centeringProof,
+      intermediatePage,
+    );
+    const centeringBound = Boolean(
+      centering && (raw.checkpoint === "intermediate-scroll"
+        ? centering.summary.ready === false
+        : centering.summary.ready === true)
+    );
+    const intermediate = Array.isArray(raw.pages) && raw.pages.length === 2
+      ? sanitizeAppMatrixPriorityMountPage(raw.pages[0], intermediatePage)
+      : null;
+    const target = Array.isArray(raw.pages) && raw.pages.length === 2
+      ? sanitizeAppMatrixPriorityMountPage(raw.pages[1], targetPage)
+      : null;
+    const readerKeys = ["rect", "scrollTop"];
+    const readerRect = appMatrixRuntimeExactObject(raw.reader, readerKeys) &&
+        appMatrixRuntimeExactObject(
+          raw.reader.rect,
+          ["bottom", "left", "right", "top"],
+        )
+      ? sanitizeAppMatrixRuntimeRectangle(raw.reader.rect)
+      : null;
+    const reader = readerRect && Number.isFinite(raw.reader.scrollTop) &&
+        raw.reader.scrollTop >= 0
+      ? { rect: readerRect, scrollTop: raw.reader.scrollTop }
+      : null;
+    const sortedPages = (values) => Array.isArray(values) && values.length <= 6 &&
+      values.every((value, index) =>
+        Number.isInteger(value) && value >= 1 && value <= 6 &&
+        (index === 0 || value > values[index - 1])
+      );
+    const mountedPages = sortedPages(raw.mountedPages)
+      ? [...raw.mountedPages]
+      : null;
+    const visiblePages = sortedPages(raw.visiblePages)
+      ? [...raw.visiblePages]
+      : null;
+    const range = mountedPages
+      ? sanitizeAppMatrixRuntimeRange(raw.range, mountedPages)
+      : null;
+    const pageStateBound = Boolean(
+      intermediate && target && reader && range && visiblePages &&
+      visiblePages.every((page) => mountedPages.includes(page)) &&
+      mountedPages.includes(intermediatePage) === intermediate.present &&
+      mountedPages.includes(targetPage) === target.present &&
+      visiblePages.includes(intermediatePage) === (intermediate.visible === true) &&
+      visiblePages.includes(targetPage) === (target.visible === true)
+    );
+    const rawLedger = Array.isArray(raw.ledgerItems) ? raw.ledgerItems : null;
+    const ledgerCountBound = rawLedger !== null &&
+      Number.isSafeInteger(raw.targetEventCount) && raw.targetEventCount >= 0 &&
+      raw.targetEventCount === rawLedger.length &&
+      rawLedger.length <= APP_MATRIX_PRIORITY_MOUNT_LEDGER_LIMIT &&
+      raw.truncated === false;
+    let ledgerBound = ledgerCountBound && boundaryBound;
+    const items = [];
+    for (let index = 0; ledgerBound && index < rawLedger.length; index += 1) {
+      const event = rawLedger[index];
+      const optionalNumber = (
+        value,
+        { integer = false, minimum = -Infinity } = {},
+      ) => value === null || (
+        (integer ? Number.isInteger(value) : Number.isFinite(value)) &&
+        value >= minimum
+      );
+      const identityShapeBound =
+        event?.documentKey === null &&
+        typeof event?.revision === "string" && event.revision.length > 0 &&
+        Number.isSafeInteger(event?.jobId) && event.jobId > 0 &&
+        Number.isSafeInteger(event?.workerInstanceId) &&
+        event.workerInstanceId > 0;
+      const renderScaleBound = Number.isFinite(event?.scale) &&
+        (event.scale > 0 || (event.enabled === false && event.scale === 0));
+      const renderShapeBound = event?.type === "render" &&
+        event.direction === "to-worker" &&
+        [event.enabled, event.visible].every((value) =>
+          value === null || typeof value === "boolean"
+        ) &&
+        optionalNumber(event.distance, { integer: true, minimum: 0 }) &&
+        renderScaleBound &&
+        event.width === null && event.height === null;
+      const bitmapShapeBound = event?.type === "bitmap" &&
+        event.direction === "from-worker" &&
+        event.enabled === null && event.visible === null &&
+        event.distance === null &&
+        Number.isFinite(event.scale) && event.scale > 0 &&
+        Number.isInteger(event.width) && event.width > 0 &&
+        Number.isInteger(event.height) && event.height > 0;
+      const valid = appMatrixRuntimeExactObject(event, ledgerKeys) &&
+        (renderShapeBound || bitmapShapeBound) &&
+        event.pageNumber === targetPage &&
+        Number.isSafeInteger(event.eventId) &&
+        event.eventId > raw.importEventId &&
+        event.eventId <= raw.atFailureEventCount &&
+        (index === 0 || event.eventId > rawLedger[index - 1].eventId) &&
+        identityShapeBound;
+      if (!valid) {
+        ledgerBound = false;
+        break;
+      }
+      items.push({
+        afterPriorityBoundary:
+          event.eventId > raw.priorityBoundaryWorkerEventId,
+        direction: event.direction,
+        distance: event.distance,
+        enabled: event.enabled,
+        height: event.height,
+        identityHash: cdpDiagnosticIdentity(
+          event.workerInstanceId,
+          event.jobId,
+          event.revision,
+          event.eventId,
+        ),
+        jobMatch: event.jobId === identity.importJobId,
+        localOrder: index + 1,
+        page: event.pageNumber,
+        relativeOrder: event.eventId - raw.importEventId,
+        revisionMatch: event.revision === identity.revision,
+        scale: event.scale,
+        type: event.type,
+        visible: event.visible,
+        width: event.width,
+        workerMatch: event.workerInstanceId === identity.workerInstanceId,
+      });
+    }
+    if (!ledgerBound || items.length !== rawLedger?.length) {
+      return { bound: false, value: null };
+    }
+    const requestItems = items.filter((item) => item.type === "render");
+    const strictRequest = requestItems.find((item) =>
+      item.afterPriorityBoundary && item.enabled === true &&
+      item.visible === false && item.distance === 1 && item.workerMatch &&
+      item.jobMatch && item.revisionMatch
+    ) ?? null;
+    const request = strictRequest ??
+      requestItems.find((item) => item.afterPriorityBoundary) ??
+      requestItems[0] ?? null;
+    const bitmapItems = items.filter((item) => item.type === "bitmap");
+    const bitmapIdentityBound = (item) => Boolean(
+      item && item.workerMatch && item.jobMatch && item.revisionMatch
+    );
+    const identityBitmap = bitmapItems.find(bitmapIdentityBound) ?? null;
+    const causalBitmap = strictRequest
+      ? bitmapItems.find((item) =>
+          item.localOrder > strictRequest.localOrder &&
+          bitmapIdentityBound(item)
+        ) ?? null
+      : null;
+    const laterBitmap = request
+      ? bitmapItems.find((item) => item.localOrder > request.localOrder) ?? null
+      : null;
+    const predicates = {
+      bitmapAfterRequest: laterBitmap !== null,
+      bitmapAfterStrictRequest: false,
+      bitmapIdentityBound: identityBitmap !== null,
+      bitmapPresent: bitmapItems.length > 0,
+      requestAfterBoundary: request?.afterPriorityBoundary === true,
+      requestDistanceOne: request?.distance === 1,
+      requestEnabled: request?.enabled === true,
+      requestIdentityBound: Boolean(
+        request && request.workerMatch && request.jobMatch &&
+        request.revisionMatch
+      ),
+      requestNonvisible: request?.visible === false,
+      requestPresent: request !== null,
+      strictRequestFound: strictRequest !== null,
+    };
+    predicates.bitmapAfterStrictRequest = Boolean(
+      strictRequest && causalBitmap
+    );
+    const bound = Boolean(
+      boundaryBound && centeringBound && pageStateBound && ledgerBound
+    );
+    return {
+      bound,
+      value: bound ? {
+        centering,
+        checkpoint: raw.checkpoint,
+        eventCounts: {
+          atFailure: raw.atFailureEventCount,
+          importBoundary: raw.importEventId,
+          priorityBoundary: raw.priorityBoundaryWorkerEventId,
+          targetLedger: raw.targetEventCount,
+        },
+        failureCategory: raw.failureCategory,
+        intermediate,
+        ledger: {
+          items,
+          retainedCount: items.length,
+          totalCount: raw.targetEventCount,
+          truncated: false,
+        },
+        mountedPages,
+        predicates,
+        range: raw.range,
+        reader,
+        target,
+        visiblePages,
+      } : null,
+    };
+  } catch {
+    return { bound: false, value: null };
+  }
 }
 
 function sanitizeAppMatrixRuntimeTiming(row) {
@@ -6527,6 +7056,17 @@ export function buildAppMatrixRuntimeDiagnosticReport({
         row.currentStage.endsWith("-started")
       ? row.currentStage.slice(0, -"-started".length)
       : null;
+    const priorityMountFailure = failed &&
+      row?.currentStage === "priority-mount-started";
+    const priorityMountResult = priorityMountFailure
+      ? sanitizeAppMatrixRuntimePriorityMountDiagnostic(
+          row?.priorityMountDiagnostic,
+          row,
+        )
+      : {
+          bound: row?.priorityMountDiagnostic == null,
+          value: null,
+        };
     const failedAtNetworkStage = failed &&
       row?.currentStage === "network-fixed-point-started";
     const networkFailureResult = sanitizeAppMatrixRuntimeNetworkFailure(
@@ -6610,6 +7150,7 @@ export function buildAppMatrixRuntimeDiagnosticReport({
       integrityReasonsBound && rowIdentityBound &&
       sourceObservationBound && statusBound &&
       screenshotBound &&
+      priorityMountResult.bound &&
       (scenarioExpected ? timing?.integrity === true : timing === null) &&
       (priorityExpected ? priorityProbe !== null : priorityProbe === null) &&
       (networkExpected
@@ -6629,6 +7170,7 @@ export function buildAppMatrixRuntimeDiagnosticReport({
       integrityReasons,
       networkFailure,
       networkFixedPoint,
+      priorityMountDiagnostic: priorityMountResult.value,
       priorityProbe,
       priorityTarget: appMatrixRuntimeInteger(row?.priorityTarget, 1),
       release,
@@ -6756,7 +7298,7 @@ export function buildAppMatrixRuntimeDiagnosticReport({
       rowOrderBound && phaseSequenceBound && runnerFailureBound &&
       !teardownFailed && !runnerFailure,
     diagnostic: true,
-    diagnosticSchemaVersion: 6,
+    diagnosticSchemaVersion: 7,
     execution: {
       attemptedConfigurationCount: publicRows.length,
       completedConfigurationCount,
@@ -7903,7 +8445,11 @@ const INSTRUMENTATION_SOURCE = String.raw`
           jobId: Number(message?.jobId) || null,
           pageNumber: Number(message?.pageNumber) || null,
           revision,
-          scale: Number(message?.scale) || null,
+          scale:
+            message?.scale !== null && message?.scale !== undefined &&
+              Number.isFinite(Number(message.scale))
+              ? Number(message.scale)
+              : null,
           type: message?.type || null,
           visible: message?.visible,
           workerInstanceId: this.__issue68WorkerInstanceId
@@ -9355,14 +9901,14 @@ async function runAppMatrixRuntimeStage(
   }
   runtimeDiagnostic.currentStage = started;
   runtimeDiagnostic.stageHistory.push(started);
-  if (markPage) {
-    await markAppMatrixRuntimePagePhase(
+  const startedMarker = markPage
+    ? await markAppMatrixRuntimePagePhase(
       cdp,
       runtimeDiagnostic.configurationId,
       started,
-    );
-  }
-  const result = await operation();
+    )
+    : null;
+  const result = await operation(startedMarker);
   const completed = `${step}-completed`;
   const expectedCompleted = APP_MATRIX_RUNTIME_DIAGNOSTIC_STAGES[
     runtimeDiagnostic.stageHistory.length
@@ -10855,7 +11401,13 @@ async function mountPdfPageByTraversal(cdp, pageNumber) {
 }
 
 async function scrollPageIntoView(cdp, pageNumber) {
-  await waitForExpression(
+  const proof = {
+    pageNumber,
+    samples: [],
+    summary: { centered: false, ready: false, stableSampleCount: 0 },
+  };
+  try {
+    await waitForExpression(
     cdp,
     browserExpression(`
       return globalThis.__lineLightIssue68.workerEvents.some((event) =>
@@ -10866,19 +11418,17 @@ async function scrollPageIntoView(cdp, pageNumber) {
     `PDF page ${pageNumber} worker model`,
     SCENARIO_TIMEOUT_MS,
   );
-  await mountPdfPageByTraversal(cdp, pageNumber);
-  await waitForPageShell(cdp, pageNumber);
-  await evaluate(
+    await mountPdfPageByTraversal(cdp, pageNumber);
+    await waitForPageShell(cdp, pageNumber);
+    await evaluate(
     cdp,
     `document.querySelector('#pdf-page-${pageNumber}')?.scrollIntoView({
       behavior: 'instant', block: 'center'
     }); true`,
   );
-  const startedAt = Date.now();
-  const samples = [];
-  let lastSummary = null;
-  while (Date.now() - startedAt < SCENARIO_TIMEOUT_MS) {
-    const sample = await evaluate(
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < SCENARIO_TIMEOUT_MS) {
+      const sample = await evaluate(
       cdp,
       browserExpression(`
         return new Promise((resolve) => requestAnimationFrame(() => {
@@ -10917,15 +11467,151 @@ async function scrollPageIntoView(cdp, pageNumber) {
         }));
       `),
     );
-    samples.push(sample);
-    if (samples.length > PDF_PAGE_CENTER_STABLE_SAMPLE_COUNT) samples.shift();
-    lastSummary = summarizePdfPageCenteringStability(samples, pageNumber);
-    if (lastSummary.ready) return;
+      proof.samples.push(sample);
+      if (proof.samples.length > PDF_PAGE_CENTER_STABLE_SAMPLE_COUNT) {
+        proof.samples.shift();
+      }
+      proof.summary = summarizePdfPageCenteringStability(
+        proof.samples,
+        pageNumber,
+      );
+      if (proof.summary.ready) return structuredClone(proof);
+    }
+    throw new Error(
+      `Timed out waiting for PDF page ${pageNumber} to remain centered: ` +
+        JSON.stringify({
+          sample: proof.samples.at(-1) ?? null,
+          summary: proof.summary,
+        }),
+    );
+  } catch (error) {
+    if (error && typeof error === "object") {
+      error.pdfPageCenteringProof = structuredClone(proof);
+    }
+    throw error;
   }
-  throw new Error(
-    `Timed out waiting for PDF page ${pageNumber} to remain centered: ` +
-      JSON.stringify({ sample: samples.at(-1) ?? null, summary: lastSummary }),
+}
+
+function appMatrixPriorityMountFailureCategory(error) {
+  return error instanceof Error && /timed out|timeout/iu.test(error.message)
+    ? "timeout"
+    : "unexpected";
+}
+
+async function captureAppMatrixPriorityMountFailure(
+  cdp,
+  {
+    centeringProof,
+    checkpoint,
+    failureCategory,
+    importEventId,
+    priorityBoundaryWorkerEventId,
+    priorityTarget,
+  },
+) {
+  const snapshot = await evaluate(
+    cdp,
+    browserExpression(`
+      const state = globalThis.__lineLightIssue68;
+      const workerEvents = Array.isArray(state?.workerEvents)
+        ? state.workerEvents
+        : [];
+      const reader = document.querySelector('.reader-scroll');
+      const list = document.querySelector('.pdf-pages');
+      const rectangle = (element) => {
+        const rect = element?.getBoundingClientRect();
+        return rect ? {
+          bottom: rect.bottom,
+          left: rect.left,
+          right: rect.right,
+          top: rect.top
+        } : null;
+      };
+      const readPage = (page) => {
+        const block = document.querySelector('#pdf-page-' + page);
+        const canvas = block?.querySelector('canvas');
+        const distance = Number(block?.dataset.pdfPageDistance);
+        const scale = Number(canvas?.dataset.pdfRasterScale);
+        return {
+          canvas: {
+            height: Number.isInteger(canvas?.height) ? canvas.height : null,
+            present: Boolean(canvas),
+            scale: Number.isFinite(scale) && scale > 0 ? scale : null,
+            source: canvas?.dataset.pdfRenderSource || null,
+            width: Number.isInteger(canvas?.width) ? canvas.width : null
+          },
+          distance: Number.isFinite(distance) ? distance : null,
+          page,
+          present: Boolean(block),
+          rect: rectangle(block),
+          visible: block ? block.dataset.pdfPageVisible === 'true' : null
+        };
+      };
+      const targetEvents = workerEvents.filter((event) =>
+        Number.isInteger(event?.eventId) &&
+        event.eventId > ${importEventId} &&
+        event.pageNumber === ${priorityTarget} &&
+        ['render', 'bitmap'].includes(event.type)
+      );
+      const finiteOrNull = (value) => Number.isFinite(value) ? value : null;
+      const booleanOrNull = (value) =>
+        typeof value === 'boolean' ? value : null;
+      const ledgerItems = targetEvents.slice(0, 16).map((event) => ({
+        direction: event.direction ?? null,
+        distance: finiteOrNull(event.distance),
+        documentKey: event.documentKey ?? null,
+        enabled: booleanOrNull(event.enabled),
+        eventId: event.eventId,
+        height: finiteOrNull(event.height),
+        jobId: event.jobId ?? null,
+        pageNumber: event.pageNumber ?? null,
+        revision: event.revision ?? null,
+        scale: finiteOrNull(event.scale),
+        type: event.type ?? null,
+        visible: booleanOrNull(event.visible),
+        width: finiteOrNull(event.width),
+        workerInstanceId: event.workerInstanceId ?? null
+      }));
+      const blocks = Array.from(document.querySelectorAll('.pdf-page-block'));
+      const mountedPages = blocks.map((block) =>
+        Number(block.dataset.pdfPageIndex) + 1
+      ).filter(Number.isInteger).sort((left, right) => left - right);
+      const visiblePages = blocks.filter((block) =>
+        block.dataset.pdfPageVisible === 'true'
+      ).map((block) => Number(block.dataset.pdfPageIndex) + 1)
+        .filter(Number.isInteger).sort((left, right) => left - right);
+      return {
+        atFailureEventCount: workerEvents.length,
+        ledgerItems,
+        mountedPages,
+        pages: [readPage(${Math.max(1, priorityTarget - 1)}), readPage(${priorityTarget})],
+        range: list?.dataset.pdfRange ?? null,
+        reader: {
+          rect: rectangle(reader),
+          scrollTop: Number.isFinite(reader?.scrollTop) ? reader.scrollTop : null
+        },
+        targetEventCount: targetEvents.length,
+        truncated: targetEvents.length > ledgerItems.length,
+        visiblePages
+      };
+    `),
   );
+  return {
+    atFailureEventCount: snapshot?.atFailureEventCount ?? null,
+    centeringProof: centeringProof ?? null,
+    checkpoint,
+    failureCategory,
+    importEventId,
+    ledgerItems: snapshot?.ledgerItems ?? null,
+    mountedPages: snapshot?.mountedPages ?? null,
+    pages: snapshot?.pages ?? null,
+    priorityBoundaryWorkerEventId,
+    range: snapshot?.range ?? null,
+    reader: snapshot?.reader ?? null,
+    targetEventCount: snapshot?.targetEventCount ?? null,
+    truncated: snapshot?.truncated ?? null,
+    visiblePages: snapshot?.visiblePages ?? null,
+  };
 }
 
 async function waitForSharpCanvas(
@@ -11577,17 +12263,26 @@ async function collectMatrixRun(
     "model-completion",
     async () => {
       const completion = await waitForPdfModelCompletion(cdp, 6);
-      if (runtimeDiagnostic) {
-        importEvent = await evaluate(
-          cdp,
-          browserExpression(`
-            return globalThis.__lineLightIssue68.workerEvents.findLast((event) =>
-              event.direction === 'to-worker' && event.type === 'import' &&
-              event.jobId === ${completion.importJobId} &&
-              event.documentKey === ${JSON.stringify(completion.documentKey)} &&
-              event.revision === ${JSON.stringify(completion.revision)}
-            ) ?? null;
-          `),
+      importEvent = await evaluate(
+        cdp,
+        browserExpression(`
+          return globalThis.__lineLightIssue68.workerEvents.findLast((event) =>
+            event.direction === 'to-worker' && event.type === 'import' &&
+            event.at === ${JSON.stringify(completion.importAt)} &&
+            event.jobId === ${completion.importJobId} &&
+            event.documentKey === ${JSON.stringify(completion.documentKey)} &&
+            event.revision === ${JSON.stringify(completion.revision)}
+          ) ?? null;
+        `),
+      );
+      if (
+        !Number.isSafeInteger(importEvent?.eventId) ||
+        importEvent.eventId <= 0 ||
+        !Number.isSafeInteger(importEvent?.workerInstanceId) ||
+        importEvent.workerInstanceId <= 0
+      ) {
+        throw new Error(
+          "The completed PDF model is not bound to its exact import worker.",
         );
       }
       return completion;
@@ -11597,6 +12292,7 @@ async function collectMatrixRun(
     runtimeDiagnostic.modelIdentity = importEvent
       ? {
           documentKey: importEvent.documentKey,
+          importEventId: importEvent.eventId,
           importJobId: importEvent.jobId,
           revision: importEvent.revision,
           workerInstanceId: importEvent.workerInstanceId,
@@ -11782,31 +12478,52 @@ async function collectMatrixRun(
     cdp,
     runtimeDiagnostic,
     "priority-mount",
-    async () => {
-      await scrollPageIntoView(cdp, intermediatePage);
-      await waitForPageShell(cdp, priorityTarget);
-      await waitForExpression(
+    async (priorityMarker) => {
+      const priorityBoundaryWorkerEventId = priorityMarker == null
+        ? await evaluate(
+            cdp,
+            "globalThis.__lineLightIssue68?.workerEvents?.length ?? null",
+          )
+        : priorityMarker.workerEventId;
+      let centeringProof = null;
+      let checkpoint = "intermediate-scroll";
+      try {
+        centeringProof = await scrollPageIntoView(cdp, intermediatePage);
+        checkpoint = "target-shell";
+        await waitForPageShell(cdp, priorityTarget);
+        checkpoint = "preview-settle";
+        await waitForExpression(
         cdp,
         browserExpression(`
-          const events = globalThis.__lineLightIssue68.workerEvents;
-          const previewRequest = events.find((event) =>
-            event.direction === 'to-worker' && event.type === 'render' &&
-            event.enabled === true && event.visible === false &&
-            event.distance === 1 && event.pageNumber === ${priorityTarget} &&
-            event.jobId === ${modelCompletion.importJobId} &&
-            event.revision === ${JSON.stringify(modelCompletion.revision)}
-          );
-          return previewRequest && events.find((event) =>
-            event.direction === 'from-worker' && event.type === 'bitmap' &&
-            event.pageNumber === ${priorityTarget} &&
-            event.jobId === ${modelCompletion.importJobId} &&
-            event.revision === ${JSON.stringify(modelCompletion.revision)} &&
-            event.eventId > previewRequest.eventId
-          ) || false;
+          const select = (${selectPdfPriorityPreviewSettlement.toString()});
+          return select({
+            importEvent: ${JSON.stringify(importEvent)},
+            priorityBoundaryWorkerEventId: ${JSON.stringify(
+              priorityBoundaryWorkerEventId,
+            )},
+            priorityTarget: ${priorityTarget},
+            workerEvents: globalThis.__lineLightIssue68.workerEvents
+          }) || false;
         `),
         `page ${priorityTarget} adjacent preview to settle before priority action`,
-        SCENARIO_TIMEOUT_MS,
-      );
+          SCENARIO_TIMEOUT_MS,
+        );
+      } catch (error) {
+        if (runtimeDiagnostic) {
+          runtimeDiagnostic.priorityMountDiagnostic =
+            await captureAppMatrixPriorityMountFailure(cdp, {
+              centeringProof:
+                centeringProof ?? error?.pdfPageCenteringProof ?? null,
+              checkpoint,
+              failureCategory:
+                appMatrixPriorityMountFailureCategory(error),
+              importEventId: importEvent?.eventId ?? null,
+              priorityBoundaryWorkerEventId,
+              priorityTarget,
+            }).catch(() => null);
+        }
+        throw error;
+      }
     },
   );
   let priorityScrollAction;
@@ -13553,6 +14270,7 @@ async function run(options) {
                 networkFailure: null,
                 networkFixedPoint: null,
                 priorityProbe: null,
+                priorityMountDiagnostic: null,
                 priorityTarget: null,
                 releaseSnapshot: null,
                 scenario: null,

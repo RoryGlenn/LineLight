@@ -71,7 +71,9 @@ import {
   selectPdfLongTasksForWindow,
   selectPdfFallbackAbortCandidate,
   selectPdfFallbackScenarioEvents,
+  selectPdfPriorityPreviewSettlement,
   sendToCdpSession,
+  sanitizeAppMatrixRuntimePriorityMountDiagnostic,
   settleCdpCommandDispatches,
   summarizePdfFallbackCancellationDiagnostic,
   summarizePdfModelCompletion,
@@ -8231,7 +8233,7 @@ test("requires an instant, centered, stable page before adjacent selection", asy
   );
   assert.match(
     source,
-    /scrollIntoView\(\{[\s\S]*behavior: 'instant', block: 'center'[\s\S]*requestAnimationFrame[\s\S]*summarizePdfPageCenteringStability\(samples, pageNumber\)/u,
+    /scrollIntoView\(\{[\s\S]*behavior: 'instant', block: 'center'[\s\S]*requestAnimationFrame[\s\S]*summarizePdfPageCenteringStability\([\s\S]*proof\.samples,[\s\S]*pageNumber/u,
   );
   assert.doesNotMatch(
     source,
@@ -9681,6 +9683,144 @@ function passingAppMatrixRuntimeCompletedInput(outputDirectory) {
   };
 }
 
+function passingAppMatrixRuntimePriorityMountFailureInput(
+  outputDirectory,
+  {
+    checkpoint = "preview-settle",
+    failureCategory = "timeout",
+  } = {},
+) {
+  const input = passingAppMatrixRuntimeCompletedInput(outputDirectory);
+  const row = input.rows[0];
+  row.stageHistory = APP_MATRIX_RUNTIME_DIAGNOSTIC_STAGES.slice(
+    0,
+    APP_MATRIX_RUNTIME_DIAGNOSTIC_STAGES.indexOf(
+      "priority-mount-started",
+    ) + 1,
+  );
+  row.currentStage = "priority-mount-started";
+  row.failureStage = "priority-mount-started";
+  row.status = "failed";
+  row.networkFixedPoint = null;
+  row.priorityProbe = null;
+  row.releaseSnapshot = null;
+  const phaseStages = row.stageHistory.filter((stage) =>
+    !stage.startsWith("navigate-") &&
+    APP_MATRIX_RUNTIME_DIAGNOSTIC_STAGES.indexOf(stage) <=
+      APP_MATRIX_RUNTIME_DIAGNOSTIC_STAGES.indexOf("scenario-finish-started")
+  );
+  row.completedSnapshot.phaseMarkers = phaseStages.map((stage, index) => ({
+    activityId: index + 1,
+    at: 50 + index * 10,
+    configurationId: row.configurationId,
+    drawInvocationId: index,
+    sequence: index + 1,
+    stage,
+    workerEventId: index,
+  }));
+  const priorityBoundaryWorkerEventId = row.completedSnapshot.phaseMarkers
+    .find((marker) => marker.stage === "priority-mount-started").workerEventId;
+  const importEventId = 5;
+  row.modelIdentity.importEventId = importEventId;
+  const centeringReady = checkpoint !== "intermediate-scroll";
+  const centerSample = {
+    cssScrollBehavior: "smooth",
+    page: {
+      bottom: 800,
+      height: 700,
+      left: 100,
+      right: 900,
+      top: 100,
+      width: 800,
+    },
+    pageNumber: 3,
+    range: "0:5",
+    reader: { bottom: 900, scrollTop: 1_000, top: 0 },
+    visible: true,
+  };
+  const centeringSamples = centeringReady
+    ? [structuredClone(centerSample), structuredClone(centerSample)]
+    : [];
+  const ledgerEvent = ({ eventId, type }) => ({
+    direction: type === "render" ? "to-worker" : "from-worker",
+    distance: type === "render" ? 1 : null,
+    documentKey: null,
+    enabled: type === "render" ? true : null,
+    eventId,
+    height: type === "bitmap" ? 990 : null,
+    jobId: row.modelIdentity.importJobId,
+    pageNumber: row.priorityTarget,
+    revision: row.modelIdentity.revision,
+    scale: 1.25,
+    type,
+    visible: type === "render" ? false : null,
+    width: type === "bitmap" ? 765 : null,
+    workerInstanceId: row.modelIdentity.workerInstanceId,
+  });
+  row.priorityMountDiagnostic = {
+    atFailureEventCount: priorityBoundaryWorkerEventId + 2,
+    centeringProof: {
+      pageNumber: 3,
+      samples: centeringSamples,
+      summary: summarizePdfPageCenteringStability(centeringSamples, 3),
+    },
+    checkpoint,
+    failureCategory,
+    importEventId,
+    ledgerItems: [
+      ledgerEvent({
+        eventId: priorityBoundaryWorkerEventId + 1,
+        type: "render",
+      }),
+      ledgerEvent({
+        eventId: priorityBoundaryWorkerEventId + 2,
+        type: "bitmap",
+      }),
+    ],
+    mountedPages: [1, 2, 3, 4, 5, 6],
+    pages: [{
+      canvas: {
+        height: 700,
+        present: true,
+        scale: 1.25,
+        source: "worker-bitmap",
+        width: 800,
+      },
+      distance: 0,
+      page: 3,
+      present: true,
+      rect: { bottom: 800, left: 100, right: 900, top: 100 },
+      visible: true,
+    }, {
+      canvas: {
+        height: 0,
+        present: true,
+        scale: null,
+        source: null,
+        width: 0,
+      },
+      distance: 1,
+      page: 4,
+      present: true,
+      rect: { bottom: 1_600, left: 100, right: 900, top: 900 },
+      visible: false,
+    }],
+    priorityBoundaryWorkerEventId,
+    range: "0:5",
+    reader: {
+      rect: { bottom: 900, left: 0, right: 1_100, top: 0 },
+      scrollTop: 1_000,
+    },
+    targetEventCount: 2,
+    truncated: false,
+    visiblePages: [3],
+  };
+  input.rows = [row];
+  input.runnerFailure = new Error("private priority mount timeout");
+  input.runnerFailureStage = `matrix:${row.configurationId}`;
+  return input;
+}
+
 function passingAppMatrixRuntimeReleaseEvents(row) {
   return [{
     activityId: 102,
@@ -9791,7 +9931,7 @@ test("builds a fail-closed privacy-safe app-matrix runtime diagnostic", () => {
   );
   const report = buildAppMatrixRuntimeDiagnosticReport(input);
   assert.equal(report.diagnostic, true);
-  assert.equal(report.diagnosticSchemaVersion, 6);
+  assert.equal(report.diagnosticSchemaVersion, 7);
   assert.equal(report.mode, "app-matrix-runtime");
   assert.equal(report.completed, false);
   assert.equal(report.execution.orderExact, true);
@@ -9989,6 +10129,547 @@ test("reports every app-matrix row and network integrity predicate", () => {
   const recomputed = buildAppMatrixRuntimeDiagnosticReport(rawSpoof);
   assert.deepEqual(recomputed.rows[0].integrityReasons, passing.rows[0].integrityReasons);
   assert.doesNotMatch(JSON.stringify(recomputed), /privateDocument|private\.pdf/u);
+});
+
+test("retains a bounded priority-mount failure snapshot in schema 7", async () => {
+  const outputDirectory = path.join(
+    os.tmpdir(),
+    "issue-68-priority-mount-diagnostic",
+  );
+  for (const checkpoint of [
+    "intermediate-scroll",
+    "target-shell",
+    "preview-settle",
+  ]) {
+    for (const failureCategory of ["timeout", "unexpected"]) {
+      const input = passingAppMatrixRuntimePriorityMountFailureInput(
+        outputDirectory,
+        { checkpoint, failureCategory },
+      );
+      const report = buildAppMatrixRuntimeDiagnosticReport(input);
+      const diagnostic = report.rows[0].priorityMountDiagnostic;
+      assert.equal(report.diagnosticSchemaVersion, 7);
+      assert.equal(report.rows[0].integrity, true, checkpoint);
+      assert.equal(diagnostic.checkpoint, checkpoint);
+      assert.equal(diagnostic.failureCategory, failureCategory);
+      assert.equal(
+        diagnostic.centering.summary.ready,
+        checkpoint !== "intermediate-scroll",
+      );
+      assert.deepEqual(diagnostic.predicates, {
+        bitmapAfterRequest: true,
+        bitmapAfterStrictRequest: true,
+        bitmapIdentityBound: true,
+        bitmapPresent: true,
+        requestAfterBoundary: true,
+        requestDistanceOne: true,
+        requestEnabled: true,
+        requestIdentityBound: true,
+        requestNonvisible: true,
+        requestPresent: true,
+        strictRequestFound: true,
+      });
+      assert.equal(diagnostic.ledger.items.length, 2);
+      if (checkpoint !== "intermediate-scroll") {
+        assert.deepEqual(diagnostic.centering.samples[0]?.range, {
+          mountedPages: [1, 2, 3, 4, 5, 6],
+          mountedRanges: [{ end: 5, start: 0 }],
+        });
+      }
+      assert.equal("documentMatch" in diagnostic.ledger.items[0], false);
+      assert.deepEqual(
+        diagnostic.ledger.items.map((item) => item.relativeOrder),
+        diagnostic.ledger.items.map((item) => item.relativeOrder)
+          .toSorted((left, right) => left - right),
+      );
+      assert.ok(diagnostic.ledger.items.every((item) =>
+        /^[a-f0-9]{64}$/u.test(item.identityHash)
+      ));
+      const serialized = JSON.stringify(report);
+      assert.doesNotMatch(
+        serialized,
+        /"eventId"|"importEventId"|"workerInstanceId"|"jobId"|"documentKey"|"revision"|private priority mount/u,
+      );
+    }
+  }
+
+  const completed = buildAppMatrixRuntimeDiagnosticReport(
+    passingAppMatrixRuntimeCompletedInput(outputDirectory),
+  );
+  assert.ok(completed.rows.every((row) =>
+    row.priorityMountDiagnostic === null
+  ));
+  const otherFailure = passingAppMatrixRuntimeFailureInput(outputDirectory);
+  assert.equal(
+    buildAppMatrixRuntimeDiagnosticReport(otherFailure)
+      .rows[0].priorityMountDiagnostic,
+    null,
+  );
+
+  const source = await readFile(
+    "scripts/run-pdf-sharpness-browser-regression.mjs",
+    "utf8",
+  );
+  assert.match(
+    source,
+    /"priority-mount",[\s\S]*async \(priorityMarker\)[\s\S]*checkpoint = "intermediate-scroll"[\s\S]*checkpoint = "target-shell"[\s\S]*checkpoint = "preview-settle"[\s\S]*captureAppMatrixPriorityMountFailure/u,
+  );
+  assert.match(
+    source,
+    /targetEvents\.slice\(0, 16\)[\s\S]*truncated: targetEvents\.length > ledgerItems\.length/u,
+  );
+});
+
+test("binds the live priority preview pair after its exact stage boundary", async () => {
+  const importEvent = {
+    direction: "to-worker",
+    documentKey: "public-document:revision-1",
+    eventId: 5,
+    jobId: 1,
+    revision: "revision-1",
+    type: "import",
+    workerInstanceId: 1,
+  };
+  const render = {
+    direction: "to-worker",
+    distance: 1,
+    documentKey: null,
+    enabled: true,
+    eventId: 21,
+    height: null,
+    jobId: 1,
+    pageNumber: 4,
+    revision: "revision-1",
+    scale: 1.25,
+    type: "render",
+    visible: false,
+    width: null,
+    workerInstanceId: 1,
+  };
+  const bitmap = {
+    direction: "from-worker",
+    distance: null,
+    documentKey: null,
+    enabled: null,
+    eventId: 22,
+    height: 990,
+    jobId: 1,
+    pageNumber: 4,
+    revision: "revision-1",
+    scale: 1.25,
+    type: "bitmap",
+    visible: null,
+    width: 765,
+    workerInstanceId: 1,
+  };
+  const select = (workerEvents) => selectPdfPriorityPreviewSettlement({
+    importEvent,
+    priorityBoundaryWorkerEventId: 20,
+    priorityTarget: 4,
+    workerEvents,
+  });
+  assert.deepEqual(select([importEvent, render, bitmap]), {
+    bitmapEventId: 22,
+    requestEventId: 21,
+  });
+  const mutations = [
+    ["pre-boundary pair", (request, response) => {
+      request.eventId = 19;
+      response.eventId = 20;
+    }],
+    ["pre-boundary request", (request) => { request.eventId = 20; }],
+    ["wrong request worker", (request) => {
+      request.workerInstanceId = 2;
+    }],
+    ["colliding wrong-worker pair", (request, response) => {
+      request.workerInstanceId = 2;
+      response.workerInstanceId = 2;
+    }],
+    ["wrong bitmap worker", (_request, response) => {
+      response.workerInstanceId = 2;
+    }],
+    ["wrong bitmap job", (_request, response) => { response.jobId = 2; }],
+    ["wrong bitmap revision", (_request, response) => {
+      response.revision = "wrong-revision";
+    }],
+  ];
+  for (const [label, mutate] of mutations) {
+    const request = structuredClone(render);
+    const response = structuredClone(bitmap);
+    mutate(request, response);
+    assert.equal(select([importEvent, request, response]), null, label);
+  }
+
+  const source = await readFile(
+    "scripts/run-pdf-sharpness-browser-regression.mjs",
+    "utf8",
+  );
+  assert.match(
+    source,
+    /priorityBoundaryWorkerEventId = priorityMarker == null[\s\S]*workerEvents\?\.length[\s\S]*selectPdfPriorityPreviewSettlement\.toString\(\)[\s\S]*priorityBoundaryWorkerEventId/u,
+  );
+  assert.match(
+    source,
+    /message\?\.scale !== null[\s\S]*Number\.isFinite\(Number\(message\.scale\)\)[\s\S]*\? Number\(message\.scale\)[\s\S]*: null/u,
+  );
+});
+
+test("recomputes priority-mount predicates from one ordered ledger", () => {
+  const outputDirectory = path.join(
+    os.tmpdir(),
+    "issue-68-priority-mount-predicates",
+  );
+  const reportFor = (mutate) => {
+    const input = passingAppMatrixRuntimePriorityMountFailureInput(
+      outputDirectory,
+    );
+    mutate(input.rows[0].priorityMountDiagnostic, input.rows[0]);
+    return buildAppMatrixRuntimeDiagnosticReport(input).rows[0];
+  };
+  const semanticMutations = [
+    ["requestAfterBoundary", (raw) => {
+      raw.ledgerItems[0].eventId = raw.priorityBoundaryWorkerEventId - 2;
+      raw.ledgerItems[1].eventId = raw.priorityBoundaryWorkerEventId - 1;
+      raw.atFailureEventCount = raw.priorityBoundaryWorkerEventId;
+    }],
+    ["requestEnabled", (raw) => { raw.ledgerItems[0].enabled = null; }],
+    ["requestNonvisible", (raw) => { raw.ledgerItems[0].visible = true; }],
+    ["requestDistanceOne", (raw) => { raw.ledgerItems[0].distance = 2; }],
+    ["requestIdentityBound", (raw) => {
+      raw.ledgerItems[0].workerInstanceId += 1;
+    }],
+    ["requestIdentityBound", (raw) => {
+      raw.ledgerItems[0].jobId += 1;
+    }],
+    ["requestIdentityBound", (raw) => {
+      raw.ledgerItems[0].revision = "wrong-revision";
+    }],
+    ["bitmapPresent", (raw) => {
+      raw.ledgerItems.pop();
+      raw.targetEventCount = 1;
+      raw.atFailureEventCount = raw.ledgerItems[0].eventId;
+    }],
+    ["bitmapIdentityBound", (raw) => {
+      raw.ledgerItems[1].revision = "wrong-revision";
+    }],
+    ["bitmapAfterRequest", (raw) => {
+      const [request, bitmap] = raw.ledgerItems;
+      bitmap.eventId = raw.priorityBoundaryWorkerEventId + 1;
+      request.eventId = raw.priorityBoundaryWorkerEventId + 2;
+      raw.ledgerItems = [bitmap, request];
+    }],
+  ];
+  for (const [flag, mutate] of semanticMutations) {
+    const row = reportFor(mutate);
+    assert.equal(row.integrity, true, flag);
+    assert.equal(row.priorityMountDiagnostic.predicates[flag], false, flag);
+    if (flag.startsWith("request")) {
+      assert.equal(
+        row.priorityMountDiagnostic.predicates.strictRequestFound,
+        false,
+        flag,
+      );
+    }
+    if (flag.startsWith("bitmap")) {
+      assert.equal(
+        row.priorityMountDiagnostic.predicates.bitmapAfterStrictRequest,
+        false,
+        flag,
+      );
+    }
+  }
+
+  const wrongBitmapOnly = reportFor((raw) => {
+    raw.ledgerItems[1].workerInstanceId += 1;
+  });
+  assert.equal(wrongBitmapOnly.integrity, true);
+  assert.equal(
+    wrongBitmapOnly.priorityMountDiagnostic.predicates.bitmapAfterRequest,
+    true,
+  );
+  assert.equal(
+    wrongBitmapOnly.priorityMountDiagnostic.predicates
+      .bitmapAfterStrictRequest,
+    false,
+  );
+  const noBitmap = reportFor((raw) => {
+    raw.ledgerItems.pop();
+    raw.targetEventCount = 1;
+    raw.atFailureEventCount = raw.ledgerItems[0].eventId;
+  });
+  assert.equal(
+    noBitmap.priorityMountDiagnostic.predicates.bitmapAfterRequest,
+    false,
+  );
+  assert.equal(
+    noBitmap.priorityMountDiagnostic.predicates.bitmapAfterStrictRequest,
+    false,
+  );
+  const disabledCleanup = reportFor((raw) => {
+    const strictRequest = raw.ledgerItems[0];
+    const bitmap = raw.ledgerItems[1];
+    const cleanup = structuredClone(strictRequest);
+    cleanup.enabled = false;
+    cleanup.eventId = raw.priorityBoundaryWorkerEventId + 1;
+    cleanup.scale = 0;
+    strictRequest.eventId = raw.priorityBoundaryWorkerEventId + 2;
+    bitmap.eventId = raw.priorityBoundaryWorkerEventId + 3;
+    raw.ledgerItems = [cleanup, strictRequest, bitmap];
+    raw.atFailureEventCount = bitmap.eventId;
+    raw.targetEventCount = 3;
+  });
+  assert.equal(disabledCleanup.integrity, true);
+  assert.equal(
+    disabledCleanup.priorityMountDiagnostic.ledger.items[0].enabled,
+    false,
+  );
+  assert.equal(
+    disabledCleanup.priorityMountDiagnostic.ledger.items[0].scale,
+    0,
+  );
+  assert.equal(
+    disabledCleanup.priorityMountDiagnostic.predicates.strictRequestFound,
+    true,
+  );
+
+  const shellLag = reportFor((raw) => {
+    raw.mountedPages = [1, 2, 3, 5, 6];
+    raw.range = "0:2,4:5";
+    raw.pages[1] = {
+      canvas: {
+        height: null,
+        present: false,
+        scale: null,
+        source: null,
+        width: null,
+      },
+      distance: null,
+      page: 4,
+      present: false,
+      rect: null,
+      visible: null,
+    };
+  });
+  assert.equal(shellLag.integrity, true);
+  assert.equal(shellLag.priorityMountDiagnostic.target.present, false);
+  const distanceLag = reportFor((raw) => { raw.pages[1].distance = 2; });
+  assert.equal(distanceLag.integrity, true);
+  assert.equal(distanceLag.priorityMountDiagnostic.target.distance, 2);
+  const wrongThenCorrectBitmap = reportFor((raw) => {
+    const correctBitmap = raw.ledgerItems[1];
+    const wrongBitmap = structuredClone(correctBitmap);
+    wrongBitmap.eventId = raw.priorityBoundaryWorkerEventId + 2;
+    wrongBitmap.workerInstanceId += 1;
+    correctBitmap.eventId = raw.priorityBoundaryWorkerEventId + 3;
+    raw.ledgerItems = [raw.ledgerItems[0], wrongBitmap, correctBitmap];
+    raw.atFailureEventCount = correctBitmap.eventId;
+    raw.targetEventCount = 3;
+  });
+  assert.equal(wrongThenCorrectBitmap.integrity, true);
+  assert.equal(
+    wrongThenCorrectBitmap.priorityMountDiagnostic.predicates
+      .bitmapAfterStrictRequest,
+    true,
+  );
+  assert.equal(
+    wrongThenCorrectBitmap.priorityMountDiagnostic.predicates
+      .bitmapIdentityBound,
+    true,
+  );
+});
+
+test("fails closed on malformed priority-mount failure snapshots", () => {
+  const outputDirectory = path.join(
+    os.tmpdir(),
+    "issue-68-priority-mount-malformed",
+  );
+  const invalidMutations = [
+    ["boundary plus one", (raw) => {
+      raw.priorityBoundaryWorkerEventId += 1;
+    }],
+    ["boundary minus one", (raw) => {
+      raw.priorityBoundaryWorkerEventId -= 1;
+    }],
+    ["wrong page", (raw) => { raw.ledgerItems[0].pageNumber = 5; }],
+    ["render direction", (raw) => {
+      raw.ledgerItems[0].direction = "from-worker";
+    }],
+    ["bitmap direction", (raw) => {
+      raw.ledgerItems[1].direction = "to-worker";
+    }],
+    ["non-null request document", (raw) => {
+      raw.ledgerItems[0].documentKey = "private-document";
+    }],
+    ["non-null bitmap document", (raw) => {
+      raw.ledgerItems[1].documentKey = "private-document";
+    }],
+    ["negative ledger distance", (raw) => {
+      raw.ledgerItems[0].distance = -1;
+    }],
+    ["fractional ledger distance", (raw) => {
+      raw.ledgerItems[0].distance = 0.5;
+    }],
+    ["negative page distance", (raw) => { raw.pages[1].distance = -1; }],
+    ["fractional page distance", (raw) => {
+      raw.pages[1].distance = 0.5;
+    }],
+    ["missing render worker", (raw) => {
+      raw.ledgerItems[0].workerInstanceId = null;
+    }],
+    ["missing render job", (raw) => { raw.ledgerItems[0].jobId = null; }],
+    ["missing render revision", (raw) => {
+      raw.ledgerItems[0].revision = "";
+    }],
+    ["missing bitmap worker", (raw) => {
+      raw.ledgerItems[1].workerInstanceId = null;
+    }],
+    ["missing bitmap job", (raw) => { raw.ledgerItems[1].jobId = null; }],
+    ["missing bitmap revision", (raw) => {
+      raw.ledgerItems[1].revision = "";
+    }],
+    ["render scale zero", (raw) => { raw.ledgerItems[0].scale = 0; }],
+    ["enabled render scale missing", (raw) => {
+      raw.ledgerItems[0].scale = null;
+    }],
+    ["disabled render scale missing", (raw) => {
+      raw.ledgerItems[0].enabled = false;
+      raw.ledgerItems[0].scale = null;
+    }],
+    ["render width", (raw) => { raw.ledgerItems[0].width = 1; }],
+    ["render height", (raw) => { raw.ledgerItems[0].height = 1; }],
+    ["bitmap scale zero", (raw) => { raw.ledgerItems[1].scale = 0; }],
+    ["bitmap width zero", (raw) => { raw.ledgerItems[1].width = 0; }],
+    ["bitmap height zero", (raw) => { raw.ledgerItems[1].height = 0; }],
+    ["bitmap enabled", (raw) => { raw.ledgerItems[1].enabled = false; }],
+    ["bitmap visible", (raw) => { raw.ledgerItems[1].visible = false; }],
+    ["bitmap distance", (raw) => { raw.ledgerItems[1].distance = 0; }],
+    ["private centering range", (raw) => {
+      raw.centeringProof.samples[0].range = "/home/private.pdf";
+    }],
+    ["overlapping centering range", (raw) => {
+      raw.centeringProof.samples[0].range = "0:3,3:5";
+    }],
+    ["out-of-range centering range", (raw) => {
+      raw.centeringProof.samples[0].range = "0:6";
+    }],
+    ["noncanonical centering range", (raw) => {
+      raw.centeringProof.samples[0].range = "00:5";
+    }],
+    ["noncanonical top-level range", (raw) => {
+      raw.range = "00:5";
+    }],
+    ["ledger order", (raw) => { raw.ledgerItems.reverse(); }],
+    ["truncation", (raw) => {
+      raw.truncated = true;
+      raw.targetEventCount += 1;
+    }],
+    ["extra field", (raw) => { raw.extra = true; }],
+    ["missing field", (raw) => { delete raw.range; }],
+    ["nonarray ledger", (raw) => { raw.ledgerItems = {}; }],
+    ["nonarray pages", (raw) => { raw.pages = null; }],
+    ["private field", (raw) => { raw.privatePath = "/home/private.pdf"; }],
+  ];
+  for (const [label, mutate] of invalidMutations) {
+    const input = passingAppMatrixRuntimePriorityMountFailureInput(
+      outputDirectory,
+    );
+    mutate(input.rows[0].priorityMountDiagnostic);
+    const row = buildAppMatrixRuntimeDiagnosticReport(input).rows[0];
+    assert.equal(row.integrity, false, label);
+    assert.equal(row.priorityMountDiagnostic, null, label);
+    assert.doesNotMatch(JSON.stringify(row), /private\.pdf/u, label);
+  }
+
+  const excludedRange = "0:1,3:5";
+  const readyRangeExclusion =
+    passingAppMatrixRuntimePriorityMountFailureInput(outputDirectory);
+  const readyCentering = readyRangeExclusion.rows[0]
+    .priorityMountDiagnostic.centeringProof;
+  readyCentering.samples.forEach((sample) => {
+    sample.range = excludedRange;
+  });
+  readyCentering.summary = summarizePdfPageCenteringStability(
+    readyCentering.samples,
+    readyCentering.pageNumber,
+  );
+  const readyRangeRow = buildAppMatrixRuntimeDiagnosticReport(
+    readyRangeExclusion,
+  ).rows[0];
+  assert.equal(readyRangeRow.integrity, false);
+  assert.equal(readyRangeRow.priorityMountDiagnostic, null);
+  assert.doesNotMatch(JSON.stringify(readyRangeRow), /0:1,3:5/u);
+
+  const partialRangeExclusion =
+    passingAppMatrixRuntimePriorityMountFailureInput(
+      outputDirectory,
+      { checkpoint: "intermediate-scroll" },
+    );
+  const producerSample = structuredClone(
+    passingAppMatrixRuntimePriorityMountFailureInput(outputDirectory)
+      .rows[0].priorityMountDiagnostic.centeringProof.samples[0],
+  );
+  producerSample.range = excludedRange;
+  producerSample.visible = false;
+  const partialCentering = partialRangeExclusion.rows[0]
+    .priorityMountDiagnostic.centeringProof;
+  partialCentering.samples = [producerSample];
+  partialCentering.summary = summarizePdfPageCenteringStability(
+    partialCentering.samples,
+    partialCentering.pageNumber,
+  );
+  const partialRangeRow = buildAppMatrixRuntimeDiagnosticReport(
+    partialRangeExclusion,
+  ).rows[0];
+  assert.equal(partialRangeRow.integrity, false);
+  assert.equal(partialRangeRow.priorityMountDiagnostic, null);
+  assert.doesNotMatch(JSON.stringify(partialRangeRow), /0:1,3:5/u);
+
+  const successWithSnapshot = passingAppMatrixRuntimeCompletedInput(
+    outputDirectory,
+  );
+  successWithSnapshot.rows[0].priorityMountDiagnostic =
+    passingAppMatrixRuntimePriorityMountFailureInput(outputDirectory)
+      .rows[0].priorityMountDiagnostic;
+  const successRow = buildAppMatrixRuntimeDiagnosticReport(
+    successWithSnapshot,
+  ).rows[0];
+  assert.equal(successRow.priorityMountDiagnostic, null);
+  assert.equal(successRow.integrity, false);
+
+  const otherFailureWithSnapshot = passingAppMatrixRuntimeFailureInput(
+    outputDirectory,
+  );
+  otherFailureWithSnapshot.rows[0].priorityMountDiagnostic =
+    passingAppMatrixRuntimePriorityMountFailureInput(outputDirectory)
+      .rows[0].priorityMountDiagnostic;
+  const otherFailureRow = buildAppMatrixRuntimeDiagnosticReport(
+    otherFailureWithSnapshot,
+  ).rows[0];
+  assert.equal(otherFailureRow.priorityMountDiagnostic, null);
+  assert.equal(otherFailureRow.integrity, false);
+
+  const base = passingAppMatrixRuntimePriorityMountFailureInput(
+    outputDirectory,
+  ).rows[0];
+  const malformed = [null, 1, "diagnostic", [], [null], {}, {
+    ...base.priorityMountDiagnostic,
+    ledgerItems: [null],
+  }, {
+    ...base.priorityMountDiagnostic,
+    atFailureEventCount: 1n,
+  }];
+  const cyclic = structuredClone(base.priorityMountDiagnostic);
+  cyclic.reader = cyclic;
+  malformed.push(cyclic);
+  for (const value of malformed) {
+    assert.doesNotThrow(() =>
+      sanitizeAppMatrixRuntimePriorityMountDiagnostic(value, base)
+    );
+    assert.equal(
+      sanitizeAppMatrixRuntimePriorityMountDiagnostic(value, base).bound,
+      false,
+    );
+  }
 });
 
 test("binds all six app-matrix runtime rows and the exact sixth timeout", () => {

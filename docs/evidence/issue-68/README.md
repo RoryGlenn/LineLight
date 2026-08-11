@@ -123,7 +123,7 @@ scrolled with `behavior: "instant"`; the harness then requires two
 animation-frame samples in which it stays visible, centered within two pixels,
 and unchanged in reader `scrollTop`, full page rectangle, and virtual range.
 Thus inherited CSS smooth scrolling cannot bind a transient page-three view for
-the first four configurations. The schema-6 noncanonical report exposes only
+the first four configurations. The schema-7 noncanonical report exposes only
 boundary counts, derived deltas, restore counts/booleans, and exact boolean-only
 integrity reasons. Those reasons separately report every row configuration,
 sequence, session, adjacent-page, priority-target, and model
@@ -142,8 +142,27 @@ prior-row delivery while retaining a boundary-spanning frame. A failed network
 fixed-point stage retains the label-bound timeout diagnostic as fixed failure
 classes, derived gates/counts, and at most twelve ID-free stability samples;
 unexpected failures use a separate fixed category.
+If `priority-mount-started` fails, schema 7 takes one heavy browser snapshot
+after the failure instead of adding another poll. It records the fixed
+`intermediate-scroll`, `target-shell`, or `preview-settle` checkpoint and a
+`timeout` or `unexpected` class; binds the exact current import and phase-marker
+event-count boundaries; retains the final instant-centering proof, page 3/page
+4 shell, canvas, geometry, reader, mounted/visible pages, and virtual range;
+and keeps at most sixteen ordered target-page render/bitmap ledger entries.
+Exact recomputed booleans show whether the request was post-boundary, enabled,
+nonvisible, distance one, bound to the exact worker/job/revision, and followed
+by a later identity-bound bitmap. Target render/bitmap events retain the real
+producer's null document key, all distances are nonnegative integers, and
+centering range strings are parsed into bounded numeric pages/ranges before
+publication. The live wait uses the same stage boundary and exact import
+worker/job/revision; pre-boundary or colliding-worker pairs cannot settle it.
+The report separately identifies any bitmap after the selected request and an
+identity-bound bitmap after the strict request. The ledger publishes only local/relative order, finite
+measurements, opaque hashes, match booleans, and bounded counts. Truncation, malformed shape,
+or a forged boundary fails the partial row closed; successful and other-stage
+rows require a null priority snapshot.
 Raw errors, function names, document identities, URLs, profile paths, and
-arbitrary local output paths are not serialized. Its schema-6 noncanonical
+arbitrary local output paths are not serialized. Its schema-7 noncanonical
 report is `diagnostic: true`, has `completed` rather than `passed`, and cannot
 satisfy canonical acceptance; exact clean source/build/fixture/session bindings
 and app/CDP/process/profile/server teardown remain mandatory.
