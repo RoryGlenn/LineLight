@@ -6314,6 +6314,68 @@ function isAppMatrixRuntimeCdpHistoryContinuous(
     cumulativeCountsBound;
 }
 
+const APP_MATRIX_ROW_IDENTITY_REASON_KEYS = [
+  "adjacentPage",
+  "aggregate",
+  "configuration",
+  "modelDocument",
+  "modelJob",
+  "modelRevision",
+  "priorityTarget",
+  "sequence",
+  "session",
+].sort();
+const APP_MATRIX_NETWORK_HISTORY_REASON_KEYS = [
+  "aggregate",
+  "currentPresent",
+  "priorFinalContinuous",
+  "priorHealthy",
+  "priorLabel",
+  "priorRestoreContinuous",
+  "required",
+].sort();
+
+export function isAppMatrixRuntimeIntegrityReasonsValid(
+  value,
+  networkHistoryRequired = null,
+) {
+  const exactBooleanRecord = (record, keys) =>
+    record && typeof record === "object" && !Array.isArray(record) &&
+    Object.keys(record).sort().join("\0") === keys.join("\0") &&
+    keys.every((key) => typeof record[key] === "boolean");
+  if (
+    !value || typeof value !== "object" || Array.isArray(value) ||
+    Object.keys(value).sort().join("\0") !==
+      ["networkHistory", "rowIdentity"].join("\0") ||
+    !exactBooleanRecord(
+      value.rowIdentity,
+      APP_MATRIX_ROW_IDENTITY_REASON_KEYS,
+    ) ||
+    !exactBooleanRecord(
+      value.networkHistory,
+      APP_MATRIX_NETWORK_HISTORY_REASON_KEYS,
+    ) ||
+    (typeof networkHistoryRequired === "boolean" &&
+      value.networkHistory.required !== networkHistoryRequired)
+  ) {
+    return false;
+  }
+  const rowChecks = APP_MATRIX_ROW_IDENTITY_REASON_KEYS.filter(
+    (key) => key !== "aggregate",
+  );
+  const historyChecks = APP_MATRIX_NETWORK_HISTORY_REASON_KEYS.filter(
+    (key) => !["aggregate", "required"].includes(key),
+  );
+  const rowAggregate = rowChecks.every((key) => value.rowIdentity[key]);
+  const historyChecksBound = historyChecks.every(
+    (key) => value.networkHistory[key],
+  );
+  return value.rowIdentity.aggregate === rowAggregate &&
+    (value.networkHistory.required
+      ? value.networkHistory.aggregate === historyChecksBound
+      : historyChecksBound && value.networkHistory.aggregate === true);
+}
+
 export function buildAppMatrixRuntimeDiagnosticReport({
   build,
   fixture,
@@ -6436,15 +6498,24 @@ export function buildAppMatrixRuntimeDiagnosticReport({
       : null;
     const expectedAdjacentPage = index < 4 ? 2 : 3;
     const expectedPriorityTarget = Math.min(6, expectedAdjacentPage + 2);
-    const rowIdentityBound =
-      expected?.id === row?.configurationId &&
-      row?.sequence === index + 1 &&
-      row?.sessionIdentityHash === sessionIdentityHash &&
-      row?.adjacentPage === expectedAdjacentPage &&
-      row?.priorityTarget === expectedPriorityTarget &&
-      row?.modelCompletion?.importJobId === row?.modelIdentity?.importJobId &&
-      row?.modelCompletion?.documentKey === row?.modelIdentity?.documentKey &&
-      row?.modelCompletion?.revision === row?.modelIdentity?.revision;
+    const rowIdentityReasons = {
+      adjacentPage: row?.adjacentPage === expectedAdjacentPage,
+      aggregate: false,
+      configuration: expected?.id === row?.configurationId,
+      modelDocument:
+        row?.modelCompletion?.documentKey === row?.modelIdentity?.documentKey,
+      modelJob:
+        row?.modelCompletion?.importJobId === row?.modelIdentity?.importJobId,
+      modelRevision:
+        row?.modelCompletion?.revision === row?.modelIdentity?.revision,
+      priorityTarget: row?.priorityTarget === expectedPriorityTarget,
+      sequence: row?.sequence === index + 1,
+      session: row?.sessionIdentityHash === sessionIdentityHash,
+    };
+    rowIdentityReasons.aggregate = Object.entries(rowIdentityReasons).every(
+      ([key, value]) => key === "aggregate" || value === true,
+    );
+    const rowIdentityBound = rowIdentityReasons.aggregate;
     const sourceObservationBound =
       row?.sourceObservation?.selectionCount === 1 &&
       row?.sourceObservation?.bytes === PUBLIC_PDF_FIXTURE_BYTES &&
@@ -6476,20 +6547,44 @@ export function buildAppMatrixRuntimeDiagnosticReport({
     const priorNetworkDiagnostic = networkHistoryExpected
       ? rawRows[index - 1]?.networkFixedPoint
       : null;
-    const networkHistoryBound = !networkHistoryExpected || (
-      rawCurrentNetworkDiagnostic !== null &&
-      priorNetworkDiagnostic?.label === PDF_SHARPNESS_MATRIX[index - 1]?.id &&
-      isCdpFixedPointDiagnosticHealthy(priorNetworkDiagnostic) &&
-      isAppMatrixRuntimeCdpHistoryContinuous(
-        priorNetworkDiagnostic,
-        rawCurrentNetworkDiagnostic.matrixRestoreProof?.networkDiagnostic,
-        expected?.id,
-      ) &&
-      isAppMatrixRuntimeCdpHistoryContinuous(
-        priorNetworkDiagnostic,
-        rawCurrentNetworkDiagnostic,
-        expected?.id,
-      )
+    const networkHistoryReasons = {
+      aggregate: false,
+      currentPresent:
+        !networkHistoryExpected || rawCurrentNetworkDiagnostic !== null,
+      priorFinalContinuous: !networkHistoryExpected ||
+        isAppMatrixRuntimeCdpHistoryContinuous(
+          priorNetworkDiagnostic,
+          rawCurrentNetworkDiagnostic,
+          expected?.id,
+        ),
+      priorHealthy: !networkHistoryExpected ||
+        isCdpFixedPointDiagnosticHealthy(priorNetworkDiagnostic),
+      priorLabel: !networkHistoryExpected ||
+        priorNetworkDiagnostic?.label ===
+          PDF_SHARPNESS_MATRIX[index - 1]?.id,
+      priorRestoreContinuous: !networkHistoryExpected ||
+        isAppMatrixRuntimeCdpHistoryContinuous(
+          priorNetworkDiagnostic,
+          rawCurrentNetworkDiagnostic?.matrixRestoreProof?.networkDiagnostic,
+          expected?.id,
+        ),
+      required: networkHistoryExpected,
+    };
+    networkHistoryReasons.aggregate = !networkHistoryExpected || [
+      networkHistoryReasons.currentPresent,
+      networkHistoryReasons.priorFinalContinuous,
+      networkHistoryReasons.priorHealthy,
+      networkHistoryReasons.priorLabel,
+      networkHistoryReasons.priorRestoreContinuous,
+    ].every((value) => value === true);
+    const networkHistoryBound = networkHistoryReasons.aggregate;
+    const integrityReasons = {
+      networkHistory: networkHistoryReasons,
+      rowIdentity: rowIdentityReasons,
+    };
+    const integrityReasonsBound = isAppMatrixRuntimeIntegrityReasonsValid(
+      integrityReasons,
+      networkHistoryExpected,
     );
     const statusBound = failed
       ? exactPrefix && !fullSequence &&
@@ -6512,7 +6607,8 @@ export function buildAppMatrixRuntimeDiagnosticReport({
         release?.releasePredicateSatisfied === true
       : failed && row?.currentStage === "release-observation-started";
     const integrity = Boolean(
-      rowIdentityBound && sourceObservationBound && statusBound &&
+      integrityReasonsBound && rowIdentityBound &&
+      sourceObservationBound && statusBound &&
       screenshotBound &&
       (scenarioExpected ? timing?.integrity === true : timing === null) &&
       (priorityExpected ? priorityProbe !== null : priorityProbe === null) &&
@@ -6530,6 +6626,7 @@ export function buildAppMatrixRuntimeDiagnosticReport({
       failureCategory: networkFailure?.category ??
         (failed ? `${failureStep}-failure` : "none"),
       integrity,
+      integrityReasons,
       networkFailure,
       networkFixedPoint,
       priorityProbe,
@@ -6659,7 +6756,7 @@ export function buildAppMatrixRuntimeDiagnosticReport({
       rowOrderBound && phaseSequenceBound && runnerFailureBound &&
       !teardownFailed && !runnerFailure,
     diagnostic: true,
-    diagnosticSchemaVersion: 5,
+    diagnosticSchemaVersion: 6,
     execution: {
       attemptedConfigurationCount: publicRows.length,
       completedConfigurationCount,
@@ -6731,6 +6828,65 @@ export function planPdfVirtualScroll({
       maximumScrollTop,
       Math.max(0, scrollTop + direction * step),
     ),
+  };
+}
+
+const PDF_PAGE_CENTER_TOLERANCE_PX = 2;
+const PDF_PAGE_CENTER_STABLE_SAMPLE_COUNT = 2;
+const PDF_PAGE_CENTER_RECT_FIELDS = [
+  "bottom",
+  "height",
+  "left",
+  "right",
+  "top",
+  "width",
+];
+
+export function summarizePdfPageCenteringStability(samples, pageNumber) {
+  if (!Array.isArray(samples) || !Number.isInteger(pageNumber) || pageNumber < 1) {
+    return { centered: false, ready: false, stableSampleCount: 0 };
+  }
+  const centeredSample = (sample) => {
+    const reader = sample?.reader;
+    const page = sample?.page;
+    return sample?.pageNumber === pageNumber &&
+      sample?.visible === true &&
+      typeof sample?.range === "string" && sample.range.length > 0 &&
+      Number.isFinite(reader?.scrollTop) &&
+      [reader?.top, reader?.bottom].every(Number.isFinite) &&
+      PDF_PAGE_CENTER_RECT_FIELDS.every((field) =>
+        Number.isFinite(page?.[field])
+      ) &&
+      reader.bottom > reader.top &&
+      page.bottom > page.top &&
+      Math.abs(
+        (page.top + page.bottom) / 2 -
+          (reader.top + reader.bottom) / 2,
+      ) <= PDF_PAGE_CENTER_TOLERANCE_PX;
+  };
+  const unchanged = (previous, current) =>
+    previous.range === current.range &&
+    previous.reader.scrollTop === current.reader.scrollTop &&
+    PDF_PAGE_CENTER_RECT_FIELDS.every((field) =>
+      previous.page[field] === current.page[field]
+    );
+  let previous = null;
+  let stableSampleCount = 0;
+  for (const sample of samples) {
+    if (!centeredSample(sample)) {
+      previous = null;
+      stableSampleCount = 0;
+      continue;
+    }
+    stableSampleCount = previous && unchanged(previous, sample)
+      ? stableSampleCount + 1
+      : 1;
+    previous = sample;
+  }
+  return {
+    centered: previous !== null,
+    ready: stableSampleCount >= PDF_PAGE_CENTER_STABLE_SAMPLE_COUNT,
+    stableSampleCount,
   };
 }
 
@@ -10715,14 +10871,60 @@ async function scrollPageIntoView(cdp, pageNumber) {
   await evaluate(
     cdp,
     `document.querySelector('#pdf-page-${pageNumber}')?.scrollIntoView({
-      behavior: 'auto', block: 'center'
+      behavior: 'instant', block: 'center'
     }); true`,
   );
-  await waitForExpression(
-    cdp,
-    `document.querySelector('#pdf-page-${pageNumber}')?.dataset.pdfPageVisible === 'true'`,
-    `PDF page ${pageNumber} to enter the viewport`,
-    SCENARIO_TIMEOUT_MS,
+  const startedAt = Date.now();
+  const samples = [];
+  let lastSummary = null;
+  while (Date.now() - startedAt < SCENARIO_TIMEOUT_MS) {
+    const sample = await evaluate(
+      cdp,
+      browserExpression(`
+        return new Promise((resolve) => requestAnimationFrame(() => {
+          const root = document.querySelector('.reader-scroll');
+          const list = document.querySelector('.pdf-pages');
+          const block = document.querySelector('#pdf-page-${pageNumber}');
+          const readerRect = root?.getBoundingClientRect();
+          const pageRect = block?.getBoundingClientRect();
+          const geometryVisible = Boolean(
+            readerRect && pageRect &&
+            pageRect.bottom > readerRect.top &&
+            pageRect.top < readerRect.bottom &&
+            pageRect.right > readerRect.left &&
+            pageRect.left < readerRect.right
+          );
+          resolve({
+            cssScrollBehavior: root ? getComputedStyle(root).scrollBehavior : null,
+            page: pageRect ? {
+              bottom: pageRect.bottom,
+              height: pageRect.height,
+              left: pageRect.left,
+              right: pageRect.right,
+              top: pageRect.top,
+              width: pageRect.width
+            } : null,
+            pageNumber: Number(block?.dataset.pdfPageIndex) + 1,
+            range: list?.dataset.pdfRange ?? null,
+            reader: readerRect ? {
+              bottom: readerRect.bottom,
+              scrollTop: root.scrollTop,
+              top: readerRect.top
+            } : null,
+            visible:
+              block?.dataset.pdfPageVisible === 'true' && geometryVisible
+          });
+        }));
+      `),
+    );
+    samples.push(sample);
+    if (samples.length > PDF_PAGE_CENTER_STABLE_SAMPLE_COUNT) samples.shift();
+    lastSummary = summarizePdfPageCenteringStability(samples, pageNumber);
+    if (lastSummary.ready) return;
+  }
+  throw new Error(
+    `Timed out waiting for PDF page ${pageNumber} to remain centered: ` +
+      JSON.stringify({ sample: samples.at(-1) ?? null, summary: lastSummary }),
   );
 }
 

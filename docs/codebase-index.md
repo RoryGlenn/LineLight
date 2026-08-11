@@ -347,7 +347,12 @@ revision-bound first page resolves the app restore promise without any earlier
 identity-matched worker error; native `Worker` errors are bridged into that same
 ordered open identity before readiness is evaluated. It then reaches a
 generic three-sample CDP quiet point and freezes an exact four-count boundary
-before file selection. Each cumulative final fixed point validates historical
+before file selection. Before choosing the adjacent preview, the harness uses
+an instant page-one scroll and requires two animation-frame samples with the
+page visibly centered within two pixels and an unchanged reader scroll offset,
+page rectangle, and virtual range; inherited CSS smooth scrolling therefore
+cannot expose a mid-scroll page as the row identity. Each cumulative final fixed
+point validates historical
 targets and settlements against their own phase and requires exactly one new
 post-boundary document worker with one direct parser child and one settlement
 each. Every half-open restore/import interval owns the exact requests and
@@ -363,7 +368,11 @@ network stage retains the already-built label-bound timeout diagnostic as fixed
 failure classes, derived gates/counts, and bounded ID-free stability samples;
 unexpected failures remain a separate fixed category. Its
 fresh-build/source, external-output, privacy, single-session, and full
-app/server teardown bindings are fail-closed. The report is explicitly
+app/server teardown bindings are fail-closed. Noncanonical diagnostic schema 6
+also exposes fixed boolean-only row-identity and network-history conjuncts plus
+their exact aggregates, without document, revision, session, path, URL, or raw
+error values; nonrequired first-row history is explicitly true with
+`required: false`. The report is explicitly
 noncanonical and cannot satisfy Issue 68 acceptance.
 A third, reference-only diagnostic allowlists the first desktop/page-2 and
 mobile-DPR-3/page-3 native-viewer configurations for the exact public fixture

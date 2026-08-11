@@ -118,9 +118,20 @@ another phase. Exact fixed-point schemas and final endpoints prevent private
 extras, cumulative rewinds, or truncated raw arrays. The forced-to-final
 privacy interval independently contains no PDF document/parser target, request,
 or settlement regardless of its phase, and malformed or cyclic structured
-network entries fail closed. The schema-5 noncanonical
-report exposes only boundary counts, derived deltas, and restore
-counts/booleans. Bounded phase, draw-hook, canvas sampler,
+network entries fail closed. Before inspecting the adjacent preview, page one is
+scrolled with `behavior: "instant"`; the harness then requires two
+animation-frame samples in which it stays visible, centered within two pixels,
+and unchanged in reader `scrollTop`, full page rectangle, and virtual range.
+Thus inherited CSS smooth scrolling cannot bind a transient page-three view for
+the first four configurations. The schema-6 noncanonical report exposes only
+boundary counts, derived deltas, restore counts/booleans, and exact boolean-only
+integrity reasons. Those reasons separately report every row configuration,
+sequence, session, adjacent-page, priority-target, and model
+job/document/revision match plus every required current/prior network-history
+and continuity match, with conjunction-bound aggregates. First-row history is
+explicitly not required while all of its vacuous history gates remain true; no
+underlying identity, document, revision, path, URL, or raw error is added.
+Bounded phase, draw-hook, canvas sampler,
 worker-dispatch, Long Task, and diagnostic-only Long Animation Frame records
 expose interval overlap without claiming causation. Long Animation Frame
 support may be unavailable; when available, frame and script timing is bounded
@@ -132,7 +143,7 @@ fixed-point stage retains the label-bound timeout diagnostic as fixed failure
 classes, derived gates/counts, and at most twelve ID-free stability samples;
 unexpected failures use a separate fixed category.
 Raw errors, function names, document identities, URLs, profile paths, and
-arbitrary local output paths are not serialized. Its version-3 noncanonical
+arbitrary local output paths are not serialized. Its schema-6 noncanonical
 report is `diagnostic: true`, has `completed` rather than `passed`, and cannot
 satisfy canonical acceptance; exact clean source/build/fixture/session bindings
 and app/CDP/process/profile/server teardown remain mandatory.

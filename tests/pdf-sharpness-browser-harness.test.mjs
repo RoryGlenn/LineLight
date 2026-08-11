@@ -51,6 +51,7 @@ import {
   hasCdpPhasePdfBootstrapCoverage,
   isCdpAttachmentStateHealthy,
   isCdpFixedPointDiagnosticHealthy,
+  isAppMatrixRuntimeIntegrityReasonsValid,
   isFallbackImportNetworkDiagnosticHealthy,
   isCdpServiceWorkerBootstrapRequest,
   isCdpTargetBootstrapRequest,
@@ -74,6 +75,7 @@ import {
   settleCdpCommandDispatches,
   summarizePdfFallbackCancellationDiagnostic,
   summarizePdfModelCompletion,
+  summarizePdfPageCenteringStability,
   summarizePdfRestoreReadiness,
   summarizeFallbackImportLifecycle,
   summarizeFallbackDiagnosticProgress,
@@ -8145,6 +8147,102 @@ test("binds fresh and persisted startup restore before the matrix import", async
   );
 });
 
+test("requires an instant, centered, stable page before adjacent selection", async () => {
+  const centered = {
+    cssScrollBehavior: "smooth",
+    page: {
+      bottom: 850,
+      height: 800,
+      left: 100,
+      right: 900,
+      top: 50,
+      width: 800,
+    },
+    pageNumber: 1,
+    range: "0:3",
+    reader: { bottom: 900, scrollTop: 400, top: 0 },
+    visible: true,
+  };
+  assert.deepEqual(summarizePdfPageCenteringStability([centered], 1), {
+    centered: true,
+    ready: false,
+    stableSampleCount: 1,
+  });
+  assert.deepEqual(
+    summarizePdfPageCenteringStability([
+      structuredClone(centered),
+      structuredClone(centered),
+    ], 1),
+    { centered: true, ready: true, stableSampleCount: 2 },
+  );
+  const moving = structuredClone(centered);
+  moving.reader.scrollTop += 1;
+  assert.equal(
+    summarizePdfPageCenteringStability([centered, moving], 1).ready,
+    false,
+  );
+  const rangeChanged = structuredClone(centered);
+  rangeChanged.range = "1:4";
+  assert.equal(
+    summarizePdfPageCenteringStability([centered, rangeChanged], 1).ready,
+    false,
+  );
+  const rectChanged = structuredClone(centered);
+  rectChanged.page.top += 1;
+  rectChanged.page.bottom += 1;
+  assert.equal(
+    summarizePdfPageCenteringStability([centered, rectChanged], 1).ready,
+    false,
+  );
+  const outsideTolerance = structuredClone(centered);
+  outsideTolerance.page.top += 2.01;
+  outsideTolerance.page.bottom += 2.01;
+  assert.equal(
+    summarizePdfPageCenteringStability(
+      [outsideTolerance, structuredClone(outsideTolerance)],
+      1,
+    ).ready,
+    false,
+  );
+  const midScrollPageThree = structuredClone(centered);
+  midScrollPageThree.page.top = -200;
+  midScrollPageThree.page.bottom = 600;
+  midScrollPageThree.centeredVisiblePage = 3;
+  midScrollPageThree.visiblePages = [1, 2, 3];
+  assert.equal(
+    summarizePdfPageCenteringStability(
+      [midScrollPageThree, structuredClone(midScrollPageThree)],
+      1,
+    ).ready,
+    false,
+  );
+  const centeredPageThree = structuredClone(centered);
+  centeredPageThree.pageNumber = 3;
+  assert.equal(
+    summarizePdfPageCenteringStability(
+      [centeredPageThree, structuredClone(centeredPageThree)],
+      1,
+    ).ready,
+    false,
+  );
+  const source = await readFile(
+    "scripts/run-pdf-sharpness-browser-regression.mjs",
+    "utf8",
+  );
+  assert.match(
+    source,
+    /scrollIntoView\(\{[\s\S]*behavior: 'instant', block: 'center'[\s\S]*requestAnimationFrame[\s\S]*summarizePdfPageCenteringStability\(samples, pageNumber\)/u,
+  );
+  assert.doesNotMatch(
+    source,
+    /scrollIntoView\(\{\s*behavior: 'auto', block: 'center'/u,
+  );
+  assert.match(
+    source,
+    /selectAdjacentPreviewTarget\(cdp\) \{[\s\S]*scrollPageIntoView\(cdp, 1\)[\s\S]*data-pdf-page-distance="1"/u,
+  );
+});
+
 test("plans bounded sub-viewport traversal toward unmounted PDF pages", () => {
   const forward = planPdfVirtualScroll({
     clientHeight: 900,
@@ -9693,11 +9791,39 @@ test("builds a fail-closed privacy-safe app-matrix runtime diagnostic", () => {
   );
   const report = buildAppMatrixRuntimeDiagnosticReport(input);
   assert.equal(report.diagnostic, true);
-  assert.equal(report.diagnosticSchemaVersion, 5);
+  assert.equal(report.diagnosticSchemaVersion, 6);
   assert.equal(report.mode, "app-matrix-runtime");
   assert.equal(report.completed, false);
   assert.equal(report.execution.orderExact, true);
   assert.equal(report.rows[0].integrity, true);
+  assert.deepEqual(report.rows[0].integrityReasons, {
+    networkHistory: {
+      aggregate: true,
+      currentPresent: true,
+      priorFinalContinuous: true,
+      priorHealthy: true,
+      priorLabel: true,
+      priorRestoreContinuous: true,
+      required: false,
+    },
+    rowIdentity: {
+      adjacentPage: true,
+      aggregate: true,
+      configuration: true,
+      modelDocument: true,
+      modelJob: true,
+      modelRevision: true,
+      priorityTarget: true,
+      sequence: true,
+      session: true,
+    },
+  });
+  assert.equal(
+    isAppMatrixRuntimeIntegrityReasonsValid(
+      report.rows[0].integrityReasons,
+    ),
+    true,
+  );
   assert.equal(report.rows[0].release.classification, "offscreen-stale-canvas");
   assert.deepEqual(report.failures, [
     "The bounded app-matrix runtime diagnostic runner reported a stage failure.",
@@ -9707,7 +9833,7 @@ test("builds a fail-closed privacy-safe app-matrix runtime diagnostic", () => {
   const serialized = JSON.stringify(report);
   assert.doesNotMatch(
     serialized,
-    /\/home\/private|privateField|documentKey|revision|public-document/u,
+    /\/home\/private|privateField|"documentKey"|public-document|revision-1/u,
   );
 
   const changedPrivateError = buildAppMatrixRuntimeDiagnosticReport({
@@ -9740,8 +9866,129 @@ test("builds a fail-closed privacy-safe app-matrix runtime diagnostic", () => {
   assert.deepEqual(firstPrivateCleanup, secondPrivateCleanup);
   assert.doesNotMatch(
     JSON.stringify(firstPrivateCleanup),
-    /home|private|profilePath|documentKey|revision/u,
+    /home|private|profilePath|"documentKey"|public-document|revision-1/u,
   );
+});
+
+test("reports every app-matrix row and network integrity predicate", () => {
+  const outputDirectory = path.join(
+    os.tmpdir(),
+    "issue-68-app-matrix-runtime-integrity-reasons",
+  );
+  const passing = buildAppMatrixRuntimeDiagnosticReport(
+    passingAppMatrixRuntimeCompletedInput(outputDirectory),
+  );
+  assert.deepEqual(
+    passing.rows.slice(0, 4).map((row) => row.adjacentPage),
+    [2, 2, 2, 2],
+  );
+  assert.equal(passing.rows[0].integrityReasons.networkHistory.required, false);
+  assert.deepEqual(
+    Object.entries(passing.rows[0].integrityReasons.networkHistory)
+      .filter(([key]) => key !== "required")
+      .map(([, value]) => value),
+    Array(6).fill(true),
+  );
+  assert.equal(passing.rows[1].integrityReasons.networkHistory.required, true);
+  assert.equal(passing.rows[1].integrityReasons.networkHistory.aggregate, true);
+
+  const rowMutations = [
+    ["configuration", (row) => { row.configurationId = "wrong-row"; }],
+    ["sequence", (row) => { row.sequence += 1; }],
+    ["session", (row) => { row.sessionIdentityHash = "f".repeat(64); }],
+    ["adjacentPage", (row) => { row.adjacentPage = 3; }],
+    ["priorityTarget", (row) => { row.priorityTarget = 5; }],
+    ["modelJob", (row) => { row.modelCompletion.importJobId += 1; }],
+    ["modelDocument", (row) => {
+      row.modelCompletion.documentKey = "wrong-document:wrong-revision";
+    }],
+    ["modelRevision", (row) => {
+      row.modelCompletion.revision = "wrong-revision";
+    }],
+  ];
+  for (const [flag, mutate] of rowMutations) {
+    const input = passingAppMatrixRuntimeCompletedInput(outputDirectory);
+    mutate(input.rows[0]);
+    const report = buildAppMatrixRuntimeDiagnosticReport(input);
+    const reasons = report.rows[0].integrityReasons;
+    assert.equal(reasons.rowIdentity[flag], false, flag);
+    assert.equal(reasons.rowIdentity.aggregate, false, flag);
+    assert.equal(report.rows[0].integrity, false, flag);
+    assert.equal(
+      isAppMatrixRuntimeIntegrityReasonsValid(reasons, false),
+      true,
+      flag,
+    );
+  }
+
+  const networkMutations = [
+    ["currentPresent", (input) => {
+      input.rows[1].networkFixedPoint = null;
+    }],
+    ["priorLabel", (input) => {
+      input.rows[0].networkFixedPoint.label = "wrong-prior-label";
+    }],
+    ["priorHealthy", (input) => {
+      input.rows[0].networkFixedPoint.counts.inflightRequestCount = 1;
+    }],
+    ["priorRestoreContinuous", (input) => {
+      input.rows[1].networkFixedPoint.matrixRestoreProof.networkDiagnostic =
+        null;
+    }],
+    ["priorFinalContinuous", (input) => {
+      input.rows[1].networkFixedPoint.targets.shift();
+      input.rows[1].networkFixedPoint.counts.targetCount -= 1;
+      input.rows[1].networkFixedPoint.counts.attachPromiseCount -= 1;
+    }],
+  ];
+  for (const [flag, mutate] of networkMutations) {
+    const input = passingAppMatrixRuntimeCompletedInput(outputDirectory);
+    mutate(input);
+    const report = buildAppMatrixRuntimeDiagnosticReport(input);
+    const reasons = report.rows[1].integrityReasons;
+    assert.equal(reasons.networkHistory.required, true, flag);
+    assert.equal(reasons.networkHistory[flag], false, flag);
+    assert.equal(reasons.networkHistory.aggregate, false, flag);
+    assert.equal(report.rows[1].integrity, false, flag);
+    assert.equal(
+      isAppMatrixRuntimeIntegrityReasonsValid(reasons, true),
+      true,
+      flag,
+    );
+  }
+
+  const reasonMutations = [
+    ["extra key", (reasons) => { reasons.rowIdentity.extra = true; }],
+    ["missing key", (reasons) => {
+      delete reasons.networkHistory.priorHealthy;
+    }],
+    ["nonboolean", (reasons) => {
+      reasons.rowIdentity.modelJob = "true";
+    }],
+    ["row aggregate substitution", (reasons) => {
+      reasons.rowIdentity.aggregate = false;
+    }],
+    ["history aggregate substitution", (reasons) => {
+      reasons.networkHistory.aggregate = false;
+    }],
+    ["required substitution", (reasons) => {
+      reasons.networkHistory.required = false;
+    }],
+  ];
+  for (const [label, mutate] of reasonMutations) {
+    const reasons = structuredClone(passing.rows[1].integrityReasons);
+    mutate(reasons);
+    assert.equal(
+      isAppMatrixRuntimeIntegrityReasonsValid(reasons, true),
+      false,
+      label,
+    );
+  }
+  const rawSpoof = passingAppMatrixRuntimeCompletedInput(outputDirectory);
+  rawSpoof.rows[0].integrityReasons = { privateDocument: "/home/private.pdf" };
+  const recomputed = buildAppMatrixRuntimeDiagnosticReport(rawSpoof);
+  assert.deepEqual(recomputed.rows[0].integrityReasons, passing.rows[0].integrityReasons);
+  assert.doesNotMatch(JSON.stringify(recomputed), /privateDocument|private\.pdf/u);
 });
 
 test("binds all six app-matrix runtime rows and the exact sixth timeout", () => {
