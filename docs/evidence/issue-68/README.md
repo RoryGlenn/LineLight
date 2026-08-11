@@ -119,9 +119,11 @@ extras, cumulative rewinds, or truncated raw arrays. The forced-to-final
 privacy interval independently contains no PDF document/parser target, request,
 or settlement regardless of its phase, and malformed or cyclic structured
 network entries fail closed. Before inspecting the adjacent preview, page one is
-scrolled with `behavior: "instant"`; the harness then requires two
-animation-frame samples in which it stays visible, centered within two pixels,
-and unchanged in reader `scrollTop`, full page rectangle, and virtual range.
+scrolled with `behavior: "instant"`; on each animation frame the harness
+recomputes the literal center and applies another bounded instant correction
+when it is more than two pixels away. It proceeds only after two subsequent
+samples in which the page stays visible and centered, with unchanged reader
+`scrollTop`, full page rectangle, and virtual range.
 Thus inherited CSS smooth scrolling cannot bind a transient page-three view for
 the first four configurations. The schema-7 noncanonical report exposes only
 boundary counts, derived deltas, restore counts/booleans, and exact boolean-only

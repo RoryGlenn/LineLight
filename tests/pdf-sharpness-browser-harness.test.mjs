@@ -61,6 +61,7 @@ import {
   markReferenceCaptureDiagnosticStage,
   navigateReferenceCaptureDiagnosticPage,
   planPdfVirtualScroll,
+  planPdfPageCenterCorrection,
   probePdfBitmapBudget,
   recordCdpNetworkRequest,
   reconcileCdpServiceWorkerBootstraps,
@@ -8227,13 +8228,321 @@ test("requires an instant, centered, stable page before adjacent selection", asy
     ).ready,
     false,
   );
+  const planningSample = {
+    page: {
+      bottom: 909.453125,
+      height: 800,
+      left: 100,
+      right: 900,
+      top: 109.453125,
+      width: 800,
+    },
+    pageNumber: 1,
+    range: "0:3",
+    reader: {
+      bottom: 900,
+      clientHeight: 900,
+      left: 0,
+      right: 1_100,
+      scrollHeight: 6_000,
+      scrollTop: 2_157,
+      top: 0,
+    },
+    readerOwned: true,
+    visible: true,
+  };
+  assert.deepEqual(planPdfPageCenterCorrection(planningSample, 1), {
+    centerDelta: 59.453125,
+    centered: false,
+    clamped: false,
+    correctionRequired: true,
+    nextScrollTop: 2_216.453125,
+    valid: true,
+  });
+  const centeredPlanning = structuredClone(planningSample);
+  centeredPlanning.page = {
+    bottom: 850,
+    height: 800,
+    left: 100,
+    right: 900,
+    top: 50,
+    width: 800,
+  };
+  centeredPlanning.reader.scrollTop = 950;
+  assert.deepEqual(planPdfPageCenterCorrection(centeredPlanning, 1), {
+    centerDelta: 0,
+    centered: true,
+    clamped: false,
+    correctionRequired: false,
+    nextScrollTop: 950,
+    valid: true,
+  });
+  const topAligned = structuredClone(centeredPlanning);
+  topAligned.page.top = 0;
+  topAligned.page.bottom = 800;
+  topAligned.reader.scrollTop = 1_000;
+  assert.equal(
+    planPdfPageCenterCorrection(topAligned, 1).nextScrollTop,
+    950,
+  );
+  const evidenceSample = (sample) => ({
+    cssScrollBehavior: "smooth",
+    page: structuredClone(sample.page),
+    pageNumber: sample.pageNumber,
+    range: sample.range,
+    reader: {
+      bottom: sample.reader.bottom,
+      scrollTop: sample.reader.scrollTop,
+      top: sample.reader.top,
+    },
+    visible: sample.visible,
+  });
+  const topEvidence = evidenceSample(topAligned);
+  const firstCenteredEvidence = evidenceSample(centeredPlanning);
+  assert.equal(
+    summarizePdfPageCenteringStability(
+      [topEvidence, firstCenteredEvidence],
+      1,
+    ).ready,
+    false,
+  );
+  assert.equal(
+    summarizePdfPageCenteringStability(
+      [firstCenteredEvidence, structuredClone(firstCenteredEvidence)],
+      1,
+    ).ready,
+    true,
+  );
+
+  const pendingSmooth = structuredClone(centeredPlanning);
+  pendingSmooth.page.top = 100;
+  pendingSmooth.page.bottom = 900;
+  assert.equal(
+    planPdfPageCenterCorrection(pendingSmooth, 1).correctionRequired,
+    true,
+  );
+  assert.equal(
+    summarizePdfPageCenteringStability(
+      [topEvidence, evidenceSample(pendingSmooth)],
+      1,
+    ).stableSampleCount,
+    0,
+  );
+  const delayedLayout = structuredClone(centeredPlanning);
+  delayedLayout.page.top += 10;
+  delayedLayout.page.bottom += 10;
+  assert.equal(
+    planPdfPageCenterCorrection(delayedLayout, 1).nextScrollTop,
+    960,
+  );
+  const recenteredAfterLayout = structuredClone(centeredPlanning);
+  recenteredAfterLayout.reader.scrollTop = 960;
+  assert.equal(
+    summarizePdfPageCenteringStability([
+      firstCenteredEvidence,
+      evidenceSample(delayedLayout),
+    ], 1).stableSampleCount,
+    0,
+  );
+  assert.equal(
+    summarizePdfPageCenteringStability([
+      evidenceSample(delayedLayout),
+      evidenceSample(recenteredAfterLayout),
+    ], 1).ready,
+    false,
+  );
+  assert.equal(
+    summarizePdfPageCenteringStability([
+      evidenceSample(recenteredAfterLayout),
+      evidenceSample(recenteredAfterLayout),
+    ], 1).ready,
+    true,
+  );
+
+  const clamped = structuredClone(centeredPlanning);
+  clamped.reader.scrollTop = 5_100;
+  clamped.page.top = 800;
+  clamped.page.bottom = 1_600;
+  assert.deepEqual(planPdfPageCenterCorrection(clamped, 1), {
+    centerDelta: 750,
+    centered: false,
+    clamped: true,
+    correctionRequired: true,
+    nextScrollTop: 5_100,
+    valid: true,
+  });
+  assert.equal(
+    summarizePdfPageCenteringStability(
+      [evidenceSample(clamped), evidenceSample(clamped)],
+      1,
+    ).ready,
+    false,
+  );
+
+  const invalidPlans = [
+    ["wrong page", (sample) => { sample.pageNumber = 2; }],
+    ["invisible", (sample) => { sample.visible = false; }],
+    ["range exclusion", (sample) => { sample.range = "1:3"; }],
+    ["nonfinite", (sample) => { sample.page.top = Number.NaN; }],
+    ["overflow operand", (sample) => {
+      sample.page.top = Number.MAX_VALUE;
+    }],
+    ["positive unsafe coordinate", (sample) => {
+      sample.page.left = Number.MAX_SAFE_INTEGER + 1;
+    }],
+    ["negative unsafe coordinate", (sample) => {
+      sample.reader.top = -(Number.MAX_SAFE_INTEGER + 1);
+    }],
+    ["positive unsafe scroll", (sample) => {
+      sample.reader.scrollTop = Number.MAX_SAFE_INTEGER + 1;
+    }],
+    ["negative unsafe scroll", (sample) => {
+      sample.reader.scrollTop = -(Number.MAX_SAFE_INTEGER + 1);
+    }],
+    ["negative scroll", (sample) => { sample.reader.scrollTop = -1; }],
+    ["fractional client height", (sample) => {
+      sample.reader.clientHeight += 0.5;
+    }],
+    ["unsafe client height", (sample) => {
+      sample.reader.clientHeight = Number.MAX_SAFE_INTEGER + 1;
+    }],
+    ["fractional scroll height", (sample) => {
+      sample.reader.scrollHeight += 0.5;
+    }],
+    ["unsafe scroll height", (sample) => {
+      sample.reader.scrollHeight = Number.MAX_SAFE_INTEGER + 1;
+    }],
+    ["contradictory height", (sample) => {
+      sample.page.height += 1e-6;
+    }],
+    ["contradictory width", (sample) => {
+      sample.page.width += 1e-6;
+    }],
+    ["nonintersection", (sample) => {
+      sample.page.top = 901;
+      sample.page.bottom = 1_701;
+      sample.visible = false;
+    }],
+    ["unowned reader", (sample) => { sample.readerOwned = false; }],
+  ];
+  for (const [name, mutate] of invalidPlans) {
+    const sample = structuredClone(centeredPlanning);
+    mutate(sample);
+    assert.deepEqual(planPdfPageCenterCorrection(sample, 1), {
+      centerDelta: null,
+      centered: false,
+      clamped: false,
+      correctionRequired: false,
+      nextScrollTop: null,
+      valid: false,
+    }, name);
+  }
+  const unsafePlannedScroll = structuredClone(centeredPlanning);
+  unsafePlannedScroll.reader.clientHeight = 1;
+  unsafePlannedScroll.reader.scrollHeight = Number.MAX_SAFE_INTEGER;
+  unsafePlannedScroll.reader.scrollTop = Number.MAX_SAFE_INTEGER - 1;
+  unsafePlannedScroll.page.top += 2;
+  unsafePlannedScroll.page.bottom += 2;
+  assert.equal(
+    planPdfPageCenterCorrection(unsafePlannedScroll, 1).valid,
+    false,
+  );
+  const dimensionRounding = structuredClone(centeredPlanning);
+  dimensionRounding.page.height += 5e-8;
+  dimensionRounding.page.width += 5e-8;
+  assert.equal(
+    planPdfPageCenterCorrection(dimensionRounding, 1).valid,
+    true,
+  );
+  assert.equal(
+    summarizePdfPageCenteringStability([
+      evidenceSample(dimensionRounding),
+      evidenceSample(dimensionRounding),
+    ], 1).ready,
+    true,
+  );
+  const fractionalScroll = structuredClone(centeredPlanning);
+  fractionalScroll.reader.scrollTop += 0.5;
+  assert.equal(planPdfPageCenterCorrection(fractionalScroll, 1).valid, true);
+  assert.equal(
+    summarizePdfPageCenteringStability([
+      evidenceSample(fractionalScroll),
+      evidenceSample(fractionalScroll),
+    ], 1).ready,
+    true,
+  );
+  const negativeZeroScroll = structuredClone(centeredPlanning);
+  negativeZeroScroll.reader.scrollTop = -0;
+  assert.equal(
+    planPdfPageCenterCorrection(negativeZeroScroll, 1).valid,
+    true,
+  );
+  assert.equal(
+    summarizePdfPageCenteringStability([
+      evidenceSample(negativeZeroScroll),
+      evidenceSample(negativeZeroScroll),
+    ], 1).ready,
+    true,
+  );
+  const negativeScrollEvidence = evidenceSample(centeredPlanning);
+  negativeScrollEvidence.reader.scrollTop = -1;
+  assert.deepEqual(
+    summarizePdfPageCenteringStability([
+      negativeScrollEvidence,
+      structuredClone(negativeScrollEvidence),
+    ], 1),
+    { centered: false, ready: false, stableSampleCount: 0 },
+  );
+  const contradictoryEvidence = evidenceSample(centeredPlanning);
+  contradictoryEvidence.page.height += 1e-6;
+  assert.deepEqual(
+    summarizePdfPageCenteringStability([
+      contradictoryEvidence,
+      structuredClone(contradictoryEvidence),
+    ], 1),
+    { centered: false, ready: false, stableSampleCount: 0 },
+  );
+  const bigintPlanning = structuredClone(centeredPlanning);
+  bigintPlanning.page.top = 1n;
+  assert.doesNotThrow(() => planPdfPageCenterCorrection(bigintPlanning, 1));
+  assert.equal(planPdfPageCenterCorrection(bigintPlanning, 1).valid, false);
+  assert.doesNotThrow(() =>
+    summarizePdfPageCenteringStability([evidenceSample(bigintPlanning)], 1)
+  );
+  const cyclicPlanning = structuredClone(centeredPlanning);
+  cyclicPlanning.page = cyclicPlanning;
+  assert.doesNotThrow(() => planPdfPageCenterCorrection(cyclicPlanning, 1));
+  assert.equal(planPdfPageCenterCorrection(cyclicPlanning, 1).valid, false);
+  const cyclicEvidence = evidenceSample(centeredPlanning);
+  cyclicEvidence.page = cyclicEvidence;
+  assert.doesNotThrow(() =>
+    summarizePdfPageCenteringStability([cyclicEvidence], 1)
+  );
+  assert.equal(
+    summarizePdfPageCenteringStability([cyclicEvidence], 1).ready,
+    false,
+  );
+  const toleranceBoundary = structuredClone(centeredPlanning);
+  toleranceBoundary.page.top += 2;
+  toleranceBoundary.page.bottom += 2;
+  assert.equal(
+    planPdfPageCenterCorrection(toleranceBoundary, 1).centered,
+    true,
+  );
+  const beyondTolerance = structuredClone(toleranceBoundary);
+  beyondTolerance.page.top += 0.000_001;
+  beyondTolerance.page.bottom += 0.000_001;
+  assert.equal(
+    planPdfPageCenterCorrection(beyondTolerance, 1).correctionRequired,
+    true,
+  );
   const source = await readFile(
     "scripts/run-pdf-sharpness-browser-regression.mjs",
     "utf8",
   );
   assert.match(
     source,
-    /scrollIntoView\(\{[\s\S]*behavior: 'instant', block: 'center'[\s\S]*requestAnimationFrame[\s\S]*summarizePdfPageCenteringStability\([\s\S]*proof\.samples,[\s\S]*pageNumber/u,
+    /scrollIntoView\(\{[\s\S]*behavior: 'instant', block: 'center'[\s\S]*requestAnimationFrame[\s\S]*planPdfPageCenterCorrection\.toString\(\)[\s\S]*root\.scrollTo\(\{ top: plan\.nextScrollTop, behavior: 'instant' \}\)[\s\S]*summarizePdfPageCenteringStability\([\s\S]*proof\.samples,[\s\S]*pageNumber/u,
   );
   assert.doesNotMatch(
     source,
@@ -10580,6 +10889,75 @@ test("fails closed on malformed priority-mount failure snapshots", () => {
     assert.doesNotMatch(JSON.stringify(row), /private\.pdf/u, label);
   }
 
+  const contradictoryGeometry =
+    passingAppMatrixRuntimePriorityMountFailureInput(outputDirectory);
+  const contradictoryCentering = contradictoryGeometry.rows[0]
+    .priorityMountDiagnostic.centeringProof;
+  contradictoryCentering.samples.forEach((sample) => {
+    sample.page.height += 1e-6;
+  });
+  contradictoryCentering.summary = summarizePdfPageCenteringStability(
+    contradictoryCentering.samples,
+    contradictoryCentering.pageNumber,
+  );
+  assert.deepEqual(contradictoryCentering.summary, {
+    centered: false,
+    ready: false,
+    stableSampleCount: 0,
+  });
+  const contradictoryRow = buildAppMatrixRuntimeDiagnosticReport(
+    contradictoryGeometry,
+  ).rows[0];
+  assert.equal(contradictoryRow.integrity, false);
+  assert.equal(contradictoryRow.priorityMountDiagnostic, null);
+
+  const negativeScrollInput =
+    passingAppMatrixRuntimePriorityMountFailureInput(outputDirectory);
+  const negativeScrollCentering = negativeScrollInput.rows[0]
+    .priorityMountDiagnostic.centeringProof;
+  negativeScrollCentering.samples.forEach((sample) => {
+    sample.reader.scrollTop = -1;
+  });
+  negativeScrollCentering.summary = summarizePdfPageCenteringStability(
+    negativeScrollCentering.samples,
+    negativeScrollCentering.pageNumber,
+  );
+  assert.deepEqual(negativeScrollCentering.summary, {
+    centered: false,
+    ready: false,
+    stableSampleCount: 0,
+  });
+  const negativeScrollRow = buildAppMatrixRuntimeDiagnosticReport(
+    negativeScrollInput,
+  ).rows[0];
+  assert.equal(negativeScrollRow.integrity, false);
+  assert.equal(negativeScrollRow.priorityMountDiagnostic, null);
+  assert.doesNotMatch(JSON.stringify(negativeScrollRow), /"scrollTop":-1/u);
+
+  const intermediateImpossible =
+    passingAppMatrixRuntimePriorityMountFailureInput(
+      outputDirectory,
+      { checkpoint: "intermediate-scroll" },
+    );
+  const impossibleCentering = intermediateImpossible.rows[0]
+    .priorityMountDiagnostic.centeringProof;
+  const impossibleSample = structuredClone(
+    passingAppMatrixRuntimePriorityMountFailureInput(outputDirectory)
+      .rows[0].priorityMountDiagnostic.centeringProof.samples[0],
+  );
+  impossibleSample.visible = false;
+  impossibleSample.page.width += 1e-6;
+  impossibleCentering.samples = [impossibleSample];
+  impossibleCentering.summary = summarizePdfPageCenteringStability(
+    impossibleCentering.samples,
+    impossibleCentering.pageNumber,
+  );
+  const intermediateImpossibleRow = buildAppMatrixRuntimeDiagnosticReport(
+    intermediateImpossible,
+  ).rows[0];
+  assert.equal(intermediateImpossibleRow.integrity, false);
+  assert.equal(intermediateImpossibleRow.priorityMountDiagnostic, null);
+
   const excludedRange = "0:1,3:5";
   const readyRangeExclusion =
     passingAppMatrixRuntimePriorityMountFailureInput(outputDirectory);
@@ -10660,7 +11038,12 @@ test("fails closed on malformed priority-mount failure snapshots", () => {
   }];
   const cyclic = structuredClone(base.priorityMountDiagnostic);
   cyclic.reader = cyclic;
-  malformed.push(cyclic);
+  const bigintCentering = structuredClone(base.priorityMountDiagnostic);
+  bigintCentering.centeringProof.samples[0].page.top = 1n;
+  const cyclicCentering = structuredClone(base.priorityMountDiagnostic);
+  cyclicCentering.centeringProof.samples[0].page =
+    cyclicCentering.centeringProof.samples[0];
+  malformed.push(cyclic, bigintCentering, cyclicCentering);
   for (const value of malformed) {
     assert.doesNotThrow(() =>
       sanitizeAppMatrixRuntimePriorityMountDiagnostic(value, base)

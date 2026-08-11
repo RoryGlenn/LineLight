@@ -348,10 +348,12 @@ identity-matched worker error; native `Worker` errors are bridged into that same
 ordered open identity before readiness is evaluated. It then reaches a
 generic three-sample CDP quiet point and freezes an exact four-count boundary
 before file selection. Before choosing the adjacent preview, the harness uses
-an instant page-one scroll and requires two animation-frame samples with the
-page visibly centered within two pixels and an unchanged reader scroll offset,
-page rectangle, and virtual range; inherited CSS smooth scrolling therefore
-cannot expose a mid-scroll page as the row identity. Each cumulative final fixed
+an instant page-one scroll, recalculates the literal center on every animation
+frame, and repeats a bounded instant correction whenever the page is more than
+two pixels away. It proceeds only after two subsequent visibly centered samples
+with an unchanged reader scroll offset, page rectangle, and virtual range;
+inherited CSS smooth scrolling therefore cannot expose a mid-scroll page as the
+row identity. Each cumulative final fixed
 point validates historical
 targets and settlements against their own phase and requires exactly one new
 post-boundary document worker with one direct parser child and one settlement

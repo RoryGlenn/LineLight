@@ -4687,6 +4687,85 @@ function appMatrixRuntimeExactObject(value, keys) {
   );
 }
 
+function isPdfPageCenterSafeNumber(value) {
+  return typeof value === "number" && Number.isFinite(value) &&
+    Math.abs(value) <= Number.MAX_SAFE_INTEGER;
+}
+
+function isPdfPageCenterSafeInteger(value, minimum = 0) {
+  return Number.isSafeInteger(value) && value >= minimum;
+}
+
+function isPdfPageCenterPageRect(value) {
+  const fields = ["bottom", "height", "left", "right", "top", "width"];
+  if (
+    !value || typeof value !== "object" ||
+    !fields.every((field) => isPdfPageCenterSafeNumber(value[field]))
+  ) {
+    return false;
+  }
+  const height = value.bottom - value.top;
+  const width = value.right - value.left;
+  return height > 0 && width > 0 && value.height > 0 && value.width > 0 &&
+    Math.abs(value.height - height) <= 1e-7 &&
+    Math.abs(value.width - width) <= 1e-7;
+}
+
+function isPdfPageCenterReaderProof(value) {
+  return Boolean(
+    value && typeof value === "object" &&
+    [value.bottom, value.scrollTop, value.top].every(
+      isPdfPageCenterSafeNumber,
+    ) && value.bottom > value.top && value.scrollTop >= 0
+  );
+}
+
+function parsePdfPageCenterRange(value) {
+  if (
+    typeof value !== "string" ||
+    !/^\d+:\d+(?:,\d+:\d+)*$/u.test(value)
+  ) {
+    return null;
+  }
+  const mountedRanges = value.split(",").map((entry) => {
+    const [start, end] = entry.split(":").map(Number);
+    return { end, start };
+  });
+  if (
+    mountedRanges.map((range) => `${range.start}:${range.end}`).join(",") !==
+      value ||
+    !mountedRanges.every((range, index) =>
+      Number.isInteger(range.start) && Number.isInteger(range.end) &&
+      range.start >= 0 && range.end >= range.start && range.end <= 5 &&
+      (index === 0 || range.start > mountedRanges[index - 1].end)
+    )
+  ) {
+    return null;
+  }
+  return {
+    mountedPages: mountedRanges.flatMap((range) =>
+      Array.from(
+        { length: range.end - range.start + 1 },
+        (_, index) => range.start + index + 1,
+      )
+    ),
+    mountedRanges,
+  };
+}
+
+function readPdfPageCenterDelta(page, reader) {
+  if (
+    !isPdfPageCenterPageRect(page) ||
+    !isPdfPageCenterReaderProof(reader)
+  ) {
+    return null;
+  }
+  const centerDelta = (
+    page.top + page.bottom - reader.top - reader.bottom
+  ) / 2;
+  return isPdfPageCenterSafeNumber(centerDelta) ? centerDelta : null;
+}
+
 function sanitizeAppMatrixPriorityMountCentering(raw, expectedPage) {
   const proofKeys = ["pageNumber", "samples", "summary"];
   const sampleKeys = [
@@ -4700,38 +4779,6 @@ function sanitizeAppMatrixPriorityMountCentering(raw, expectedPage) {
   const pageKeys = ["bottom", "height", "left", "right", "top", "width"];
   const readerKeys = ["bottom", "scrollTop", "top"];
   const summaryKeys = ["centered", "ready", "stableSampleCount"];
-  const parseRange = (value) => {
-    if (
-      typeof value !== "string" ||
-      !/^\d+:\d+(?:,\d+:\d+)*$/u.test(value)
-    ) {
-      return null;
-    }
-    const mountedRanges = value.split(",").map((entry) => {
-      const [start, end] = entry.split(":").map(Number);
-      return { end, start };
-    });
-    if (
-      mountedRanges.map((range) => `${range.start}:${range.end}`).join(",") !==
-        value ||
-      !mountedRanges.every((range, index) =>
-      Number.isInteger(range.start) && Number.isInteger(range.end) &&
-      range.start >= 0 && range.end >= range.start && range.end <= 5 &&
-      (index === 0 || range.start > mountedRanges[index - 1].end)
-      )
-    ) {
-      return null;
-    }
-    return {
-      mountedPages: mountedRanges.flatMap((range) =>
-        Array.from(
-          { length: range.end - range.start + 1 },
-          (_, index) => range.start + index + 1,
-        )
-      ),
-      mountedRanges,
-    };
-  };
   if (
     !appMatrixRuntimeExactObject(raw, proofKeys) ||
     raw.pageNumber !== expectedPage ||
@@ -4742,7 +4789,7 @@ function sanitizeAppMatrixPriorityMountCentering(raw, expectedPage) {
     return null;
   }
   const samples = raw.samples.map((sample) => {
-    const range = parseRange(sample?.range);
+    const range = parsePdfPageCenterRange(sample?.range);
     if (
       !appMatrixRuntimeExactObject(sample, sampleKeys) ||
       !appMatrixRuntimeExactObject(sample.page, pageKeys) ||
@@ -4750,8 +4797,8 @@ function sanitizeAppMatrixPriorityMountCentering(raw, expectedPage) {
       sample.pageNumber !== expectedPage ||
       typeof sample.visible !== "boolean" ||
       range === null || !range.mountedPages.includes(expectedPage) ||
-      !pageKeys.every((key) => Number.isFinite(sample.page[key])) ||
-      !readerKeys.every((key) => Number.isFinite(sample.reader[key]))
+      !isPdfPageCenterPageRect(sample.page) ||
+      !isPdfPageCenterReaderProof(sample.reader)
     ) {
       return null;
     }
@@ -7384,6 +7431,71 @@ const PDF_PAGE_CENTER_RECT_FIELDS = [
   "width",
 ];
 
+export function planPdfPageCenterCorrection(sample, pageNumber) {
+  const invalid = {
+    centerDelta: null,
+    centered: false,
+    clamped: false,
+    correctionRequired: false,
+    nextScrollTop: null,
+    valid: false,
+  };
+  if (
+    !sample || typeof sample !== "object" ||
+    !Number.isInteger(pageNumber) || pageNumber < 1 || pageNumber > 6 ||
+    sample.readerOwned !== true || sample.pageNumber !== pageNumber ||
+    sample.visible !== true
+  ) {
+    return invalid;
+  }
+  const range = parsePdfPageCenterRange(sample.range);
+  const reader = sample.reader;
+  const page = sample.page;
+  if (
+    range === null || !range.mountedPages.includes(pageNumber) ||
+    !isPdfPageCenterPageRect(page) ||
+    !isPdfPageCenterReaderProof(reader) ||
+    !isPdfPageCenterSafeNumber(reader?.left) ||
+    !isPdfPageCenterSafeNumber(reader?.right) ||
+    reader.right <= reader.left ||
+    !isPdfPageCenterSafeInteger(reader?.clientHeight, 1) ||
+    !isPdfPageCenterSafeInteger(reader?.scrollHeight) ||
+    reader.scrollHeight < reader.clientHeight ||
+    page.bottom <= reader.top || page.top >= reader.bottom ||
+    page.right <= reader.left || page.left >= reader.right
+  ) {
+    return invalid;
+  }
+  const maximumScrollTop = reader.scrollHeight - reader.clientHeight;
+  const centerDelta = readPdfPageCenterDelta(page, reader);
+  if (
+    !isPdfPageCenterSafeNumber(maximumScrollTop) ||
+    reader.scrollTop < 0 || reader.scrollTop > maximumScrollTop ||
+    centerDelta === null
+  ) {
+    return invalid;
+  }
+  const centered = Math.abs(centerDelta) <= 2;
+  const plannedScrollTop = reader.scrollTop + centerDelta;
+  const nextScrollTop = centered
+    ? reader.scrollTop
+    : Math.min(maximumScrollTop, Math.max(0, plannedScrollTop));
+  if (
+    !isPdfPageCenterSafeNumber(plannedScrollTop) ||
+    !isPdfPageCenterSafeNumber(nextScrollTop)
+  ) {
+    return invalid;
+  }
+  return {
+    centerDelta,
+    centered,
+    clamped: !centered && nextScrollTop !== plannedScrollTop,
+    correctionRequired: !centered,
+    nextScrollTop,
+    valid: true,
+  };
+}
+
 export function summarizePdfPageCenteringStability(samples, pageNumber) {
   if (!Array.isArray(samples) || !Number.isInteger(pageNumber) || pageNumber < 1) {
     return { centered: false, ready: false, stableSampleCount: 0 };
@@ -7391,20 +7503,13 @@ export function summarizePdfPageCenteringStability(samples, pageNumber) {
   const centeredSample = (sample) => {
     const reader = sample?.reader;
     const page = sample?.page;
+    const range = parsePdfPageCenterRange(sample?.range);
+    const centerDelta = readPdfPageCenterDelta(page, reader);
     return sample?.pageNumber === pageNumber &&
       sample?.visible === true &&
-      typeof sample?.range === "string" && sample.range.length > 0 &&
-      Number.isFinite(reader?.scrollTop) &&
-      [reader?.top, reader?.bottom].every(Number.isFinite) &&
-      PDF_PAGE_CENTER_RECT_FIELDS.every((field) =>
-        Number.isFinite(page?.[field])
-      ) &&
-      reader.bottom > reader.top &&
-      page.bottom > page.top &&
-      Math.abs(
-        (page.top + page.bottom) / 2 -
-          (reader.top + reader.bottom) / 2,
-      ) <= PDF_PAGE_CENTER_TOLERANCE_PX;
+      range?.mountedPages.includes(pageNumber) === true &&
+      centerDelta !== null &&
+      Math.abs(centerDelta) <= PDF_PAGE_CENTER_TOLERANCE_PX;
   };
   const unchanged = (previous, current) =>
     previous.range === current.range &&
@@ -11428,15 +11533,39 @@ async function scrollPageIntoView(cdp, pageNumber) {
   );
     const startedAt = Date.now();
     while (Date.now() - startedAt < SCENARIO_TIMEOUT_MS) {
-      const sample = await evaluate(
+      const observation = await evaluate(
       cdp,
       browserExpression(`
         return new Promise((resolve) => requestAnimationFrame(() => {
+          const isPdfPageCenterSafeNumber = (
+            ${isPdfPageCenterSafeNumber.toString()}
+          );
+          const isPdfPageCenterSafeInteger = (
+            ${isPdfPageCenterSafeInteger.toString()}
+          );
+          const isPdfPageCenterPageRect = (
+            ${isPdfPageCenterPageRect.toString()}
+          );
+          const isPdfPageCenterReaderProof = (
+            ${isPdfPageCenterReaderProof.toString()}
+          );
+          const parsePdfPageCenterRange = (
+            ${parsePdfPageCenterRange.toString()}
+          );
+          const readPdfPageCenterDelta = (
+            ${readPdfPageCenterDelta.toString()}
+          );
+          const planCorrection = (${planPdfPageCenterCorrection.toString()});
           const root = document.querySelector('.reader-scroll');
           const list = document.querySelector('.pdf-pages');
           const block = document.querySelector('#pdf-page-${pageNumber}');
           const readerRect = root?.getBoundingClientRect();
           const pageRect = block?.getBoundingClientRect();
+          const readerOwned = Boolean(
+            root && list && block && root.contains(list) &&
+            list.contains(block) && block.id === 'pdf-page-${pageNumber}' &&
+            block.dataset.pdfPageIndex === '${pageNumber - 1}'
+          );
           const geometryVisible = Boolean(
             readerRect && pageRect &&
             pageRect.bottom > readerRect.top &&
@@ -11444,7 +11573,7 @@ async function scrollPageIntoView(cdp, pageNumber) {
             pageRect.right > readerRect.left &&
             pageRect.left < readerRect.right
           );
-          resolve({
+          const sample = {
             cssScrollBehavior: root ? getComputedStyle(root).scrollBehavior : null,
             page: pageRect ? {
               bottom: pageRect.bottom,
@@ -11462,11 +11591,28 @@ async function scrollPageIntoView(cdp, pageNumber) {
               top: readerRect.top
             } : null,
             visible:
-              block?.dataset.pdfPageVisible === 'true' && geometryVisible
-          });
+              readerOwned && block?.dataset.pdfPageVisible === 'true' &&
+              geometryVisible
+          };
+          const plan = planCorrection({
+            ...sample,
+            reader: readerRect ? {
+              ...sample.reader,
+              clientHeight: root.clientHeight,
+              left: readerRect.left,
+              right: readerRect.right,
+              scrollHeight: root.scrollHeight
+            } : null,
+            readerOwned
+          }, ${pageNumber});
+          if (plan.valid && plan.correctionRequired) {
+            root.scrollTo({ top: plan.nextScrollTop, behavior: 'instant' });
+          }
+          resolve({ plan, sample });
         }));
       `),
     );
+      const sample = observation?.sample ?? null;
       proof.samples.push(sample);
       if (proof.samples.length > PDF_PAGE_CENTER_STABLE_SAMPLE_COUNT) {
         proof.samples.shift();
@@ -11475,7 +11621,13 @@ async function scrollPageIntoView(cdp, pageNumber) {
         proof.samples,
         pageNumber,
       );
-      if (proof.summary.ready) return structuredClone(proof);
+      if (
+        observation?.plan?.valid === true &&
+        observation.plan.correctionRequired === false &&
+        proof.summary.ready
+      ) {
+        return structuredClone(proof);
+      }
     }
     throw new Error(
       `Timed out waiting for PDF page ${pageNumber} to remain centered: ` +
