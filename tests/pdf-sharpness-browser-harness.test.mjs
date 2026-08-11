@@ -74,6 +74,7 @@ import {
   settleCdpCommandDispatches,
   summarizePdfFallbackCancellationDiagnostic,
   summarizePdfModelCompletion,
+  summarizePdfRestoreReadiness,
   summarizeFallbackImportLifecycle,
   summarizeFallbackDiagnosticProgress,
   summarizeFallbackDiagnosticSetup,
@@ -509,6 +510,7 @@ function passingFallbackNetworkDiagnostic() {
     type: "service_worker",
     urlClass: "app-asset",
     waitingForDebugger: true,
+    workerInstanceId: null,
   };
   const setupDocument = {
     ancestry: [],
@@ -649,6 +651,63 @@ function passingFallbackNetworkDiagnostic() {
       target: parserTarget,
     }),
   ];
+  const importBoundary = {
+    attachPromiseCount: oldTargets.length,
+    requestCount: 10,
+    settlementCount: 2,
+    targetCount: oldTargets.length,
+  };
+  const requestProof = ({
+    bootstrapTargetSessionId = null,
+    method = "GET",
+    phase,
+    requestId,
+    sequence,
+    sessionId = null,
+    type = "Fetch",
+    urlClass = "app-asset",
+  }) => ({
+    bootstrapTargetIdentityHash: bootstrapTargetSessionId
+      ? diagnosticIdentity(bootstrapTargetSessionId)
+      : null,
+    identityHash: diagnosticIdentity(sessionId, requestId),
+    method,
+    phase,
+    sequence,
+    sessionIdentityHash: sessionId ? diagnosticIdentity(sessionId) : null,
+    sessionScoped: sessionId !== null,
+    type,
+    urlClass,
+  });
+  const requests = Array.from({ length: importBoundary.requestCount },
+    (_, index) => requestProof({
+      phase: "fallback-diagnostic-setup",
+      requestId: `setup-request-${index + 1}`,
+      sequence: index + 1,
+    }));
+  for (const [target, requestId, sessionId] of [
+    [blobTarget, "fallback-blob-request", null],
+    [appWorkerTarget, "fallback-app-worker-request", null],
+    [parserTarget, "fallback-parser-request", blobTarget.sessionId],
+  ]) {
+    requests.push(requestProof({
+      bootstrapTargetSessionId: target.sessionId,
+      phase: "fallback-import-diagnostic",
+      requestId,
+      sequence: requests.length + 1,
+      sessionId,
+      type: "Script",
+      urlClass: target.urlClass,
+    }));
+  }
+  for (let index = requests.length; index < 20; index += 1) {
+    requests.push(requestProof({
+      phase: "fallback-import-diagnostic",
+      requestId: `fallback-runtime-request-${index + 1}`,
+      sequence: index + 1,
+      sessionId: parserTarget.sessionId,
+    }));
+  }
   return {
     attachErrors: [],
     counts: {
@@ -664,6 +723,11 @@ function passingFallbackNetworkDiagnostic() {
       targetBootstrapSettlementCount: targetBootstrapSettlements.length,
       targetCount: targets.length,
     },
+    fallbackRequestProof: {
+      complete: true,
+      finalRequestCount: requests.length,
+      requests,
+    },
     inflightRequests: [],
     initialTargetBaseline: {
       checked: true,
@@ -672,6 +736,7 @@ function passingFallbackNetworkDiagnostic() {
       targetCount: 1,
       workerCount: 0,
     },
+    importBoundary,
     label: "fallback-import-diagnostic",
     outcome: "fixed-point-reached",
     pendingAttaches: [],
@@ -1099,6 +1164,40 @@ test("requires a clean fallback blob/parser CDP lifecycle after the setup bounda
     isFallbackImportNetworkDiagnosticHealthy(diagnostic, boundary, 2),
     true,
   );
+  assert.equal(
+    isFallbackImportNetworkDiagnosticHealthy(
+      diagnostic,
+      { ...boundary, privatePath: "/home/private.pdf" },
+      2,
+    ),
+    false,
+  );
+  assert.equal(
+    isFallbackImportNetworkDiagnosticHealthy(
+      diagnostic,
+      { ...boundary, attachPromiseCount: boundary.attachPromiseCount + 1 },
+      2,
+    ),
+    false,
+  );
+  for (const delta of [-1, 1]) {
+    const changedDiagnostic = structuredClone(diagnostic);
+    const changedBoundary = {
+      ...boundary,
+      requestCount: boundary.requestCount + delta,
+    };
+    changedDiagnostic.importBoundary.requestCount =
+      changedBoundary.requestCount;
+    assert.equal(
+      isFallbackImportNetworkDiagnosticHealthy(
+        changedDiagnostic,
+        changedBoundary,
+        2,
+      ),
+      false,
+      `request boundary ${delta < 0 ? "rewind" : "advance"}`,
+    );
+  }
   const mutations = [
     (value) => { value.counts.attachErrorCount = 1; },
     (value) => { value.counts.inflightRequestCount = 1; },
@@ -2156,6 +2255,7 @@ test("builds a noncanonical privacy-safe fallback import diagnostic", () => {
   };
   const report = buildFallbackImportDiagnosticReport(input);
   assert.equal(report.diagnostic, true);
+  assert.equal(report.diagnosticSchemaVersion, 2);
   assert.equal(report.completed, true);
   assert.equal(report.importCompleted, true);
   assert.equal(report.networkSettled, true);
@@ -3108,18 +3208,18 @@ function passingEvidence() {
           resumeDispatchedAt: dispatchTimes[4],
         };
       };
-      const normalPairs = PDF_SHARPNESS_MATRIX.map(({ id }, index) => {
+      const normalPair = (id, index, role, offset) => {
         const documentTarget = {
           ancestry: [],
           attachComplete: true,
           bootstrapRequestKey: null,
           detached: false,
-          ...completedTargetSetup("worker", 1_000 + index * 100),
+          ...completedTargetSetup("worker", 1_000 + index * 200 + offset),
           parentSessionId: null,
           phase: id,
           resumed: true,
-          sessionId: `normal-document-session-${index}`,
-          targetId: `normal-document-target-${index}`,
+          sessionId: `normal-${role}-document-session-${index}`,
+          targetId: `normal-${role}-document-target-${index}`,
           type: "worker",
           url: "http://127.0.0.1/assets/pdf-document.worker-test.js",
           waitingForDebugger: true,
@@ -3129,17 +3229,27 @@ function passingEvidence() {
           attachComplete: true,
           bootstrapRequestKey: null,
           detached: false,
-          ...completedTargetSetup("worker", 1_050 + index * 100),
+          ...completedTargetSetup(
+            "worker",
+            1_050 + index * 200 + offset,
+          ),
           parentSessionId: documentTarget.sessionId,
           phase: id,
           resumed: true,
-          sessionId: `normal-parser-session-${index}`,
-          targetId: `normal-parser-target-${index}`,
+          sessionId: `normal-${role}-parser-session-${index}`,
+          targetId: `normal-${role}-parser-target-${index}`,
           type: "worker",
           url: "http://127.0.0.1/assets/pdf-parser.worker-test.js",
           waitingForDebugger: true,
         };
-        return { documentTarget, id, parserTarget };
+        return { documentTarget, parserTarget, role };
+      };
+      const normalPairs = PDF_SHARPNESS_MATRIX.map(({ id }, index) => {
+        const restored = index === 0
+          ? null
+          : normalPair(id, index, "restore", 0);
+        const imported = normalPair(id, index, "import", 100);
+        return { id, imported, restored };
       });
       const forcedWrapper = {
         ancestry: [],
@@ -3187,23 +3297,31 @@ function passingEvidence() {
         url: "http://127.0.0.1/sw.js",
         waitingForDebugger: true,
       };
-      const targets = [
-        serviceWorker,
-        ...normalPairs.flatMap(({ documentTarget, parserTarget }) => [
-          documentTarget,
-          parserTarget,
-        ]),
-        forcedWrapper,
-        forcedParser,
-      ];
+      const targets = [serviceWorker];
       const targetBootstrapSettlements = [];
-      const bootstrapRequests = normalPairs.flatMap(
-        ({ documentTarget, id, parserTarget }, index) => {
+      const serviceWorkerRequest = {
+        method: "GET",
+        phase: serviceWorker.phase,
+        requestId: "service-worker-bootstrap-request",
+        serviceWorkerTargetSessionId: serviceWorker.sessionId,
+        sessionId: serviceWorker.sessionId,
+        startedAt: 905,
+        terminalAt: 910,
+        terminalReason: "loading-finished",
+        type: "Script",
+        url: serviceWorker.url,
+      };
+      serviceWorker.serviceWorkerBootstrapRequestKey =
+        `${serviceWorker.sessionId}:${serviceWorkerRequest.requestId}`;
+      const requests = [serviceWorkerRequest];
+      const appendPair = (pair, id, index) => {
+          const { documentTarget, parserTarget, role } = pair;
+          targets.push(documentTarget, parserTarget);
           const documentRequest = {
             bootstrapTargetSessionId: documentTarget.sessionId,
             method: "GET",
             phase: id,
-            requestId: `normal-document-request-${index}`,
+            requestId: `normal-${role}-document-request-${index}`,
             sessionId: null,
             type: "Script",
             url: documentTarget.url,
@@ -3212,7 +3330,7 @@ function passingEvidence() {
             bootstrapTargetSessionId: parserTarget.sessionId,
             method: "GET",
             phase: id,
-            requestId: `normal-parser-request-${index}`,
+            requestId: `normal-${role}-parser-request-${index}`,
             sessionId: documentTarget.sessionId,
             type: "Script",
             url: parserTarget.url,
@@ -3238,18 +3356,118 @@ function passingEvidence() {
               url: request.url,
             });
           }
-          return [documentRequest, parserRequest];
+          requests.push(documentRequest, parserRequest);
+          if (role === "import") {
+            requests.push({
+              method: "GET",
+              phase: id,
+              requestId: `normal-import-runtime-request-${index}`,
+              sessionId: parserTarget.sessionId,
+              type: "Fetch",
+              url: `http://127.0.0.1/assets/worker-request-${index}.bin`,
+            });
+          }
+      };
+      const matrixFixedPoints = normalPairs.map(
+        ({ id, imported, restored }, index) => {
+          if (restored) appendPair(restored, id, index);
+          const importBoundary = {
+            attachPromiseCount: targets.length,
+            requestCount: requests.length,
+            settlementCount: targetBootstrapSettlements.length,
+            targetCount: targets.length,
+          };
+          appendPair(imported, id, index);
+          const restoreCount = restored ? 1 : 0;
+          return {
+            attachErrorCount: 0,
+            attachmentReady: true,
+            attachPromiseCount: targets.length,
+            completedRequestCount: requests.length,
+            documentBootstrapSettlementCount: 1,
+            importBoundary,
+            inflightRequestCount: 0,
+            label: id,
+            parserBootstrapSettlementCount: 1,
+            pendingAttachCount: 0,
+            requestCount: requests.length,
+            restore: {
+              fixedPoint: {
+                attachPromiseCount: importBoundary.attachPromiseCount,
+                completedRequestCount: importBoundary.requestCount,
+                documentBootstrapSettlementCount: restoreCount,
+                parserBootstrapSettlementCount: restoreCount,
+                requestCount: importBoundary.requestCount,
+                targetBootstrapSettlementCount:
+                  importBoundary.settlementCount,
+                targetCount: importBoundary.targetCount,
+              },
+              readiness: {
+                activeDocumentCount: restoreCount,
+                activeDocumentMatchesOpen: index > 0,
+                activeDocumentStateAvailable: true,
+                activePdfCount: restoreCount,
+                expectedPersisted: index > 0,
+                firstPageCount: restoreCount,
+                importRequestCount: 0,
+                libraryPending: false,
+                openRequestCount: restoreCount,
+                ready: true,
+                sourceSelectionCount: 0,
+              },
+            },
+            serviceWorkerBootstrapObservationCount: 1,
+            serviceWorkerBypassed: true,
+            targetBootstrapSettlementCount:
+              targetBootstrapSettlements.length,
+            targetCount: targets.length,
+          };
         },
       );
-      const runtimeRequests = [
-        ...normalPairs.map(({ id, parserTarget }, index) => ({
+      targets.push(forcedWrapper, forcedParser);
+      const forcedBootstrapRequests = [
+        {
+          bootstrapTargetSessionId: forcedWrapper.sessionId,
           method: "GET",
-          phase: id,
-          requestId: `normal-runtime-request-${index}`,
-          sessionId: parserTarget.sessionId,
-          type: "Fetch",
-          url: `http://127.0.0.1/assets/worker-request-${index}.bin`,
-        })),
+          phase: forcedWrapper.phase,
+          requestId: "forced-wrapper-bootstrap-request",
+          sessionId: null,
+          type: "Script",
+          url: forcedWrapper.url,
+        },
+        {
+          bootstrapTargetSessionId: forcedParser.sessionId,
+          method: "GET",
+          phase: forcedParser.phase,
+          requestId: "forced-parser-bootstrap-request",
+          sessionId: forcedWrapper.sessionId,
+          type: "Script",
+          url: forcedParser.url,
+        },
+      ];
+      for (const [request, target] of [
+        [forcedBootstrapRequests[0], forcedWrapper],
+        [forcedBootstrapRequests[1], forcedParser],
+      ]) {
+        target.bootstrapRequestKey =
+          `${request.sessionId ?? "page"}:${request.requestId}`;
+        targetBootstrapSettlements.push({
+          method: request.method,
+          phase: request.phase,
+          requestId: request.requestId,
+          requestSessionId: request.sessionId,
+          resourceType: request.type,
+          targetDetachedAtSettlement: false,
+          targetId: target.targetId,
+          targetParentSessionId: target.parentSessionId,
+          targetSessionId: target.sessionId,
+          targetType: target.type,
+          terminalReason: "target-attached",
+          url: request.url,
+        });
+      }
+      requests.push(
+        ...forcedBootstrapRequests,
         ...[forcedWrapper, forcedParser].map((target, index) => ({
           method: "GET",
           phase: target.phase,
@@ -3258,26 +3476,7 @@ function passingEvidence() {
           type: "Fetch",
           url: `http://127.0.0.1/assets/forced-request-${index}.bin`,
         })),
-      ];
-      const serviceWorkerRequest = {
-        method: "GET",
-        phase: serviceWorker.phase,
-        requestId: "service-worker-bootstrap-request",
-        serviceWorkerTargetSessionId: serviceWorker.sessionId,
-        sessionId: serviceWorker.sessionId,
-        startedAt: 905,
-        terminalAt: 910,
-        terminalReason: "loading-finished",
-        type: "Script",
-        url: serviceWorker.url,
-      };
-      serviceWorker.serviceWorkerBootstrapRequestKey =
-        `${serviceWorker.sessionId}:${serviceWorkerRequest.requestId}`;
-      const requests = [
-        serviceWorkerRequest,
-        ...bootstrapRequests,
-        ...runtimeRequests,
-      ];
+      );
       requests.forEach((request, index) => {
         request.sequence = index + 1;
         request.startedAt ??= 3_000 + index * 2;
@@ -3310,10 +3509,8 @@ function passingEvidence() {
       return {
         attachErrors: [],
         networkFixedPoints: [
-          ...PDF_SHARPNESS_MATRIX.map(({ id }) => id),
-          "forced-main-fallback",
-          "final-network-privacy",
-        ].map((label) => ({
+          ...matrixFixedPoints,
+          ...["forced-main-fallback", "final-network-privacy"].map((label) => ({
           attachErrorCount: 0,
           attachmentReady: true,
           attachPromiseCount: targets.length,
@@ -3324,23 +3521,24 @@ function passingEvidence() {
           label,
           pendingAttachCount: 0,
           parserBootstrapSettlementCount:
-            PDF_SHARPNESS_MATRIX.some(({ id }) => id === label) ? 1 : 0,
+            label === "forced-main-fallback" ? 1 : 0,
           requestCount,
           serviceWorkerBypassed: true,
           serviceWorkerBootstrapObservationCount: 1,
           targetBootstrapSettlementCount:
             targetBootstrapSettlements.length,
           targetCount: targets.length,
-        })),
+          })),
+        ],
         completedRequestCount: requestCount,
         coverageTargets: {
           forcedBlobWrapper: [forcedWrapper],
           forcedParserWorker: [forcedParser],
-          normalDocumentWorker: normalPairs.map(
-            ({ documentTarget }) => documentTarget,
+          normalDocumentWorker: normalPairs.flatMap(({ imported, restored }) =>
+            [restored?.documentTarget, imported.documentTarget].filter(Boolean)
           ),
-          normalParserWorker: normalPairs.map(
-            ({ parserTarget }) => parserTarget,
+          normalParserWorker: normalPairs.flatMap(({ imported, restored }) =>
+            [restored?.parserTarget, imported.parserTarget].filter(Boolean)
           ),
         },
         externalRequests: [],
@@ -3355,23 +3553,39 @@ function passingEvidence() {
         inflightRequestCount: 0,
         localRequestCount: requestCount,
         matrixCoverage: Object.fromEntries(
-          normalPairs.map(({ documentTarget, id, parserTarget }) => [
+          normalPairs.map(({ id, imported }) => [
             id,
             {
               documentBootstrapSettlementCount: 1,
               documentRequestCount: 2,
-              documentTargets: [documentTarget],
+              documentTargets: [imported.documentTarget],
               parserBootstrapSettlementCount: 1,
               parserRequestCount: 1,
-              parserTargets: [parserTarget],
+              parserTargets: [imported.parserTarget],
             },
           ]),
         ),
         nonPageRequestCounts: {
-          forcedBlobWrapper: 2,
+          forcedBlobWrapper: 3,
           forcedParserWorker: 1,
-          normalDocumentWorker: normalPairs.length * 2,
-          normalParserWorker: normalPairs.length,
+          normalDocumentWorker: nonPageRequests.filter((request) =>
+            normalPairs.some(({ imported, restored }) =>
+              [restored, imported].filter(Boolean).some(({ documentTarget }) =>
+                request.sessionId === documentTarget.sessionId
+              )
+            ) || normalPairs.some(({ imported, restored }) =>
+              [restored, imported].filter(Boolean).some(({ parserTarget }) =>
+                request.sessionId === parserTarget.sessionId
+              )
+            )
+          ).length,
+          normalParserWorker: nonPageRequests.filter((request) =>
+            normalPairs.some(({ imported, restored }) =>
+              [restored, imported].filter(Boolean).some(({ parserTarget }) =>
+                request.sessionId === parserTarget.sessionId
+              )
+            )
+          ).length,
           total: nonPageRequests.length,
         },
         nonPageRequests,
@@ -3546,6 +3760,66 @@ test("accepts complete Issue 68 sharpness evidence", () => {
   assert.deepEqual(validatePdfSharpnessEvidence(evidence), []);
 });
 
+test("accepts fresh row one and same-phase restore/import intervals", () => {
+  const evidence = passingEvidence();
+  const points = evidence.network.networkFixedPoints;
+  assert.deepEqual(
+    {
+      document: points.at(-2).documentBootstrapSettlementCount,
+      parser: points.at(-2).parserBootstrapSettlementCount,
+    },
+    { document: 0, parser: 1 },
+  );
+  assert.deepEqual(
+    {
+      document: points.at(-1).documentBootstrapSettlementCount,
+      parser: points.at(-1).parserBootstrapSettlementCount,
+    },
+    { document: 0, parser: 0 },
+  );
+  assert.deepEqual(
+    {
+      attachPromiseCount: points.at(-1).attachPromiseCount,
+      completedRequestCount: points.at(-1).completedRequestCount,
+      requestCount: points.at(-1).requestCount,
+      targetBootstrapSettlementCount:
+        points.at(-1).targetBootstrapSettlementCount,
+      targetCount: points.at(-1).targetCount,
+    },
+    {
+      attachPromiseCount: points.at(-2).attachPromiseCount,
+      completedRequestCount: points.at(-2).completedRequestCount,
+      requestCount: points.at(-2).requestCount,
+      targetBootstrapSettlementCount:
+        points.at(-2).targetBootstrapSettlementCount,
+      targetCount: points.at(-2).targetCount,
+    },
+  );
+  PDF_SHARPNESS_MATRIX.forEach(({ id }, index) => {
+    const point = points[index];
+    const previous = points[index - 1] ?? {
+      targetCount: 0,
+    };
+    const restoreTargets = evidence.network.targets.slice(
+      previous.targetCount,
+      point.importBoundary.targetCount,
+    ).filter((target) => /pdf-(?:document|parser)\.worker-/u.test(target.url));
+    const importTargets = evidence.network.targets.slice(
+      point.importBoundary.targetCount,
+      point.targetCount,
+    ).filter((target) => /pdf-(?:document|parser)\.worker-/u.test(target.url));
+    assert.equal(restoreTargets.length, index === 0 ? 0 : 2);
+    assert.equal(importTargets.length, 2);
+    assert.equal(restoreTargets.every((target) => target.phase === id), true);
+    assert.equal(importTargets.every((target) => target.phase === id), true);
+    assert.equal(
+      point.restore.readiness.activeDocumentMatchesOpen,
+      index > 0,
+    );
+  });
+  assert.deepEqual(validatePdfSharpnessEvidence(evidence), []);
+});
+
 test("binds the requested top page when an adjacent page is the global winner", () => {
   const evidence = passingEvidence();
   makeAdjacentReferenceComponentTheGlobalWinner(evidence.matrix[0]);
@@ -3580,7 +3854,7 @@ test("binds raster transitions to import and monotonic event identities", async 
     "utf8",
   );
   assert.match(source, /compositionId: state\.draws\.length \+ 1/u);
-  assert.equal(source.match(/eventId: workerEvents\.length \+ 1/gu)?.length, 2);
+  assert.equal(source.match(/eventId: workerEvents\.length \+ 1/gu)?.length, 3);
   assert.match(
     source,
     /event\.jobId === \$\{modelCompletion\.importJobId\}/u,
@@ -3754,9 +4028,11 @@ test("records fixed-point diagnostics without private URL or payload data", () =
   assert.deepEqual(Object.keys(diagnostic).sort(), [
     "attachErrors",
     "counts",
+    "importBoundary",
     "inflightRequests",
     "initialTargetBaseline",
     "label",
+    "matrixRestoreProof",
     "outcome",
     "pendingAttaches",
     "recentActivity",
@@ -3766,6 +4042,8 @@ test("records fixed-point diagnostics without private URL or payload data", () =
     "targets",
     "wait",
   ]);
+  assert.equal(diagnostic.importBoundary, null);
+  assert.equal(diagnostic.matrixRestoreProof, null);
   assert.equal(diagnostic.inflightRequests[0].urlClass,
     "pdf-parser-worker");
   assert.equal(diagnostic.pendingAttaches[0].urlClass,
@@ -4028,6 +4306,57 @@ test("records fixed-point diagnostics without private URL or payload data", () =
     }),
   );
   healthyDiagnostic.wait.stableSamples = 3;
+  healthyDiagnostic.targets = [
+    serviceWorkerTarget,
+    ...healthyDiagnostic.targets.filter(
+      (target) => target.sessionId !== serviceWorkerTarget.sessionId,
+    ),
+  ];
+  const restoreDiagnostic = structuredClone(healthyDiagnostic);
+  restoreDiagnostic.counts = {
+    ...restoreDiagnostic.counts,
+    attachPromiseCount: 1,
+    completedRequestCount: 1,
+    requestCount: 1,
+    targetBootstrapSettlementCount: 0,
+    targetCount: 1,
+  };
+  restoreDiagnostic.importBoundary = null;
+  restoreDiagnostic.matrixRestoreProof = null;
+  restoreDiagnostic.targetBootstrapSettlements = [];
+  restoreDiagnostic.targets = [structuredClone(serviceWorkerTarget)];
+  restoreDiagnostic.wait.recentSamples.forEach((sample) => {
+    sample.requestCount = 1;
+    sample.targetCount = 1;
+  });
+  healthyDiagnostic.importBoundary = {
+    attachPromiseCount: 1,
+    requestCount: 1,
+    settlementCount: 0,
+    targetCount: 1,
+  };
+  healthyDiagnostic.matrixRestoreProof = {
+    documentBootstrapSettlementCount: 0,
+    networkDiagnostic: restoreDiagnostic,
+    parserBootstrapSettlementCount: 0,
+    readiness: {
+      activeDocumentCount: 0,
+      activeDocumentMatchesOpen: false,
+      activeDocumentStateAvailable: true,
+      activePdfCount: 0,
+      expectedPersisted: false,
+      firstPageCount: 0,
+      importRequestCount: 0,
+      libraryPending: false,
+      openRequestCount: 0,
+      ready: true,
+      sourceSelectionCount: 0,
+    },
+  };
+  Object.assign(
+    healthyDiagnostic,
+    passingCumulativeAppMatrixNetworkDiagnostics()[0],
+  );
   assert.equal(isCdpFixedPointDiagnosticHealthy(healthyDiagnostic), true);
   const naturallyDetachedServiceWorker = structuredClone(healthyDiagnostic);
   naturallyDetachedServiceWorker.targets.find(
@@ -4055,7 +4384,7 @@ test("records fixed-point diagnostics without private URL or payload data", () =
     teardown: cleanDiagnosticTeardown,
   });
   assert.equal(report.diagnostic, true);
-  assert.equal(report.diagnosticSchemaVersion, 1);
+  assert.equal(report.diagnosticSchemaVersion, 2);
   assert.equal(report.completed, true);
   assert.equal(report.fixedPointReached, true);
   assert.deepEqual(Object.keys(report).sort(), [
@@ -4319,7 +4648,7 @@ test("records fixed-point diagnostics without private URL or payload data", () =
     mutate(unhealthyDiagnostic);
     assert.equal(
       isCdpFixedPointDiagnosticHealthy(unhealthyDiagnostic),
-      name === "wrong first-scenario phase",
+      false,
       `${name} helper result was unexpected`,
     );
     const unhealthyReport = buildFirstNetworkDiagnosticReport({
@@ -5618,6 +5947,114 @@ test("requires at least one strict preview-to-sharp upgrade in the matrix", () =
   );
 });
 
+function appendShadowPdfPairToFinalNetworkInterval(evidence) {
+  const network = evidence.network;
+  const firstPoint = network.networkFixedPoints[0];
+  const sourceTargets = network.targets.slice(
+    firstPoint.importBoundary.targetCount,
+    firstPoint.targetCount,
+  );
+  const sourceDocument = sourceTargets.find((target) =>
+    /pdf-document\.worker-/u.test(target.url)
+  );
+  const sourceParser = sourceTargets.find((target) =>
+    /pdf-parser\.worker-/u.test(target.url)
+  );
+  const documentTarget = structuredClone(sourceDocument);
+  const parserTarget = structuredClone(sourceParser);
+  const phase = "shadow-final-phase";
+  documentTarget.ancestry = [];
+  documentTarget.parentSessionId = null;
+  documentTarget.phase = phase;
+  documentTarget.sessionId = "shadow-final-document-session";
+  documentTarget.targetId = "shadow-final-document-target";
+  parserTarget.ancestry = [{
+    phase,
+    sessionId: documentTarget.sessionId,
+    type: documentTarget.type,
+    url: documentTarget.url,
+  }];
+  parserTarget.parentSessionId = documentTarget.sessionId;
+  parserTarget.phase = phase;
+  parserTarget.sessionId = "shadow-final-parser-session";
+  parserTarget.targetId = "shadow-final-parser-target";
+  let nextCdpId = Math.max(
+    ...network.targets.flatMap((target) =>
+      target.commands.map((command) => command.cdpId)
+    ),
+  ) + 1;
+  for (const target of [documentTarget, parserTarget]) {
+    for (const command of target.commands) {
+      command.cdpId = nextCdpId++;
+    }
+  }
+  const requests = [
+    {
+      bootstrapTargetSessionId: documentTarget.sessionId,
+      method: "GET",
+      phase,
+      requestId: "shadow-final-document-request",
+      sessionId: null,
+      startedAt: 9_000,
+      terminalAt: 9_001,
+      terminalReason: "target-attached",
+      type: "Script",
+      url: documentTarget.url,
+    },
+    {
+      bootstrapTargetSessionId: parserTarget.sessionId,
+      method: "GET",
+      phase,
+      requestId: "shadow-final-parser-request",
+      sessionId: documentTarget.sessionId,
+      startedAt: 9_002,
+      terminalAt: 9_003,
+      terminalReason: "target-attached",
+      type: "Script",
+      url: parserTarget.url,
+    },
+  ];
+  for (const [request, target] of [
+    [requests[0], documentTarget],
+    [requests[1], parserTarget],
+  ]) {
+    target.bootstrapRequestKey =
+      `${request.sessionId ?? "page"}:${request.requestId}`;
+    network.targetBootstrapSettlements.push({
+      method: request.method,
+      phase: request.phase,
+      requestId: request.requestId,
+      requestSessionId: request.sessionId,
+      resourceType: request.type,
+      targetDetachedAtSettlement: false,
+      targetId: target.targetId,
+      targetParentSessionId: target.parentSessionId,
+      targetSessionId: target.sessionId,
+      targetType: target.type,
+      terminalReason: "target-attached",
+      url: request.url,
+    });
+  }
+  network.targets.push(documentTarget, parserTarget);
+  network.requests.push(...requests);
+  network.requests.forEach((request, index) => {
+    request.sequence = index + 1;
+  });
+  network.nonPageRequests = network.requests.filter(
+    (request) => request.sessionId !== null,
+  );
+  network.nonPageRequestCounts.total = network.nonPageRequests.length;
+  network.completedRequestCount = network.requests.length;
+  network.localRequestCount = network.requests.length;
+  const finalPoint = network.networkFixedPoints.at(-1);
+  finalPoint.attachPromiseCount = network.targets.length;
+  finalPoint.completedRequestCount = network.requests.length;
+  finalPoint.requestCount = network.requests.length;
+  finalPoint.targetBootstrapSettlementCount =
+    network.targetBootstrapSettlements.length;
+  finalPoint.targetCount = network.targets.length;
+}
+
 test("rejects each material Issue 68 acceptance regression", async (t) => {
   const cases = [
     ["legacy evidence schema", (value) => {
@@ -6562,6 +6999,307 @@ test("rejects each material Issue 68 acceptance regression", async (t) => {
     ["fixed-point service worker bypass", (value) => {
       value.network.networkFixedPoints[0].serviceWorkerBypassed = false;
     }, /recursively attached worker network/u],
+    ["forced fallback omits its parser settlement", (value) => {
+      value.network.networkFixedPoints.at(-2)
+        .parserBootstrapSettlementCount = 0;
+    }, /recursively attached worker network/u],
+    ["forced fallback claims a document settlement", (value) => {
+      value.network.networkFixedPoints.at(-2)
+        .documentBootstrapSettlementCount = 1;
+    }, /recursively attached worker network/u],
+    ["forced fallback claims an extra parser settlement", (value) => {
+      value.network.networkFixedPoints.at(-2)
+        .parserBootstrapSettlementCount = 2;
+    }, /recursively attached worker network/u],
+    ["final privacy claims a document settlement", (value) => {
+      value.network.networkFixedPoints.at(-1)
+        .documentBootstrapSettlementCount = 1;
+    }, /recursively attached worker network/u],
+    ["final privacy claims a parser settlement", (value) => {
+      value.network.networkFixedPoints.at(-1)
+        .parserBootstrapSettlementCount = 1;
+    }, /recursively attached worker network/u],
+    ["final privacy interval hides a correlated PDF pair", (value) => {
+      appendShadowPdfPairToFinalNetworkInterval(value);
+    }, /recursively attached worker network/u],
+    ["matrix import boundary missing field", (value) => {
+      delete value.network.networkFixedPoints[1].importBoundary.requestCount;
+    }, /recursively attached worker network/u],
+    ["matrix import boundary extra field", (value) => {
+      value.network.networkFixedPoints[1].importBoundary.completedRequestCount =
+        value.network.networkFixedPoints[1].importBoundary.requestCount;
+    }, /recursively attached worker network/u],
+    ["matrix import boundary fractional", (value) => {
+      value.network.networkFixedPoints[1].importBoundary.targetCount += 0.5;
+    }, /recursively attached worker network/u],
+    ["matrix restore readiness", (value) => {
+      value.network.networkFixedPoints[1].restore.readiness.firstPageCount = 0;
+    }, /recursively attached worker network/u],
+    ["matrix restore request settlement", (value) => {
+      value.network.networkFixedPoints[1].restore.fixedPoint
+        .completedRequestCount -= 1;
+    }, /recursively attached worker network/u],
+    ["matrix point private field", (value) => {
+      value.network.networkFixedPoints[1].privatePath = "/home/private.pdf";
+    }, /recursively attached worker network/u],
+    ["matrix restore private field", (value) => {
+      value.network.networkFixedPoints[1].restore.privatePath =
+        "/home/private.pdf";
+    }, /recursively attached worker network/u],
+    ["matrix point incomplete completion endpoint", (value) => {
+      value.network.networkFixedPoints[1].completedRequestCount -= 1;
+    }, /recursively attached worker network/u],
+    ["matrix endpoint consumes next restore request", (value) => {
+      value.network.networkFixedPoints[1].requestCount += 1;
+      value.network.networkFixedPoints[1].completedRequestCount += 1;
+    }, /recursively attached worker network/u],
+    ["fallback fixed point rewinds cumulative history", (value) => {
+      const point = value.network.networkFixedPoints.at(-2);
+      point.attachPromiseCount = 1;
+      point.completedRequestCount = 1;
+      point.requestCount = 1;
+      point.targetBootstrapSettlementCount = 0;
+      point.targetCount = 1;
+    }, /recursively attached worker network/u],
+    ["final fixed point omits a raw target", (value) => {
+      const point = value.network.networkFixedPoints.at(-1);
+      point.attachPromiseCount -= 1;
+      point.targetCount -= 1;
+    }, /recursively attached worker network/u],
+    ["restore and import document requests cross the boundary", (value) => {
+      const point = value.network.networkFixedPoints[1];
+      const previous = value.network.networkFixedPoints[0];
+      const restoreIndex = value.network.requests.findIndex(
+        (request, index) =>
+          index >= previous.requestCount &&
+          index < point.importBoundary.requestCount &&
+          request.sessionId === null &&
+          request.bootstrapTargetSessionId,
+      );
+      const importIndex = value.network.requests.findIndex(
+        (request, index) =>
+          index >= point.importBoundary.requestCount &&
+          index < point.requestCount &&
+          request.sessionId === null &&
+          request.bootstrapTargetSessionId,
+      );
+      [value.network.requests[restoreIndex], value.network.requests[importIndex]] =
+        [value.network.requests[importIndex], value.network.requests[restoreIndex]];
+      value.network.requests.forEach((request, index) => {
+        request.sequence = index + 1;
+      });
+    }, /recursively attached worker network/u],
+    ["import parser is parented to the restore document", (value) => {
+      const point = value.network.networkFixedPoints[1];
+      const previous = value.network.networkFixedPoints[0];
+      const restoreDocument = value.network.targets
+        .slice(previous.targetCount, point.importBoundary.targetCount)
+        .find((target) => /pdf-document\.worker-/u.test(target.url));
+      const importedTargets = value.network.targets.slice(
+        point.importBoundary.targetCount,
+        point.targetCount,
+      );
+      const importedParser = importedTargets.find((target) =>
+        /pdf-parser\.worker-/u.test(target.url)
+      );
+      const requestIndex = value.network.requests.findIndex((request) =>
+        request.bootstrapTargetSessionId === importedParser.sessionId
+      );
+      const [request] = value.network.requests.splice(requestIndex, 1);
+      request.sessionId = restoreDocument.sessionId;
+      importedParser.parentSessionId = restoreDocument.sessionId;
+      importedParser.ancestry = [structuredClone(restoreDocument)];
+      importedParser.bootstrapRequestKey =
+        `${request.sessionId}:${request.requestId}`;
+      const settlement = value.network.targetBootstrapSettlements.find(
+        (entry) => entry.targetSessionId === importedParser.sessionId,
+      );
+      settlement.requestSessionId = request.sessionId;
+      settlement.targetParentSessionId = request.sessionId;
+      value.network.requests.splice(
+        point.importBoundary.requestCount - 1,
+        0,
+        request,
+      );
+      value.network.requests.forEach((entry, index) => {
+        entry.sequence = index + 1;
+      });
+      value.network.nonPageRequests = value.network.requests.filter(
+        (entry) => entry.sessionId !== null,
+      );
+    }, /recursively attached worker network/u],
+    ["import parser declared ancestry contradicts its service parent", (value) => {
+      const point = value.network.networkFixedPoints[1];
+      const importedParser = value.network.targets
+        .slice(point.importBoundary.targetCount, point.targetCount)
+        .find((target) => /pdf-parser\.worker-/u.test(target.url));
+      const serviceWorker = value.network.targets.find(
+        (target) => target.type === "service_worker",
+      );
+      const request = value.network.requests.find((entry) =>
+        entry.bootstrapTargetSessionId === importedParser.sessionId
+      );
+      request.sessionId = serviceWorker.sessionId;
+      importedParser.parentSessionId = serviceWorker.sessionId;
+      importedParser.bootstrapRequestKey =
+        `${request.sessionId}:${request.requestId}`;
+      const settlement = value.network.targetBootstrapSettlements.find(
+        (entry) => entry.targetSessionId === importedParser.sessionId,
+      );
+      settlement.requestSessionId = request.sessionId;
+      settlement.targetParentSessionId = request.sessionId;
+      value.network.nonPageRequests = value.network.requests.filter(
+        (entry) => entry.sessionId !== null,
+      );
+    }, /recursively attached worker network/u],
+    ["restore interval hides an extra phase PDF pair", (value) => {
+      const pointIndex = 1;
+      const point = value.network.networkFixedPoints[pointIndex];
+      const previous = value.network.networkFixedPoints[pointIndex - 1];
+      const restoreTargets = value.network.targets.slice(
+        previous.targetCount,
+        point.importBoundary.targetCount,
+      );
+      const sourceDocument = restoreTargets.find((target) =>
+        /pdf-document\.worker-/u.test(target.url)
+      );
+      const sourceParser = restoreTargets.find((target) =>
+        /pdf-parser\.worker-/u.test(target.url)
+      );
+      const hiddenDocument = structuredClone(sourceDocument);
+      const hiddenParser = structuredClone(sourceParser);
+      hiddenDocument.phase = "shadow-phase";
+      hiddenDocument.sessionId = "shadow-document-session";
+      hiddenDocument.targetId = "shadow-document-target";
+      hiddenDocument.commands.forEach((command) => {
+        command.cdpId += 100_000;
+      });
+      hiddenDocument.ancestry = [];
+      hiddenParser.phase = "shadow-phase";
+      hiddenParser.sessionId = "shadow-parser-session";
+      hiddenParser.targetId = "shadow-parser-target";
+      hiddenParser.parentSessionId = hiddenDocument.sessionId;
+      hiddenParser.commands.forEach((command) => {
+        command.cdpId += 200_000;
+      });
+      hiddenParser.ancestry = [structuredClone(hiddenDocument)];
+      const sourceDocumentRequest = value.network.requests.find(
+        (request) =>
+          request.bootstrapTargetSessionId === sourceDocument.sessionId,
+      );
+      const sourceParserRequest = value.network.requests.find(
+        (request) => request.bootstrapTargetSessionId === sourceParser.sessionId,
+      );
+      const hiddenDocumentRequest = {
+        ...structuredClone(sourceDocumentRequest),
+        bootstrapTargetSessionId: hiddenDocument.sessionId,
+        phase: "shadow-phase",
+        requestId: "shadow-document-request",
+      };
+      const hiddenParserRequest = {
+        ...structuredClone(sourceParserRequest),
+        bootstrapTargetSessionId: hiddenParser.sessionId,
+        phase: "shadow-phase",
+        requestId: "shadow-parser-request",
+        sessionId: hiddenDocument.sessionId,
+      };
+      hiddenDocument.bootstrapRequestKey =
+        `page:${hiddenDocumentRequest.requestId}`;
+      hiddenParser.bootstrapRequestKey =
+        `${hiddenDocument.sessionId}:${hiddenParserRequest.requestId}`;
+      const hiddenSettlement = (source, request, target) => ({
+        ...structuredClone(source),
+        phase: "shadow-phase",
+        requestId: request.requestId,
+        requestSessionId: request.sessionId,
+        targetId: target.targetId,
+        targetParentSessionId: target.parentSessionId,
+        targetSessionId: target.sessionId,
+      });
+      const hiddenSettlements = [
+        hiddenSettlement(
+          value.network.targetBootstrapSettlements.find((entry) =>
+            entry.targetSessionId === sourceDocument.sessionId
+          ),
+          hiddenDocumentRequest,
+          hiddenDocument,
+        ),
+        hiddenSettlement(
+          value.network.targetBootstrapSettlements.find((entry) =>
+            entry.targetSessionId === sourceParser.sessionId
+          ),
+          hiddenParserRequest,
+          hiddenParser,
+        ),
+      ];
+      value.network.targets.splice(
+        previous.targetCount,
+        0,
+        hiddenDocument,
+        hiddenParser,
+      );
+      value.network.requests.splice(
+        previous.requestCount,
+        0,
+        hiddenDocumentRequest,
+        hiddenParserRequest,
+      );
+      value.network.targetBootstrapSettlements.splice(
+        previous.targetBootstrapSettlementCount,
+        0,
+        ...hiddenSettlements,
+      );
+      for (
+        let index = pointIndex;
+        index < value.network.networkFixedPoints.length;
+        index += 1
+      ) {
+        const fixedPoint = value.network.networkFixedPoints[index];
+        fixedPoint.attachPromiseCount += 2;
+        fixedPoint.completedRequestCount += 2;
+        fixedPoint.requestCount += 2;
+        fixedPoint.targetBootstrapSettlementCount += 2;
+        fixedPoint.targetCount += 2;
+        if (fixedPoint.importBoundary) {
+          fixedPoint.importBoundary.attachPromiseCount += 2;
+          fixedPoint.importBoundary.requestCount += 2;
+          fixedPoint.importBoundary.settlementCount += 2;
+          fixedPoint.importBoundary.targetCount += 2;
+          fixedPoint.restore.fixedPoint.attachPromiseCount += 2;
+          fixedPoint.restore.fixedPoint.completedRequestCount += 2;
+          fixedPoint.restore.fixedPoint.requestCount += 2;
+          fixedPoint.restore.fixedPoint.targetBootstrapSettlementCount += 2;
+          fixedPoint.restore.fixedPoint.targetCount += 2;
+        }
+      }
+      value.network.completedRequestCount += 2;
+      value.network.localRequestCount += 2;
+      value.network.nonPageRequestCounts.total += 1;
+      value.network.requests.forEach((request, index) => {
+        request.sequence = index + 1;
+      });
+      value.network.nonPageRequests = value.network.requests.filter(
+        (request) => request.sessionId !== null,
+      );
+    }, /recursively attached worker network/u],
+    ["post-boundary request reuses restore target", (value) => {
+      const point = value.network.networkFixedPoints[1];
+      const restoreDocument = value.network.targets
+        .slice(
+          value.network.networkFixedPoints[0].targetCount,
+          point.importBoundary.targetCount,
+        )
+        .find((target) =>
+          /pdf-document\.worker-/u.test(target.url)
+        );
+      value.network.requests[point.importBoundary.requestCount].sessionId =
+        restoreDocument.sessionId;
+    }, /recursively attached worker network/u],
+    ["boundary cuts into explicit target", (value) => {
+      const boundary = value.network.networkFixedPoints[1].importBoundary;
+      boundary.attachPromiseCount += 1;
+      boundary.targetCount += 1;
+    }, /recursively attached worker network/u],
     ["bootstrap settlement URL", (value) => {
       value.network.targetBootstrapSettlements[0].url += "?wrong=1";
     }, /recursively attached worker network/u],
@@ -6696,6 +7434,73 @@ test("fails closed without throwing on omitted arrays and numeric fields", () =>
   delete evidence.teardown.errors;
   const failures = validatePdfSharpnessEvidence(evidence);
   assert.ok(failures.length >= 7);
+});
+
+test("fails closed without throwing on malformed structured network entries", () => {
+  const cases = [
+    ["null target", (value) => { value.network.targets = [null]; }],
+    ["primitive target", (value) => { value.network.targets = [7]; }],
+    ["null request", (value) => { value.network.requests = [null]; }],
+    ["null non-page request", (value) => {
+      value.network.nonPageRequests = [null];
+    }],
+    ["null settlement", (value) => {
+      value.network.targetBootstrapSettlements = [null];
+    }],
+    ["null service-worker observation", (value) => {
+      value.network.serviceWorkerBootstrapObservations = [null];
+    }],
+    ["null fixed point", (value) => {
+      value.network.networkFixedPoints = [null];
+    }],
+    ["null coverage target", (value) => {
+      value.network.coverageTargets.normalDocumentWorker = [null];
+    }],
+    ["primitive coverage target", (value) => {
+      value.network.coverageTargets.normalParserWorker = ["session"];
+    }],
+    ["missing coverage target field", (value) => {
+      delete value.network.coverageTargets.forcedParserWorker;
+    }],
+    ["null matrix document target", (value) => {
+      value.network.matrixCoverage[PDF_SHARPNESS_MATRIX[0].id]
+        .documentTargets = [null];
+    }],
+    ["primitive matrix parser target", (value) => {
+      value.network.matrixCoverage[PDF_SHARPNESS_MATRIX[0].id]
+        .parserTargets = [3];
+    }],
+    ["null target command", (value) => {
+      value.network.targets[0].commands = [null];
+    }],
+    ["primitive ancestry", (value) => {
+      value.network.targets[1].ancestry = 1;
+    }],
+    ["cyclic coverage entry", (value) => {
+      const cyclic = [];
+      cyclic.push(cyclic);
+      value.network.coverageTargets.normalDocumentWorker = cyclic;
+    }],
+    ["cyclic target ancestry", (value) => {
+      const target = value.network.targets[1];
+      target.ancestry = [target];
+    }],
+    ["BigInt command sequence", (value) => {
+      value.network.targets[0].commands[0].resultSequence = 1n;
+    }],
+    ["BigInt fixed-point endpoint", (value) => {
+      value.network.networkFixedPoints[0].requestCount = 1n;
+    }],
+  ];
+  for (const [name, mutate] of cases) {
+    const evidence = passingEvidence();
+    mutate(evidence);
+    let failures;
+    assert.doesNotThrow(() => {
+      failures = validatePdfSharpnessEvidence(evidence);
+    }, name);
+    assert.ok(failures.length > 0, name);
+  }
 });
 
 test("decodes CDP-style RGBA PNG scanlines for reference analysis", () => {
@@ -7144,6 +7949,200 @@ test("requires exact worker model completion before traversing virtualized pages
   assert.match(source, /PDF_VIRTUAL_SCROLL_MAX_STEPS/u);
   assert.match(source, /requestAnimationFrame\(\(\) =>[\s\S]*requestAnimationFrame/u);
   assert.doesNotMatch(source, /PDF_PAGE_(?:CHROME|GAP)/u);
+});
+
+test("binds fresh and persisted startup restore before the matrix import", async () => {
+  const restoredOpen = {
+    at: 10,
+    direction: "to-worker",
+    documentKey: "restored-document:restored-revision",
+    eventId: 1,
+    jobId: 4,
+    revision: "restored-revision",
+    type: "open",
+    workerInstanceId: 2,
+  };
+  const restoredPage = {
+    at: 11,
+    direction: "from-worker",
+    documentKey: restoredOpen.documentKey,
+    eventId: 2,
+    first: true,
+    jobId: restoredOpen.jobId,
+    pageNumber: 1,
+    revision: restoredOpen.revision,
+    type: "page",
+    workerInstanceId: restoredOpen.workerInstanceId,
+  };
+  const fresh = {
+    activeDocumentCount: 0,
+    activeDocumentMatchesOpen: false,
+    activeDocumentStateAvailable: true,
+    activePdfPresent: false,
+    expectedPersisted: false,
+    libraryPending: false,
+    sourceFiles: [],
+    workerEvents: [],
+  };
+  const persisted = {
+    activeDocumentCount: 1,
+    activeDocumentMatchesOpen: true,
+    activeDocumentStateAvailable: true,
+    activePdfPresent: true,
+    expectedPersisted: true,
+    libraryPending: false,
+    sourceFiles: [],
+    workerEvents: [restoredOpen, restoredPage],
+  };
+  assert.equal(summarizePdfRestoreReadiness(fresh).ready, true);
+  assert.deepEqual(summarizePdfRestoreReadiness(persisted), {
+    activeDocumentCount: 1,
+    activeDocumentMatchesOpen: true,
+    activeDocumentStateAvailable: true,
+    activePdfCount: 1,
+    expectedPersisted: true,
+    firstPageCount: 1,
+    importRequestCount: 0,
+    libraryPending: false,
+    openRequestCount: 1,
+    ready: true,
+    sourceSelectionCount: 0,
+  });
+  const mutations = [
+    (value) => { value.activeDocumentCount = 0; },
+    (value) => { value.activeDocumentMatchesOpen = false; },
+    (value) => { value.activeDocumentStateAvailable = false; },
+    (value) => { value.activePdfPresent = false; },
+    (value) => { value.libraryPending = true; },
+    (value) => { value.sourceFiles.push({ sha256: SHA }); },
+    (value) => { value.workerEvents.shift(); },
+    (value) => { value.workerEvents.push({ ...restoredOpen, eventId: 3 }); },
+    (value) => { value.workerEvents[1].workerInstanceId += 1; },
+    (value) => { value.workerEvents[1].jobId += 1; },
+    (value) => { value.workerEvents[1].documentKey = "other:revision"; },
+    (value) => { value.workerEvents[1].revision = "other-revision"; },
+    (value) => { value.workerEvents[1].pageNumber = 2; },
+    (value) => { value.workerEvents[1].first = false; },
+    (value) => { delete value.workerEvents[1].first; },
+    (value) => { value.workerEvents[0].eventId = 0; },
+    (value) => { value.workerEvents[0].jobId = Number.MAX_SAFE_INTEGER + 1; },
+    (value) => { value.workerEvents[0].workerInstanceId = -1; },
+    (value) => { value.workerEvents[0].at = Number.NaN; },
+    (value) => { value.workerEvents[1].at = 9; },
+    (value) => {
+      value.workerEvents[0].documentKey = "restored-document:wrong-revision";
+    },
+    (value) => { value.sourceFiles = null; },
+    (value) => { value.workerEvents = null; },
+    (value) => {
+      value.workerEvents.push({
+        ...restoredOpen,
+        eventId: 3,
+        type: "import",
+      });
+    },
+  ];
+  for (const mutate of mutations) {
+    const changed = structuredClone(persisted);
+    mutate(changed);
+    assert.equal(summarizePdfRestoreReadiness(changed).ready, false);
+  }
+  const exactIdentityError = {
+    at: 10.5,
+    direction: "from-worker",
+    documentKey: restoredOpen.documentKey,
+    eventId: 2,
+    jobId: restoredOpen.jobId,
+    revision: restoredOpen.revision,
+    terminal: true,
+    type: "error",
+    workerInstanceId: restoredOpen.workerInstanceId,
+  };
+  const restoreWithPreFirstPageError = (mutate = () => {}) => {
+    const value = structuredClone(persisted);
+    const error = structuredClone(exactIdentityError);
+    mutate(error);
+    value.workerEvents.splice(1, 0, error);
+    return value;
+  };
+  const irrelevantErrorMetadataCases = [
+    ["baseline terminal error", () => {}],
+    ["fractional event identity", (error) => { error.eventId = 1.5; }],
+    ["negative event identity", (error) => { error.eventId = -1; }],
+    ["after-page event identity", (error) => {
+      error.eventId = restoredPage.eventId + 1;
+    }],
+    ["missing event identity", (error) => { delete error.eventId; }],
+    ["NaN clock", (error) => { error.at = Number.NaN; }],
+    ["before-open clock", (error) => { error.at = restoredOpen.at - 1; }],
+    ["after-page clock", (error) => { error.at = restoredPage.at + 1; }],
+    ["missing clock", (error) => { delete error.at; }],
+    ["missing document key", (error) => { delete error.documentKey; }],
+    ["wrong document key", (error) => {
+      error.documentKey = "other-document:other-revision";
+    }],
+    ["resumable terminal flag", (error) => { error.terminal = false; }],
+    ["missing terminal flag", (error) => { delete error.terminal; }],
+    ["resumable outcome", (error) => { error.outcome = "resumable"; }],
+    ["native marker false", (error) => { error.nativeWorkerError = false; }],
+    ["native marker true", (error) => { error.nativeWorkerError = true; }],
+  ];
+  for (const [name, mutate] of irrelevantErrorMetadataCases) {
+    assert.equal(
+      summarizePdfRestoreReadiness(
+        restoreWithPreFirstPageError(mutate),
+      ).ready,
+      false,
+      name,
+    );
+  }
+  const nativeErrorFreeRestore = structuredClone(persisted);
+  assert.equal(summarizePdfRestoreReadiness(nativeErrorFreeRestore).ready, true);
+  const nonmatchingErrorCases = [
+    ["wrong direction", (error) => { error.direction = "to-worker"; }],
+    ["wrong worker", (error) => { error.workerInstanceId += 1; }],
+    ["missing worker", (error) => { delete error.workerInstanceId; }],
+    ["wrong job", (error) => { error.jobId += 1; }],
+    ["missing job", (error) => { delete error.jobId; }],
+    ["wrong revision", (error) => { error.revision = "other-revision"; }],
+    ["missing revision", (error) => { delete error.revision; }],
+  ];
+  for (const [name, mutate] of nonmatchingErrorCases) {
+    assert.equal(
+      summarizePdfRestoreReadiness(
+        restoreWithPreFirstPageError(mutate),
+      ).ready,
+      true,
+      name,
+    );
+  }
+  const errorAfterFirstPage = structuredClone(persisted);
+  errorAfterFirstPage.workerEvents.push({
+    ...exactIdentityError,
+    at: restoredPage.at + 1,
+    eventId: restoredPage.eventId + 1,
+  });
+  assert.equal(summarizePdfRestoreReadiness(errorAfterFirstPage).ready, true);
+  const freshWithOpen = structuredClone(fresh);
+  freshWithOpen.workerEvents.push(restoredOpen, restoredPage);
+  assert.equal(summarizePdfRestoreReadiness(freshWithOpen).ready, false);
+
+  const source = await readFile(
+    "scripts/run-pdf-sharpness-browser-regression.mjs",
+    "utf8",
+  );
+  assert.match(
+    source,
+    /navigateToReader\(cdp, appUrl, configuration\)[\s\S]*waitForPdfRestoreReadiness\(cdp, matrixIndex > 0\)[\s\S]*waitForCdpNetworkFixedPoint\([\s\S]*record: false[\s\S]*captureCdpNetworkBoundary\(networkState\)[\s\S]*importFixture\(cdp, fixture\)/u,
+  );
+  assert.match(
+    source,
+    /addEventListener\("error", \(\) => \{[\s\S]*__issue68ActiveStartIdentity[\s\S]*workerEvents\.push\([\s\S]*nativeWorkerError: true/u,
+  );
+  assert.match(
+    source,
+    /networkState\.phase = "final-network-privacy";[\s\S]*waitForCdpNetworkFixedPoint\([\s\S]*"final-network-privacy"/u,
+  );
 });
 
 test("plans bounded sub-viewport traversal toward unmounted PDF pages", () => {
@@ -7755,7 +8754,7 @@ test("keeps the app-matrix runtime diagnostic bounded and noncanonical", async (
   );
   assert.match(
     source,
-    /appBrowser = await startBrowser[\s\S]*appCdp = await CdpSession\.connect[\s\S]*for \(const configuration of PDF_SHARPNESS_MATRIX\)/u,
+    /appBrowser = await startBrowser[\s\S]*appCdp = await CdpSession\.connect[\s\S]*for \(const \[matrixIndex, configuration\] of[\s\S]*PDF_SHARPNESS_MATRIX\.entries\(\)\)/u,
   );
   assert.match(
     source,
@@ -8060,7 +9059,11 @@ function passingAppMatrixRuntimeFailureInput(outputDirectory) {
   };
 }
 
-function passingAppMatrixNetworkDiagnostic(label, commandOffset = 0) {
+function passingAppMatrixNetworkDiagnostic(
+  label,
+  commandOffset = 0,
+  role = "import",
+) {
   const documentSetup = completedCdpTargetSetup({
     cdpIdStart: commandOffset + 1,
     startedAt: commandOffset + 10,
@@ -8079,12 +9082,12 @@ function passingAppMatrixNetworkDiagnostic(label, commandOffset = 0) {
     attachComplete: true,
     ...documentSetup,
     detached: false,
-    identityHash: diagnosticIdentity(`${label}-document-session`, `${label}-document-target`),
+    identityHash: diagnosticIdentity(`${label}-${role}-document-session`, `${label}-${role}-document-target`),
     parentSessionId: null,
     phase: label,
     resumed: true,
-    sessionId: `${label}-document-session`,
-    targetId: `${label}-document-target`,
+    sessionId: `${label}-${role}-document-session`,
+    targetId: `${label}-${role}-document-target`,
     type: "worker",
     urlClass: "pdf-document-worker",
     waitingForDebugger: true,
@@ -8100,12 +9103,12 @@ function passingAppMatrixNetworkDiagnostic(label, commandOffset = 0) {
     attachComplete: true,
     ...parserSetup,
     detached: false,
-    identityHash: diagnosticIdentity(`${label}-parser-session`, `${label}-parser-target`),
+    identityHash: diagnosticIdentity(`${label}-${role}-parser-session`, `${label}-${role}-parser-target`),
     parentSessionId: documentTarget.sessionId,
     phase: label,
     resumed: true,
-    sessionId: `${label}-parser-session`,
-    targetId: `${label}-parser-target`,
+    sessionId: `${label}-${role}-parser-session`,
+    targetId: `${label}-${role}-parser-target`,
     type: "worker",
     urlClass: "pdf-parser-worker",
     waitingForDebugger: true,
@@ -8204,8 +9207,8 @@ function passingAppMatrixNetworkDiagnostic(label, commandOffset = 0) {
     }],
     serviceWorkerBypassed: true,
     targetBootstrapSettlements: [
-      settlement(documentTarget, `${label}-document-request`),
-      settlement(parserTarget, `${label}-parser-request`),
+      settlement(documentTarget, `${label}-${role}-document-request`),
+      settlement(parserTarget, `${label}-${role}-parser-request`),
     ],
     targets: [documentTarget, parserTarget, serviceTarget],
     wait: {
@@ -8227,58 +9230,112 @@ function passingAppMatrixNetworkDiagnostic(label, commandOffset = 0) {
 }
 
 function passingCumulativeAppMatrixNetworkDiagnostics() {
-  let cumulative = null;
+  const firstTemplate = passingAppMatrixNetworkDiagnostic(
+    PDF_SHARPNESS_MATRIX[0].id,
+    0,
+  );
+  const serviceTarget = firstTemplate.targets.find(
+    (target) => target.type === "service_worker",
+  );
+  const serviceWorkers = firstTemplate.serviceWorkerBootstrapObservations;
+  let targets = [serviceTarget];
+  let settlements = [];
+  let requestCount = 1;
+  const snapshot = (template, label) => {
+    const counts = {
+      ...template.counts,
+      attachPromiseCount: targets.length,
+      completedRequestCount: requestCount,
+      requestCount,
+      serviceWorkerBootstrapObservationCount: serviceWorkers.length,
+      targetBootstrapSettlementCount: settlements.length,
+      targetCount: targets.length,
+    };
+    return {
+      ...template,
+      counts,
+      importBoundary: null,
+      label,
+      matrixRestoreProof: null,
+      serviceWorkerBootstrapObservations: structuredClone(serviceWorkers),
+      targetBootstrapSettlements: structuredClone(settlements),
+      targets: structuredClone(targets),
+      wait: {
+        ...template.wait,
+        recentSamples: [1, 2, 3].map((stableSamples) => ({
+          attachErrorCount: 0,
+          attachmentReady: true,
+          incompleteTargetCount: 0,
+          inflightRequestCount: 0,
+          pendingAttachCount: 0,
+          requestCount,
+          serviceWorkerBypassed: true,
+          stableSamples,
+          targetCount: targets.length,
+        })),
+      },
+    };
+  };
   return PDF_SHARPNESS_MATRIX.map((configuration, index) => {
-    const current = passingAppMatrixNetworkDiagnostic(
+    const imported = passingAppMatrixNetworkDiagnostic(
       configuration.id,
-      index * 100,
+      100 + index * 300,
+      "import",
     );
-    if (cumulative === null) {
-      cumulative = current;
-    } else {
-      const targets = [
-        ...cumulative.targets,
-        ...current.targets.filter((target) => target.type === "worker"),
+    if (index > 0) {
+      const restored = passingAppMatrixNetworkDiagnostic(
+        configuration.id,
+        index * 300,
+        "restore",
+      );
+      targets = [
+        ...targets,
+        ...restored.targets.filter((target) => target.type === "worker"),
       ];
-      const targetBootstrapSettlements = [
-        ...cumulative.targetBootstrapSettlements,
-        ...current.targetBootstrapSettlements,
+      settlements = [
+        ...settlements,
+        ...restored.targetBootstrapSettlements,
       ];
-      const requestCount = cumulative.counts.requestCount + 2;
-      const counts = {
-        ...current.counts,
-        attachPromiseCount: targets.length,
-        completedRequestCount: requestCount,
-        requestCount,
-        serviceWorkerBootstrapObservationCount:
-          cumulative.serviceWorkerBootstrapObservations.length,
-        targetBootstrapSettlementCount: targetBootstrapSettlements.length,
-        targetCount: targets.length,
-      };
-      cumulative = {
-        ...current,
-        counts,
-        serviceWorkerBootstrapObservations:
-          cumulative.serviceWorkerBootstrapObservations,
-        targetBootstrapSettlements,
-        targets,
-        wait: {
-          ...current.wait,
-          recentSamples: [1, 2, 3].map((stableSamples) => ({
-            attachErrorCount: 0,
-            attachmentReady: true,
-            incompleteTargetCount: 0,
-            inflightRequestCount: 0,
-            pendingAttachCount: 0,
-            requestCount,
-            serviceWorkerBypassed: true,
-            stableSamples,
-            targetCount: targets.length,
-          })),
-        },
-      };
+      requestCount += 2;
     }
-    return structuredClone(cumulative);
+    const restoreDiagnostic = snapshot(imported, configuration.id);
+    const importBoundary = {
+      attachPromiseCount: targets.length,
+      requestCount,
+      settlementCount: settlements.length,
+      targetCount: targets.length,
+    };
+    targets = [
+      ...targets,
+      ...imported.targets.filter((target) => target.type === "worker"),
+    ];
+    settlements = [
+      ...settlements,
+      ...imported.targetBootstrapSettlements,
+    ];
+    requestCount += 2;
+    const current = snapshot(imported, configuration.id);
+    const restoreCount = index > 0 ? 1 : 0;
+    current.importBoundary = importBoundary;
+    current.matrixRestoreProof = {
+      documentBootstrapSettlementCount: restoreCount,
+      networkDiagnostic: restoreDiagnostic,
+      parserBootstrapSettlementCount: restoreCount,
+      readiness: {
+        activeDocumentCount: restoreCount,
+        activeDocumentMatchesOpen: index > 0,
+        activeDocumentStateAvailable: true,
+        activePdfCount: restoreCount,
+        expectedPersisted: index > 0,
+        firstPageCount: restoreCount,
+        importRequestCount: 0,
+        libraryPending: false,
+        openRequestCount: restoreCount,
+        ready: true,
+        sourceSelectionCount: 0,
+      },
+    };
+    return current;
   });
 }
 
@@ -8331,8 +9388,19 @@ function passingAppMatrixRuntimeNetworkTimeoutInput(outputDirectory) {
 
 test("validates cumulative fixed-point history and exact current PDF coverage", () => {
   const diagnostics = passingCumulativeAppMatrixNetworkDiagnostics();
-  assert.equal(isCdpFixedPointDiagnosticHealthy(diagnostics[1]), true);
-  assert.equal(isCdpFixedPointDiagnosticHealthy(diagnostics[5]), true);
+  diagnostics.forEach((diagnostic, index) => {
+    assert.equal(isCdpFixedPointDiagnosticHealthy(diagnostic), true);
+    assert.equal(
+      diagnostic.targets.slice(diagnostic.importBoundary.targetCount).filter(
+        (target) => target.urlClass === "pdf-document-worker",
+      ).length,
+      1,
+    );
+    assert.equal(
+      diagnostic.matrixRestoreProof.readiness.openRequestCount,
+      index === 0 ? 0 : 1,
+    );
+  });
 
   const mutations = [
     ["historical settlement phase", (diagnostic) => {
@@ -8377,6 +9445,55 @@ test("validates cumulative fixed-point history and exact current PDF coverage", 
     }],
     ["stale cumulative stable tail", (diagnostic) => {
       diagnostic.wait.recentSamples.at(-1).targetCount -= 1;
+    }],
+    ["missing import boundary field", (diagnostic) => {
+      delete diagnostic.importBoundary.requestCount;
+    }],
+    ["extra import boundary field", (diagnostic) => {
+      diagnostic.importBoundary.completedRequestCount =
+        diagnostic.importBoundary.requestCount;
+    }],
+    ["fractional import boundary", (diagnostic) => {
+      diagnostic.importBoundary.targetCount += 0.5;
+    }],
+    ["boundary attach target mismatch", (diagnostic) => {
+      diagnostic.importBoundary.attachPromiseCount -= 1;
+    }],
+    ["boundary cuts into explicit import", (diagnostic) => {
+      diagnostic.importBoundary.attachPromiseCount += 1;
+      diagnostic.importBoundary.targetCount += 1;
+    }],
+    ["restore completed request mismatch", (diagnostic) => {
+      diagnostic.matrixRestoreProof.networkDiagnostic.counts
+        .completedRequestCount -= 1;
+    }],
+    ["restore open count mismatch", (diagnostic) => {
+      diagnostic.matrixRestoreProof.readiness.openRequestCount = 0;
+    }],
+    ["restore active document mismatch", (diagnostic) => {
+      diagnostic.matrixRestoreProof.readiness.activeDocumentMatchesOpen =
+        false;
+    }],
+    ["restore first page mismatch", (diagnostic) => {
+      diagnostic.matrixRestoreProof.readiness.firstPageCount = 0;
+    }],
+    ["restore import observed", (diagnostic) => {
+      diagnostic.matrixRestoreProof.readiness.importRequestCount = 1;
+    }],
+    ["restore source observed", (diagnostic) => {
+      diagnostic.matrixRestoreProof.readiness.sourceSelectionCount = 1;
+    }],
+    ["restore continuity drift", (diagnostic) => {
+      diagnostic.matrixRestoreProof.networkDiagnostic.targets[0].detached =
+        !diagnostic.matrixRestoreProof.networkDiagnostic.targets[0].detached;
+    }],
+    ["restore proof private field", (diagnostic) => {
+      diagnostic.matrixRestoreProof.privatePath = "/home/private.pdf";
+    }],
+    ["nested restore proof", (diagnostic) => {
+      const restoreDiagnostic =
+        diagnostic.matrixRestoreProof.networkDiagnostic;
+      restoreDiagnostic.matrixRestoreProof = diagnostic.matrixRestoreProof;
     }],
   ];
   for (const [label, mutate] of mutations) {
@@ -8576,7 +9693,7 @@ test("builds a fail-closed privacy-safe app-matrix runtime diagnostic", () => {
   );
   const report = buildAppMatrixRuntimeDiagnosticReport(input);
   assert.equal(report.diagnostic, true);
-  assert.equal(report.diagnosticSchemaVersion, 3);
+  assert.equal(report.diagnosticSchemaVersion, 5);
   assert.equal(report.mode, "app-matrix-runtime");
   assert.equal(report.completed, false);
   assert.equal(report.execution.orderExact, true);
@@ -8801,10 +9918,12 @@ test("retains a privacy-safe fixed-point timeout on the failed matrix row", () =
   );
   const attachFailureDiagnostic =
     attachFailureInput.rows[1].networkFailure.diagnostic;
-  const failedTarget = attachFailureDiagnostic.targets.find((target) =>
+  const failedTarget = attachFailureDiagnostic.targets
+    .slice(attachFailureDiagnostic.importBoundary.targetCount)
+    .find((target) =>
     target.phase === attachFailureDiagnostic.label &&
     target.urlClass === "pdf-document-worker"
-  );
+    );
   const resumeCommand = failedTarget.commands.at(-1);
   failedTarget.commands = [
     { ...failedTarget.commands[0], status: "failed" },
@@ -8903,10 +10022,12 @@ test("retains a privacy-safe fixed-point timeout on the failed matrix row", () =
     value.runnerFailureStage = `matrix:${row.configurationId}`;
     return value;
   };
-  const currentDocumentTarget = (diagnostic) => diagnostic.targets.find(
-    (target) => target.phase === diagnostic.label &&
-      target.urlClass === "pdf-document-worker",
-  );
+  const currentDocumentTarget = (diagnostic) => diagnostic.targets
+    .slice(diagnostic.importBoundary?.targetCount ?? 0)
+    .find(
+      (target) => target.phase === diagnostic.label &&
+        target.urlClass === "pdf-document-worker",
+    );
   const removeTargetSettlement = (diagnostic, target) => {
     diagnostic.targetBootstrapSettlements =
       diagnostic.targetBootstrapSettlements.filter(
@@ -9594,6 +10715,14 @@ test("retains a privacy-safe fixed-point timeout on the failed matrix row", () =
     structuredClone(mutableRoot),
     structuredClone(mutableChild),
   );
+  const currentMutableRestore =
+    currentMutableDiagnostic.matrixRestoreProof.networkDiagnostic;
+  currentMutableRestore.targets.splice(
+    priorMutableTargetCount,
+    0,
+    structuredClone(mutableRoot),
+    structuredClone(mutableChild),
+  );
   for (const diagnostic of [
     previousMutableDiagnostic,
     currentMutableDiagnostic,
@@ -9604,6 +10733,13 @@ test("retains a privacy-safe fixed-point timeout on the failed matrix row", () =
       sample.targetCount = diagnostic.counts.targetCount;
     });
   }
+  currentMutableRestore.counts.attachPromiseCount += 2;
+  currentMutableRestore.counts.targetCount += 2;
+  currentMutableRestore.wait.recentSamples.forEach((sample) => {
+    sample.targetCount = currentMutableRestore.counts.targetCount;
+  });
+  currentMutableDiagnostic.importBoundary.attachPromiseCount += 2;
+  currentMutableDiagnostic.importBoundary.targetCount += 2;
   const retainedMutableRoot = currentMutableDiagnostic.targets.find(
     (target) => target.sessionId === mutableRoot.sessionId,
   );
@@ -9666,6 +10802,26 @@ test("retains a privacy-safe fixed-point timeout on the failed matrix row", () =
   assert.equal(priorSessionInflight.rows[1].integrity, true);
 
   const mutations = [
+    ["timeout boundary missing field", (value) => {
+      delete timeoutDiagnostic(value).importBoundary.requestCount;
+    }],
+    ["timeout boundary extra field", (value) => {
+      const boundary = timeoutDiagnostic(value).importBoundary;
+      boundary.completedRequestCount = boundary.requestCount;
+    }],
+    ["timeout boundary cuts import", (value) => {
+      const boundary = timeoutDiagnostic(value).importBoundary;
+      boundary.attachPromiseCount += 1;
+      boundary.targetCount += 1;
+    }],
+    ["timeout restore open count", (value) => {
+      timeoutDiagnostic(value).matrixRestoreProof.readiness.openRequestCount =
+        0;
+    }],
+    ["timeout restore completed request", (value) => {
+      timeoutDiagnostic(value).matrixRestoreProof.networkDiagnostic.counts
+        .completedRequestCount -= 1;
+    }],
     ["timeout label", (value) => {
       value.rows[1].networkFailure.diagnostic.label = value.rows[0]
         .configurationId;

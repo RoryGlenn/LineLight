@@ -340,9 +340,25 @@ cannot move a prior frame into the next row. Raw URLs and names never enter the
 report. Release proof is anchored
 to the polled DOM/geometry/canvas state, so an empty post-boundary worker-event
 list is valid; any retained event must still match the current worker, job,
-revision, page, type, and order. Each cumulative CDP fixed point validates
-historical targets and settlements against their own phase and requires exactly
-one current document worker/parser pair with one settlement each. A failed
+revision, page, type, and order. After each navigation, the diagnostic first
+proves either a settled fresh library or one startup `open` whose document ID
+matches the active IndexedDB document and whose exact `first: true`,
+revision-bound first page resolves the app restore promise without any earlier
+identity-matched worker error; native `Worker` errors are bridged into that same
+ordered open identity before readiness is evaluated. It then reaches a
+generic three-sample CDP quiet point and freezes an exact four-count boundary
+before file selection. Each cumulative final fixed point validates historical
+targets and settlements against their own phase and requires exactly one new
+post-boundary document worker with one direct parser child and one settlement
+each. Every half-open restore/import interval owns the exact requests and
+settlements for those targets, including the null-session document bootstrap,
+and reconstructs ancestry from parent sessions so a hidden differently phased
+pair cannot pass. Restore and import remain in the real shared phase; the
+validator checks previous-final to restore to import continuity instead of
+filtering detached targets or accepting a doubled phase count.
+The forced-to-final privacy interval is independently required to contain no
+PDF document/parser target, request, or settlement, regardless of phase labels,
+and malformed or recursive structured network entries fail closed. A failed
 network stage retains the already-built label-bound timeout diagnostic as fixed
 failure classes, derived gates/counts, and bounded ID-free stability samples;
 unexpected failures remain a separate fixed category. Its

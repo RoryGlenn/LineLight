@@ -1891,6 +1891,7 @@ export function validatePdfSharpnessEvidence(evidence) {
     fail(`fallback recorded a Long Task over ${PDF_SHARPNESS_MAX_LONG_TASK_MS}ms`);
   }
 
+  try {
   const network = evidence?.network;
   const networkTargets = Array.isArray(network?.targets) ? network.targets : [];
   const networkRequests = Array.isArray(network?.requests)
@@ -1915,7 +1916,10 @@ export function validatePdfSharpnessEvidence(evidence) {
   const blobWrapper = (target) =>
     target?.phase === "forced-main-fallback" &&
     String(target?.url).startsWith("blob:");
-  const targetChain = (target) => [target, ...(target?.ancestry ?? [])];
+  const targetChain = (target) => [
+    target,
+    ...(Array.isArray(target?.ancestry) ? target.ancestry : []),
+  ];
   const requestIdentity = (sessionId, requestId) =>
     `${sessionId ?? "page"}:${requestId}`;
   const requestByIdentity = new Map(
@@ -1944,9 +1948,15 @@ export function validatePdfSharpnessEvidence(evidence) {
     );
     const expectedResultSequences = commands.map((_, index) => index + 1);
     const commandIds = commands.map((command) => command?.cdpId);
-    const commandsByResult = [...commands].sort(
-      (left, right) => left.resultSequence - right.resultSequence,
-    );
+    const commandsByResult = [...commands].sort((left, right) => {
+      const leftSequence = Number.isSafeInteger(left?.resultSequence)
+        ? left.resultSequence
+        : -1;
+      const rightSequence = Number.isSafeInteger(right?.resultSequence)
+        ? right.resultSequence
+        : -1;
+      return leftSequence - rightSequence;
+    });
     const serviceWorkerBarrier =
       target?.type === "service_worker" &&
       target?.waitingForDebugger === true;
@@ -1982,12 +1992,12 @@ export function validatePdfSharpnessEvidence(evidence) {
       commands.every(
         (command, index) =>
           index === 0 ||
-          command.dispatchedAt >= commands[index - 1].dispatchedAt,
+          command?.dispatchedAt >= commands[index - 1]?.dispatchedAt,
       ) &&
       commandsByResult.every(
         (command, index) =>
           index === 0 ||
-          command.resultAt >= commandsByResult[index - 1].resultAt,
+          command?.resultAt >= commandsByResult[index - 1]?.resultAt,
       ) &&
       [...resultSequences].sort((left, right) => left - right).join(",") ===
         expectedResultSequences.join(",") &&
@@ -2003,18 +2013,18 @@ export function validatePdfSharpnessEvidence(evidence) {
               index === 0 || commandId === commandIds[index - 1] + 1,
           ) &&
           setupCommands.every(
-            (command) => command.dispatchedAt <= target.resumeDispatchedAt,
+            (command) => command?.dispatchedAt <= target.resumeDispatchedAt,
           ) &&
           commands.every(
             (command) =>
-              command.deadlineAt === target.commandDeadlineAt &&
-              command.resultAt >= target.resumeDispatchedAt &&
-              command.resultAt <= target.commandDeadlineAt,
+              command?.deadlineAt === target.commandDeadlineAt &&
+              command?.resultAt >= target.resumeDispatchedAt &&
+              command?.resultAt <= target.commandDeadlineAt,
           )
         : target?.commandDeadlineAt === null &&
           (target?.waitingForDebugger !== true ||
             setupCommands.every(
-              (command) => command.resultAt <= target.resumeDispatchedAt,
+              (command) => command?.resultAt <= target.resumeDispatchedAt,
             )))
     );
   };
@@ -2167,15 +2177,25 @@ export function validatePdfSharpnessEvidence(evidence) {
     "forcedBlobWrapper",
     "forcedParserWorker",
   ];
+  const coverageSessionIds = (targets) => {
+    if (
+      !Array.isArray(targets) || targets.length === 0 ||
+      targets.some(
+        (target) =>
+          !target || typeof target !== "object" || Array.isArray(target) ||
+          !nonEmptyString(target.sessionId),
+      )
+    ) {
+      return null;
+    }
+    return targets.map((target) => target.sessionId).sort().join(",");
+  };
   const coverageComplete = coverageNames.every(
-    (name) =>
-      Array.isArray(coverageTargets?.[name]) &&
-      coverageTargets[name].length > 0 &&
-      coverageTargets[name].map(({ sessionId }) => sessionId).sort().join(",") ===
-        computedCoverageTargets[name]
-          .map(({ sessionId }) => sessionId)
-          .sort()
-          .join(","),
+    (name) => {
+      const reported = coverageSessionIds(coverageTargets?.[name]);
+      const computed = coverageSessionIds(computedCoverageTargets[name]);
+      return reported !== null && computed !== null && reported === computed;
+    },
   );
   const requestCounts = network?.nonPageRequestCounts;
   const requestBelongsTo = (request, predicate) =>
@@ -2213,61 +2233,431 @@ export function validatePdfSharpnessEvidence(evidence) {
       !Array.isArray(matrixCoverage)
     ? Object.keys(matrixCoverage)
     : [];
+  const matrixFixedPoints = new Map(
+    (Array.isArray(network?.networkFixedPoints)
+      ? network.networkFixedPoints
+      : [])
+      .filter((point) => normalPhaseIds.has(point?.label))
+      .map((point) => [point.label, point]),
+  );
+  const boundaryKeys = [
+    "attachPromiseCount",
+    "requestCount",
+    "settlementCount",
+    "targetCount",
+  ].sort().join("\0");
+  const fixedPointBaseKeys = [
+    "attachErrorCount",
+    "attachmentReady",
+    "attachPromiseCount",
+    "completedRequestCount",
+    "documentBootstrapSettlementCount",
+    "inflightRequestCount",
+    "label",
+    "parserBootstrapSettlementCount",
+    "pendingAttachCount",
+    "requestCount",
+    "serviceWorkerBootstrapObservationCount",
+    "serviceWorkerBypassed",
+    "targetBootstrapSettlementCount",
+    "targetCount",
+  ].sort().join("\0");
+  const matrixFixedPointKeys = [
+    ...fixedPointBaseKeys.split("\0"),
+    "importBoundary",
+    "restore",
+  ].sort().join("\0");
+  const restoreKeys = ["fixedPoint", "readiness"].sort().join("\0");
+  const restoreFixedPointKeys = [
+    "attachPromiseCount",
+    "completedRequestCount",
+    "documentBootstrapSettlementCount",
+    "parserBootstrapSettlementCount",
+    "requestCount",
+    "targetBootstrapSettlementCount",
+    "targetCount",
+  ].sort().join("\0");
+  const readinessKeys = [
+    "activeDocumentCount",
+    "activeDocumentMatchesOpen",
+    "activeDocumentStateAvailable",
+    "activePdfCount",
+    "expectedPersisted",
+    "firstPageCount",
+    "importRequestCount",
+    "libraryPending",
+    "openRequestCount",
+    "ready",
+    "sourceSelectionCount",
+  ].sort().join("\0");
+  const coverageKeys = [
+    "documentBootstrapSettlementCount",
+    "documentRequestCount",
+    "documentTargets",
+    "parserBootstrapSettlementCount",
+    "parserRequestCount",
+    "parserTargets",
+  ].sort().join("\0");
+  const fixedPoints = Array.isArray(network?.networkFixedPoints)
+    ? network.networkFixedPoints
+    : [];
+  const endpoint = (point) => ({
+    attachPromiseCount: point?.attachPromiseCount,
+    requestCount: point?.requestCount,
+    settlementCount: point?.targetBootstrapSettlementCount,
+    targetCount: point?.targetCount,
+  });
+  const endpointShapeValid = (value) =>
+    [
+      value?.attachPromiseCount,
+      value?.requestCount,
+      value?.settlementCount,
+      value?.targetCount,
+    ].every(nonNegativeInteger) &&
+    value.attachPromiseCount === value.targetCount;
+  const endpointValuesValid = (point) =>
+    [
+      point?.attachPromiseCount,
+      point?.completedRequestCount,
+      point?.requestCount,
+      point?.serviceWorkerBootstrapObservationCount,
+      point?.targetBootstrapSettlementCount,
+      point?.targetCount,
+    ].every(nonNegativeInteger) &&
+    point.attachPromiseCount === point.targetCount &&
+    point.completedRequestCount === point.requestCount &&
+    point.requestCount <= networkRequests.length &&
+    point.serviceWorkerBootstrapObservationCount <=
+      serviceWorkerBootstrapObservations.length &&
+    point.targetBootstrapSettlementCount <=
+      targetBootstrapSettlements.length &&
+    point.targetCount <= networkTargets.length;
+  const endpointsMonotone = (left, right) =>
+    endpointShapeValid(left) &&
+    endpointShapeValid(right) &&
+    left.attachPromiseCount <= right.attachPromiseCount &&
+    left.requestCount <= right.requestCount &&
+    left.settlementCount <= right.settlementCount &&
+    left.targetCount <= right.targetCount;
+  const validBoundary = (boundary, point) =>
+    boundary && typeof boundary === "object" &&
+    Object.keys(boundary).sort().join("\0") === boundaryKeys &&
+    [
+      boundary.attachPromiseCount,
+      boundary.requestCount,
+      boundary.settlementCount,
+      boundary.targetCount,
+    ].every(nonNegativeInteger) &&
+    boundary.attachPromiseCount === boundary.targetCount &&
+    boundary.attachPromiseCount <= point?.attachPromiseCount &&
+    boundary.requestCount <= point?.requestCount &&
+    boundary.settlementCount <= point?.targetBootstrapSettlementCount &&
+    boundary.targetCount <= point?.targetCount &&
+    boundary.requestCount <= networkRequests.length &&
+    boundary.settlementCount <= targetBootstrapSettlements.length &&
+    boundary.targetCount <= networkTargets.length;
+  const targetIndexBySession = new Map(
+    networkTargets.map((target, index) => [target?.sessionId, index]),
+  );
+  const exactTargetAncestry = (target) => {
+    if (!nonEmptyString(target?.sessionId)) return false;
+    const targetIndex = targetIndexBySession.get(target.sessionId);
+    if (!nonNegativeInteger(targetIndex)) return false;
+    const reconstructed = [];
+    const visited = new Set([target.sessionId]);
+    let childIndex = targetIndex;
+    let parentSessionId = target.parentSessionId;
+    while (parentSessionId !== null) {
+      if (!nonEmptyString(parentSessionId) || visited.has(parentSessionId)) {
+        return false;
+      }
+      const parent = targetBySession.get(parentSessionId);
+      const parentIndex = targetIndexBySession.get(parentSessionId);
+      if (!parent || !nonNegativeInteger(parentIndex) || parentIndex >= childIndex) {
+        return false;
+      }
+      visited.add(parentSessionId);
+      childIndex = parentIndex;
+      reconstructed.push({
+        phase: parent.phase,
+        sessionId: parent.sessionId,
+        type: parent.type,
+        url: parent.url,
+      });
+      parentSessionId = parent.parentSessionId;
+    }
+    return Array.isArray(target.ancestry) &&
+      target.ancestry.length === reconstructed.length &&
+      target.ancestry.every((ancestor, index) =>
+        ancestor?.phase === reconstructed[index].phase &&
+        ancestor?.sessionId === reconstructed[index].sessionId &&
+        ancestor?.type === reconstructed[index].type &&
+        ancestor?.url === reconstructed[index].url
+      );
+  };
+  const intervalProof = (start, end, label, expectedPdfPairCount) => {
+    if (
+      ![start, end].every(endpointShapeValid) ||
+      !endpointsMonotone(start, end) ||
+      end.requestCount > networkRequests.length ||
+      end.settlementCount > targetBootstrapSettlements.length ||
+      end.targetCount > networkTargets.length
+    ) {
+      return { valid: false };
+    }
+    const intervalTargets = networkTargets.slice(
+      start.targetCount,
+      end.targetCount,
+    );
+    const intervalRequests = networkRequests.slice(
+      start.requestCount,
+      end.requestCount,
+    );
+    const intervalSettlements = targetBootstrapSettlements.slice(
+      start.settlementCount,
+      end.settlementCount,
+    );
+    const intervalTargetSessions = new Set(
+      intervalTargets.map((target) => target?.sessionId),
+    );
+    const documentTargets = intervalTargets.filter(documentWorker);
+    const parserTargets = intervalTargets.filter(parserWorker);
+    const pdfTargets = intervalTargets.filter((target) =>
+      documentWorker(target) || parserWorker(target)
+    );
+    const documentTarget = documentTargets[0] ?? null;
+    const parserTarget = parserTargets[0] ?? null;
+    const exactPdfSet =
+      documentTargets.length === expectedPdfPairCount &&
+      parserTargets.length === expectedPdfPairCount &&
+      pdfTargets.length === expectedPdfPairCount * 2 &&
+      pdfTargets.every((target) => target?.phase === label) &&
+      (expectedPdfPairCount === 0 || (
+        expectedPdfPairCount === 1 &&
+        documentTarget?.parentSessionId === null &&
+        parserTarget?.parentSessionId === documentTarget.sessionId &&
+        parserTarget?.ancestry?.length === 1 &&
+        parserTarget.ancestry[0]?.sessionId === documentTarget.sessionId
+      ));
+    const matchingIntervalRequests = (settlement) =>
+      intervalRequests.filter((request) =>
+        request?.sessionId === settlement?.requestSessionId &&
+        request?.requestId === settlement?.requestId
+      );
+    const settlementsOwned = intervalSettlements.every((settlement) => {
+      const matchingRequests = matchingIntervalRequests(settlement);
+      const request = matchingRequests[0];
+      const target = targetBySession.get(settlement?.targetSessionId);
+      return matchingRequests.length === 1 &&
+        intervalTargetSessions.has(target?.sessionId) &&
+        targetSetupComplete(target) &&
+        target?.type === "worker" &&
+        settlement?.targetType === target.type &&
+        settlement?.targetDetachedAtSettlement === false &&
+        settlement?.targetId === target.targetId &&
+        settlement?.targetParentSessionId === target.parentSessionId &&
+        settlement?.phase === target.phase &&
+        settlement?.terminalReason === "target-attached" &&
+        settlement?.method === "GET" &&
+        settlement?.resourceType === "Script" &&
+        request?.method === settlement.method &&
+        request?.type === settlement.resourceType &&
+        request?.phase === settlement.phase &&
+        request?.url === settlement.url &&
+        request?.bootstrapTargetSessionId === target.sessionId &&
+        target.parentSessionId === request.sessionId &&
+        target.url === request.url &&
+        target.bootstrapRequestKey ===
+          requestIdentity(request.sessionId, request.requestId);
+    });
+    const pdfBootstrapRequestsOwned = intervalRequests.every((request) => {
+      const target = targetBySession.get(request?.bootstrapTargetSessionId);
+      const pdfLike = documentWorker(target) || parserWorker(target) ||
+        documentWorker(request) || parserWorker(request);
+      if (!pdfLike) return true;
+      return Boolean(
+        target &&
+        intervalTargetSessions.has(target.sessionId) &&
+        (documentWorker(target) || parserWorker(target)) &&
+        intervalSettlements.filter((settlement) =>
+          settlement?.requestSessionId === request.sessionId &&
+          settlement?.requestId === request.requestId &&
+          settlement?.targetSessionId === target.sessionId
+        ).length === 1,
+      );
+    });
+    const boundedNonPageRequests = intervalRequests.filter(
+      (request) => request?.sessionId !== null,
+    );
+    const documentRequestCount = boundedNonPageRequests.filter(
+      (request) => requestBelongsTo(request, documentWorker),
+    ).length;
+    const parserRequestCount = boundedNonPageRequests.filter(
+      (request) =>
+        parserWorker(targetBySession.get(request?.sessionId)) &&
+        requestBelongsTo(request, documentWorker),
+    ).length;
+    const documentBootstrapSettlementCount = intervalSettlements.filter(
+      (settlement) =>
+        documentWorker(targetBySession.get(settlement?.targetSessionId)),
+    ).length;
+    const parserBootstrapSettlementCount = intervalSettlements.filter(
+      (settlement) =>
+        parserWorker(targetBySession.get(settlement?.targetSessionId)),
+    ).length;
+    return {
+      documentBootstrapSettlementCount,
+      documentRequestCount,
+      documentTargets,
+      parserBootstrapSettlementCount,
+      parserRequestCount,
+      parserTargets,
+      valid:
+        exactPdfSet &&
+        intervalTargets.every(exactTargetAncestry) &&
+        settlementsOwned &&
+        pdfBootstrapRequestsOwned &&
+        documentBootstrapSettlementCount === expectedPdfPairCount &&
+        parserBootstrapSettlementCount === expectedPdfPairCount,
+    };
+  };
+  const zeroEndpoint = {
+    attachPromiseCount: 0,
+    requestCount: 0,
+    settlementCount: 0,
+    targetCount: 0,
+  };
+  const importProofs = PDF_SHARPNESS_MATRIX.map(({ id }, index) => {
+    const point = fixedPoints[index];
+    return intervalProof(point?.importBoundary, endpoint(point), id, 1);
+  });
+  const forcedPoint = fixedPoints[PDF_SHARPNESS_MATRIX.length];
+  const preForcedPoint = fixedPoints[PDF_SHARPNESS_MATRIX.length - 1];
+  const finalFixedPoint = fixedPoints[PDF_SHARPNESS_MATRIX.length + 1];
+  const forcedStart = endpoint(preForcedPoint);
+  const forcedEnd = endpoint(forcedPoint);
+  const forcedBoundsValid = endpointsMonotone(forcedStart, forcedEnd) &&
+    forcedEnd.requestCount <= networkRequests.length &&
+    forcedEnd.settlementCount <= targetBootstrapSettlements.length &&
+    forcedEnd.targetCount <= networkTargets.length;
+  const forcedTargets = forcedBoundsValid
+    ? networkTargets.slice(forcedStart.targetCount, forcedEnd.targetCount)
+    : [];
+  const forcedRequests = forcedBoundsValid
+    ? networkRequests.slice(forcedStart.requestCount, forcedEnd.requestCount)
+    : [];
+  const forcedSettlements = forcedBoundsValid
+    ? targetBootstrapSettlements.slice(
+        forcedStart.settlementCount,
+        forcedEnd.settlementCount,
+      )
+    : [];
+  const forcedWrappers = forcedTargets.filter(blobWrapper);
+  const forcedParsers = forcedTargets.filter((target) =>
+    parserWorker(target) && target?.phase === "forced-main-fallback"
+  );
+  const forcedWrapper = forcedWrappers[0] ?? null;
+  const forcedParser = forcedParsers[0] ?? null;
+  const forcedTargetSessions = new Set(
+    forcedTargets.map((target) => target?.sessionId),
+  );
+  const forcedFallbackIntervalBound =
+    forcedPoint?.label === "forced-main-fallback" &&
+    forcedBoundsValid &&
+    forcedWrappers.length === 1 &&
+    forcedParsers.length === 1 &&
+    forcedTargets.length === 2 &&
+    forcedTargets.every(exactTargetAncestry) &&
+    forcedParser?.parentSessionId === forcedWrapper?.sessionId &&
+    forcedParser?.ancestry?.length === 1 &&
+    forcedParser.ancestry[0]?.sessionId === forcedWrapper?.sessionId &&
+    forcedSettlements.length === 2 &&
+    forcedSettlements.every((settlement) =>
+      forcedTargetSessions.has(settlement?.targetSessionId) &&
+      forcedRequests.filter((request) =>
+        request?.sessionId === settlement?.requestSessionId &&
+        request?.requestId === settlement?.requestId &&
+        request?.bootstrapTargetSessionId === settlement?.targetSessionId
+      ).length === 1 &&
+      validBootstrapSettlement(settlement)
+    ) &&
+    forcedTargets.every((target) =>
+      forcedSettlements.filter((settlement) =>
+        settlement?.targetSessionId === target.sessionId
+      ).length === 1
+    );
+  const finalEnd = endpoint(finalFixedPoint);
+  const finalIntervalProof = intervalProof(
+    forcedEnd,
+    finalEnd,
+    "final-network-privacy",
+    0,
+  );
+  const finalIntervalTargets = finalIntervalProof.valid
+    ? networkTargets.slice(forcedEnd.targetCount, finalEnd.targetCount)
+    : [];
+  const finalIntervalRequests = finalIntervalProof.valid
+    ? networkRequests.slice(forcedEnd.requestCount, finalEnd.requestCount)
+    : [];
+  const finalIntervalSettlements = finalIntervalProof.valid
+    ? targetBootstrapSettlements.slice(
+        forcedEnd.settlementCount,
+        finalEnd.settlementCount,
+      )
+    : [];
+  const finalNetworkIntervalBound =
+    finalIntervalProof.valid &&
+    finalIntervalTargets.every(
+      (target) => !documentWorker(target) && !parserWorker(target),
+    ) &&
+    finalIntervalRequests.every((request) => {
+      const bootstrapTarget = targetBySession.get(
+        request?.bootstrapTargetSessionId,
+      );
+      return !documentWorker(request) &&
+        !parserWorker(request) &&
+        !documentWorker(bootstrapTarget) &&
+        !parserWorker(bootstrapTarget) &&
+        !targetChain(targetBySession.get(request?.sessionId)).some(
+          (target) => documentWorker(target) || parserWorker(target),
+        );
+    }) &&
+    finalIntervalSettlements.every((settlement) => {
+      const target = targetBySession.get(settlement?.targetSessionId);
+      return !documentWorker(settlement) &&
+        !parserWorker(settlement) &&
+        !documentWorker(target) &&
+        !parserWorker(target);
+    });
   const matrixCoverageComplete =
     matrixCoverageKeys.join(",") === expectedIds.join(",") &&
-    PDF_SHARPNESS_MATRIX.every(({ id }) => {
+    PDF_SHARPNESS_MATRIX.every(({ id }, index) => {
       const reported = matrixCoverage?.[id];
-      const documentTargets = networkTargets.filter(
-        (target) => target?.phase === id && documentWorker(target),
+      const point = matrixFixedPoints.get(id);
+      const proof = importProofs[index];
+      if (!validBoundary(point?.importBoundary, point) || !proof?.valid) {
+        return false;
+      }
+      const reportedDocumentSessions = coverageSessionIds(
+        reported?.documentTargets,
       );
-      const parserTargets = networkTargets.filter(
-        (target) =>
-          target?.phase === id &&
-          parserWorker(target) &&
-          targetChain(target).some(documentWorker),
+      const reportedParserSessions = coverageSessionIds(
+        reported?.parserTargets,
       );
-      const documentRequestCount = nonPageRequests.filter(
-        (request) =>
-          targetBySession.get(request?.sessionId)?.phase === id &&
-          requestBelongsTo(request, documentWorker),
-      ).length;
-      const parserRequestCount = nonPageRequests.filter(
-        (request) =>
-          targetBySession.get(request?.sessionId)?.phase === id &&
-          parserWorker(targetBySession.get(request?.sessionId)) &&
-          targetChain(targetBySession.get(request?.sessionId)).some(
-            documentWorker,
-          ),
-      ).length;
-      const documentBootstrapSettlementCount =
-        targetBootstrapSettlements.filter((settlement) => {
-          const target = targetBySession.get(settlement?.targetSessionId);
-          return target?.phase === id && documentWorker(target);
-        }).length;
-      const parserBootstrapSettlementCount =
-        targetBootstrapSettlements.filter((settlement) => {
-          const target = targetBySession.get(settlement?.targetSessionId);
-          return target?.phase === id && parserWorker(target);
-        }).length;
-      const sessionIds = (targets) =>
-        targets.map(({ sessionId }) => sessionId).sort().join(",");
       return (
-        documentTargets.length > 0 &&
-        parserTargets.length > 0 &&
-        documentRequestCount > 0 &&
-        parserRequestCount > 0 &&
-        documentBootstrapSettlementCount === documentTargets.length &&
-        parserBootstrapSettlementCount === parserTargets.length &&
-        Array.isArray(reported?.documentTargets) &&
-        Array.isArray(reported?.parserTargets) &&
-        sessionIds(reported.documentTargets) === sessionIds(documentTargets) &&
-        sessionIds(reported.parserTargets) === sessionIds(parserTargets) &&
+        Object.keys(reported ?? {}).sort().join("\0") === coverageKeys &&
+        proof.documentRequestCount > 0 &&
+        proof.parserRequestCount > 0 &&
+        reportedDocumentSessions !== null &&
+        reportedParserSessions !== null &&
+        reportedDocumentSessions === coverageSessionIds(proof.documentTargets) &&
+        reportedParserSessions === coverageSessionIds(proof.parserTargets) &&
         reported?.documentBootstrapSettlementCount ===
-          documentBootstrapSettlementCount &&
-        reported?.documentRequestCount === documentRequestCount &&
+          proof.documentBootstrapSettlementCount &&
+        reported?.documentRequestCount === proof.documentRequestCount &&
         reported?.parserBootstrapSettlementCount ===
-          parserBootstrapSettlementCount &&
-        reported?.parserRequestCount === parserRequestCount
+          proof.parserBootstrapSettlementCount &&
+        reported?.parserRequestCount === proof.parserRequestCount
       );
     });
   const expectedFixedPointLabels = [
@@ -2275,10 +2665,87 @@ export function validatePdfSharpnessEvidence(evidence) {
     "forced-main-fallback",
     "final-network-privacy",
   ];
-  const fixedPoints = Array.isArray(network?.networkFixedPoints)
-    ? network.networkFixedPoints
-    : [];
-  const finalFixedPoint = fixedPoints.at(-1);
+  const matrixPointSequenceBound = PDF_SHARPNESS_MATRIX.every(
+    ({ id }, index) => {
+      const point = fixedPoints[index];
+      const previous = fixedPoints[index - 1];
+      const previousEndpoint = previous ? endpoint(previous) : zeroEndpoint;
+      const boundary = point?.importBoundary;
+      const restore = point?.restore;
+      const readiness = restore?.readiness;
+      const expectedRestoreCount = index === 0 ? 0 : 1;
+      const restoreProof = intervalProof(
+        previousEndpoint,
+        boundary,
+        id,
+        expectedRestoreCount,
+      );
+      if (
+        point?.label !== id ||
+        Object.keys(point ?? {}).sort().join("\0") !== matrixFixedPointKeys ||
+        !validBoundary(boundary, point) ||
+        Object.keys(restore ?? {}).sort().join("\0") !== restoreKeys ||
+        Object.keys(restore?.fixedPoint ?? {}).sort().join("\0") !==
+          restoreFixedPointKeys ||
+        Object.keys(readiness ?? {}).sort().join("\0") !== readinessKeys ||
+        !endpointValuesValid(point) ||
+        restore?.fixedPoint?.attachPromiseCount !==
+          boundary.attachPromiseCount ||
+        restore?.fixedPoint?.requestCount !== boundary.requestCount ||
+        restore?.fixedPoint?.completedRequestCount !== boundary.requestCount ||
+        restore?.fixedPoint?.targetBootstrapSettlementCount !==
+          boundary.settlementCount ||
+        restore?.fixedPoint?.targetCount !== boundary.targetCount ||
+        restore?.fixedPoint?.attachPromiseCount !==
+          restore?.fixedPoint?.targetCount ||
+        restore?.fixedPoint?.completedRequestCount !==
+          restore?.fixedPoint?.requestCount ||
+        restore?.fixedPoint?.documentBootstrapSettlementCount !==
+          expectedRestoreCount ||
+        restore?.fixedPoint?.parserBootstrapSettlementCount !==
+          expectedRestoreCount ||
+        readiness?.activeDocumentCount !== expectedRestoreCount ||
+        readiness?.activeDocumentMatchesOpen !== (index > 0) ||
+        readiness?.activeDocumentStateAvailable !== true ||
+        readiness?.activePdfCount !== expectedRestoreCount ||
+        readiness?.expectedPersisted !== (index > 0) ||
+        readiness?.firstPageCount !== expectedRestoreCount ||
+        readiness?.importRequestCount !== 0 ||
+        readiness?.libraryPending !== false ||
+        readiness?.openRequestCount !== expectedRestoreCount ||
+        readiness?.ready !== true ||
+        readiness?.sourceSelectionCount !== 0 ||
+        !endpointsMonotone(previousEndpoint, boundary) ||
+        !restoreProof.valid ||
+        !importProofs[index]?.valid
+      ) {
+        return false;
+      }
+      return true;
+    },
+  );
+  const fixedPointSchemaAndContinuityBound = fixedPoints.every(
+    (point, index) => {
+      const matrixPoint = index < PDF_SHARPNESS_MATRIX.length;
+      const expectedKeys = matrixPoint
+        ? matrixFixedPointKeys
+        : fixedPointBaseKeys;
+      const previous = fixedPoints[index - 1];
+      const expectedPdfCounts = matrixPoint
+        ? { document: 1, parser: 1 }
+        : point?.label === "forced-main-fallback"
+          ? { document: 0, parser: 1 }
+          : point?.label === "final-network-privacy"
+            ? { document: 0, parser: 0 }
+            : null;
+      return Object.keys(point ?? {}).sort().join("\0") === expectedKeys &&
+        endpointValuesValid(point) &&
+        point?.documentBootstrapSettlementCount ===
+          expectedPdfCounts?.document &&
+        point?.parserBootstrapSettlementCount === expectedPdfCounts?.parser &&
+        (!previous || endpointsMonotone(endpoint(previous), endpoint(point)));
+    },
+  );
   if (
     network?.sourceSha256 !== fixture?.sha256 ||
     network?.sourceStayedLocal !== true ||
@@ -2308,8 +2775,11 @@ export function validatePdfSharpnessEvidence(evidence) {
         !nonEmptyString(target?.type) ||
         typeof target?.url !== "string" ||
         !Array.isArray(target?.ancestry) ||
-        !targetSetupComplete(target),
+        !targetSetupComplete(target) ||
+        !exactTargetAncestry(target),
     ) ||
+    new Set(networkTargets.map((target) => target?.sessionId)).size !==
+      networkTargets.length ||
     !Array.isArray(network?.requests) ||
     network.requests.length !== network.localRequestCount ||
     network.requests.some(
@@ -2337,8 +2807,12 @@ export function validatePdfSharpnessEvidence(evidence) {
     !serviceWorkerBootstrapComplete ||
     new Set(targetCommandIds).size !== targetCommandIds.length ||
     !matrixCoverageComplete ||
+    !matrixPointSequenceBound ||
+    !forcedFallbackIntervalBound ||
+    !finalNetworkIntervalBound ||
+    !fixedPointSchemaAndContinuityBound ||
     !Array.isArray(network?.networkFixedPoints) ||
-    fixedPoints.map(({ label }) => label).join(",") !==
+    fixedPoints.map((point) => point?.label).join(",") !==
       expectedFixedPointLabels.join(",") ||
     fixedPoints.some(
       (point) =>
@@ -2351,7 +2825,7 @@ export function validatePdfSharpnessEvidence(evidence) {
         point?.inflightRequestCount !== 0 ||
         !nonNegativeInteger(point?.requestCount) ||
         point.requestCount === 0 ||
-        point.completedRequestCount > point.requestCount ||
+        point.completedRequestCount !== point.requestCount ||
         !nonNegativeInteger(point?.targetCount) ||
         point.targetCount === 0 ||
         point.attachPromiseCount !== point.targetCount ||
@@ -2376,12 +2850,19 @@ export function validatePdfSharpnessEvidence(evidence) {
                 ?.parserBootstrapSettlementCount)),
     ) ||
     finalFixedPoint?.requestCount !== network.localRequestCount ||
+    finalFixedPoint?.requestCount !== networkRequests.length ||
     finalFixedPoint?.completedRequestCount !== network.completedRequestCount ||
+    finalFixedPoint?.completedRequestCount !== networkRequests.length ||
+    finalFixedPoint?.attachPromiseCount !== networkTargets.length ||
+    finalFixedPoint?.targetCount !== networkTargets.length ||
     finalFixedPoint?.targetBootstrapSettlementCount !==
       targetBootstrapSettlements.length ||
     finalFixedPoint?.serviceWorkerBootstrapObservationCount !==
       serviceWorkerBootstrapObservations.length
   ) {
+    fail("PDF source or recursively attached worker network evidence failed");
+  }
+  } catch {
     fail("PDF source or recursively attached worker network evidence failed");
   }
 

@@ -59,7 +59,9 @@ exact job, document, revision, page 1, terminal progress, complete, and
 render-fallback chain; an automatically restored page or generic ready DOM
 cannot pass. Its distinct `diagnostic: true` report has `completed`,
 `importCompleted`, and `networkSettled` states but never a canonical `passed`
-field or acceptance schema version. It records only fixture hashes/counts,
+field or acceptance schema version. Its schema-2 network diagnostic binds the
+exact file-selection request boundary to a bounded ordered proof of hashed
+request, session, bootstrap-target, and settlement ownership. It records only fixture hashes/counts,
 opaque local-library identities, fixed DOM/notice/error categories, wrapped
 worker lifecycle metadata, sanitized CDP target/network state, one bound
 external screenshot, and fail-closed owned teardown. It never stores document
@@ -94,10 +96,31 @@ recomputed reader/layout/visual intersections, mounted range, viewport, and
 bounded import-bound worker/draw activity. The polled DOM, geometry, canvas,
 and viewport state is authoritative for release, so no repeated post-boundary
 worker disable message is required; any event that is present remains bound to
-the current worker, job, revision, page, type, and order. Later rows retain
-cumulative CDP history, validate every historical target/settlement against its
-own phase, and require exactly one document worker/parser pair with one
-settlement each for the current phase. Bounded phase, draw-hook, canvas sampler,
+the current worker, job, revision, page, type, and order. After every navigation,
+the row first proves the startup library branch has settled: row one has no
+active PDF, open/import request, or selected source; later rows have one `open`
+whose document ID matches the active IndexedDB document and whose exact
+`first: true`, revision-bound first page resolves the app restore promise, with
+safe monotonic event identities, no earlier identity-matched message or native
+`Worker` error, and no import request or selected source. Native worker errors
+are bridged to the active open worker/job/revision identity before readiness. A
+generic three-sample CDP quiet point then
+binds that restore state before an exact four-count
+attachment/request/settlement/target boundary is frozen immediately before
+file selection. Later rows retain cumulative CDP history and validate
+previous-final to restore to explicit-import continuity. The final fixed point
+requires exactly one new post-boundary document worker, its direct parser child,
+and one settlement each, even though restore and import truthfully share the
+same phase. Every restore/import half-open interval owns its request and
+settlement identities (including the null-session document bootstrap), rebuilds
+the declared parent-session ancestry, and rejects any extra PDF-like target in
+another phase. Exact fixed-point schemas and final endpoints prevent private
+extras, cumulative rewinds, or truncated raw arrays. The forced-to-final
+privacy interval independently contains no PDF document/parser target, request,
+or settlement regardless of its phase, and malformed or cyclic structured
+network entries fail closed. The schema-5 noncanonical
+report exposes only boundary counts, derived deltas, and restore
+counts/booleans. Bounded phase, draw-hook, canvas sampler,
 worker-dispatch, Long Task, and diagnostic-only Long Animation Frame records
 expose interval overlap without claiming causation. Long Animation Frame
 support may be unavailable; when available, frame and script timing is bounded
@@ -319,9 +342,20 @@ requires:
   A worker script request transferred into an attached target settles only when
   one fully attached and resumed `worker` has the exact raw URL, parent session,
   phase, `GET` method, and `Script` resource type; the request remains in the
-  evidence with a one-to-one `target-attached` terminal record. Each matrix
-  phase requires both document- and parser-worker settlements. All remaining
-  attachment promises and observed network requests must reach a quiet fixed
+  evidence with a one-to-one `target-attached` terminal record. Each matrix row
+  first settles and validates its startup restore, including the active
+  IndexedDB document binding and exact `first: true` worker page, then records
+  an exact four-field boundary immediately before file selection. Canonical matrix
+  coverage is independently reconstructed from each half-open
+  boundary-to-final endpoint slice and requires one newly imported
+  document/parser chain and one settlement each. Pre-boundary restored targets
+  remain in cumulative evidence but cannot satisfy a post-boundary request or
+  settlement. Each settlement resolves to exactly one request in the same
+  half-open request slice, each PDF bootstrap request targets a PDF worker in
+  its target slice, and reconstructed parent ancestry must be exact. Boundaries
+  and endpoints must be monotonic, completed requests equal requests, and the
+  final endpoints equal the final raw arrays. All remaining attachment promises
+  and observed network requests must reach a quiet fixed
   point before the privacy snapshot. Every stable sample independently requires
   successful service-worker bypass, zero attach errors, and the exact completed
   attach/resume command sequence for every observed target, so a timed-out
@@ -342,6 +376,11 @@ exact new target. Separately, the selected import must have exactly one
 null-parent wrapper blob and exactly one direct parser child, each with one
 matching settlement and exact ancestry. A restored wrapper, unrelated local
 worker, or second parser cannot substitute for that chain.
+The canonical forced-main-fallback fixed point therefore records zero document
+settlements and one parser settlement for the blob-wrapper/parser chain; the
+subsequent final privacy point records zero of both and its half-open interval
+from the forced endpoint contains no PDF target, request, or settlement under
+any phase label.
 
 The validator also requires the exact reviewed source-file key set and one
 unique, expected filename/path/hash/byte reference for every screenshot. A

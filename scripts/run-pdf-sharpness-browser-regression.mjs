@@ -166,6 +166,9 @@ export const FALLBACK_IMPORT_DIAGNOSTIC_STAGES = Object.freeze(
 );
 export const APP_MATRIX_RUNTIME_DIAGNOSTIC_STEPS = Object.freeze([
   "navigate",
+  "restore-readiness",
+  "restore-network-fixed-point",
+  "import-boundary",
   "file-select",
   "model-completion",
   "adjacent-selection",
@@ -568,6 +571,125 @@ export function summarizePdfModelCompletion(workerEvents, expectedPageCount) {
     pageEventCount: pageEvents.length,
     pageNumbers,
     revision: completion?.revision ?? null,
+  };
+}
+
+/**
+ * Prove the startup-library branch has settled before the matrix import starts.
+ * The app's restore promise resolves from PdfDocumentClient.open only after its
+ * identity-matched first page arrives, so the persisted branch requires that
+ * exact open/page pair in addition to the settled library UI.
+ */
+export function summarizePdfRestoreReadiness({
+  activeDocumentCount,
+  activeDocumentMatchesOpen,
+  activeDocumentStateAvailable,
+  activePdfPresent,
+  expectedPersisted,
+  libraryPending,
+  sourceFiles,
+  workerEvents,
+}) {
+  const rawInputsValid =
+    Array.isArray(workerEvents) && Array.isArray(sourceFiles);
+  const events = rawInputsValid ? workerEvents : [];
+  const sources = rawInputsValid ? sourceFiles : [];
+  const positiveSafeInteger = (value) =>
+    Number.isSafeInteger(value) && value > 0;
+  const finiteClock = (value) => Number.isFinite(value) && value >= 0;
+  const revisionBoundDocumentKey = (event) =>
+    typeof event?.revision === "string" && event.revision.length > 0 &&
+    typeof event?.documentKey === "string" &&
+    event.documentKey.length > event.revision.length + 1 &&
+    event.documentKey.endsWith(`:${event.revision}`);
+  const opens = events.filter(
+    (event) => event?.direction === "to-worker" && event?.type === "open",
+  );
+  const imports = events.filter(
+    (event) => event?.direction === "to-worker" && event?.type === "import",
+  );
+  const open = opens[0] ?? null;
+  const openIndex = open ? events.indexOf(open) : -1;
+  const openIdentityValid = Boolean(
+    open &&
+    positiveSafeInteger(open.eventId) &&
+    positiveSafeInteger(open.workerInstanceId) &&
+    positiveSafeInteger(open.jobId) &&
+    finiteClock(open.at) &&
+    revisionBoundDocumentKey(open),
+  );
+  const identityPages = events.filter(
+    (event, eventIndex) =>
+      openIdentityValid &&
+      event?.direction === "from-worker" &&
+      event?.type === "page" &&
+      eventIndex > openIndex &&
+      positiveSafeInteger(event?.eventId) &&
+      event?.eventId > open.eventId &&
+      finiteClock(event?.at) &&
+      event.at >= open.at &&
+      event?.workerInstanceId === open.workerInstanceId &&
+      event?.jobId === open.jobId &&
+      event?.documentKey === open.documentKey &&
+      event?.revision === open.revision &&
+      revisionBoundDocumentKey(event),
+  );
+  const matchingFirstPages = identityPages.filter(
+    (event) => event?.first === true,
+  );
+  const firstPage = matchingFirstPages[0] ?? null;
+  const firstPageIndex = firstPage ? events.indexOf(firstPage) : -1;
+  const matchingErrors = events.filter(
+    (event, eventIndex) =>
+      openIdentityValid &&
+      firstPage &&
+      eventIndex > openIndex &&
+      eventIndex < firstPageIndex &&
+      event?.direction === "from-worker" &&
+      event?.type === "error" &&
+      event?.workerInstanceId === open.workerInstanceId &&
+      event?.jobId === open.jobId &&
+      event?.revision === open.revision,
+  );
+  const commonReady =
+    rawInputsValid &&
+    activeDocumentStateAvailable === true &&
+    libraryPending === false &&
+    imports.length === 0 &&
+    sources.length === 0;
+  const ready = expectedPersisted === true
+    ? commonReady &&
+      activeDocumentCount === 1 &&
+      activeDocumentMatchesOpen === true &&
+      activePdfPresent === true &&
+      opens.length === 1 &&
+      openIdentityValid &&
+      matchingFirstPages.length === 1 &&
+      firstPage?.pageNumber === 1 &&
+      identityPages[0] === firstPage &&
+      matchingErrors.length === 0
+    : expectedPersisted === false &&
+      commonReady &&
+      activeDocumentCount === 0 &&
+      activeDocumentMatchesOpen === false &&
+      activePdfPresent === false &&
+      opens.length === 0 &&
+      matchingFirstPages.length === 0;
+  return {
+    activeDocumentCount: Number.isSafeInteger(activeDocumentCount) &&
+        activeDocumentCount >= 0
+      ? activeDocumentCount
+      : null,
+    activeDocumentMatchesOpen: activeDocumentMatchesOpen === true,
+    activeDocumentStateAvailable: activeDocumentStateAvailable === true,
+    activePdfCount: activePdfPresent === true ? 1 : 0,
+    expectedPersisted: expectedPersisted === true,
+    firstPageCount: matchingFirstPages.length,
+    importRequestCount: imports.length,
+    libraryPending: libraryPending === true,
+    openRequestCount: opens.length,
+    ready,
+    sourceSelectionCount: sources.length,
   };
 }
 
@@ -1093,8 +1215,50 @@ export function isCdpAttachmentStateHealthy(networkState) {
   );
 }
 
-function cdpPhasePdfBootstrapCounts(networkState, appUrl, label) {
-  const phaseTargets = (networkState.targets ?? []).filter(
+function captureCdpNetworkBoundary(networkState) {
+  return {
+    attachPromiseCount: networkState.attachPromises.length,
+    requestCount: networkState.requests.length,
+    settlementCount: networkState.targetBootstrapSettlements.length,
+    targetCount: networkState.targets.length,
+  };
+}
+
+function isCdpNetworkBoundaryValid(boundary, counts = {}) {
+  const exactKeys = [
+    "attachPromiseCount",
+    "requestCount",
+    "settlementCount",
+    "targetCount",
+  ].sort().join("\0");
+  const values = [
+    boundary?.attachPromiseCount,
+    boundary?.requestCount,
+    boundary?.settlementCount,
+    boundary?.targetCount,
+  ];
+  return (
+    boundary && typeof boundary === "object" && !Array.isArray(boundary) &&
+    Object.keys(boundary).sort().join("\0") === exactKeys &&
+    values.every((value) => Number.isSafeInteger(value) && value >= 0) &&
+    boundary.attachPromiseCount === boundary.targetCount &&
+    boundary.attachPromiseCount <= (counts.attachPromiseCount ?? Infinity) &&
+    boundary.requestCount <= (counts.requestCount ?? Infinity) &&
+    boundary.settlementCount <=
+      (counts.targetBootstrapSettlementCount ?? Infinity) &&
+    boundary.targetCount <= (counts.targetCount ?? Infinity)
+  );
+}
+
+function cdpPhasePdfBootstrapCounts(
+  networkState,
+  appUrl,
+  label,
+  boundary = null,
+) {
+  const targetStart = boundary?.targetCount ?? 0;
+  const settlementStart = boundary?.settlementCount ?? 0;
+  const phaseTargets = (networkState.targets ?? []).slice(targetStart).filter(
     (target) => target?.phase === label,
   );
   const documentTargets = phaseTargets.filter(
@@ -1105,7 +1269,9 @@ function cdpPhasePdfBootstrapCounts(networkState, appUrl, label) {
     (target) => classifyCdpDiagnosticUrl(target?.url, appUrl) ===
       "pdf-parser-worker",
   );
-  const settlements = networkState.targetBootstrapSettlements ?? [];
+  const settlements = (networkState.targetBootstrapSettlements ?? []).slice(
+    settlementStart,
+  );
   const documentTargetSessions = new Set(
     documentTargets.map((target) => target.sessionId),
   );
@@ -1128,16 +1294,29 @@ function cdpPhasePdfBootstrapCounts(networkState, appUrl, label) {
   };
 }
 
-export function hasCdpPhasePdfBootstrapCoverage(networkState, appUrl, label) {
+export function hasCdpPhasePdfBootstrapCoverage(
+  networkState,
+  appUrl,
+  label,
+  boundary = null,
+  expectedPairCount = 1,
+) {
   if (!PDF_SHARPNESS_MATRIX.some((configuration) => configuration.id === label)) {
     return true;
   }
-  const counts = cdpPhasePdfBootstrapCounts(networkState, appUrl, label);
+  const counts = cdpPhasePdfBootstrapCounts(
+    networkState,
+    appUrl,
+    label,
+    boundary,
+  );
   return (
-    counts.documentTargetCount === 1 &&
-    counts.parserTargetCount === 1 &&
-    counts.documentBootstrapSettlementCount === 1 &&
-    counts.parserBootstrapSettlementCount === 1
+    Number.isSafeInteger(expectedPairCount) &&
+    expectedPairCount >= 0 &&
+    counts.documentTargetCount === expectedPairCount &&
+    counts.parserTargetCount === expectedPairCount &&
+    counts.documentBootstrapSettlementCount === expectedPairCount &&
+    counts.parserBootstrapSettlementCount === expectedPairCount
   );
 }
 
@@ -1490,6 +1669,35 @@ export function buildCdpNetworkFixedPointDiagnostic(
       type: entry.type ?? null,
       urlClass: classifyCdpDiagnosticUrl(entry.url, appUrl),
     }));
+  const fallbackRequests = label === FALLBACK_IMPORT_DIAGNOSTIC_LABEL
+    ? networkState.requests
+    : [];
+  const fallbackRequestProof = label === FALLBACK_IMPORT_DIAGNOSTIC_LABEL
+    ? {
+        complete: fallbackRequests.length <= 256,
+        finalRequestCount: networkState.requests.length,
+        requests: fallbackRequests.slice(0, 256).map(
+          (request) => ({
+            bootstrapTargetIdentityHash: request.bootstrapTargetSessionId
+              ? cdpDiagnosticIdentity(request.bootstrapTargetSessionId)
+              : null,
+            identityHash: cdpDiagnosticIdentity(
+              request.sessionId,
+              request.requestId,
+            ),
+            method: request.method ?? null,
+            phase: request.phase ?? null,
+            sequence: request.sequence ?? null,
+            sessionIdentityHash: request.sessionId
+              ? cdpDiagnosticIdentity(request.sessionId)
+              : null,
+            sessionScoped: request.sessionId !== null,
+            type: request.type ?? null,
+            urlClass: classifyCdpDiagnosticUrl(request.url, appUrl),
+          }),
+        ),
+      }
+    : null;
   return {
     attachErrors,
     counts: {
@@ -1511,9 +1719,14 @@ export function buildCdpNetworkFixedPointDiagnostic(
       targetBootstrapSettlementCount: targetBootstrapSettlements.length,
       targetCount: networkState.targets.length,
     },
+    ...(label === FALLBACK_IMPORT_DIAGNOSTIC_LABEL
+      ? { fallbackRequestProof }
+      : {}),
     inflightRequests,
     initialTargetBaseline: networkState.initialTargetBaseline ?? null,
+    importBoundary: waitState.importBoundary ?? null,
     label,
+    matrixRestoreProof: waitState.matrixRestoreProof ?? null,
     outcome,
     pendingAttaches,
     recentActivity,
@@ -1550,7 +1763,46 @@ export function buildCdpNetworkFixedPointDiagnostic(
   };
 }
 
-export function isCdpFixedPointDiagnosticHealthy(networkDiagnostic) {
+function isMatrixRestoreReadinessHealthy(readiness, expectedPersisted) {
+  const expectedCount = expectedPersisted ? 1 : 0;
+  return (
+    readiness &&
+    Object.keys(readiness).sort().join("\0") === [
+      "activeDocumentCount",
+      "activeDocumentMatchesOpen",
+      "activeDocumentStateAvailable",
+      "activePdfCount",
+      "expectedPersisted",
+      "firstPageCount",
+      "importRequestCount",
+      "libraryPending",
+      "openRequestCount",
+      "ready",
+      "sourceSelectionCount",
+    ].sort().join("\0") &&
+    readiness.activeDocumentCount === expectedCount &&
+    readiness.activeDocumentMatchesOpen === expectedPersisted &&
+    readiness.activeDocumentStateAvailable === true &&
+    readiness.activePdfCount === expectedCount &&
+    readiness.expectedPersisted === expectedPersisted &&
+    readiness.firstPageCount === expectedCount &&
+    readiness.importRequestCount === 0 &&
+    readiness.libraryPending === false &&
+    readiness.openRequestCount === expectedCount &&
+    readiness.ready === true &&
+    readiness.sourceSelectionCount === 0
+  );
+}
+
+export function isCdpFixedPointDiagnosticHealthy(
+  networkDiagnostic,
+  {
+    expectedPdfPairCount = 1,
+    requireImportBoundary = PDF_SHARPNESS_MATRIX.some(
+      ({ id }) => id === networkDiagnostic?.label,
+    ),
+  } = {},
+) {
   const targets = Array.isArray(networkDiagnostic?.targets)
     ? networkDiagnostic.targets
     : [];
@@ -1585,6 +1837,27 @@ export function isCdpFixedPointDiagnosticHealthy(networkDiagnostic) {
   )
     ? networkDiagnostic.targetBootstrapSettlements
     : [];
+  const counts = networkDiagnostic?.counts;
+  const importBoundary = networkDiagnostic?.importBoundary;
+  const boundaryBound = requireImportBoundary
+    ? isCdpNetworkBoundaryValid(importBoundary, counts) &&
+      Object.keys(importBoundary).sort().join("\0") === [
+        "attachPromiseCount",
+        "requestCount",
+        "settlementCount",
+        "targetCount",
+      ].sort().join("\0")
+    : importBoundary === null;
+  const targetStart = boundaryBound && requireImportBoundary
+    ? importBoundary.targetCount
+    : 0;
+  const settlementStart = boundaryBound && requireImportBoundary
+    ? importBoundary.settlementCount
+    : 0;
+  const postBoundaryTargets = targets.slice(targetStart);
+  const postBoundarySettlements = targetBootstrapSettlements.slice(
+    settlementStart,
+  );
   const bootstrapTargetSessions = targetBootstrapSettlements.map(
     (settlement) => settlement?.targetSessionId,
   );
@@ -1624,13 +1897,16 @@ export function isCdpFixedPointDiagnosticHealthy(networkDiagnostic) {
       );
     },
   );
-  const pdfTargets = targets.filter(
-    (target) =>
-      target?.phase === networkDiagnostic?.label &&
-      ["pdf-document-worker", "pdf-parser-worker"].includes(
-        target?.urlClass,
-      ),
+  const postBoundaryPdfTargets = postBoundaryTargets.filter((target) =>
+    ["pdf-document-worker", "pdf-parser-worker"].includes(
+      target?.urlClass,
+    )
   );
+  const pdfTargets = requireImportBoundary
+    ? postBoundaryPdfTargets
+    : postBoundaryPdfTargets.filter(
+        (target) => target?.phase === networkDiagnostic?.label,
+      );
   const pdfBootstrapCoverage = [
     "pdf-document-worker",
     "pdf-parser-worker",
@@ -1638,11 +1914,35 @@ export function isCdpFixedPointDiagnosticHealthy(networkDiagnostic) {
     const matchingTargets = pdfTargets.filter(
       (target) => target.urlClass === urlClass,
     );
-    return matchingTargets.length === 1 &&
-      targetBootstrapSettlements.filter((settlement) =>
-        settlement.targetSessionId === matchingTargets[0].sessionId
-      ).length === 1;
+    return matchingTargets.length === expectedPdfPairCount &&
+      postBoundarySettlements.filter((settlement) =>
+        settlement.targetSessionId === matchingTargets[0]?.sessionId
+      ).length === expectedPdfPairCount;
   });
+  const currentDocumentTarget = pdfTargets.find(
+    (target) => target.urlClass === "pdf-document-worker",
+  );
+  const currentParserTarget = pdfTargets.find(
+    (target) => target.urlClass === "pdf-parser-worker",
+  );
+  const postBoundaryTargetSessions = new Set(
+    postBoundaryTargets.map((target) => target?.sessionId),
+  );
+  const currentPdfChainBound = expectedPdfPairCount === 0
+    ? pdfTargets.length === 0
+    : expectedPdfPairCount === 1 &&
+      pdfTargets.length === 2 &&
+      pdfTargets.every((target) =>
+        target?.phase === networkDiagnostic?.label
+      ) &&
+      currentDocumentTarget?.parentSessionId === null &&
+      currentParserTarget?.parentSessionId === currentDocumentTarget.sessionId &&
+      currentParserTarget?.ancestry?.length === 1 &&
+      currentParserTarget.ancestry[0]?.sessionId ===
+        currentDocumentTarget.sessionId &&
+      postBoundarySettlements.every((settlement) =>
+        postBoundaryTargetSessions.has(settlement?.targetSessionId)
+      );
   const parserTargetsBoundToDocumentWorker = targets
     .filter((target) => target.urlClass === "pdf-parser-worker")
     .every((target) => {
@@ -1723,7 +2023,51 @@ export function isCdpFixedPointDiagnosticHealthy(networkDiagnostic) {
     : [];
   const requiredStableSamples = CDP_FIXED_POINT_STABLE_SAMPLES;
   const stableTail = recentSamples.slice(-requiredStableSamples);
-  const counts = networkDiagnostic?.counts;
+  const matrixIndex = PDF_SHARPNESS_MATRIX.findIndex(
+    ({ id }) => id === networkDiagnostic?.label,
+  );
+  const restoreProof = networkDiagnostic?.matrixRestoreProof;
+  const restoreDiagnostic = restoreProof?.networkDiagnostic;
+  const restoreExpectedPairCount = matrixIndex > 0 ? 1 : 0;
+  const matrixRestoreProofBound = requireImportBoundary ? (
+    matrixIndex >= 0 &&
+    restoreProof &&
+    Object.keys(restoreProof).sort().join("\0") === [
+      "documentBootstrapSettlementCount",
+      "networkDiagnostic",
+      "parserBootstrapSettlementCount",
+      "readiness",
+    ].sort().join("\0") &&
+    restoreDiagnostic !== networkDiagnostic &&
+    restoreDiagnostic?.importBoundary === null &&
+    restoreDiagnostic?.matrixRestoreProof === null &&
+    isMatrixRestoreReadinessHealthy(
+      restoreProof.readiness,
+      matrixIndex > 0,
+    ) &&
+    restoreProof.documentBootstrapSettlementCount ===
+      restoreExpectedPairCount &&
+    restoreProof.parserBootstrapSettlementCount ===
+      restoreExpectedPairCount &&
+    isCdpFixedPointDiagnosticHealthy(restoreDiagnostic, {
+      expectedPdfPairCount: restoreExpectedPairCount,
+      requireImportBoundary: false,
+    }) &&
+    restoreDiagnostic?.label === networkDiagnostic?.label &&
+    restoreDiagnostic?.counts?.attachPromiseCount ===
+      importBoundary?.attachPromiseCount &&
+    restoreDiagnostic?.counts?.requestCount === importBoundary?.requestCount &&
+    restoreDiagnostic?.counts?.completedRequestCount ===
+      importBoundary?.requestCount &&
+    restoreDiagnostic?.counts?.targetBootstrapSettlementCount ===
+      importBoundary?.settlementCount &&
+    restoreDiagnostic?.counts?.targetCount === importBoundary?.targetCount &&
+    isAppMatrixRuntimeCdpHistoryContinuous(
+      restoreDiagnostic,
+      networkDiagnostic,
+      networkDiagnostic.label,
+    )
+  ) : networkDiagnostic?.matrixRestoreProof === null;
   return (
     networkDiagnostic?.outcome === "fixed-point-reached" &&
     networkDiagnostic?.serviceWorkerBypassed === true &&
@@ -1753,15 +2097,18 @@ export function isCdpFixedPointDiagnosticHealthy(networkDiagnostic) {
     counts.targetCount === targets.length &&
     targets.length > 0 &&
     targets.every(isCdpTargetSetupComplete) &&
+    appMatrixRuntimeTargetAncestryBound(targets) &&
     validTargetIdentities &&
     new Set(targetCommandIds).size === targetCommandIds.length &&
     validBootstrapSettlements &&
-    targetBootstrapSettlements.length > 0 &&
+    boundaryBound &&
+    targetBootstrapSettlements.length >= expectedPdfPairCount * 2 &&
     new Set(bootstrapTargetSessions).size ===
       bootstrapTargetSessions.length &&
     new Set(bootstrapRequestIdentities).size ===
       bootstrapRequestIdentities.length &&
     pdfBootstrapCoverage &&
+    currentPdfChainBound &&
     parserTargetsBoundToDocumentWorker &&
     initialTargetBaseline?.checked === true &&
     initialTargetBaseline?.pageCount === 1 &&
@@ -1769,6 +2116,7 @@ export function isCdpFixedPointDiagnosticHealthy(networkDiagnostic) {
     initialTargetBaseline?.workerCount === 0 &&
     initialTargetBaseline?.targetCount === 1 &&
     validServiceWorkerBootstrapObservations &&
+    matrixRestoreProofBound &&
     networkDiagnostic?.wait?.requiredStableSamples === requiredStableSamples &&
     Number.isInteger(networkDiagnostic?.wait?.stableSamples) &&
     networkDiagnostic.wait.stableSamples === requiredStableSamples &&
@@ -2792,7 +3140,7 @@ export function buildFirstNetworkDiagnosticReport({
       screenshotBound &&
       !teardownFailed,
     diagnostic: true,
-    diagnosticSchemaVersion: 1,
+    diagnosticSchemaVersion: 2,
     failures,
     fixture: fixtureBound ? fixture : null,
     fixedPointReached: fixedPointHealthy,
@@ -3137,15 +3485,17 @@ export function isFallbackImportNetworkDiagnosticHealthy(
   const targetStart = boundary?.targetCount;
   const settlementStart = boundary?.settlementCount;
   const requestStart = boundary?.requestCount;
-  const attachStart = boundary?.attachPromiseCount;
-  const validBoundary =
-    [targetStart, settlementStart, requestStart, attachStart].every(
-      (value) => Number.isInteger(value) && value >= 0,
-    ) &&
-    targetStart === attachStart &&
-    targetStart <= targets.length &&
-    settlementStart <= settlements.length &&
-    requestStart <= counts.requestCount;
+  const validBoundary = isCdpNetworkBoundaryValid(boundary, counts) &&
+    targetStart <= targets.length && settlementStart <= settlements.length;
+  const diagnosticBoundary = diagnostic?.importBoundary;
+  const diagnosticBoundaryBound =
+    isCdpNetworkBoundaryValid(diagnosticBoundary, counts) &&
+    [
+      "attachPromiseCount",
+      "requestCount",
+      "settlementCount",
+      "targetCount",
+    ].every((key) => diagnosticBoundary[key] === boundary?.[key]);
   const newTargets = validBoundary ? targets.slice(targetStart) : [];
   const postBoundarySettlements = validBoundary
     ? settlements.slice(settlementStart)
@@ -3276,6 +3626,87 @@ export function isFallbackImportNetworkDiagnosticHealthy(
         entry?.terminalReason === "target-attached"
       );
     });
+  const requestProof = diagnostic?.fallbackRequestProof;
+  const requestProofs = Array.isArray(requestProof?.requests)
+    ? requestProof.requests
+    : [];
+  const requestProofKeys = [
+    "bootstrapTargetIdentityHash",
+    "identityHash",
+    "method",
+    "phase",
+    "sequence",
+    "sessionIdentityHash",
+    "sessionScoped",
+    "type",
+    "urlClass",
+  ].sort().join("\0");
+  const requestProofBound =
+    requestProof && typeof requestProof === "object" &&
+    Object.keys(requestProof).sort().join("\0") === [
+      "complete",
+      "finalRequestCount",
+      "requests",
+    ].sort().join("\0") &&
+    requestProof.complete === true &&
+    requestProof.finalRequestCount === counts.requestCount &&
+    requestProofs.length === counts.requestCount &&
+    requestProofs.length <= 256 &&
+    requestProofs.every((request, index) =>
+      Object.keys(request ?? {}).sort().join("\0") === requestProofKeys &&
+      SHA256_PATTERN.test(request.identityHash ?? "") &&
+      (request.bootstrapTargetIdentityHash === null ||
+        SHA256_PATTERN.test(request.bootstrapTargetIdentityHash ?? "")) &&
+      (request.sessionIdentityHash === null ||
+        SHA256_PATTERN.test(request.sessionIdentityHash ?? "")) &&
+      typeof request.sessionScoped === "boolean" &&
+      request.sessionScoped === (request.sessionIdentityHash !== null) &&
+      nonEmptyString(request.method) &&
+      nonEmptyString(request.phase) &&
+      nonEmptyString(request.type) &&
+      nonEmptyString(request.urlClass) &&
+      request.sequence === index + 1
+    );
+  const postBoundaryRequestProofs = requestProofBound && validBoundary
+    ? requestProofs.slice(requestStart)
+    : [];
+  const newTargetByIdentityHash = new Map(
+    newTargets.map((target) => [
+      cdpDiagnosticIdentity(target.sessionId),
+      target,
+    ]),
+  );
+  const settlementRequestProofsBound =
+    postBoundarySettlements.every((settlement) =>
+      postBoundaryRequestProofs.filter((request) =>
+        request.identityHash === cdpDiagnosticIdentity(
+          settlement.requestSessionId,
+          settlement.requestId,
+        ) &&
+        request.bootstrapTargetIdentityHash === cdpDiagnosticIdentity(
+          settlement.targetSessionId,
+        )
+      ).length === 1
+    ) &&
+    postBoundaryRequestProofs.every((request) => {
+      if (request.bootstrapTargetIdentityHash !== null) {
+        const target = newTargetByIdentityHash.get(
+          request.bootstrapTargetIdentityHash,
+        );
+        return Boolean(target) &&
+          postBoundarySettlements.filter((settlement) =>
+            request.identityHash === cdpDiagnosticIdentity(
+              settlement.requestSessionId,
+              settlement.requestId,
+            ) &&
+            request.bootstrapTargetIdentityHash === cdpDiagnosticIdentity(
+              settlement.targetSessionId,
+            )
+          ).length === 1;
+      }
+      return request.sessionScoped === true &&
+        newTargetByIdentityHash.has(request.sessionIdentityHash);
+    });
   const currentTargets = [importBlobTarget, ...importParserTargets].filter(
     Boolean,
   );
@@ -3313,6 +3744,9 @@ export function isFallbackImportNetworkDiagnosticHealthy(
     : [];
   return (
     validBoundary &&
+    diagnosticBoundaryBound &&
+    requestProofBound &&
+    settlementRequestProofsBound &&
     diagnostic?.label === FALLBACK_IMPORT_DIAGNOSTIC_LABEL &&
     diagnostic?.outcome === "fixed-point-reached" &&
     diagnostic?.serviceWorkerBypassed === true &&
@@ -3616,7 +4050,7 @@ export function buildFallbackImportDiagnosticReport({
       screenshotBound &&
       !teardownFailed,
     diagnostic: true,
-    diagnosticSchemaVersion: 1,
+    diagnosticSchemaVersion: 2,
     execution: progressSummary,
     failures,
     fixture: fixtureBound ? fixture : null,
@@ -4815,6 +5249,12 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
   const inflightRequests = Array.isArray(diagnostic?.inflightRequests)
     ? diagnostic.inflightRequests
     : null;
+  const importBoundary = diagnostic?.importBoundary;
+  const restoreProof = diagnostic?.matrixRestoreProof;
+  const restoreDiagnostic = restoreProof?.networkDiagnostic;
+  const matrixIndex = PDF_SHARPNESS_MATRIX.findIndex(
+    ({ id }) => id === expectedConfigurationId,
+  );
   if (
     diagnostic?.label !== expectedConfigurationId ||
     diagnostic?.outcome !== "timeout" ||
@@ -4830,6 +5270,52 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
   const integer = (value) => Number.isSafeInteger(value) && value >= 0;
   const positiveInteger = (value) => integer(value) && value > 0;
   const safeClockOrNull = (value) => value === null || positiveInteger(value);
+  const boundaryBound =
+    Object.keys(importBoundary ?? {}).sort().join("\0") === [
+      "attachPromiseCount",
+      "requestCount",
+      "settlementCount",
+      "targetCount",
+    ].sort().join("\0") &&
+    isCdpNetworkBoundaryValid(importBoundary, counts);
+  const restoreExpectedPairCount = matrixIndex > 0 ? 1 : 0;
+  const restoreProofBound =
+    matrixIndex >= 0 &&
+    boundaryBound &&
+    Object.keys(restoreProof ?? {}).sort().join("\0") === [
+      "documentBootstrapSettlementCount",
+      "networkDiagnostic",
+      "parserBootstrapSettlementCount",
+      "readiness",
+    ].sort().join("\0") &&
+    restoreDiagnostic !== diagnostic &&
+    restoreDiagnostic?.importBoundary === null &&
+    restoreDiagnostic?.matrixRestoreProof === null &&
+    isMatrixRestoreReadinessHealthy(
+      restoreProof?.readiness,
+      matrixIndex > 0,
+    ) &&
+    restoreProof?.documentBootstrapSettlementCount ===
+      restoreExpectedPairCount &&
+    restoreProof?.parserBootstrapSettlementCount ===
+      restoreExpectedPairCount &&
+    isCdpFixedPointDiagnosticHealthy(restoreDiagnostic, {
+      expectedPdfPairCount: restoreExpectedPairCount,
+      requireImportBoundary: false,
+    }) &&
+    restoreDiagnostic?.counts?.attachPromiseCount ===
+      importBoundary.attachPromiseCount &&
+    restoreDiagnostic?.counts?.completedRequestCount ===
+      importBoundary.requestCount &&
+    restoreDiagnostic?.counts?.requestCount === importBoundary.requestCount &&
+    restoreDiagnostic?.counts?.targetBootstrapSettlementCount ===
+      importBoundary.settlementCount &&
+    restoreDiagnostic?.counts?.targetCount === importBoundary.targetCount &&
+    isAppMatrixRuntimeCdpHistoryContinuous(
+      restoreDiagnostic,
+      diagnostic,
+      expectedConfigurationId,
+    );
   const urlClasses = new Set([
     "about",
     "app-asset",
@@ -5458,23 +5944,35 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
     finalSample?.targetCount === counts?.targetCount &&
     finalSample?.serviceWorkerBypassed ===
       (diagnostic?.serviceWorkerBypassed === true);
-  const currentDocumentTargets = targets.filter((target) =>
+  const postBoundaryTargets = boundaryBound
+    ? targets.slice(importBoundary.targetCount)
+    : [];
+  const postBoundarySettlements = boundaryBound
+    ? settlements.slice(importBoundary.settlementCount)
+    : [];
+  const currentDocumentTargets = postBoundaryTargets.filter((target) =>
     target?.phase === expectedConfigurationId &&
     target?.type === "worker" &&
     target?.urlClass === "pdf-document-worker"
   );
-  const currentParserTargets = targets.filter((target) =>
+  const currentParserTargets = postBoundaryTargets.filter((target) =>
     target?.phase === expectedConfigurationId &&
     target?.type === "worker" &&
     target?.urlClass === "pdf-parser-worker"
   );
-  const settlementCount = (target) => settlements.filter(
+  const settlementCount = (target) => postBoundarySettlements.filter(
     (settlement) => settlement?.targetSessionId === target?.sessionId,
   ).length;
   const pdfCardinality = currentDocumentTargets.length === 1 &&
     currentParserTargets.length === 1 &&
     settlementCount(currentDocumentTargets[0]) === 1 &&
-    settlementCount(currentParserTargets[0]) === 1;
+    settlementCount(currentParserTargets[0]) === 1 &&
+    currentDocumentTargets[0]?.parentSessionId === null &&
+    currentParserTargets[0]?.parentSessionId ===
+      currentDocumentTargets[0]?.sessionId &&
+    currentParserTargets[0]?.ancestry?.length === 1 &&
+    currentParserTargets[0]?.ancestry?.[0]?.sessionId ===
+      currentDocumentTargets[0]?.sessionId;
   const serviceWorkerCoverage = serviceWorkerIdentitiesBound &&
     serviceWorkerTargets.length > 0 &&
     serviceWorkers.length === serviceWorkerTargets.length &&
@@ -5529,7 +6027,8 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
     pendingCoverageBound && targetFailureCoverageBound &&
     inflightRequestsBound && settlementsBound && parserAncestryBound &&
     serviceWorkerIdentitiesBound && requestUnionBound && samplesBound &&
-    waitBound && finalReadinessBound && failureClasses.length > 0;
+    waitBound && finalReadinessBound && restoreProofBound &&
+    failureClasses.length > 0;
   return {
     bound,
     value: bound
@@ -5557,6 +6056,27 @@ function sanitizeAppMatrixRuntimeNetworkFailure(
             serviceWorkerObservationCount: serviceWorkers.length,
             serviceWorkerTargetCount: serviceWorkerTargets.length,
             targetCount: counts.targetCount,
+          },
+          importBoundary: { ...importBoundary },
+          importDeltas: {
+            attachPromiseCount:
+              counts.attachPromiseCount - importBoundary.attachPromiseCount,
+            requestCount: counts.requestCount - importBoundary.requestCount,
+            settlementCount:
+              counts.targetBootstrapSettlementCount -
+              importBoundary.settlementCount,
+            targetCount: counts.targetCount - importBoundary.targetCount,
+          },
+          restore: {
+            fixedPoint: {
+              completedRequestCount:
+                restoreDiagnostic.counts.completedRequestCount,
+              requestCount: restoreDiagnostic.counts.requestCount,
+              settlementCount:
+                restoreDiagnostic.counts.targetBootstrapSettlementCount,
+              targetCount: restoreDiagnostic.counts.targetCount,
+            },
+            readiness: { ...restoreProof.readiness },
           },
           failureClasses,
           gates,
@@ -5871,6 +6391,21 @@ export function buildAppMatrixRuntimeDiagnosticReport({
           completedRequestCount:
             row.networkFixedPoint.counts.completedRequestCount,
           inflightRequestCount: row.networkFixedPoint.counts.inflightRequestCount,
+          importBoundary: { ...row.networkFixedPoint.importBoundary },
+          importDeltas: {
+            attachPromiseCount:
+              row.networkFixedPoint.counts.attachPromiseCount -
+              row.networkFixedPoint.importBoundary.attachPromiseCount,
+            requestCount:
+              row.networkFixedPoint.counts.requestCount -
+              row.networkFixedPoint.importBoundary.requestCount,
+            settlementCount:
+              row.networkFixedPoint.counts.targetBootstrapSettlementCount -
+              row.networkFixedPoint.importBoundary.settlementCount,
+            targetCount:
+              row.networkFixedPoint.counts.targetCount -
+              row.networkFixedPoint.importBoundary.targetCount,
+          },
           label: row.networkFixedPoint.label,
           outcome: row.networkFixedPoint.outcome,
           pendingAttachCount: row.networkFixedPoint.counts.pendingAttachCount,
@@ -5878,6 +6413,25 @@ export function buildAppMatrixRuntimeDiagnosticReport({
           serviceWorkerBypassed: row.networkFixedPoint.serviceWorkerBypassed,
           stableSamples: row.networkFixedPoint.wait.stableSamples,
           targetCount: row.networkFixedPoint.counts.targetCount,
+          restore: {
+            fixedPoint: {
+              completedRequestCount:
+                row.networkFixedPoint.matrixRestoreProof.networkDiagnostic
+                  .counts.completedRequestCount,
+              requestCount:
+                row.networkFixedPoint.matrixRestoreProof.networkDiagnostic
+                  .counts.requestCount,
+              settlementCount:
+                row.networkFixedPoint.matrixRestoreProof.networkDiagnostic
+                  .counts.targetBootstrapSettlementCount,
+              targetCount:
+                row.networkFixedPoint.matrixRestoreProof.networkDiagnostic
+                  .counts.targetCount,
+            },
+            readiness: {
+              ...row.networkFixedPoint.matrixRestoreProof.readiness,
+            },
+          },
         }
       : null;
     const expectedAdjacentPage = index < 4 ? 2 : 3;
@@ -5926,6 +6480,11 @@ export function buildAppMatrixRuntimeDiagnosticReport({
       rawCurrentNetworkDiagnostic !== null &&
       priorNetworkDiagnostic?.label === PDF_SHARPNESS_MATRIX[index - 1]?.id &&
       isCdpFixedPointDiagnosticHealthy(priorNetworkDiagnostic) &&
+      isAppMatrixRuntimeCdpHistoryContinuous(
+        priorNetworkDiagnostic,
+        rawCurrentNetworkDiagnostic.matrixRestoreProof?.networkDiagnostic,
+        expected?.id,
+      ) &&
       isAppMatrixRuntimeCdpHistoryContinuous(
         priorNetworkDiagnostic,
         rawCurrentNetworkDiagnostic,
@@ -6100,7 +6659,7 @@ export function buildAppMatrixRuntimeDiagnosticReport({
       rowOrderBound && phaseSequenceBound && runnerFailureBound &&
       !teardownFailed && !runnerFailure,
     diagnostic: true,
-    diagnosticSchemaVersion: 3,
+    diagnosticSchemaVersion: 5,
     execution: {
       attemptedConfigurationCount: publicRows.length,
       completedConfigurationCount,
@@ -7061,14 +7620,21 @@ const INSTRUMENTATION_SOURCE = String.raw`
           const message = event.data || {};
           const documentId = message.page?.documentId || message.document?.id;
           const revision = message.page?.revision || message.revision || null;
+          const jobId = Number(message.jobId) || null;
+          const activeIdentity = this.__issue68ActiveStartIdentity;
+          const documentKey = documentId && revision
+            ? documentId + ":" + revision
+            : message.type === "error" &&
+                activeIdentity?.jobId === jobId &&
+                activeIdentity?.revision === revision
+              ? activeIdentity.documentKey
+              : null;
           if (!firstMessageRecorded) {
             firstMessageRecorded = true;
             workerLifecycle.push({
               at: performance.now(),
-              documentKey: documentId && revision
-                ? documentId + ":" + revision
-                : null,
-              jobId: Number(message.jobId) || null,
+              documentKey,
+              jobId,
               messageType: message.type || null,
               pageNumber: Number(message.pageNumber || message.page?.pageNumber) || null,
               revision,
@@ -7082,12 +7648,11 @@ const INSTRUMENTATION_SOURCE = String.raw`
             at: performance.now(),
             completedPages: Number(message.completedPages) || null,
             direction: "from-worker",
-            documentKey: documentId && revision
-              ? documentId + ":" + revision
-              : null,
+            documentKey,
             height: Number(message.height) || null,
             eventId: workerEvents.length + 1,
-            jobId: Number(message.jobId) || null,
+            first: message.first ?? null,
+            jobId,
             pageHeight: Number(message.page?.layout?.height) || null,
             pageCount: Number(
               message.pageCount || message.document?.pdfPageCount
@@ -7096,6 +7661,8 @@ const INSTRUMENTATION_SOURCE = String.raw`
             pageWidth: Number(message.page?.layout?.width) || null,
             revision,
             scale: Number(message.scale) || null,
+            terminal:
+              message.type === "error" && message.outcome !== "resumable",
             type: message.type || null,
             workerInstanceId,
             width: Number(message.width) || null
@@ -7128,6 +7695,21 @@ const INSTRUMENTATION_SOURCE = String.raw`
           }
         });
         this.addEventListener("error", () => {
+          const activeIdentity = this.__issue68ActiveStartIdentity;
+          if (activeIdentity) {
+            workerEvents.push({
+              activityId: ++activitySequence,
+              at: performance.now(),
+              direction: "from-worker",
+              documentKey: activeIdentity.documentKey,
+              eventId: workerEvents.length + 1,
+              jobId: activeIdentity.jobId,
+              nativeWorkerError: true,
+              revision: activeIdentity.revision,
+              type: "error",
+              workerInstanceId
+            });
+          }
           workerLifecycle.push({
             at: performance.now(),
             category: "worker-error",
@@ -7152,7 +7734,7 @@ const INSTRUMENTATION_SOURCE = String.raw`
       if (this.__issue68PdfWorker) {
         const documentId = message?.documentId;
         const revision = message?.revision ?? null;
-        workerEvents.push({
+        const postedWorkerEvent = {
           activityId: ++activitySequence,
           at: performance.now(),
           direction: "to-worker",
@@ -7169,7 +7751,15 @@ const INSTRUMENTATION_SOURCE = String.raw`
           type: message?.type || null,
           visible: message?.visible,
           workerInstanceId: this.__issue68WorkerInstanceId
-        });
+        };
+        workerEvents.push(postedWorkerEvent);
+        if (["import", "open"].includes(postedWorkerEvent.type)) {
+          this.__issue68ActiveStartIdentity = {
+            documentKey: postedWorkerEvent.documentKey,
+            jobId: postedWorkerEvent.jobId,
+            revision: postedWorkerEvent.revision
+          };
+        }
         workerLifecycle.push({
           at: performance.now(),
           documentKey: documentId && revision
@@ -9374,7 +9964,13 @@ async function waitForCdpNetworkFixedPoint(
   networkState,
   appUrl,
   label,
-  timeoutMs = 10_000,
+  {
+    expectedPdfPairCount = 1,
+    importBoundary = null,
+    matrixRestoreProof = null,
+    record = true,
+    timeoutMs = 10_000,
+  } = {},
 ) {
   const startedAt = Date.now();
   const recentSamples = [];
@@ -9398,10 +9994,17 @@ async function waitForCdpNetworkFixedPoint(
       networkState,
       appUrl,
       label,
+      importBoundary,
     );
     const attachmentReady =
       isCdpAttachmentStateHealthy(networkState) &&
-      hasCdpPhasePdfBootstrapCoverage(networkState, appUrl, label) &&
+      hasCdpPhasePdfBootstrapCoverage(
+        networkState,
+        appUrl,
+        label,
+        importBoundary,
+        expectedPdfPairCount,
+      ) &&
       (networkState.failures ?? []).every((failure) => failure?.canceled) &&
       (networkState.responseFailures ?? []).length === 0 &&
       networkState.requests.every(
@@ -9451,7 +10054,28 @@ async function waitForCdpNetworkFixedPoint(
           networkState.targetBootstrapSettlements.length,
         targetCount,
       };
-      networkState.networkFixedPoints.push(fixedPoint);
+      if (importBoundary) fixedPoint.importBoundary = { ...importBoundary };
+      if (matrixRestoreProof) {
+        fixedPoint.restore = {
+          fixedPoint: {
+            attachPromiseCount:
+              matrixRestoreProof.networkDiagnostic.counts.attachPromiseCount,
+            completedRequestCount:
+              matrixRestoreProof.networkDiagnostic.counts.completedRequestCount,
+            documentBootstrapSettlementCount:
+              matrixRestoreProof.documentBootstrapSettlementCount,
+            parserBootstrapSettlementCount:
+              matrixRestoreProof.parserBootstrapSettlementCount,
+            requestCount: matrixRestoreProof.networkDiagnostic.counts.requestCount,
+            targetBootstrapSettlementCount:
+              matrixRestoreProof.networkDiagnostic.counts
+                .targetBootstrapSettlementCount,
+            targetCount: matrixRestoreProof.networkDiagnostic.counts.targetCount,
+          },
+          readiness: { ...matrixRestoreProof.readiness },
+        };
+      }
+      if (record) networkState.networkFixedPoints.push(fixedPoint);
       return {
         diagnostic: buildCdpNetworkFixedPointDiagnostic(
           networkState,
@@ -9460,6 +10084,8 @@ async function waitForCdpNetworkFixedPoint(
           "fixed-point-reached",
           {
             elapsedMs: Date.now() - startedAt,
+            importBoundary,
+            matrixRestoreProof,
             recentSamples,
             stableSamples: stability.stableSamples,
             timeoutMs,
@@ -9476,6 +10102,8 @@ async function waitForCdpNetworkFixedPoint(
     "timeout",
     {
       elapsedMs: Date.now() - startedAt,
+      importBoundary,
+      matrixRestoreProof,
       recentSamples,
       stableSamples: stability.stableSamples,
       timeoutMs,
@@ -9715,12 +10343,7 @@ async function collectFallbackImportDiagnostic(
             };
           `),
         );
-        const network = {
-          attachPromiseCount: networkState.attachPromises.length,
-          requestCount: networkState.requests.length,
-          settlementCount: networkState.targetBootstrapSettlements.length,
-          targetCount: networkState.targets.length,
-        };
+        const network = captureCdpNetworkBoundary(networkState);
         await selectFixtureFile(cdp, fixturePath);
         return { boundary: value, networkBoundary: network };
       },
@@ -9881,6 +10504,91 @@ async function waitForPdfModelCompletion(cdp, expectedPageCount) {
       `PDF model diagnostic: ${JSON.stringify(diagnostic)}`,
     );
   }
+}
+
+async function waitForPdfRestoreReadiness(cdp, expectedPersisted) {
+  return waitForExpression(
+    cdp,
+    asyncBrowserExpression(`
+      const summarize = (${summarizePdfRestoreReadiness.toString()});
+      const requestValue = (request) => new Promise((resolve, reject) => {
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+      const libraryPending = Array.from(
+        document.querySelectorAll('[role="status"]')
+      ).some((element) =>
+        element.textContent?.includes('Opening your private library')
+      );
+      let activeDocument = null;
+      let activeDocumentId = null;
+      let activeDocumentStateAvailable = false;
+      let database = null;
+      try {
+        database = await new Promise((resolve, reject) => {
+          const request = indexedDB.open('guided-reader-library');
+          request.onsuccess = () => resolve(request.result);
+          request.onerror = () => reject(request.error);
+        });
+        const transaction = database.transaction(
+          ['documents', 'state'],
+          'readonly'
+        );
+        activeDocumentId = await requestValue(
+          transaction.objectStore('state').get('active-document-id')
+        );
+        activeDocument = typeof activeDocumentId === 'string'
+          ? await requestValue(
+              transaction.objectStore('documents').get(activeDocumentId)
+            )
+          : null;
+        activeDocumentStateAvailable = true;
+      } catch {
+        activeDocument = null;
+        activeDocumentId = null;
+      } finally {
+        database?.close();
+      }
+      const workerEvents = globalThis.__lineLightIssue68?.workerEvents;
+      const openEvents = Array.isArray(workerEvents)
+        ? workerEvents.filter((event) =>
+            event?.direction === 'to-worker' && event?.type === 'open'
+          )
+        : [];
+      const open = openEvents.length === 1 ? openEvents[0] : null;
+      const revisionSuffix = typeof open?.revision === 'string'
+        ? ':' + open.revision
+        : null;
+      const openDocumentId = revisionSuffix &&
+          typeof open?.documentKey === 'string' &&
+          open.documentKey.length > revisionSuffix.length &&
+          open.documentKey.endsWith(revisionSuffix)
+        ? open.documentKey.slice(0, -revisionSuffix.length)
+        : null;
+      const summary = summarize({
+        activeDocumentCount: activeDocument &&
+            activeDocument.id === activeDocumentId
+          ? 1
+          : 0,
+        activeDocumentMatchesOpen: Boolean(
+          activeDocument &&
+          activeDocument.id === activeDocumentId &&
+          activeDocumentId === openDocumentId
+        ),
+        activeDocumentStateAvailable,
+        activePdfPresent: Boolean(document.querySelector('.pdf-page-view')),
+        expectedPersisted: ${expectedPersisted ? "true" : "false"},
+        libraryPending,
+        sourceFiles: globalThis.__lineLightIssue68?.sourceFiles,
+        workerEvents
+      });
+      return summary.ready ? summary : false;
+    `),
+    expectedPersisted
+      ? "the identity-bound persisted PDF restore promise"
+      : "the settled fresh-library state before PDF import",
+    SCENARIO_TIMEOUT_MS,
+  );
 }
 
 async function readRasterTransitionDiagnostic(
@@ -10579,6 +11287,9 @@ async function collectMatrixRun(
   outputDirectory,
   configuration,
   runtimeDiagnostic = null,
+  networkState,
+  matrixIndex,
+  matrixNetworkProof,
 ) {
   try {
   await runAppMatrixRuntimeStage(
@@ -10588,6 +11299,48 @@ async function collectMatrixRun(
     () => navigateToReader(cdp, appUrl, configuration),
     { markPage: false },
   );
+  const restoreReadiness = await runAppMatrixRuntimeStage(
+    cdp,
+    runtimeDiagnostic,
+    "restore-readiness",
+    () => waitForPdfRestoreReadiness(cdp, matrixIndex > 0),
+  );
+  const restoreNetworkFixedPoint = await runAppMatrixRuntimeStage(
+    cdp,
+    runtimeDiagnostic,
+    "restore-network-fixed-point",
+    () => waitForCdpNetworkFixedPoint(
+      networkState,
+      appUrl,
+      configuration.id,
+      {
+        expectedPdfPairCount: matrixIndex > 0 ? 1 : 0,
+        record: false,
+      },
+    ),
+  );
+  const restoreCounts = cdpPhasePdfBootstrapCounts(
+    networkState,
+    appUrl,
+    configuration.id,
+  );
+  const importBoundary = await runAppMatrixRuntimeStage(
+    cdp,
+    runtimeDiagnostic,
+    "import-boundary",
+    () => captureCdpNetworkBoundary(networkState),
+  );
+  Object.assign(matrixNetworkProof, {
+    importBoundary,
+    restore: {
+      documentBootstrapSettlementCount:
+        restoreCounts.documentBootstrapSettlementCount,
+      networkDiagnostic: restoreNetworkFixedPoint.diagnostic,
+      parserBootstrapSettlementCount:
+        restoreCounts.parserBootstrapSettlementCount,
+      readiness: restoreReadiness,
+    },
+  });
   await runAppMatrixRuntimeStage(
     cdp,
     runtimeDiagnostic,
@@ -11932,42 +12685,61 @@ function summarizeNetwork(
   const targetBootstrapSettlements = [
     ...networkState.targetBootstrapSettlements,
   ];
+  const matrixFixedPointByLabel = new Map(
+    networkState.networkFixedPoints
+      .filter((point) => normalPhaseIds.has(point?.label))
+      .map((point) => [point.label, point]),
+  );
   const matrixCoverage = Object.fromEntries(
     PDF_SHARPNESS_MATRIX.map(({ id }) => {
-      const documentTargets = targets.filter(
-        (target) => target.phase === id && documentWorker(target),
+      const point = matrixFixedPointByLabel.get(id);
+      const boundary = point?.importBoundary;
+      const boundedTargets = isCdpNetworkBoundaryValid(boundary, point)
+        ? targets.slice(boundary.targetCount, point.targetCount)
+        : [];
+      const boundedSettlements = isCdpNetworkBoundaryValid(boundary, point)
+        ? targetBootstrapSettlements.slice(
+            boundary.settlementCount,
+            point.targetBootstrapSettlementCount,
+          )
+        : [];
+      const boundedRequests = isCdpNetworkBoundaryValid(boundary, point)
+        ? networkState.requests.slice(
+            boundary.requestCount,
+            point.requestCount,
+          )
+        : [];
+      const boundedNonPageRequests = boundedRequests.filter(
+        (request) => request.sessionId !== null,
       );
-      const parserTargets = targets.filter(
-        (target) =>
-          target.phase === id &&
-          parserWorker(target) &&
-          targetChain(target).some(documentWorker),
+      const documentTargets = boundedTargets.filter(
+        (target) => documentWorker(target),
       );
-      const documentRequestCount = nonPageRequests.filter(
-        (request) =>
-          targetBySession.get(request.sessionId)?.phase === id &&
-          requestBelongsTo(request, documentWorker),
+      const parserTargets = boundedTargets.filter(
+        (target) => parserWorker(target),
+      );
+      const documentRequestCount = boundedNonPageRequests.filter(
+        (request) => requestBelongsTo(request, documentWorker),
       ).length;
-      const parserRequestCount = nonPageRequests.filter(
+      const parserRequestCount = boundedNonPageRequests.filter(
         (request) =>
-          targetBySession.get(request.sessionId)?.phase === id &&
           parserWorker(targetBySession.get(request.sessionId)) &&
           targetChain(targetBySession.get(request.sessionId)).some(
             documentWorker,
           ),
       ).length;
       const documentBootstrapSettlementCount =
-        targetBootstrapSettlements.filter(
+        boundedSettlements.filter(
           (settlement) => {
             const target = targetBySession.get(settlement.targetSessionId);
-            return target?.phase === id && documentWorker(target);
+            return documentWorker(target);
           },
         ).length;
       const parserBootstrapSettlementCount =
-        targetBootstrapSettlements.filter(
+        boundedSettlements.filter(
           (settlement) => {
             const target = targetBySession.get(settlement.targetSessionId);
-            return target?.phase === id && parserWorker(target);
+            return parserWorker(target);
           },
         ).length;
       return [id, {
@@ -12540,6 +13312,10 @@ async function run(options) {
                 networkState,
                 server.appUrl,
                 FALLBACK_IMPORT_DIAGNOSTIC_LABEL,
+                {
+                  importBoundary:
+                    fallbackDiagnosticCapture.networkBoundary,
+                },
               );
               return fixedPoint.diagnostic;
             } catch {
@@ -12558,7 +13334,8 @@ async function run(options) {
             ),
           );
       } else {
-        for (const configuration of PDF_SHARPNESS_MATRIX) {
+        for (const [matrixIndex, configuration] of
+          PDF_SHARPNESS_MATRIX.entries()) {
           runnerStage = `matrix:${configuration.id}`;
           networkState.phase = configuration.id;
           const runtimeDiagnostic = options.diagnoseAppMatrixRuntime
@@ -12587,6 +13364,7 @@ async function run(options) {
             : null;
           let matrixRun;
           let networkFixedPoint;
+          const matrixNetworkProof = {};
           try {
             matrixRun = await collectMatrixRun(
               appCdp,
@@ -12595,6 +13373,9 @@ async function run(options) {
               options.outputDirectory,
               configuration,
               runtimeDiagnostic,
+              networkState,
+              matrixIndex,
+              matrixNetworkProof,
             );
             matrixRun.comparison.sourceSha256 = fixture.sha256;
             if (options.diagnoseFirstNetworkFixedPoint) {
@@ -12608,6 +13389,10 @@ async function run(options) {
                 networkState,
                 server.appUrl,
                 configuration.id,
+                {
+                  importBoundary: matrixNetworkProof.importBoundary,
+                  matrixRestoreProof: matrixNetworkProof.restore,
+                },
               ),
             );
             if (runtimeDiagnostic) {
@@ -12686,6 +13471,7 @@ async function run(options) {
           matrixRun.comparison.paired = true;
         }
         if (reference.error) throw reference.error;
+        networkState.phase = "final-network-privacy";
         await waitForCdpNetworkFixedPoint(
           networkState,
           server.appUrl,
