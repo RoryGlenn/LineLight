@@ -12,6 +12,7 @@ import {
   OFFLINE_MODEL_DTYPE,
   OFFLINE_MODEL_ASSETS,
   OFFLINE_MODEL_BYTES,
+  OFFLINE_DEFAULT_VOICE,
   OFFLINE_MODEL_READY_MARKER_URL,
   OFFLINE_MODEL_READY_MARKER_VERSION,
   OFFLINE_MODEL_REVISION,
@@ -25,6 +26,7 @@ import {
   OFFLINE_WASM_THREADS,
   constrainOfflineBackendPreference,
   nextOfflineSpeechBackend,
+  normalizeOfflineVoiceId,
   probeWebGpuAdapter,
   resolveOfflineModelRequest,
   selectOfflineModelDtype,
@@ -32,10 +34,6 @@ import {
 } from "../app/offline-model-manifest.mjs";
 import { handleOfflineModelRequest } from "../worker/offline-model.mjs";
 import { describeWorkerStartupFailure } from "../app/worker-startup-diagnostics.mjs";
-import {
-  OFFLINE_DEFAULT_VOICE,
-  normalizeOfflineVoiceId,
-} from "../app/offline-speech-config.ts";
 
 test("defaults new readers to Offline natural narration", () => {
   assert.equal(DEFAULT_NARRATION_ENGINE, "offline");

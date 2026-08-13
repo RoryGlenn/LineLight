@@ -29,7 +29,7 @@ const JSEP_SHA256 =
 const FIXTURE_SHA256 =
   "1addfceae4b869eec37dae4755d576ccd0fd7e1ce505dc856da3b96acbf3f06c";
 const WEBGPU_COVERAGE_SHA256 =
-  "d7251ce4a9971216fef989ae18623d001d55b555cf4d10e5e18230764d3cff08";
+  "f6c285b5a5cb47ed05e07fbef3d0ed59a40559456d3b2628c40f595877e1ae5a";
 const FIXTURE_PATH = "tests/fixtures/pdf-highlights/issue-60-geometry.pdf";
 const WEBGPU_COVERAGE_PATH = "tests/offline-model.test.mjs";
 const SOURCE_FILES = [

@@ -8,12 +8,14 @@ import {
   OFFLINE_MODEL_REVISION,
   OFFLINE_MODEL_RUNTIME,
   OFFLINE_MODEL_URLS,
+  OFFLINE_DEFAULT_VOICE as OFFLINE_DEFAULT_VOICE_VALUE,
   OFFLINE_VOICE_ASSETS,
   OFFLINE_VOICE_BYTES,
   OFFLINE_VOICE_IDS,
   OFFLINE_VOICE_URLS,
   OFFLINE_WASM_PROXY,
   OFFLINE_WASM_THREADS,
+  normalizeOfflineVoiceId as normalizeOfflineVoiceIdValue,
 } from "./offline-model-manifest.mjs";
 
 export {
@@ -37,8 +39,6 @@ export {
 export const OFFLINE_MODEL_RANGE_CHUNK_BYTES = 8 * 1024 * 1024;
 export const OFFLINE_MODEL_CACHE_NAME = "linelight-offline-model-v2";
 export const OFFLINE_VOICE_CACHE_NAME = "linelight-offline-voices-v2";
-export const OFFLINE_DEFAULT_VOICE = "F2";
-
 export const OFFLINE_VOICES = [
   {
     value: "F1",
@@ -94,15 +94,11 @@ export const OFFLINE_VOICES = [
 
 export type OfflineVoiceId = (typeof OFFLINE_VOICES)[number]["value"];
 
+export const OFFLINE_DEFAULT_VOICE =
+  OFFLINE_DEFAULT_VOICE_VALUE as OfflineVoiceId;
+
 export function normalizeOfflineVoiceId(value: unknown): OfflineVoiceId {
-  if (
-    typeof value === "string" &&
-    OFFLINE_VOICES.some((voice) => voice.value === value)
-  ) {
-    return value as OfflineVoiceId;
-  }
-  if (typeof value === "string" && /^(?:[ab]m|m)_/u.test(value)) return "M1";
-  return OFFLINE_DEFAULT_VOICE;
+  return normalizeOfflineVoiceIdValue(value) as OfflineVoiceId;
 }
 
 export const OFFLINE_MODEL_ASSET_BYTES = OFFLINE_MODEL_ASSETS.map(

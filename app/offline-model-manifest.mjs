@@ -60,6 +60,7 @@ export const OFFLINE_MODEL_FILES = OFFLINE_MODEL_ASSETS.map(
 export const OFFLINE_VOICE_IDS = OFFLINE_VOICE_ASSETS.map(
   (asset) => asset.id,
 );
+export const OFFLINE_DEFAULT_VOICE = "F2";
 export const OFFLINE_MODEL_BYTES = OFFLINE_MODEL_ASSETS.reduce(
   (total, asset) => total + asset.bytes,
   0,
@@ -127,6 +128,15 @@ export async function probeWebGpuAdapter({
 /** The studio pack has one reviewed model representation on every backend. */
 export function selectOfflineModelDtype() {
   return OFFLINE_MODEL_DTYPE;
+}
+
+/** Migrate stored voice IDs without requiring the TypeScript UI module. */
+export function normalizeOfflineVoiceId(value) {
+  if (typeof value === "string" && OFFLINE_VOICE_IDS.includes(value)) {
+    return value;
+  }
+  if (typeof value === "string" && /^(?:[ab]m|m)_/u.test(value)) return "M1";
+  return OFFLINE_DEFAULT_VOICE;
 }
 
 const ALLOWED_OFFLINE_MODEL_FILES = new Set([
