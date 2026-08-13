@@ -22,6 +22,7 @@ release.
   DRM-free audiobook, or optional Azure neural narration
 - Prepare a whole book for instant offline replay, or export bounded WAV parts
   with a text-sync timing sidecar
+- Try that complete render, replay, and WAV export flow in the built-in demo
 - Automatically follow the narration or return to the spoken position
 - Switch between a reflowed focus view and the original PDF page
 - Adjust font, text size, line spacing, colors, reading ruler, and speed
@@ -68,18 +69,21 @@ end cooperatively while the initialized worker and model session remain warm.
 A bounded watchdog replaces the worker only if a canceled run never reaches a
 terminal acknowledgment; the replacement may load prepared assets only from
 the local browser cache. A small bounded memory cache avoids regenerating
-recently heard passages. For saved books, a bounded recent set of completed
-offline chunks and their timing boundaries is also stored in IndexedDB under
-the exact model, voice, pace, token range, and source-text fingerprint, so a
-later session can reuse matching audio without sending text anywhere or running
-inference again.
-The reader can also prepare every bounded passage in a saved book as a
-resumable job. Each independently playable WAV chunk is compressed and committed
-with its timing metadata before progress advances, so pause, cancellation,
-reload, and quota errors preserve completed work. A ready profile can be
-exported sequentially as duration- and size-bounded WAV parts plus a JSON
-sidecar that binds word anchors to the exact book fingerprint, model, voice,
-and generated pace; LineLight never builds one whole-book audio buffer.
+recently heard passages. For the built-in demo and saved books, a bounded recent
+set of completed offline chunks and their timing boundaries is also stored in
+IndexedDB under the exact model, voice, pace, token range, and source-text
+fingerprint, so a later session can reuse matching audio without sending text
+anywhere or running inference again.
+The reader can also prepare every bounded passage in the demo or a saved book
+as a resumable job. Each independently playable WAV chunk is compressed and
+committed with its timing metadata before progress advances, so pause,
+cancellation, reload, and quota errors preserve completed work. A ready profile
+can be exported sequentially as duration- and size-bounded WAV parts plus a
+JSON sidecar that binds word anchors to the exact book fingerprint, model,
+voice, and generated pace; LineLight never builds one whole-book audio buffer.
+The built-in **A Gentle Start** sample exposes this same render, Play, and export
+workflow. Its prepared audio survives reload without adding the sample to the
+private library.
 Deleting a book deletes its retained narration. During an interrupted update,
 an older stored q8 pack
 remains usable offline until fp16 passes runtime validation; the Narration

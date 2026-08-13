@@ -48,3 +48,28 @@ test("connects sequential bounded WAV export and exact sidecar re-import", async
   }
   assert.match(source, /return decodePreparedNarrationAudio\(record\)/u);
 });
+
+test("exposes durable render and playback in the built-in demo", async () => {
+  const source = await readFile("app/page.tsx", "utf8");
+
+  for (const required of [
+    "saveReaderDocument(DEMO_DOCUMENT)",
+    "Render audio from this text",
+    "Render demo audio",
+    "then press Play to hear it follow the highlighted",
+  ]) {
+    assert.ok(source.includes(required), `missing ${required}`);
+  }
+  assert.doesNotMatch(
+    source,
+    /readerDocument\.kind !== "demo" &&\s*\(\s*<div className="prepared-narration-card">/u,
+  );
+  assert.doesNotMatch(
+    source,
+    /readerDocument\.kind === "demo" \|\|\s*!model\.tokens\.length/u,
+  );
+  assert.doesNotMatch(
+    source,
+    /!cachedSynthesis && readerDocument\.kind !== "demo"/u,
+  );
+});
