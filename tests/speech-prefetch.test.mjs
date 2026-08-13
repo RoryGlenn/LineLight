@@ -347,7 +347,7 @@ test("discarding speculative narration cooperatively cancels without replacing t
   );
 });
 
-test("clears cached q8 audio only after an fp16 update commits", async () => {
+test("clears cached narration only after the new model commits", async () => {
   const pageSource = await readFile("app/page.tsx", "utf8");
   const install = pageSource.indexOf("await installOfflineVoicePack({");
   const status = pageSource.indexOf(

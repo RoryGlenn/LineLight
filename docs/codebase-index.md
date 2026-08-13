@@ -357,9 +357,9 @@ complete deterministic unit harness.
 ## Offline natural narration and voice-pack lifecycle
 
 **Purpose:** Install, validate, retain, load, synthesize, update, and remove the
-private Kokoro voice pack while supporting WebGPU, threaded WebAssembly, a
-single-thread fallback, resumable downloads, and safe migration from the legacy
-q8 model.
+private native-44.1 kHz Supertonic 3 voice pack while supporting WebGPU,
+threaded WebAssembly, a single-thread fallback, resumable downloads, and safe
+cleanup of the legacy Kokoro pack.
 
 **Runtime:** Browser main for worker ownership and status; dedicated worker for
 download validation, ONNX initialization, and synthesis; edge worker for pinned
@@ -370,8 +370,8 @@ browser cache and voice URLs from the canonical model manifest.
 [`app/offline-model-manifest.mjs`](../app/offline-model-manifest.mjs) owns pinned
 model identity, files, sizes, routes, backend selection, dtype selection, and the
 ready-marker identity. [`app/offline-model-cache.mjs`](../app/offline-model-cache.mjs)
-owns strict artifact deletion, ready-marker operations, the Transformers cache
-adapter, and retention of emitted worker/WASM runtime assets.
+owns strict artifact deletion, ready-marker operations, legacy cache helpers,
+and retention of emitted worker/WASM runtime assets.
 [`app/offline-pack-installer.mjs`](../app/offline-pack-installer.mjs) owns
 verified range downloads, resumption, assembly, and cache writes.
 [`app/offline-preparation.mjs`](../app/offline-preparation.mjs) owns preparation
@@ -390,16 +390,19 @@ bundled package and cancellation bridge.
 [`app/worker-startup-diagnostics.mjs`](../app/worker-startup-diagnostics.mjs)
 owns bounded, local-only worker failure details without serializing document or
 narration data. [`app/offline-speech.worker.ts`](../app/offline-speech.worker.ts) owns
-Transformers/Kokoro configuration, model installation, initialization, warm-up,
-synthesis, pronunciation-weighted boundary generation, runtime fallback, and
-commit ordering. It publishes ONNX run start/end generations only for
+model installation, four-session ONNX initialization, warm-up, synthesis,
+pronunciation-weighted boundary generation, runtime fallback, and commit
+ordering. [`app/supertonic-runtime.mjs`](../app/supertonic-runtime.mjs) owns
+reviewed text preprocessing, bounded segmentation, Supertonic inference, voice
+style validation, and native 44.1 kHz PCM-16 WAV encoding. The worker publishes
+ONNX run start/end generations only for
 multi-threaded WebAssembly, bridges cancellation to the modified runtime, and
 returns a terminal cancellation acknowledgment without disposing a healthy
 warm session.
 [`app/offline-speech-utils.mjs`](../app/offline-speech-utils.mjs) owns backend
 error classification, strict waveform validation, bounded punctuation-only
 token-shape recovery, and approximate word timing. Exhausting those local
-recovery shapes stays request-local rather than restarting the same fp16 graph
+recovery shapes stays request-local rather than restarting the same model
 through the backend ladder.
 [`app/phonemizer-runtime.ts`](../app/phonemizer-runtime.ts) preserves the
 phonemizer's prebuilt runtime interface. [`worker/offline-model.mjs`](../worker/offline-model.mjs)
@@ -413,28 +416,23 @@ use the allowlisted `/offline-model/` route implemented by
 
 **Change together:** Treat the manifest, cache adapter,
 installer, main-thread RPC, worker protocol, service worker, model route, and
-artifact validation as one compatibility boundary. A retained q8 artifact is
-the compatibility path while an fp16 update is uncommitted. The install
-transaction validates and warms fp16 audio, retains the emitted worker and WASM
-assets, strictly deletes q8, and then writes and verifies the fp16 ready marker.
-A crash after q8 cleanup but before that marker leaves complete, unmarked fp16
-intentionally unready; the next preparation revalidates it without downloading
-the model again. Installation and removal must remain serialized. A WebGPU
+artifact validation as one compatibility boundary. The install transaction
+downloads every exact-size graph and voice style, validates and warms 44.1 kHz
+audio, retains the emitted worker and WASM assets, writes and verifies the ready
+marker, and only then removes the former Kokoro caches. Installation and
+removal must remain serialized. A WebGPU
 failure advances through the applicable fresh WASM tiers: isolated, capable
 contexts try threaded WASM before single-thread, while other contexts go
 directly to single-thread WASM. Changes to active-run cancellation must keep the
-page mailbox, worker protocol, bundled ONNX Runtime patch, and Transformers
-browser inference queue compatible. The guarded Transformers 3.8.1 patch
-recovers the serialized web queue after every rejected run and rethrows only
-the exact reviewed cooperative-cancellation error before tensor or model-input
-formatting and console diagnostics; ordinary failures retain upstream
-diagnostics. Cancellation applies only when the selected backend is
+page mailbox, worker protocol, bundled ONNX Runtime patch, and direct
+Supertonic session runner compatible. Cancellation applies only when the
+selected backend is
 multi-threaded WebAssembly; WebGPU and single-thread WebAssembly keep their
 request-boundary behavior even if shared memory happens to be available.
 
-**State and I/O:** Model and setup assets use browser Cache Storage through the
-Transformers cache adapter; voices use their dedicated cache; resumable ranges
-remain verified cache entries until assembly. Runtime worker and WASM assets are
+**State and I/O:** Model and setup assets use a dedicated browser Cache Storage
+cache; voice styles use a second cache; resumable ranges remain verified cache
+entries until assembly. Runtime worker and WASM assets are
 retained in the stable asset cache. Installation may access only LineLight's
 pinned model route and bundled assets. Once installed, synthesis consumes local
 text and local cached assets. The worker forwards the same-origin shared Wasm
@@ -443,12 +441,18 @@ writes only the two atomic run-generation cells and does not copy narration
 text or document content into the protocol. The distributed model and runtime
 license text is
 [`public/offline-voice-license.txt`](../public/offline-voice-license.txt), and
-the exact upstream runtime component notices are
+the complete Supertonic model and reference-source licenses are
+[`public/supertonic-model-license.txt`](../public/supertonic-model-license.txt)
+and
+[`public/supertonic-source-license.txt`](../public/supertonic-source-license.txt).
+The exact upstream runtime component notices are
 [`public/offline-voice-third-party-notices.txt`](../public/offline-voice-third-party-notices.txt).
 
 **Verification:** Use
 [`tests/offline-model.test.mjs`](../tests/offline-model.test.mjs) for manifest,
 backend, cache, worker, route, and artifact contracts;
+[`tests/supertonic-runtime.test.mjs`](../tests/supertonic-runtime.test.mjs) for
+native sample rate, text/style validation, inference feeds, and WAV encoding;
 [`tests/offline-pack-installer.test.mjs`](../tests/offline-pack-installer.test.mjs)
 for resumable storage behavior;
 [`tests/offline-preparation.test.mjs`](../tests/offline-preparation.test.mjs) for
@@ -499,8 +503,8 @@ Backend fallback, migration, offline restart, active-cancellation latency,
 warm-session reuse, no-fetch recovery, and voice quality require the
 corresponding real-browser records; a passing Issue #55 run writes its exact
 source-bound JSON under `docs/evidence/issue-55/`. The headed production-browser
-waveform, recovery-shape, onset-boundary, cache, and privacy gate for invalid
-fp16 samples is recorded in
+waveform, recovery-shape, onset-boundary, cache, and privacy gate for the
+previous model is recorded in
 [`docs/evidence/issue-70/offline-audio-recovery.json`](evidence/issue-70/offline-audio-recovery.json).
 
 ## Prepared narration, WAV export, and audiobook sync
@@ -510,7 +514,7 @@ export portable bounded WAV parts with text timing, and synchronize a matching
 DRM-free local audiobook without uploading book or audio content.
 
 **Runtime:** Browser main coordinates jobs, IndexedDB, decoding, playback, and
-file saves. Dedicated workers own Kokoro synthesis and Whisper transcription.
+file saves. Dedicated workers own Supertonic synthesis and Whisper transcription.
 The edge worker streams only pinned public model assets.
 
 **Owns:** [`app/prepared-narration.mjs`](../app/prepared-narration.mjs) owns
@@ -640,7 +644,7 @@ network-response critical path. Cleanup runs from an idle client message rather
 than activation or narration startup. A separate metadata cache records the
 current manifest and live deployment leases; diagnostics count only the stable
 runtime cache and finite pre-v9 caches. The service worker never scans or
-deletes the large model and voice caches or their fp16 ready receipt, although
+deletes the large model and voice caches or their validation receipt, although
 offline narration retains its bundled worker and WASM assets in the runtime
 cache.
 
@@ -670,7 +674,7 @@ headers.
 
 **Owns:** [`worker/index.ts`](../worker/index.ts) is the edge request router and
 vinext entry point. [`worker/offline-model.mjs`](../worker/offline-model.mjs) owns
-the pinned public Kokoro model proxy,
+the pinned public Supertonic model proxy,
 [`worker/alignment-model.mjs`](../worker/alignment-model.mjs) owns the pinned
 Whisper alignment-model proxy, and
 [`worker/speech-token.ts`](../worker/speech-token.ts) owns the Azure token route.

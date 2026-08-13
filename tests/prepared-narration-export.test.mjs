@@ -10,6 +10,7 @@ import {
   parseWaveAudio,
   planPreparedNarrationExportParts,
 } from "../app/prepared-narration-export.mjs";
+import { encodePcm16Wave } from "../app/supertonic-runtime.mjs";
 
 function floatWav(sampleCount = 24_000, sampleRate = 24_000) {
   const buffer = new ArrayBuffer(44 + sampleCount * 4);
@@ -81,6 +82,19 @@ test("parses and joins compatible float WAV chunks without a whole-book buffer",
     () => createWavePartBlob([first, floatWav(12_000, 16_000)]),
     /incompatible formats/,
   );
+});
+
+test("preserves native 44.1 kHz PCM in downloaded narration parts", async () => {
+  const first = encodePcm16Wave(new Float32Array(44_100).fill(0.1));
+  const second = encodePcm16Wave(new Float32Array(22_050).fill(-0.1));
+  const joined = createWavePartBlob([first, second]);
+  const parsed = parseWaveAudio(await joined.blob.arrayBuffer());
+
+  assert.equal(parsed.audioFormat, 1);
+  assert.equal(parsed.sampleRate, 44_100);
+  assert.equal(parsed.bitsPerSample, 16);
+  assert.equal(parsed.channels, 1);
+  assert.equal(parsed.durationSeconds, 1.5);
 });
 
 test("plans continuous ordered export parts under duration and byte bounds", () => {

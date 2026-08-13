@@ -83,7 +83,6 @@ test("production artifacts exclude native Sharp and libvips files", async () => 
 
   for (const worker of offlineWorkers) {
     const source = await readFile(worker, "utf8");
-    assert.match(source, /sharp \(ignored\)/u);
     assert.doesNotMatch(source, /@img[/\\]sharp|sharp-libvips|sharp\.node/iu);
   }
 });
@@ -135,7 +134,7 @@ test("production ships a working untransformed phonemizer runtime", async () => 
   }
 });
 
-test("production ships the device-specific voice ladder and local ORT runtime", async () => {
+test("production ships the native-44.1 kHz voice ladder and local ORT runtime", async () => {
   const files = await listFiles("dist");
   const clientWasm = files.find(
     (path) =>
@@ -161,7 +160,8 @@ test("production ships the device-specific voice ladder and local ORT runtime", 
   );
   assert.match(workerSource, /Downloading the included neural voice model/u);
   assert.match(workerSource, new RegExp(basename(clientWasm)));
-  assert.match(workerSource, /model_fp16/u);
+  assert.match(workerSource, /vector_estimator\.onnx/u);
+  assert.match(workerSource, /44100/u);
   assert.match(workerSource, /\.wasmPaths=\{wasm:/u);
   assert.match(workerSource, /crossOriginIsolated/u);
   assert.match(workerSource, /hardwareConcurrency/u);

@@ -1,18 +1,17 @@
-LineLight offline narration uses Kokoro-82M v1.0 ONNX, kokoro-js,
-Transformers.js, and phonemizer. These components are provided under the
-Apache License, Version 2.0, reproduced below.
+LineLight offline narration uses the pinned Supertonic 3 model from Supertone
+Inc. The model is distributed under the BigScience Open RAIL-M License,
+including its use restrictions. The complete model license is distributed at
+/supertonic-model-license.txt.
 
-LineLight modifies these installed @huggingface/transformers 3.8.1 files on
-August 9, 2026: src/backends/onnx.js, src/models.js, and
-dist/transformers.web.js. In the source backend and browser distribution, the
-current browser inference retains its original fulfillment or rejection while
-a private fulfilled queue tail lets later inference continue after any
-rejected run. In the source model wrapper and browser distribution, only the
-exact reviewed cooperative-cancellation error (AbortError with code
-ERR_ORT_WASM_RUN_CANCELED) is rethrown before tensor or model-input formatting
-and console logging. Ordinary and similar-looking errors retain the upstream
-diagnostic and rejection behavior. Those modifications remain licensed under
-Apache License, Version 2.0.
+LineLight's browser inference is adapted from Supertone Inc.'s Supertonic
+reference implementation at commit
+7e2804f96016a7028cb1ed627353c61c1e9dd281. That source is distributed under
+the MIT License; its complete license is at /supertonic-source-license.txt.
+
+Offline narration also uses phonemizer under the Apache License, Version 2.0,
+reproduced below. Transformers.js remains part of LineLight's separate local
+audiobook-alignment feature, but it is no longer in the offline narration
+synthesis path.
 
                                  Apache License
                            Version 2.0, January 2004

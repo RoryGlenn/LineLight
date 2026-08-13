@@ -312,7 +312,7 @@ export function isPreparedNarrationExportManifest(value) {
       manifest.exportSchemaVersion ===
         PREPARED_NARRATION_EXPORT_SCHEMA_VERSION &&
       typeof manifest.modelRevision === "string" &&
-      ["fp16", "q8"].includes(manifest.modelDtype) &&
+      ["fp32", "fp16", "q8"].includes(manifest.modelDtype) &&
       typeof manifest.voice === "string" &&
       Number.isFinite(manifest.rate) &&
       manifest.rate >= 0.5 &&

@@ -23,13 +23,13 @@ test("applies the reviewed podcast-host voice and pace without changing reader l
   assert.deepEqual(result, {
     ...settings,
     narrationEngine: "offline",
-    offlineVoice: "af_heart",
+    offlineVoice: "F2",
     rate: 0.9,
   });
   assert.equal(PODCAST_HOST_PRESET.label, "Podcast host");
   assert.equal(
     PODCAST_HOST_PRESET.description,
-    "Warm, natural Heart voice · fully offline",
+    "Warm Studio F2 voice · native 44.1 kHz · fully offline",
   );
 });
 

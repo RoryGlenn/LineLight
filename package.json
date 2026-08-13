@@ -25,7 +25,6 @@
     "@huggingface/transformers": "3.8.1",
     "drizzle-orm": "0.45.2",
     "jszip": "^3.10.1",
-    "kokoro-js": "1.2.1",
     "microsoft-cognitiveservices-speech-sdk": "^1.51.0",
     "next": "16.2.12",
     "onnxruntime-web": "file:vendor/onnxruntime-web/onnxruntime-web-1.22.0-dev.20250409-89f8206ba4.tgz",

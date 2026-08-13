@@ -1,53 +1,46 @@
-import { env as transformersEnv } from "@huggingface/transformers";
-import { KokoroTTS } from "kokoro-js";
 import {
+  env as ortEnv,
+  InferenceSession,
   setWasmRunCancellationObserver,
+  Tensor,
   type WasmRunCancellationEvent,
 } from "onnxruntime-web";
 import ortWasmUrl from "../node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.jsep.wasm?url";
 import {
-  KOKORO_VOICE_CACHE_NAME,
-  LEGACY_OFFLINE_MODEL_URLS,
-  OFFLINE_LEGACY_Q8_MODEL_CACHE_URLS,
-  OFFLINE_MODEL_BYTES,
+  OFFLINE_MODEL_ASSET_BYTES,
+  OFFLINE_MODEL_ASSETS,
+  OFFLINE_MODEL_CACHE_NAME,
   OFFLINE_MODEL_DTYPE,
   OFFLINE_MODEL_FILES,
-  OFFLINE_MODEL_ID,
-  OFFLINE_MODEL_LOCAL_PATH,
   OFFLINE_MODEL_RANGE_CHUNK_BYTES,
   OFFLINE_MODEL_URLS,
   OFFLINE_VOICES,
-  OFFLINE_VOICE_BYTES,
+  OFFLINE_VOICE_ASSET_BYTES,
+  OFFLINE_VOICE_ASSETS,
+  OFFLINE_VOICE_CACHE_NAME,
   OFFLINE_VOICE_CACHE_URLS,
   OFFLINE_VOICE_SOURCE_URLS,
   OFFLINE_WASM_PROXY,
   OFFLINE_WASM_THREADS,
-  TRANSFORMERS_CACHE_NAME,
   type OfflineVoiceId,
 } from "./offline-speech-config";
 import {
-  OFFLINE_LEGACY_Q8_MODEL_BYTES,
-  OFFLINE_LEGACY_Q8_MODEL_URL,
-  OFFLINE_FP16_READY_MARKER_URL,
-  OFFLINE_FP16_READY_MARKER_VERSION,
+  OFFLINE_MODEL_READY_MARKER_URL,
+  OFFLINE_MODEL_READY_MARKER_VERSION,
+  OFFLINE_LEGACY_MODEL_ID,
   OFFLINE_RUNTIME_CACHE_NAME,
-  OFFLINE_WEBGPU_MODEL_BYTES,
-  OFFLINE_WEBGPU_MODEL_DTYPE,
-  OFFLINE_WEBGPU_MODEL_FILE,
-  OFFLINE_WEBGPU_MODEL_URL,
   OFFLINE_WEBGPU_ADAPTER_TIMEOUT_MS,
   probeWebGpuAdapter,
-  selectOfflineModelDtype,
   selectOfflineSpeechBackend,
 } from "./offline-model-manifest.mjs";
 import {
   ensureCachedOfflineAsset,
+  getCachedOfflineAssetResponse,
   isCachedOfflineAssetComplete,
 } from "./offline-pack-installer.mjs";
 import {
   commitOfflineModelReadyMarker,
-  createOfflineModelCacheAdapter,
-  deleteOfflineModelArtifactEntries,
+  deleteOfflineModelEntriesByIdentifier,
   retainOfflineRuntimeAssets,
 } from "./offline-model-cache.mjs";
 import {
@@ -61,6 +54,11 @@ import {
   shouldRetryOfflineSpeechBackend,
 } from "./offline-speech-utils.mjs";
 import { phonemize } from "./phonemizer-runtime";
+import {
+  SUPERTONIC_SYNTHESIS_STEPS,
+  createSupertonicRuntime,
+  createSupertonicVoiceStyle,
+} from "./supertonic-runtime.mjs";
 
 type RequestMessage =
   | {
@@ -69,7 +67,7 @@ type RequestMessage =
       text: string;
       voice: OfflineVoiceId;
       rate: number;
-      device?: KokoroDevice;
+      device?: OfflineDevice;
       wasmThreads?: number;
     }
   | {
@@ -77,14 +75,14 @@ type RequestMessage =
       type: "initialize";
       voice: OfflineVoiceId;
       warm?: boolean;
-      device?: KokoroDevice;
+      device?: OfflineDevice;
       wasmThreads?: number;
     }
   | {
       id: number;
       type: "install";
       voice: OfflineVoiceId;
-      device?: KokoroDevice;
+      device?: OfflineDevice;
       wasmThreads?: number;
     }
   | { id: number; type: "cancel" };
@@ -102,14 +100,11 @@ type ActiveCancellationOwner = {
   sessionGeneration: number;
 };
 
-type KokoroDevice = "webgpu" | "wasm";
+type OfflineDevice = "webgpu" | "wasm";
 
 type OfflineBackend = {
-  device: KokoroDevice;
-  modelDtype:
-    | typeof OFFLINE_MODEL_DTYPE
-    | typeof OFFLINE_WEBGPU_MODEL_DTYPE
-    | "q8";
+  device: OfflineDevice;
+  modelDtype: typeof OFFLINE_MODEL_DTYPE;
   wasmThreads: number | null;
 };
 
@@ -137,63 +132,20 @@ class BackendUnavailableError extends Error {
 }
 
 const workerScope = globalThis as unknown as WorkerScope;
-const wasmModelIndex = OFFLINE_MODEL_FILES.findIndex((file) =>
-  file.endsWith(".onnx"),
-);
-const wasmModelUrl = OFFLINE_MODEL_URLS[wasmModelIndex];
 
 let modelCachePromise: Promise<Cache> | null = null;
 function getModelCache() {
-  modelCachePromise ??= caches.open(TRANSFORMERS_CACHE_NAME).catch((error) => {
+  modelCachePromise ??= caches.open(OFFLINE_MODEL_CACHE_NAME).catch((error) => {
     modelCachePromise = null;
     throw error;
   });
   return modelCachePromise;
 }
 
-// Transformers.js v3 accepts a Cache-compatible adapter. Model requests are
-// reconstructed from durable ranges, while setup files retain normal Cache
-// Storage behavior. Returning a complete virtual response from match() keeps
-// Transformers from writing a second full model entry after reading it.
-transformersEnv.useCustomCache = true;
-transformersEnv.customCache = createOfflineModelCacheAdapter({
-  aliases: OFFLINE_MODEL_FILES.flatMap((file, index) =>
-    file.endsWith(".onnx")
-      ? []
-      : [{
-          cacheUrl: OFFLINE_MODEL_URLS[index],
-          fallbackCacheUrls: [LEGACY_OFFLINE_MODEL_URLS[index]],
-        }],
-  ),
-  baseUrl: globalThis.location.origin,
-  getCache: getModelCache,
-  models: [
-    ...(wasmModelUrl
-      ? [{
-          cacheUrl: wasmModelUrl,
-          expectedBytes: OFFLINE_MODEL_BYTES,
-          fallbackCacheUrls:
-            wasmModelIndex >= 0
-              ? [LEGACY_OFFLINE_MODEL_URLS[wasmModelIndex]]
-              : [],
-        }]
-      : []),
-    {
-      cacheUrl: OFFLINE_LEGACY_Q8_MODEL_URL,
-      expectedBytes: OFFLINE_LEGACY_Q8_MODEL_BYTES,
-      fallbackCacheUrls: OFFLINE_LEGACY_Q8_MODEL_CACHE_URLS.filter(
-        (cacheUrl) => cacheUrl !== OFFLINE_LEGACY_Q8_MODEL_URL,
-      ),
-    },
-  ],
-  rangeChunkBytes: OFFLINE_MODEL_RANGE_CHUNK_BYTES,
-});
-
-const wasmBackend = transformersEnv.backends.onnx.wasm;
+const wasmBackend = ortEnv.wasm;
 if (wasmBackend) {
-  // Transformers.js otherwise points this runtime at jsDelivr. Keeping the
-  // emitted ORT binary on LineLight's origin makes an installed voice genuinely
-  // offline and lets the service worker retain the immutable asset.
+  // Keep the emitted ORT binary on LineLight's origin so an installed voice is
+  // genuinely offline and the service worker can retain the immutable asset.
   wasmBackend.wasmPaths = { wasm: ortWasmUrl };
   wasmBackend.numThreads = 1;
   wasmBackend.proxy = OFFLINE_WASM_PROXY;
@@ -206,7 +158,11 @@ const lastProgressByRequest = new Map<
   number,
   { label: string; progress: number }
 >();
-let tts: KokoroTTS | null = null;
+let tts: ReturnType<typeof createSupertonicRuntime> | null = null;
+const loadedVoiceStyles = new Map<
+  OfflineVoiceId,
+  ReturnType<typeof createSupertonicVoiceStyle>
+>();
 let activeBackend: OfflineBackend = {
   device: "wasm",
   modelDtype: OFFLINE_MODEL_DTYPE,
@@ -310,45 +266,23 @@ function hasWebGpuAdapter() {
   return webGpuAdapterAvailablePromise;
 }
 
-async function hasWasmModelArtifact() {
-  if (wasmModelIndex < 0 || !wasmModelUrl) return false;
-  try {
-    const cache = await getModelCache();
-    return (
-      (await isCachedOfflineAssetComplete({
-        cache,
-        cacheUrl: wasmModelUrl,
-        expectedBytes: OFFLINE_MODEL_BYTES,
-        rangeChunkBytes: OFFLINE_MODEL_RANGE_CHUNK_BYTES,
-      })) ||
-      (await isCachedOfflineAssetComplete({
-        cache,
-        cacheUrl: LEGACY_OFFLINE_MODEL_URLS[wasmModelIndex],
-        expectedBytes: OFFLINE_MODEL_BYTES,
-        rangeChunkBytes: OFFLINE_MODEL_RANGE_CHUNK_BYTES,
-      }))
-    );
-  } catch {
-    return false;
-  }
-}
-
-async function hasLegacyQ8ModelArtifact({ strict = false } = {}) {
+async function hasCompleteModelPack() {
   try {
     const cache = await getModelCache();
     const matches = await Promise.all(
-      OFFLINE_LEGACY_Q8_MODEL_CACHE_URLS.map((cacheUrl) =>
+      OFFLINE_MODEL_ASSETS.map((asset, index) =>
         isCachedOfflineAssetComplete({
           cache,
-          cacheUrl,
-          expectedBytes: OFFLINE_LEGACY_Q8_MODEL_BYTES,
-          rangeChunkBytes: OFFLINE_MODEL_RANGE_CHUNK_BYTES,
+          cacheUrl: OFFLINE_MODEL_URLS[index],
+          expectedBytes: asset.bytes,
+          rangeChunkBytes: asset.rangeBacked
+            ? OFFLINE_MODEL_RANGE_CHUNK_BYTES
+            : undefined,
         }),
       ),
     );
-    return matches.some(Boolean);
-  } catch (error) {
-    if (strict) throw error;
+    return matches.every(Boolean);
+  } catch {
     return false;
   }
 }
@@ -356,27 +290,14 @@ async function hasLegacyQ8ModelArtifact({ strict = false } = {}) {
 async function selectBackend({
   preferredDevice,
   preferredWasmThreads,
-  preferFp16 = false,
 }: {
-  preferredDevice?: KokoroDevice;
+  preferredDevice?: OfflineDevice;
   preferredWasmThreads?: number;
-  preferFp16?: boolean;
 }) {
   const preferWebGpu = preferredDevice !== "wasm";
-  // The fp16 and retained-q8 inspections read independent Cache Storage keys.
-  const [fp16Available, legacyQ8Available] = await Promise.all([
-    hasWasmModelArtifact(),
-    hasLegacyQ8ModelArtifact(),
-  ]);
-  const modelDtype = selectOfflineModelDtype({
-    legacyQ8Available,
-    preferFp16,
-  });
-  const useLegacyQ8 = modelDtype === "q8";
   const webGpuAvailable =
     preferWebGpu &&
-    !useLegacyQ8 &&
-    fp16Available &&
+    (await hasCompleteModelPack()) &&
     (await hasWebGpuAdapter());
   const selectedBackend = selectOfflineSpeechBackend({
     crossOriginIsolated: globalThis.crossOriginIsolated === true,
@@ -385,19 +306,13 @@ async function selectBackend({
     preferWebGpu,
     webGpuAvailable,
   }) as {
-    device: KokoroDevice;
+    device: OfflineDevice;
     wasmThreads: number | null;
   };
   const backend: OfflineBackend = {
     ...selectedBackend,
-    modelDtype: useLegacyQ8
-      ? "q8"
-      : selectedBackend.device === "webgpu"
-        ? OFFLINE_WEBGPU_MODEL_DTYPE
-        : OFFLINE_MODEL_DTYPE,
+    modelDtype: OFFLINE_MODEL_DTYPE,
   };
-
-  if (useLegacyQ8) backend.device = "wasm";
 
   if (
     backend.device === "wasm" &&
@@ -416,7 +331,7 @@ async function selectInstallBackend({
   preferredDevice,
   preferredWasmThreads,
 }: {
-  preferredDevice?: KokoroDevice;
+  preferredDevice?: OfflineDevice;
   preferredWasmThreads?: number;
 }) {
   const preferWebGpu = preferredDevice !== "wasm";
@@ -427,15 +342,12 @@ async function selectInstallBackend({
     preferWebGpu,
     webGpuAvailable: preferWebGpu && (await hasWebGpuAdapter()),
   }) as {
-    device: KokoroDevice;
+    device: OfflineDevice;
     wasmThreads: number | null;
   };
   return {
     ...selectedBackend,
-    modelDtype:
-      selectedBackend.device === "webgpu"
-        ? OFFLINE_WEBGPU_MODEL_DTYPE
-        : OFFLINE_MODEL_DTYPE,
+    modelDtype: OFFLINE_MODEL_DTYPE,
   } as OfflineBackend;
 }
 
@@ -484,76 +396,43 @@ function postProgress(
 
 async function disposeModel() {
   if (!tts) return;
-  await tts.model.dispose();
+  await tts.dispose();
   tts = null;
+  loadedVoiceStyles.clear();
   modelIsWarm = false;
   warmedOfflineVoices.clear();
 }
 
 async function assertOfflineFilesAvailable(
   voice: OfflineVoiceId,
-  backend: OfflineBackend = activeBackend,
 ) {
   const [modelCache, voiceCache] = await Promise.all([
-    caches.open(TRANSFORMERS_CACHE_NAME),
-    caches.open(KOKORO_VOICE_CACHE_NAME),
+    caches.open(OFFLINE_MODEL_CACHE_NAME),
+    caches.open(OFFLINE_VOICE_CACHE_NAME),
   ]);
-  const selectedVoiceUrl = OFFLINE_VOICE_CACHE_URLS.find((url) =>
-    url.endsWith(`/voices/${voice}.bin`),
+  const voiceIndex = OFFLINE_VOICE_ASSETS.findIndex(
+    (asset) => asset.id === voice,
   );
+  const selectedVoiceUrl = OFFLINE_VOICE_CACHE_URLS[voiceIndex];
   const modelMatches = await Promise.all(
-    OFFLINE_MODEL_URLS.map(async (url, index) => {
-      const file = OFFLINE_MODEL_FILES[index];
-      const useLegacyQ8 =
-        backend.modelDtype === "q8" && file.endsWith(".onnx");
-      const selectedUrl =
-        useLegacyQ8
-          ? OFFLINE_LEGACY_Q8_MODEL_URL
-          : backend.device === "webgpu" && file.endsWith(".onnx")
-          ? OFFLINE_WEBGPU_MODEL_URL
-          : url;
-      const legacyUrl =
-        selectedUrl === url
-          ? LEGACY_OFFLINE_MODEL_URLS[index]
-          : undefined;
-      if (file.endsWith(".onnx")) {
-        const expectedBytes = useLegacyQ8
-          ? OFFLINE_LEGACY_Q8_MODEL_BYTES
-          : backend.device === "webgpu"
-            ? OFFLINE_WEBGPU_MODEL_BYTES
-            : OFFLINE_MODEL_BYTES;
-        const candidateUrls = useLegacyQ8
-          ? OFFLINE_LEGACY_Q8_MODEL_CACHE_URLS
-          : [selectedUrl, ...(legacyUrl ? [legacyUrl] : [])];
-        const candidates = await Promise.all(
-          candidateUrls.map((cacheUrl) =>
-            isCachedOfflineAssetComplete({
-              cache: modelCache,
-              cacheUrl,
-              expectedBytes,
-              rangeChunkBytes: OFFLINE_MODEL_RANGE_CHUNK_BYTES,
-            }),
-          ),
-        );
-        return candidates.some(Boolean);
-      }
-      return Boolean(
-        (await modelCache.match(selectedUrl)) ??
-          (legacyUrl ? await modelCache.match(legacyUrl) : undefined),
-      );
-    }),
+    OFFLINE_MODEL_ASSETS.map((asset, index) =>
+      isCachedOfflineAssetComplete({
+        cache: modelCache,
+        cacheUrl: OFFLINE_MODEL_URLS[index],
+        expectedBytes: asset.bytes,
+        rangeChunkBytes: asset.rangeBacked
+          ? OFFLINE_MODEL_RANGE_CHUNK_BYTES
+          : undefined,
+      }),
+    ),
   );
-  const voiceMatch = selectedVoiceUrl
-    ? await voiceCache.match(selectedVoiceUrl)
-    : undefined;
-  let voiceComplete = false;
-  if (voiceMatch) {
-    const declaredLength = voiceMatch.headers.get("content-length");
-    voiceComplete = declaredLength === null
-      ? (await voiceMatch.clone().arrayBuffer()).byteLength ===
-        OFFLINE_VOICE_BYTES
-      : Number(declaredLength) === OFFLINE_VOICE_BYTES;
-  }
+  const voiceComplete =
+    voiceIndex >= 0 &&
+    await isCachedOfflineAssetComplete({
+      cache: voiceCache,
+      cacheUrl: selectedVoiceUrl,
+      expectedBytes: OFFLINE_VOICE_ASSET_BYTES[voiceIndex],
+    });
 
   if (modelMatches.some((match) => !match) || !voiceComplete) {
     throw new Error(
@@ -562,17 +441,52 @@ async function assertOfflineFilesAvailable(
   }
 }
 
+async function cachedModelResponse(index: number) {
+  const asset = OFFLINE_MODEL_ASSETS[index];
+  const cache = await getModelCache();
+  const response = asset.rangeBacked
+    ? await getCachedOfflineAssetResponse({
+        cache,
+        cacheUrl: OFFLINE_MODEL_URLS[index],
+        expectedBytes: asset.bytes,
+        label: "The included studio voice model",
+        rangeChunkBytes: OFFLINE_MODEL_RANGE_CHUNK_BYTES,
+      })
+    : await cache.match(OFFLINE_MODEL_URLS[index]);
+  if (!response) {
+    throw new Error("The included offline voice model is incomplete.");
+  }
+  return response;
+}
+
+async function loadVoiceStyle(voice: OfflineVoiceId) {
+  const existing = loadedVoiceStyles.get(voice);
+  if (existing) return existing;
+  const voiceIndex = OFFLINE_VOICE_ASSETS.findIndex(
+    (asset) => asset.id === voice,
+  );
+  const response = voiceIndex >= 0
+    ? await (await caches.open(OFFLINE_VOICE_CACHE_NAME)).match(
+        OFFLINE_VOICE_CACHE_URLS[voiceIndex],
+      )
+    : undefined;
+  if (!response) {
+    throw new Error("The selected offline voice style is incomplete.");
+  }
+  const style = createSupertonicVoiceStyle(await response.json(), Tensor);
+  loadedVoiceStyles.set(voice, style);
+  return style;
+}
+
 async function loadModel(
   id: number,
   {
     preferredDevice,
     preferredWasmThreads,
-    preferFp16 = false,
     selectedBackend: suppliedBackend,
   }: {
-    preferredDevice?: KokoroDevice;
+    preferredDevice?: OfflineDevice;
     preferredWasmThreads?: number;
-    preferFp16?: boolean;
     selectedBackend?: OfflineBackend;
   },
 ) {
@@ -581,7 +495,6 @@ async function loadModel(
     (await selectBackend({
       preferredDevice,
       preferredWasmThreads,
-      preferFp16,
     }));
   if (
     tts &&
@@ -597,79 +510,71 @@ async function loadModel(
   }
   if (tts) await disposeModel();
   configureBackend(selectedBackend);
-  transformersEnv.localModelPath = new URL(
-    OFFLINE_MODEL_LOCAL_PATH,
-    globalThis.location.origin,
-  ).href;
-  transformersEnv.allowLocalModels = true;
-  transformersEnv.allowRemoteModels = false;
-  const loadedByFile = new Map<string, number>();
-  const totalByFile = new Map<string, number>();
-
-  const progressCallback = (event: {
-    status: string;
-    file?: string;
-    loaded?: number;
-    total?: number;
-    progress?: number;
-  }) => {
-    if (event.file && Number.isFinite(event.loaded)) {
-      loadedByFile.set(event.file, event.loaded ?? 0);
-    }
-    if (event.file && Number.isFinite(event.total) && event.total) {
-      totalByFile.set(event.file, event.total);
-    }
-
-    const knownTotal = Array.from(totalByFile.values()).reduce(
-      (sum, value) => sum + value,
-      0,
-    );
-    const knownLoaded = Array.from(loadedByFile.values()).reduce(
-      (sum, value) => sum + value,
-      0,
-    );
-    const expectedModelBytes =
-      selectedBackend.modelDtype === "q8"
-        ? OFFLINE_LEGACY_Q8_MODEL_BYTES
-        : selectedBackend.device === "webgpu"
-        ? OFFLINE_WEBGPU_MODEL_BYTES
-        : OFFLINE_MODEL_BYTES;
-    const modelFraction =
-      knownTotal > 0
-        ? knownLoaded / Math.max(knownTotal, expectedModelBytes)
-        : (event.progress ?? 0) / 100;
-    const modelProgress = 8 + Math.min(1, modelFraction) * 54;
-    const fileLabel = event.file?.includes("onnx/")
-      ? "Loading the included neural voice model…"
-      : "Preparing the included voice model…";
-    postProgress(id, Math.min(62, modelProgress), fileLabel, {
-      backend: selectedBackend,
-      stage: "initializing",
-    });
-  };
-
-  const createModel = async (backend: OfflineBackend) => {
-    if (backend.device === "wasm") {
-      return KokoroTTS.from_pretrained(OFFLINE_MODEL_ID, {
-        dtype: backend.modelDtype,
-        device: "wasm",
-        progress_callback: progressCallback,
-      });
-    }
-
-    return KokoroTTS.from_pretrained(OFFLINE_MODEL_ID, {
-      dtype: OFFLINE_WEBGPU_MODEL_DTYPE,
-      device: "webgpu",
-      progress_callback: progressCallback,
-    });
-  };
+  const createdSessions: InferenceSession[] = [];
 
   try {
-    tts = await createModel(selectedBackend);
+    const configIndex = OFFLINE_MODEL_FILES.indexOf("onnx/tts.json");
+    const indexerIndex = OFFLINE_MODEL_FILES.indexOf(
+      "onnx/unicode_indexer.json",
+    );
+    if (configIndex < 0 || indexerIndex < 0) {
+      throw new Error("The included voice setup is incomplete.");
+    }
+    const [config, indexer] = await Promise.all([
+      cachedModelResponse(configIndex).then((response) => response.json()),
+      cachedModelResponse(indexerIndex).then((response) => response.json()),
+    ]);
+    const modelDefinitions = [
+      ["durationPredictor", "onnx/duration_predictor.onnx"],
+      ["textEncoder", "onnx/text_encoder.onnx"],
+      ["vectorEstimator", "onnx/vector_estimator.onnx"],
+      ["vocoder", "onnx/vocoder.onnx"],
+    ] as const;
+    const sessions = {} as Record<
+      (typeof modelDefinitions)[number][0],
+      InferenceSession
+    >;
+    const totalModelBytes = modelDefinitions.reduce((total, [, file]) => {
+      const asset = OFFLINE_MODEL_ASSETS.find((entry) => entry.file === file);
+      return total + (asset?.bytes ?? 0);
+    }, 0);
+    let loadedModelBytes = 0;
+    for (const [key, file] of modelDefinitions) {
+      const index = OFFLINE_MODEL_FILES.indexOf(file);
+      const asset = OFFLINE_MODEL_ASSETS[index];
+      if (index < 0 || !asset) {
+        throw new Error("The included neural voice model is incomplete.");
+      }
+      postProgress(
+        id,
+        8 + (loadedModelBytes / totalModelBytes) * 54,
+        `Loading ${modelAssetLabel(file).toLowerCase()}…`,
+        { backend: selectedBackend, stage: "initializing" },
+      );
+      const bytes = new Uint8Array(
+        await (await cachedModelResponse(index)).arrayBuffer(),
+      );
+      const session = await InferenceSession.create(bytes, {
+        executionProviders: [selectedBackend.device],
+        graphOptimizationLevel: "all",
+      });
+      createdSessions.push(session);
+      sessions[key] = session;
+      loadedModelBytes += asset.bytes;
+    }
+    tts = createSupertonicRuntime({
+      config: config as Record<string, unknown>,
+      indexer: indexer as number[],
+      sessions,
+      Tensor,
+    });
     activeBackend = selectedBackend;
     modelSessionGeneration += 1;
   } catch (error) {
-    await disposeModel().catch(() => undefined);
+    await Promise.allSettled(
+      createdSessions.map((session) => session.release()),
+    );
+    tts = null;
     if (
       selectedBackend.device === "webgpu" ||
       isOfflineBackendRuntimeFailure(error)
@@ -685,7 +590,6 @@ async function loadModel(
   return tts;
 }
 
-const MODEL_DOWNLOAD_PROGRESS = [2, 5, 8, 92] as const;
 function modelAssetLabel(file: string) {
   return file.endsWith(".onnx")
     ? "The included neural voice model"
@@ -697,54 +601,30 @@ async function installModelFiles(
   backend: OfflineBackend,
   signal?: AbortSignal,
 ) {
-  const modelCache = await caches.open(TRANSFORMERS_CACHE_NAME);
+  const modelCache = await caches.open(OFFLINE_MODEL_CACHE_NAME);
+  const totalBytes = OFFLINE_MODEL_ASSET_BYTES.reduce(
+    (total, bytes) => total + bytes,
+    0,
+  );
+  let completedBytes = 0;
 
-  for (let index = 0; index < OFFLINE_MODEL_URLS.length; index += 1) {
-    const defaultSourceUrl = OFFLINE_MODEL_URLS[index];
-    const defaultFile = OFFLINE_MODEL_FILES[index];
-    const isModelFile = defaultFile.endsWith(".onnx");
-    const sourceUrl =
-      backend.device === "webgpu" && isModelFile
-        ? OFFLINE_WEBGPU_MODEL_URL
-        : defaultSourceUrl;
-    const legacyUrl =
-      sourceUrl === defaultSourceUrl
-        ? LEGACY_OFFLINE_MODEL_URLS[index]
-        : undefined;
-    const file =
-      backend.device === "webgpu" && isModelFile
-        ? OFFLINE_WEBGPU_MODEL_FILE
-        : defaultFile;
-    const targetProgress = MODEL_DOWNLOAD_PROGRESS[index] ?? 92;
-    const expectedModelBytes =
-      backend.device === "webgpu"
-        ? OFFLINE_WEBGPU_MODEL_BYTES
-        : OFFLINE_MODEL_BYTES;
-    const cached = isModelFile
-      ? (await isCachedOfflineAssetComplete({
-          cache: modelCache,
-          cacheUrl: sourceUrl,
-          expectedBytes: expectedModelBytes,
-          rangeChunkBytes: OFFLINE_MODEL_RANGE_CHUNK_BYTES,
-        })) ||
-        Boolean(
-          legacyUrl &&
-            (await isCachedOfflineAssetComplete({
-              cache: modelCache,
-              cacheUrl: legacyUrl,
-              expectedBytes: expectedModelBytes,
-              rangeChunkBytes: OFFLINE_MODEL_RANGE_CHUNK_BYTES,
-            })),
-        )
-      : Boolean(
-          (await modelCache.match(sourceUrl)) ??
-            (legacyUrl ? await modelCache.match(legacyUrl) : undefined),
-        );
+  for (let index = 0; index < OFFLINE_MODEL_ASSETS.length; index += 1) {
+    const asset = OFFLINE_MODEL_ASSETS[index];
+    const sourceUrl = OFFLINE_MODEL_URLS[index];
+    const startProgress = (completedBytes / totalBytes) * 92;
+    const targetProgress =
+      ((completedBytes + asset.bytes) / totalBytes) * 92;
+    const cached = await isCachedOfflineAssetComplete({
+      cache: modelCache,
+      cacheUrl: sourceUrl,
+      expectedBytes: asset.bytes,
+      rangeChunkBytes: asset.rangeBacked
+        ? OFFLINE_MODEL_RANGE_CHUNK_BYTES
+        : undefined,
+    });
 
     if (!cached) {
-      const startProgress =
-        index === 0 ? 0 : (MODEL_DOWNLOAD_PROGRESS[index - 1] ?? 0);
-      const downloadLabel = file.endsWith(".onnx")
+      const downloadLabel = asset.file.endsWith(".onnx")
         ? "Downloading the included neural voice model…"
         : "Downloading the included voice setup…";
       postProgress(
@@ -756,8 +636,8 @@ async function installModelFiles(
       await ensureCachedOfflineAsset({
         cache: modelCache,
         cacheUrl: sourceUrl,
-        expectedBytes: isModelFile ? expectedModelBytes : undefined,
-        label: modelAssetLabel(file),
+        expectedBytes: asset.bytes,
+        label: modelAssetLabel(asset.file),
         onDownloadProgress: ({
           loaded,
           total,
@@ -774,8 +654,8 @@ async function installModelFiles(
             { backend, stage: "downloading" },
           );
         },
-        rangeBacked: isModelFile,
-        rangeChunkBytes: isModelFile
+        rangeBacked: asset.rangeBacked,
+        rangeChunkBytes: asset.rangeBacked
           ? OFFLINE_MODEL_RANGE_CHUNK_BYTES
           : undefined,
         signal,
@@ -786,16 +666,17 @@ async function installModelFiles(
     postProgress(
       id,
       targetProgress,
-      file.endsWith(".onnx")
+      asset.file.endsWith(".onnx")
         ? "Included neural voice model downloaded."
         : "Included voice setup downloaded.",
       { backend, stage: "downloading" },
     );
+    completedBytes += asset.bytes;
   }
 }
 
 async function installVoices(id: number, signal?: AbortSignal) {
-  const voiceCache = await caches.open(KOKORO_VOICE_CACHE_NAME);
+  const voiceCache = await caches.open(OFFLINE_VOICE_CACHE_NAME);
 
   for (let index = 0; index < OFFLINE_VOICE_SOURCE_URLS.length; index += 1) {
     const sourceUrl = OFFLINE_VOICE_SOURCE_URLS[index];
@@ -809,7 +690,7 @@ async function installVoices(id: number, signal?: AbortSignal) {
     await ensureCachedOfflineAsset({
       cache: voiceCache,
       cacheUrl,
-      expectedBytes: OFFLINE_VOICE_BYTES,
+      expectedBytes: OFFLINE_VOICE_ASSET_BYTES[index],
       label: `The included ${OFFLINE_VOICES[index].label} voice`,
       onDownloadProgress: ({
         loaded,
@@ -840,23 +721,16 @@ async function installVoices(id: number, signal?: AbortSignal) {
   }
 }
 
-async function removeUnusedModelArtifact() {
-  if (activeBackend.modelDtype === "q8") return;
-  const modelCache = await caches.open(TRANSFORMERS_CACHE_NAME);
-  await Promise.all(
-    OFFLINE_LEGACY_Q8_MODEL_CACHE_URLS.map((cacheUrl) =>
-      deleteOfflineModelArtifactEntries({
-        baseUrl: globalThis.location.origin,
-        cache: modelCache,
-        cacheUrl,
-      }),
-    ),
+async function removeLegacyOfflineVoicePack() {
+  await Promise.allSettled(
+    ["transformers-cache", "kokoro-voices"].map(async (cacheName) => {
+      const cache = await caches.open(cacheName);
+      await deleteOfflineModelEntriesByIdentifier({
+        cache,
+        modelIdentifier: OFFLINE_LEGACY_MODEL_ID,
+      });
+    }),
   );
-  if (await hasLegacyQ8ModelArtifact({ strict: true })) {
-    throw new Error(
-      "The faster offline voice is ready, but the stored compatibility model could not be removed. Try the update again.",
-    );
-  }
 }
 
 async function retainOfflineSpeechRuntime() {
@@ -877,76 +751,12 @@ async function retainOfflineSpeechRuntime() {
   });
 }
 
-async function ensureRequestedFallbackFiles(
-  id: number,
-  voice: OfflineVoiceId,
-  preferredDevice: KokoroDevice | undefined,
-  preferredWasmThreads: number | undefined,
-  signal: AbortSignal,
-) {
-  if (preferredDevice !== "wasm") return;
-  if (
-    (await hasWasmModelArtifact()) ||
-    (await hasLegacyQ8ModelArtifact())
-  ) {
-    return;
-  }
-
-  const backend = await selectInstallBackend({
-    preferredDevice: "wasm",
-    preferredWasmThreads,
-  });
-  postProgress(id, 2, "Preparing the local compatibility model…", {
-    backend,
-    stage: "downloading",
-  });
-  // Keep the last complete artifact recoverable until its replacement has
-  // downloaded and warmed successfully. Cleanup runs only after that commit.
-  await installModelFiles(id, backend, signal);
-  await installVoices(id, signal);
-  await assertOfflineFilesAvailable(voice, backend);
-}
-
-async function removeObsoleteModelArtifacts() {
-  try {
-    const cache = await getModelCache();
-    const currentPaths = new Set(
-      [
-        wasmModelUrl,
-        OFFLINE_WEBGPU_MODEL_URL,
-        ...OFFLINE_LEGACY_Q8_MODEL_CACHE_URLS,
-        wasmModelIndex >= 0
-          ? LEGACY_OFFLINE_MODEL_URLS[wasmModelIndex]
-          : undefined,
-      ]
-        .filter((url): url is string => Boolean(url))
-        .map((url) => new URL(url, globalThis.location.origin).pathname),
-    );
-    const keys = await cache.keys();
-    await Promise.allSettled(
-      keys
-        .filter((request) => {
-          const url = new URL(request.url);
-          return (
-            url.pathname.includes(`/${OFFLINE_MODEL_ID}/`) &&
-            url.pathname.endsWith(".onnx") &&
-            !currentPaths.has(url.pathname)
-          );
-        })
-        .map((request) => cache.delete(request)),
-    );
-  } catch {
-    // Obsolete data must not turn an otherwise valid installation into an error.
-  }
-}
-
 async function initializeSpeech(
   id: number,
   voice: OfflineVoiceId,
-  preferredDevice?: KokoroDevice,
+  preferredDevice?: OfflineDevice,
   preferredWasmThreads?: number,
   warm = true,
-  preferFp16 = false,
 ) {
   const totalStartedAt = performance.now();
   postProgress(id, 2, "Verifying the downloaded offline voice…", {
@@ -956,9 +766,8 @@ async function initializeSpeech(
   const selectedBackend = await selectBackend({
     preferredDevice,
     preferredWasmThreads,
-    preferFp16,
   });
-  await assertOfflineFilesAvailable(voice, selectedBackend);
+  await assertOfflineFilesAvailable(voice);
   verifiedOfflineAssets.add(
     `${selectedBackend.device}:${selectedBackend.modelDtype}:${selectedBackend.wasmThreads ?? "gpu"}:${voice}`,
   );
@@ -974,7 +783,6 @@ async function initializeSpeech(
   const model = await loadModel(id, {
     preferredDevice: selectedBackend.device,
     preferredWasmThreads: selectedBackend.wasmThreads ?? undefined,
-    preferFp16,
     selectedBackend,
   });
   const modelInitializationMilliseconds =
@@ -988,12 +796,14 @@ async function initializeSpeech(
       stage: "warming",
     });
     try {
+      const style = await loadVoiceStyle(voice);
       await generateUsableOfflineAudio(
         "Ready.",
         (warmText) =>
           model.generate(warmText, {
-            voice,
+            style,
             speed: 1,
+            steps: SUPERTONIC_SYNTHESIS_STEPS,
           }),
       );
     } catch (error) {
@@ -1042,8 +852,9 @@ async function generateSpeech(
   voice: OfflineVoiceId,
   rate: number,
   offlineOnly: boolean,
-  preferredDevice?: KokoroDevice,
+  preferredDevice?: OfflineDevice,
   preferredWasmThreads?: number,
+  signal?: AbortSignal,
 ) {
   postProgress(id, 2, "Checking the included offline voice…", {
     stage: "verifying",
@@ -1058,7 +869,7 @@ async function generateSpeech(
   const verificationKey =
     `${selectedBackend.device}:${selectedBackend.modelDtype}:${selectedBackend.wasmThreads ?? "gpu"}:${voice}`;
   if (offlineOnly && !verifiedOfflineAssets.has(verificationKey)) {
-    await assertOfflineFilesAvailable(voice, selectedBackend);
+    await assertOfflineFilesAvailable(voice);
     verifiedOfflineAssets.add(verificationKey);
   }
   const model = await loadModel(id, {
@@ -1074,10 +885,21 @@ async function generateSpeech(
   const startedAt = performance.now();
   let audio;
   try {
+    const style = await loadVoiceStyle(voice);
     audio = await generateUsableOfflineAudio(text, (generationText) =>
       model.generate(generationText, {
-        voice,
+        style,
         speed: Math.min(2, Math.max(0.5, rate || 1)),
+        steps: SUPERTONIC_SYNTHESIS_STEPS,
+        signal,
+        onProgress: (completed, total) => {
+          postProgress(
+            id,
+            68 + (completed / total) * 26,
+            "Generating narration audio…",
+            { backend: activeBackend, stage: "synthesizing" },
+          );
+        },
       }),
     );
   } catch (error) {
@@ -1099,7 +921,7 @@ async function generateSpeech(
     try {
       const phonemeEntries = await phonemize(
         buildWordPhonemeBatch(timedWords),
-        voice.startsWith("b") ? "en-gb" : "en-us",
+        "en-us",
       );
       phonemeCounts = countBatchedWordPhonemes(
         timedWords,
@@ -1163,43 +985,29 @@ async function handleRequest(
         preferredDevice: message.device,
         preferredWasmThreads: message.wasmThreads,
       });
-      await removeObsoleteModelArtifacts();
       await installModelFiles(id, installBackend, abortController.signal);
       await installVoices(id, abortController.signal);
       postProgress(id, 99, "Verifying the included offline voices…", {
         backend: installBackend,
         stage: "verifying",
       });
-      await assertOfflineFilesAvailable(
-        message.voice,
-        installBackend,
-      );
-      transformersEnv.allowLocalModels = true;
-      transformersEnv.allowRemoteModels = false;
+      await assertOfflineFilesAvailable(message.voice);
       result = await initializeSpeech(
         id,
         message.voice,
         installBackend.device,
         installBackend.wasmThreads ?? undefined,
         true,
-        true,
       );
       await retainOfflineSpeechRuntime();
-      await removeUnusedModelArtifact();
       await commitOfflineModelReadyMarker({
         cache: await getModelCache(),
-        cacheUrl: OFFLINE_FP16_READY_MARKER_URL,
-        value: OFFLINE_FP16_READY_MARKER_VERSION,
+        cacheUrl: OFFLINE_MODEL_READY_MARKER_URL,
+        value: OFFLINE_MODEL_READY_MARKER_VERSION,
       });
+      await removeLegacyOfflineVoicePack();
     } else if (message.type === "initialize") {
       const warm = message.warm !== false;
-      await ensureRequestedFallbackFiles(
-        id,
-        message.voice,
-        message.device,
-        message.wasmThreads,
-        abortController.signal,
-      );
       result = await initializeSpeech(
         id,
         message.voice,
@@ -1207,24 +1015,13 @@ async function handleRequest(
         message.wasmThreads,
         warm,
       );
-      // A background model load has not validated synthesis yet. Keep the
-      // legacy q8 artifact until a warm probe or real narration succeeds so an
-      // interrupted fp16 migration always retains a recoverable voice.
       if (warm) {
         await retainOfflineSpeechRuntime().catch(() => undefined);
-        await removeUnusedModelArtifact().catch(() => undefined);
       }
     } else {
       if (!message.text.trim()) {
         throw new Error("There is no text left to narrate.");
       }
-      await ensureRequestedFallbackFiles(
-        id,
-        message.voice,
-        message.device,
-        message.wasmThreads,
-        abortController.signal,
-      );
       result = await generateSpeech(
         id,
         message.text,
@@ -1233,9 +1030,9 @@ async function handleRequest(
         true,
         message.device,
         message.wasmThreads,
+        abortController.signal,
       );
       void retainOfflineSpeechRuntime().catch(() => undefined);
-      await removeUnusedModelArtifact().catch(() => undefined);
     }
 
     if (canceledRequests.delete(id) || abortController.signal.aborted) {

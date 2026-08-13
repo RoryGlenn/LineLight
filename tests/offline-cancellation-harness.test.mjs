@@ -29,7 +29,7 @@ const JSEP_SHA256 =
 const FIXTURE_SHA256 =
   "1addfceae4b869eec37dae4755d576ccd0fd7e1ce505dc856da3b96acbf3f06c";
 const WEBGPU_COVERAGE_SHA256 =
-  "4f48ed467068c74080e7b8cfd215338da80b6b70d27fafb6fbbd709581ea9370";
+  "d7251ce4a9971216fef989ae18623d001d55b555cf4d10e5e18230764d3cff08";
 const FIXTURE_PATH = "tests/fixtures/pdf-highlights/issue-60-geometry.pdf";
 const WEBGPU_COVERAGE_PATH = "tests/offline-model.test.mjs";
 const SOURCE_FILES = [
@@ -95,19 +95,19 @@ function cpuInterval(
 
 function passingCacheInventory() {
   const entries = [
-    ...Array.from({ length: 24 }, (_, index) => ({
+    ...Array.from({ length: 53 }, (_, index) => ({
       byteLength: 1_000 + index,
-      cacheName: "transformers-cache",
+      cacheName: "linelight-offline-model-v2",
       requestSha256: sha256(`model-request-${index}`),
       sha256: sha256(`model-${index}`),
       url: `/offline-model/reviewed/model-${index}`,
     })),
-    ...Array.from({ length: 5 }, (_, index) => ({
+    ...Array.from({ length: 10 }, (_, index) => ({
       byteLength: 500 + index,
-      cacheName: "kokoro-voices",
+      cacheName: "linelight-offline-voices-v2",
       requestSha256: sha256(`voice-request-${index}`),
       sha256: sha256(`voice-${index}`),
-      url: `/onnx-community/Kokoro-82M-v1.0-ONNX/voices/voice-${index}.bin`,
+      url: `/Supertone/supertonic-3/voice_styles/voice-${index}.json`,
     })),
     {
       byteLength: 24_113_968,
@@ -1617,9 +1617,9 @@ test("range cache keys stay distinct without exposing their query strings", () =
   const evidence = passingEvidence();
   for (const inventory of [evidence.cache.before, evidence.cache.after]) {
     for (const entry of inventory.entries.filter(
-      (candidate) => candidate.cacheName === "transformers-cache",
+      (candidate) => candidate.cacheName === "linelight-offline-model-v2",
     )) {
-      entry.url = "/offline-model/reviewed/model_fp16.onnx";
+      entry.url = "/offline-model/reviewed/vector_estimator.onnx";
     }
     inventory.entries.sort((left, right) =>
       (left.cacheName + left.url + left.requestSha256).localeCompare(
@@ -1648,7 +1648,7 @@ test("range cache keys stay distinct without exposing their query strings", () =
   assert.deepEqual(validateOfflineCancellationEvidence(evidence), []);
 
   const modelEntries = evidence.cache.after.entries.filter(
-    (entry) => entry.cacheName === "transformers-cache",
+    (entry) => entry.cacheName === "linelight-offline-model-v2",
   );
   modelEntries[1].requestSha256 = modelEntries[0].requestSha256;
   evidence.cache.after.entries.sort((left, right) =>

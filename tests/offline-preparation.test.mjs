@@ -8,7 +8,6 @@ import {
   OFFLINE_MIN_CHUNK_CHARACTERS,
   OFFLINE_WARM_IDLE_TIMEOUT_MS,
   adaptOfflineSpeechChunkCharacters,
-  assessOfflineModelAvailability,
   evaluateOfflineStorageHeadroom,
   mapOfflineInstallProgress,
   mapOfflineNarrationPhaseProgress,
@@ -94,89 +93,41 @@ test("Play joins active idle initialization but cancels work not yet started", (
   );
 });
 
-test("a retained q8 model stays usable while requesting an fp16 upgrade", () => {
-  assert.deepEqual(
-    assessOfflineModelAvailability({
-      legacyModelComplete: true,
-      preferredModelComplete: false,
-      preferredModelValidated: false,
-      setupComplete: true,
-    }),
-    { installed: true, upgradeRequired: true },
-  );
-  assert.deepEqual(
-    assessOfflineModelAvailability({
-      legacyModelComplete: true,
-      preferredModelComplete: true,
-      preferredModelValidated: false,
-      setupComplete: true,
-    }),
-    { installed: true, upgradeRequired: true },
-  );
-  assert.deepEqual(
-    assessOfflineModelAvailability({
-      legacyModelComplete: true,
-      preferredModelComplete: true,
-      preferredModelValidated: true,
-      setupComplete: true,
-    }),
-    { installed: true, upgradeRequired: true },
-  );
-  assert.deepEqual(
-    assessOfflineModelAvailability({
-      legacyModelComplete: false,
-      preferredModelComplete: true,
-      preferredModelValidated: true,
-      setupComplete: true,
-    }),
-    { installed: true, upgradeRequired: false },
-  );
-  assert.deepEqual(
-    assessOfflineModelAvailability({
-      legacyModelComplete: false,
-      preferredModelComplete: true,
-      preferredModelValidated: false,
-      setupComplete: true,
-    }),
-    { installed: false, upgradeRequired: false },
-  );
-});
-
-test("requires transient storage headroom for the fp16 offline pack", () => {
-  const enough = evaluateOfflineStorageHeadroom(166_000_000, {
-    quota: 500_000_000,
-    usage: 200_000_000,
+test("requires fixed runtime headroom for the 44.1 kHz offline pack", () => {
+  const enough = evaluateOfflineStorageHeadroom(401_276_744, {
+    quota: 800_000_000,
+    usage: 300_000_000,
   });
   assert.deepEqual(enough, {
-    availableBytes: 300_000_000,
-    requiredBytes: 215_800_000,
+    availableBytes: 500_000_000,
+    requiredBytes: 451_276_744,
     sufficient: true,
   });
   assert.equal(
-    evaluateOfflineStorageHeadroom(166_000_000, {
-      quota: 300_000_000,
-      usage: 180_000_000,
+    evaluateOfflineStorageHeadroom(401_276_744, {
+      quota: 700_000_000,
+      usage: 300_000_000,
     }).sufficient,
     false,
   );
   assert.equal(
-    evaluateOfflineStorageHeadroom(166_000_000, undefined).sufficient,
+    evaluateOfflineStorageHeadroom(401_276_744, undefined).sufficient,
     null,
   );
 });
 
 test("a resumed install reserves only missing pack bytes plus runtime margin", () => {
   const resumed = evaluateOfflineStorageHeadroom(
-    166_000_000,
+    401_276_744,
     {
-      quota: 300_000_000,
-      usage: 180_000_000,
+      quota: 600_000_000,
+      usage: 400_000_000,
     },
-    100_000_000,
+    300_000_000,
   );
   assert.deepEqual(resumed, {
-    availableBytes: 120_000_000,
-    requiredBytes: 115_800_000,
+    availableBytes: 200_000_000,
+    requiredBytes: 151_276_744,
     sufficient: true,
   });
 });

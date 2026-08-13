@@ -62,10 +62,12 @@ import {
   type AzureSpeechResult,
 } from "./azure-speech";
 import {
+  OFFLINE_DEFAULT_VOICE,
   OFFLINE_MODEL_DTYPE,
   OFFLINE_MODEL_REVISION,
   OFFLINE_PACK_BYTES,
   OFFLINE_VOICES,
+  normalizeOfflineVoiceId,
   type OfflineVoiceId,
 } from "./offline-speech-config";
 import {
@@ -236,7 +238,7 @@ type PreparedNarrationManifest = {
   documentFingerprint: string;
   profileKey: string;
   modelRevision: string;
-  modelDtype: "fp16" | "q8";
+  modelDtype: "fp32" | "fp16" | "q8";
   voice: OfflineVoiceId;
   rate: number;
   chunkCharacters: number;
@@ -285,7 +287,7 @@ type PreparedNarrationExportManifest = {
   author: string;
   totalTokens: number;
   modelRevision: string;
-  modelDtype: "fp16" | "q8";
+  modelDtype: "fp32" | "fp16" | "q8";
   voice: string;
   rate: number;
   profileKey: string;
@@ -597,7 +599,7 @@ const DEFAULT_SETTINGS: ReaderSettings = {
   narrationEngine: DEFAULT_NARRATION_ENGINE,
   narrationPreferenceVersion: NARRATION_PREFERENCE_VERSION,
   voiceURI: "",
-  offlineVoice: "af_heart",
+  offlineVoice: OFFLINE_DEFAULT_VOICE,
   azureVoice: "en-US-AvaMultilingualNeural",
 };
 
@@ -2014,6 +2016,9 @@ export default function Home() {
               ...storedLayout,
               ...narrationPreference,
               focusLines: storedLayout.focusLines as FocusLineCount,
+              offlineVoice: normalizeOfflineVoiceId(
+                parsedSettings.offlineVoice,
+              ),
             }));
           }
         } catch {
@@ -2507,9 +2512,8 @@ export default function Home() {
           );
         }
 
-        // q8 and fp16 can synthesize the same passage differently. Never let
-        // audio retained before a successful model update mask the validated
-        // fp16 runtime after the migration commits.
+        // Never let audio retained from a previous model mask the newly
+        // validated native-44.1 kHz runtime after migration commits.
         offlineAudioCacheRef.current?.clear();
         setOfflinePackState("ready");
         setOfflineUpgradeRequired(false);
@@ -2676,7 +2680,7 @@ export default function Home() {
           onProgress: ({ label }) => setPreparedNarrationMessage(label),
         });
         const modelDtype = runtime.modelDtype;
-        if (modelDtype !== "fp16" && modelDtype !== "q8") {
+        if (modelDtype !== OFFLINE_MODEL_DTYPE) {
           throw new OfflineSpeechError(
             "The active offline model cannot create a durable voice profile.",
           );
@@ -4410,7 +4414,7 @@ export default function Home() {
       let waitingChunkStart: number | null = queueStartIndex;
       const expectedOfflineModelDtype = isOffline
         ? getOfflineSpeechReadiness().modelDtype ??
-          (offlineUpgradeRequired ? "q8" : OFFLINE_MODEL_DTYPE)
+          OFFLINE_MODEL_DTYPE
         : null;
       const expectedOfflineProfileKey = preparedRange
         ? preparedNarrationManifest!.profileKey
@@ -5005,7 +5009,6 @@ export default function Home() {
       model.fullText,
       model.tokens,
       offlinePackState,
-      offlineUpgradeRequired,
       preparedNarrationManifest,
       preparedNarrationMetadata,
       primeNarrationAudioOutput,
@@ -7453,7 +7456,7 @@ export default function Home() {
                         <div className="offline-pack-ready">
                           <span>
                             <strong>Stored on this device</strong>
-                            Five voices are available without internet.
+                            Ten voices are available without internet.
                             {offlineUpgradeRequired && (
                               <small>
                                 A faster, quality-preserving voice update is
@@ -7755,8 +7758,8 @@ export default function Home() {
                       first launch. After preparation, speech is generated on
                       this device and narration text never leaves it. Word
                       highlighting follows an audio-synchronized estimate
-                      weighted by word length and punctuation because Kokoro
-                      does not provide exact word timestamps.{" "}
+                      weighted by word length and punctuation because the
+                      local model does not provide exact word timestamps.{" "}
                       <a
                         href="/offline-voice-license.txt"
                         target="_blank"

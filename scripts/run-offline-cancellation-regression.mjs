@@ -49,14 +49,14 @@ const DEFAULT_FIXTURE_SHA256 =
   "1addfceae4b869eec37dae4755d576ccd0fd7e1ce505dc856da3b96acbf3f06c";
 const WEBGPU_COVERAGE_RELATIVE_PATH = "tests/offline-model.test.mjs";
 const WEBGPU_COVERAGE_SHA256 =
-  "4f48ed467068c74080e7b8cfd215338da80b6b70d27fafb6fbbd709581ea9370";
+  "d7251ce4a9971216fef989ae18623d001d55b555cf4d10e5e18230764d3cff08";
 const EXPECTED_JSEP_WASM_SHA256 =
   "1e5a323ca41d859f324694c7b5ba2052bf8c1a96ff9721bc62e94f874d379fe1";
-const EXPECTED_MODEL_CACHE_ENTRIES = 24;
-const EXPECTED_VOICE_CACHE_ENTRIES = 5;
-const MODEL_CACHE_NAME = "transformers-cache";
+const EXPECTED_MODEL_CACHE_ENTRIES = 53;
+const EXPECTED_VOICE_CACHE_ENTRIES = 10;
+const MODEL_CACHE_NAME = "linelight-offline-model-v2";
 const RUNTIME_CACHE_NAME = "linelight-assets-v1";
-const VOICE_CACHE_NAME = "kokoro-voices";
+const VOICE_CACHE_NAME = "linelight-offline-voices-v2";
 const REQUIRED_ACTIVE_CANCELLATIONS = 5;
 const CPU_SAMPLE_INTERVAL_MS = 50;
 const MAX_CPU_SAMPLE_INTERVAL_MS = 100;
@@ -115,7 +115,7 @@ const FAR_SEEK_RESET_ANCHOR_KIND = "reviewed-fixture-token";
 const FAR_SEEK_RESET_ANCHOR_ORDINAL = 0;
 const PREPARED_PROFILE_ORIGIN_PORT = 5212;
 const EXTERNAL_MODEL_REQUEST_PATTERN =
-  /(?:huggingface\.co|cdn\.jsdelivr\.net|raw\.githubusercontent\.com|kokoro|onnx\/model.*\.onnx|voices\/.*\.bin)/iu;
+  /(?:huggingface\.co|cdn\.jsdelivr\.net|raw\.githubusercontent\.com|supertonic|onnx\/.*\.onnx|voice_styles\/.*\.json)/iu;
 const PROTOCOL_WORKER_EVENT_KEYS = Object.freeze(
   [
     "atMs",
@@ -711,7 +711,7 @@ function validateCpuRecord(record, index, failures, idleThresholdPercent) {
 /**
  * Validate the durable, source-bound evidence produced by this harness. The
  * function is exported so synthetic tests can prove every fail-closed gate
- * without pretending that a unit test is a real Kokoro benchmark.
+ * without pretending that a unit test is a real Supertonic benchmark.
  */
 export function validateOfflineCancellationEvidence(evidence) {
   const failures = [];
@@ -1432,7 +1432,7 @@ export function findEvidencePrivacyViolations(value) {
     },
     {
       path: /^\$evidence\.cache\.(?:after|before)\.entries\[\d+\]\.url$/u,
-      value: /^\/(?:assets|offline-model|onnx-community)\/[A-Za-z\d._/-]+$/u,
+      value: /^\/(?:assets|offline-model|onnx-community|Supertone)\/[A-Za-z\d._/-]+$/u,
     },
     {
       path: /^\$evidence\.cache\.currentRuntimeManifest\.assetPaths\[\d+\]$/u,
@@ -1440,11 +1440,11 @@ export function findEvidencePrivacyViolations(value) {
     },
     {
       path: /^\$evidence\.cache\.transition\.(?:added|retiredRuntimeDeletions|unexplainedRemovals)\[\d+\]\.url$/u,
-      value: /^\/(?:assets|offline-model|onnx-community)\/[A-Za-z\d._/-]+$/u,
+      value: /^\/(?:assets|offline-model|onnx-community|Supertone)\/[A-Za-z\d._/-]+$/u,
     },
     {
       path: /^\$evidence\.cache\.transition\.required(?:After|Before)\.entries\[\d+\]\.url$/u,
-      value: /^\/(?:assets|offline-model|onnx-community)\/[A-Za-z\d._/-]+$/u,
+      value: /^\/(?:assets|offline-model|onnx-community|Supertone)\/[A-Za-z\d._/-]+$/u,
     },
     {
       path: /^\$evidence\.finalIsolation\.teardownPath$/u,
@@ -1452,7 +1452,7 @@ export function findEvidencePrivacyViolations(value) {
     },
     {
       path: /^\$evidence\.threadedWasm\.timeoutRecovery\.requiredCache(?:After|Before)\.entries\[\d+\]\.url$/u,
-      value: /^\/(?:assets|offline-model|onnx-community)\/[A-Za-z\d._/-]+$/u,
+      value: /^\/(?:assets|offline-model|onnx-community|Supertone)\/[A-Za-z\d._/-]+$/u,
     },
   ];
   const isReviewedUrlPath = (current, currentPath) => {
@@ -2244,7 +2244,7 @@ function installBrowserInstrumentation(correlateSessionGeneration) {
       highlightScope: "sentence",
       narrationEngine: "offline",
       narrationPreferenceVersion: 1,
-      offlineVoice: "af_heart",
+      offlineVoice: "F2",
       rate: 1,
     }),
   );
@@ -3561,7 +3561,7 @@ async function cacheInventory(cdp) {
   return evaluate(
     cdp,
     `(async () => {
-      const relevant = /(?:offline-model|Kokoro-82M|voices\\/|ort-wasm)/iu;
+      const relevant = /(?:offline-model|supertonic-3|voice_styles\\/|ort-wasm)/iu;
       const entries = [];
       for (const cacheName of await caches.keys()) {
         const cache = await caches.open(cacheName);
