@@ -375,6 +375,51 @@ test("persists exact prepared narration and cleans it up with its book", async (
   assert.notEqual(await library.getDocument("two"), null);
 });
 
+test("keeps the built-in demo unlisted while retaining its prepared audio", async () => {
+  const indexedDB = new IDBFactory();
+  const library = createReaderLibrary({
+    indexedDB,
+    keyRange: IDBKeyRange,
+    databaseName: "prepared-narration-demo",
+  });
+  const demoDocument = {
+    ...document("gentle-start", "A Gentle Start"),
+    kind: "demo",
+  };
+
+  await library.saveDocument(demoDocument);
+  assert.deepEqual(await library.load(), {
+    entries: [],
+    activeDocumentId: null,
+  });
+  assert.equal((await library.getDocument(demoDocument.id)).kind, "demo");
+
+  const manifest = preparedNarrationManifest(demoDocument.id);
+  assert.equal(await library.savePreparedNarrationManifest(manifest), true);
+  const progress = await library.commitPreparedNarrationChunk(
+    manifest,
+    preparedNarrationChunk(demoDocument.id, {
+      retention: PREPARED_NARRATION_BOOK_RETENTION,
+    }),
+  );
+
+  assert.equal(progress.nextIndex, 4);
+  assert.equal(
+    (await library.listPreparedNarrationManifests(demoDocument.id)).length,
+    1,
+  );
+  assert.equal(
+    (
+      await library.listPreparedNarrationChunkMetadata(
+        demoDocument.id,
+        manifest.profileKey,
+      )
+    ).length,
+    1,
+  );
+  assert.deepEqual((await library.load()).entries, []);
+});
+
 test("atomically resumes prepared narration and removes one exact profile", async () => {
   const indexedDB = new IDBFactory();
   let timestamp = 300;

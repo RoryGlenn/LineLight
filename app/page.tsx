@@ -185,6 +185,7 @@ import {
   removeReaderAudiobook,
   removeReaderPreparedNarration,
   renameReaderDocument,
+  saveReaderDocument,
   saveReaderNavigation,
   saveReaderAudiobookManifest,
   saveReaderPreparedNarrationChunk,
@@ -1020,7 +1021,6 @@ export default function Home() {
     rate: settings.rate,
   });
   const canPrepareCurrentDocument =
-    readerDocument.kind !== "demo" &&
     model.tokens.length > 0 &&
     (readerDocument.kind !== "pdf" ||
       readerDocument.pdfImportStatus === "ready");
@@ -1787,7 +1787,6 @@ export default function Home() {
   useEffect(() => {
     let cancelled = false;
     const canPrepare =
-      readerDocument.kind !== "demo" &&
       model.tokens.length > 0 &&
       (readerDocument.kind !== "pdf" ||
         readerDocument.pdfImportStatus === "ready");
@@ -1807,6 +1806,12 @@ export default function Home() {
 
     const loadPreparedNarration = async () => {
       try {
+        if (readerDocument.kind === "demo") {
+          // Keep the built-in sample out of the private library while giving
+          // its prepared audio a durable document owner in IndexedDB.
+          await saveReaderDocument(DEMO_DOCUMENT);
+          if (cancelled) return;
+        }
         const fingerprint = await fingerprintPreparedNarrationText(
           model.fullText,
         );
@@ -2632,7 +2637,6 @@ export default function Home() {
     if (preparedNarrationJobPromiseRef.current) return;
     const run = async () => {
       if (
-        readerDocument.kind === "demo" ||
         !model.tokens.length ||
         (readerDocument.kind === "pdf" &&
           readerDocument.pdfImportStatus !== "ready")
@@ -4497,7 +4501,7 @@ export default function Home() {
           ]);
           let cachedSynthesis = offlineAudioCacheRef.current?.get(cacheKey);
           let textFingerprint: string | null = null;
-          if (!cachedSynthesis && readerDocument.kind !== "demo") {
+          if (!cachedSynthesis) {
             try {
               textFingerprint = await fingerprintPreparedNarrationText(
                 chunk.text,
@@ -4590,47 +4594,45 @@ export default function Home() {
                 generatedSynthesis,
                 generatedSynthesis.audioData.byteLength,
               );
-              if (readerDocument.kind !== "demo") {
-                try {
-                  textFingerprint ??=
-                    await fingerprintPreparedNarrationText(chunk.text);
-                  const durableBoundaries = generatedSynthesis.boundaries.map(
-                    (boundary) => ({
-                      ...boundary,
-                      tokenIndex: findWordAtCharacter(
-                        model.tokens,
-                        chunk.startChar + boundary.textOffset,
-                      ),
-                    }),
-                  );
-                  void saveReaderPreparedNarrationChunk({
-                    schemaVersion: PREPARED_NARRATION_SCHEMA_VERSION,
-                    documentId: readerDocument.id,
-                    profileKey: generatedProfileKey,
-                    startIndex: chunk.startIndex,
-                    nextIndex: chunk.nextIndex,
-                    textFingerprint,
-                    audioData: generatedSynthesis.audioData,
-                    audioByteLength: generatedSynthesis.audioData.byteLength,
-                    audioEncoding: PREPARED_NARRATION_IDENTITY_ENCODING,
-                    sourceAudioByteLength:
-                      generatedSynthesis.audioData.byteLength,
-                    mimeType: PREPARED_NARRATION_AUDIO_MIME_TYPE,
-                    audioDurationSeconds:
-                      generatedSynthesis.audioDurationSeconds,
-                    boundaries: durableBoundaries,
-                    device: generatedSynthesis.device,
-                    modelDtype: generatedSynthesis.modelDtype,
-                    synthesisMilliseconds:
-                      generatedSynthesis.synthesisMilliseconds,
-                    wasmThreads: generatedSynthesis.wasmThreads,
-                    retention: PREPARED_NARRATION_RECENT_RETENTION,
-                    createdAt: Date.now(),
-                  }).catch(() => undefined);
-                } catch {
-                  // Playback must not fail when opportunistic persistence is
-                  // unavailable. Explicit preparation will report such errors.
-                }
+              try {
+                textFingerprint ??=
+                  await fingerprintPreparedNarrationText(chunk.text);
+                const durableBoundaries = generatedSynthesis.boundaries.map(
+                  (boundary) => ({
+                    ...boundary,
+                    tokenIndex: findWordAtCharacter(
+                      model.tokens,
+                      chunk.startChar + boundary.textOffset,
+                    ),
+                  }),
+                );
+                void saveReaderPreparedNarrationChunk({
+                  schemaVersion: PREPARED_NARRATION_SCHEMA_VERSION,
+                  documentId: readerDocument.id,
+                  profileKey: generatedProfileKey,
+                  startIndex: chunk.startIndex,
+                  nextIndex: chunk.nextIndex,
+                  textFingerprint,
+                  audioData: generatedSynthesis.audioData,
+                  audioByteLength: generatedSynthesis.audioData.byteLength,
+                  audioEncoding: PREPARED_NARRATION_IDENTITY_ENCODING,
+                  sourceAudioByteLength:
+                    generatedSynthesis.audioData.byteLength,
+                  mimeType: PREPARED_NARRATION_AUDIO_MIME_TYPE,
+                  audioDurationSeconds:
+                    generatedSynthesis.audioDurationSeconds,
+                  boundaries: durableBoundaries,
+                  device: generatedSynthesis.device,
+                  modelDtype: generatedSynthesis.modelDtype,
+                  synthesisMilliseconds:
+                    generatedSynthesis.synthesisMilliseconds,
+                  wasmThreads: generatedSynthesis.wasmThreads,
+                  retention: PREPARED_NARRATION_RECENT_RETENTION,
+                  createdAt: Date.now(),
+                }).catch(() => undefined);
+              } catch {
+                // Playback must not fail when opportunistic persistence is
+                // unavailable. Explicit preparation will report such errors.
               }
             }
           }
@@ -5008,7 +5010,6 @@ export default function Home() {
       preparedNarrationMetadata,
       primeNarrationAudioOutput,
       readerDocument.id,
-      readerDocument.kind,
       releaseBufferedAudio,
       releaseNarrationAudioPrime,
       settings.azureVoice,
@@ -7565,14 +7566,13 @@ export default function Home() {
                         </button>
                       </div>
                     )}
-                    {readerDocument.kind !== "demo" && (
-                      <div className="prepared-narration-card">
+                    <div className="prepared-narration-card">
                         <div>
-                          <strong>Prepare this book</strong>
+                          <strong>Render audio from this text</strong>
                           <p>
                             Generate this exact offline voice and pace once,
-                            then replay it without synthesis—even after a
-                            reload. Estimated remaining storage: {" "}
+                            then press Play to hear it follow the highlighted
+                            text—even after a reload. Estimated remaining storage:{" "}
                             {formatStorageBytes(
                               preparedNarrationEstimate.estimatedBytes,
                             )}.
@@ -7637,7 +7637,9 @@ export default function Home() {
                             >
                               {preparedNarrationManifest?.nextIndex
                                 ? "Resume preparation"
-                                : "Prepare book"}
+                                : readerDocument.kind === "demo"
+                                  ? "Render demo audio"
+                                  : "Render book audio"}
                             </button>
                           )}
                           {preparedNarrationManifest &&
@@ -7740,8 +7742,7 @@ export default function Home() {
                             </small>
                           )}
                         </div>
-                      </div>
-                    )}
+                    </div>
                     {runtimeAssetStorageBytes !== null && (
                       <small className="offline-pack-status">
                         Retained runtime files use{" "}

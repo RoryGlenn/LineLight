@@ -542,6 +542,9 @@ sidecar verification, audiobook attachment/alignment, manual sentence sync, and
 cleanup. Play and sentence navigation enter the common reader transport; a
 ready prepared profile reuses the containing independent chunk, while an
 audiobook uses only qualified or manual anchors for text seeking.
+The built-in demo exposes the same render, replay, and export controls. Its fixed
+text is registered as an unlisted document owner so exact-profile audio can
+persist without creating a private-library entry.
 
 **Change together:** Changes to token indices, chunk boundaries, sidecar fields,
 or confidence rules must update preparation, export, audiobook alignment,
@@ -560,6 +563,8 @@ IndexedDB records. A ready LineLight WAV sidecar can bypass ASR only when its
 book fingerprint and ordered filenames match. Whisper model requests contain no
 book text or audio; only pinned public files cross the network. Book and profile
 removal clean their owned audio, metadata, transcript, and anchor records.
+The built-in demo's narration records use the same local-only stores and exact
+fingerprint checks as imported documents.
 
 **Verification:** Use
 [`tests/prepared-narration.test.mjs`](../tests/prepared-narration.test.mjs),
