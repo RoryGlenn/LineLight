@@ -38,20 +38,21 @@ export {
 
 export const OFFLINE_MODEL_RANGE_CHUNK_BYTES = 8 * 1024 * 1024;
 export const OFFLINE_MODEL_CACHE_NAME = "linelight-offline-model-v2";
-export const OFFLINE_VOICE_CACHE_NAME = "linelight-offline-voices-v3";
+export const OFFLINE_VOICE_CACHE_NAME = "linelight-offline-voices-v4";
 export const OFFLINE_RETIRED_VOICE_CACHE_NAMES = [
+  "linelight-offline-voices-v3",
   "linelight-offline-voices-v2",
 ] as const;
 export const OFFLINE_VOICES = [
   {
-    value: "F2",
+    value: "F4",
     label: "Female",
-    description: "Natural studio voice · native 44.1 kHz",
+    description: "Warm, conversational studio voice · native 44.1 kHz",
   },
   {
-    value: "M1",
+    value: "M4",
     label: "Male",
-    description: "Natural studio voice · native 44.1 kHz",
+    description: "Deep, grounded studio voice · native 44.1 kHz",
   },
 ] as const;
 

@@ -23,13 +23,13 @@ test("applies the reviewed podcast-host voice and pace without changing reader l
   assert.deepEqual(result, {
     ...settings,
     narrationEngine: "offline",
-    offlineVoice: "F2",
-    rate: 0.9,
+    offlineVoice: "F4",
+    rate: 1,
   });
   assert.equal(PODCAST_HOST_PRESET.label, "Podcast host");
   assert.equal(
     PODCAST_HOST_PRESET.description,
-    "Natural female voice · native 44.1 kHz · fully offline",
+    "Warm female voice · native 44.1 kHz · fully offline",
   );
 });
 
@@ -37,7 +37,7 @@ test("marks the preset active only while all of its voice settings match", () =>
   const selected = applyNarratorPreset({ theme: "cream" });
 
   assert.equal(isNarratorPresetActive(selected), true);
-  assert.equal(isNarratorPresetActive({ ...selected, rate: 1 }), false);
+  assert.equal(isNarratorPresetActive({ ...selected, rate: 0.9 }), false);
   assert.equal(
     isNarratorPresetActive({ ...selected, offlineVoice: "bm_george" }),
     false,

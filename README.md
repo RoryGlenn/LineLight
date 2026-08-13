@@ -36,9 +36,11 @@ LineLight has four narration modes:
 
 - **Offline natural** is the default for new readers. On first launch,
   LineLight automatically stores an included roughly 399 MB Supertonic 3
-  model pack with one female and one male voice in browser Cache Storage. Its
-  four float32 graphs generate native 44.1 kHz audio through WebGPU when
-  supported and threaded WebAssembly otherwise.
+  model pack with one warm, conversational female voice and one deep, grounded
+  male voice in browser Cache Storage. Both were selected from the pinned model's
+  included styles by local reference-similarity, naturalness, intelligibility,
+  and signal-quality screening. Its four float32 graphs generate native 44.1 kHz
+  audio through WebGPU when supported and threaded WebAssembly otherwise.
   Interrupted model downloads resume from verified ranges. The pinned files are
   delivered through
   an allowlisted LineLight route rather than fetched by the browser from a

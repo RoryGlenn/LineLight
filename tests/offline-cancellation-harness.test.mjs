@@ -104,7 +104,7 @@ function passingCacheInventory() {
     })),
     ...Array.from({ length: 2 }, (_, index) => ({
       byteLength: 500 + index,
-      cacheName: "linelight-offline-voices-v3",
+      cacheName: "linelight-offline-voices-v4",
       requestSha256: sha256(`voice-request-${index}`),
       sha256: sha256(`voice-${index}`),
       url: `/Supertone/supertonic-3/voice_styles/voice-${index}.json`,

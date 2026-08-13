@@ -213,7 +213,7 @@ const INSTRUMENTATION_SOURCE = `
       highlightScope: "sentence",
       follow: false,
       rate: 1,
-      offlineVoice: "F2"
+      offlineVoice: "F4"
     }));
   } catch {}
 
