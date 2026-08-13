@@ -358,9 +358,12 @@ complete deterministic unit harness.
 
 **Purpose:** Install, validate, retain, load, synthesize, update, and remove the
 private native-44.1 kHz Supertonic 3 voice pack with one reviewed female voice
-and one reviewed male voice while supporting WebGPU, threaded WebAssembly, a
-single-thread fallback, resumable downloads, and safe cleanup of retired voice
-caches.
+(`F4`, warm and conversational) and one reviewed male voice (`M4`, deep and
+grounded) while supporting WebGPU, threaded WebAssembly, a single-thread
+fallback, resumable downloads, and safe cleanup of retired voice caches. The
+two styles were selected locally against the supplied reference recording with
+reference-similarity, naturalness, intelligibility, and signal-quality checks;
+the private recording is never a runtime or repository asset.
 
 **Runtime:** Browser main for worker ownership and status; dedicated worker for
 download validation, ONNX initialization, and synthesis; edge worker for pinned

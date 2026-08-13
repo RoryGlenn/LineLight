@@ -126,7 +126,7 @@ test("repairs a truncated whole asset and records its verified byte size", async
       fetchCount += 1;
       return new Response(source);
     },
-    label: "The included Heart voice",
+    label: "The included female voice",
     sourceUrl: "/offline-model/voices/af_heart.bin",
   });
 
@@ -153,7 +153,7 @@ test("repairs a truncated whole asset and records its verified byte size", async
     fetchAsset: async () => {
       throw new Error("a verified asset must not be downloaded again");
     },
-    label: "The included Heart voice",
+    label: "The included female voice",
     sourceUrl: "/offline-model/voices/af_heart.bin",
   });
 });
