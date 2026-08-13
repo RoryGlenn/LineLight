@@ -19,6 +19,7 @@ import {
   OFFLINE_VOICE_ASSETS,
   OFFLINE_VOICE_CACHE_NAME,
   OFFLINE_VOICE_CACHE_URLS,
+  OFFLINE_RETIRED_VOICE_CACHE_NAMES,
   OFFLINE_VOICE_SOURCE_URLS,
   OFFLINE_WASM_PROXY,
   OFFLINE_WASM_THREADS,
@@ -27,6 +28,7 @@ import {
 import {
   OFFLINE_MODEL_READY_MARKER_URL,
   OFFLINE_MODEL_READY_MARKER_VERSION,
+  OFFLINE_RETIRED_MODEL_READY_MARKER_URLS,
   OFFLINE_LEGACY_MODEL_ID,
   OFFLINE_RUNTIME_CACHE_NAME,
   OFFLINE_WEBGPU_ADAPTER_TIMEOUT_MS,
@@ -721,15 +723,23 @@ async function installVoices(id: number, signal?: AbortSignal) {
   }
 }
 
-async function removeLegacyOfflineVoicePack() {
+async function removeRetiredOfflineVoicePacks() {
   await Promise.allSettled(
-    ["transformers-cache", "kokoro-voices"].map(async (cacheName) => {
-      const cache = await caches.open(cacheName);
-      await deleteOfflineModelEntriesByIdentifier({
-        cache,
-        modelIdentifier: OFFLINE_LEGACY_MODEL_ID,
-      });
-    }),
+    [
+      ...OFFLINE_RETIRED_MODEL_READY_MARKER_URLS.map(async (cacheUrl) =>
+        (await getModelCache()).delete(cacheUrl),
+      ),
+      ...OFFLINE_RETIRED_VOICE_CACHE_NAMES.map((cacheName) =>
+        caches.delete(cacheName),
+      ),
+      ...["transformers-cache", "kokoro-voices"].map(async (cacheName) => {
+        const cache = await caches.open(cacheName);
+        await deleteOfflineModelEntriesByIdentifier({
+          cache,
+          modelIdentifier: OFFLINE_LEGACY_MODEL_ID,
+        });
+      }),
+    ],
   );
 }
 
@@ -1005,7 +1015,7 @@ async function handleRequest(
         cacheUrl: OFFLINE_MODEL_READY_MARKER_URL,
         value: OFFLINE_MODEL_READY_MARKER_VERSION,
       });
-      await removeLegacyOfflineVoicePack();
+      await removeRetiredOfflineVoicePacks();
     } else if (message.type === "initialize") {
       const warm = message.warm !== false;
       result = await initializeSpeech(

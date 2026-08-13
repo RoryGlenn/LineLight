@@ -42,16 +42,8 @@ export const OFFLINE_MODEL_ASSETS = Object.freeze([
 ]);
 
 export const OFFLINE_VOICE_ASSETS = Object.freeze([
-  Object.freeze({ id: "F1", file: "voice_styles/F1.json", bytes: 292_046 }),
   Object.freeze({ id: "F2", file: "voice_styles/F2.json", bytes: 292_423 }),
-  Object.freeze({ id: "F3", file: "voice_styles/F3.json", bytes: 290_794 }),
-  Object.freeze({ id: "F4", file: "voice_styles/F4.json", bytes: 291_808 }),
-  Object.freeze({ id: "F5", file: "voice_styles/F5.json", bytes: 291_479 }),
   Object.freeze({ id: "M1", file: "voice_styles/M1.json", bytes: 291_748 }),
-  Object.freeze({ id: "M2", file: "voice_styles/M2.json", bytes: 292_055 }),
-  Object.freeze({ id: "M3", file: "voice_styles/M3.json", bytes: 290_198 }),
-  Object.freeze({ id: "M4", file: "voice_styles/M4.json", bytes: 291_522 }),
-  Object.freeze({ id: "M5", file: "voice_styles/M5.json", bytes: 291_469 }),
 ]);
 
 export const OFFLINE_MODEL_FILES = OFFLINE_MODEL_ASSETS.map(
@@ -91,9 +83,12 @@ export const OFFLINE_VOICE_URLS = OFFLINE_VOICE_ASSETS.map(
 );
 
 export const OFFLINE_MODEL_READY_MARKER_VERSION =
-  "supertonic-3-44100-ready-v1";
+  "supertonic-3-44100-two-voices-ready-v2";
 export const OFFLINE_MODEL_READY_MARKER_URL =
   `${OFFLINE_MODEL_ROUTE_PREFIX}__linelight_${OFFLINE_MODEL_READY_MARKER_VERSION}`;
+export const OFFLINE_RETIRED_MODEL_READY_MARKER_URLS = Object.freeze([
+  `${OFFLINE_MODEL_ROUTE_PREFIX}__linelight_supertonic-3-44100-ready-v1`,
+]);
 
 // The old Kokoro identifiers are used only for post-commit cleanup. They are
 // deliberately not accepted by resolveOfflineModelRequest.
@@ -135,7 +130,12 @@ export function normalizeOfflineVoiceId(value) {
   if (typeof value === "string" && OFFLINE_VOICE_IDS.includes(value)) {
     return value;
   }
-  if (typeof value === "string" && /^(?:[ab]m|m)_/u.test(value)) return "M1";
+  if (
+    typeof value === "string" &&
+    /^(?:M[1-5]$|[ab]?m_)/u.test(value)
+  ) {
+    return "M1";
+  }
   return OFFLINE_DEFAULT_VOICE;
 }
 

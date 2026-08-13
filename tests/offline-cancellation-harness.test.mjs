@@ -29,7 +29,7 @@ const JSEP_SHA256 =
 const FIXTURE_SHA256 =
   "1addfceae4b869eec37dae4755d576ccd0fd7e1ce505dc856da3b96acbf3f06c";
 const WEBGPU_COVERAGE_SHA256 =
-  "f6c285b5a5cb47ed05e07fbef3d0ed59a40559456d3b2628c40f595877e1ae5a";
+  "8bcea58cc78b82166246be9519a3d16a31b3378b55d4d5557359a3e275b5cfcb";
 const FIXTURE_PATH = "tests/fixtures/pdf-highlights/issue-60-geometry.pdf";
 const WEBGPU_COVERAGE_PATH = "tests/offline-model.test.mjs";
 const SOURCE_FILES = [
@@ -102,9 +102,9 @@ function passingCacheInventory() {
       sha256: sha256(`model-${index}`),
       url: `/offline-model/reviewed/model-${index}`,
     })),
-    ...Array.from({ length: 10 }, (_, index) => ({
+    ...Array.from({ length: 2 }, (_, index) => ({
       byteLength: 500 + index,
-      cacheName: "linelight-offline-voices-v2",
+      cacheName: "linelight-offline-voices-v3",
       requestSha256: sha256(`voice-request-${index}`),
       sha256: sha256(`voice-${index}`),
       url: `/Supertone/supertonic-3/voice_styles/voice-${index}.json`,

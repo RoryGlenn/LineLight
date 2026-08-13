@@ -7456,7 +7456,8 @@ export default function Home() {
                         <div className="offline-pack-ready">
                           <span>
                             <strong>Stored on this device</strong>
-                            Ten voices are available without internet.
+                            One female and one male voice are available without
+                            internet.
                             {offlineUpgradeRequired && (
                               <small>
                                 A faster, quality-preserving voice update is

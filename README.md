@@ -35,10 +35,10 @@ release.
 LineLight has four narration modes:
 
 - **Offline natural** is the default for new readers. On first launch,
-  LineLight automatically stores an included roughly 401 MB Supertonic 3
-  model pack and ten English voice styles in browser Cache Storage. Its four
-  float32 graphs generate native 44.1 kHz audio through WebGPU when supported
-  and threaded WebAssembly otherwise.
+  LineLight automatically stores an included roughly 399 MB Supertonic 3
+  model pack with one female and one male voice in browser Cache Storage. Its
+  four float32 graphs generate native 44.1 kHz audio through WebGPU when
+  supported and threaded WebAssembly otherwise.
   Interrupted model downloads resume from verified ranges. The pinned files are
   delivered through
   an allowlisted LineLight route rather than fetched by the browser from a
@@ -100,9 +100,9 @@ the [MIT-licensed Supertonic reference](https://github.com/supertone-inc/superto
 The bundled modified ONNX Runtime Web is also provided under the MIT License.
 LineLight stores the pinned model in browser Cache Storage and asks the browser
 to make that storage persistent. Browser storage can still be cleared or
-evicted; the settings panel prepares the included voice again if any required
-file is missing. A fresh preparation checks for roughly 451 MB of free site
-storage so the model, ten styles, bundled ONNX runtime, and cache metadata fit
+evicted; the settings panel prepares the included voices again if any required
+file is missing. A fresh preparation checks for roughly 449 MB of free site
+storage so the model, two styles, bundled ONNX runtime, and cache metadata fit
 without a duplicate model copy. A resumed preparation needs less because
 verified ranges and styles are counted before the storage check.
 The distributed license and modification text is available at

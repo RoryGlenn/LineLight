@@ -49,14 +49,14 @@ const DEFAULT_FIXTURE_SHA256 =
   "1addfceae4b869eec37dae4755d576ccd0fd7e1ce505dc856da3b96acbf3f06c";
 const WEBGPU_COVERAGE_RELATIVE_PATH = "tests/offline-model.test.mjs";
 const WEBGPU_COVERAGE_SHA256 =
-  "f6c285b5a5cb47ed05e07fbef3d0ed59a40559456d3b2628c40f595877e1ae5a";
+  "8bcea58cc78b82166246be9519a3d16a31b3378b55d4d5557359a3e275b5cfcb";
 const EXPECTED_JSEP_WASM_SHA256 =
   "1e5a323ca41d859f324694c7b5ba2052bf8c1a96ff9721bc62e94f874d379fe1";
 const EXPECTED_MODEL_CACHE_ENTRIES = 53;
-const EXPECTED_VOICE_CACHE_ENTRIES = 10;
+const EXPECTED_VOICE_CACHE_ENTRIES = 2;
 const MODEL_CACHE_NAME = "linelight-offline-model-v2";
 const RUNTIME_CACHE_NAME = "linelight-assets-v1";
-const VOICE_CACHE_NAME = "linelight-offline-voices-v2";
+const VOICE_CACHE_NAME = "linelight-offline-voices-v3";
 const REQUIRED_ACTIVE_CANCELLATIONS = 5;
 const CPU_SAMPLE_INTERVAL_MS = 50;
 const MAX_CPU_SAMPLE_INTERVAL_MS = 100;

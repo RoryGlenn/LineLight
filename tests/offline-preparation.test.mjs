@@ -94,31 +94,31 @@ test("Play joins active idle initialization but cancels work not yet started", (
 });
 
 test("requires fixed runtime headroom for the 44.1 kHz offline pack", () => {
-  const enough = evaluateOfflineStorageHeadroom(401_276_744, {
+  const enough = evaluateOfflineStorageHeadroom(398_945_373, {
     quota: 800_000_000,
     usage: 300_000_000,
   });
   assert.deepEqual(enough, {
     availableBytes: 500_000_000,
-    requiredBytes: 451_276_744,
+    requiredBytes: 448_945_373,
     sufficient: true,
   });
   assert.equal(
-    evaluateOfflineStorageHeadroom(401_276_744, {
+    evaluateOfflineStorageHeadroom(398_945_373, {
       quota: 700_000_000,
       usage: 300_000_000,
     }).sufficient,
     false,
   );
   assert.equal(
-    evaluateOfflineStorageHeadroom(401_276_744, undefined).sufficient,
+    evaluateOfflineStorageHeadroom(398_945_373, undefined).sufficient,
     null,
   );
 });
 
 test("a resumed install reserves only missing pack bytes plus runtime margin", () => {
   const resumed = evaluateOfflineStorageHeadroom(
-    401_276_744,
+    398_945_373,
     {
       quota: 600_000_000,
       usage: 400_000_000,
@@ -127,7 +127,7 @@ test("a resumed install reserves only missing pack bytes plus runtime margin", (
   );
   assert.deepEqual(resumed, {
     availableBytes: 200_000_000,
-    requiredBytes: 151_276_744,
+    requiredBytes: 148_945_373,
     sufficient: true,
   });
 });

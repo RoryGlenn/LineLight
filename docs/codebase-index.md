@@ -357,9 +357,10 @@ complete deterministic unit harness.
 ## Offline natural narration and voice-pack lifecycle
 
 **Purpose:** Install, validate, retain, load, synthesize, update, and remove the
-private native-44.1 kHz Supertonic 3 voice pack while supporting WebGPU,
-threaded WebAssembly, a single-thread fallback, resumable downloads, and safe
-cleanup of the legacy Kokoro pack.
+private native-44.1 kHz Supertonic 3 voice pack with one reviewed female voice
+and one reviewed male voice while supporting WebGPU, threaded WebAssembly, a
+single-thread fallback, resumable downloads, and safe cleanup of retired voice
+caches.
 
 **Runtime:** Browser main for worker ownership and status; dedicated worker for
 download validation, ONNX initialization, and synthesis; edge worker for pinned
@@ -417,10 +418,10 @@ use the allowlisted `/offline-model/` route implemented by
 **Change together:** Treat the manifest, cache adapter,
 installer, main-thread RPC, worker protocol, service worker, model route, and
 artifact validation as one compatibility boundary. The install transaction
-downloads every exact-size graph and voice style, validates and warms 44.1 kHz
-audio, retains the emitted worker and WASM assets, writes and verifies the ready
-marker, and only then removes the former Kokoro caches. Installation and
-removal must remain serialized. A WebGPU
+downloads every exact-size graph and required voice style, validates and warms
+44.1 kHz audio, retains the emitted worker and WASM assets, writes and verifies
+the ready marker, and only then removes the former ten-voice and Kokoro caches.
+Installation and removal must remain serialized. A WebGPU
 failure advances through the applicable fresh WASM tiers: isolated, capable
 contexts try threaded WASM before single-thread, while other contexts go
 directly to single-thread WASM. Changes to active-run cancellation must keep the

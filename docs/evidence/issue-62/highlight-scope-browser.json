@@ -1,14 +1,14 @@
 {
   "schemaVersion": 1,
   "issue": 62,
-  "recordedAt": "2026-08-13T16:35:28.496Z",
+  "recordedAt": "2026-08-13T17:00:19.475Z",
   "source": {
     "branch": "agent/issue-62-highlight-scope",
     "files": {
       "app/focus-document-view.tsx": "d5f16767180d5e61f4e658030468ce27640b13aa9567a4e4433c35176927792b",
       "app/globals.css": "7ab560e1a4d8c3770978d8709ed705e90b6bdb9f9847f49d231ee7eb3400cf4c",
       "app/highlight-scope.mjs": "84474122fafee6410a162bc789d94907b095e9efc5d3411011e55f0be55cc73b",
-      "app/page.tsx": "965c6b9606b1570e9f4d2c4d7b5dd95411e4fb2e5d0dfee0816d05dc19a53968",
+      "app/page.tsx": "ff08973e738f5849d81eeadc764838a242d847158e024ebaa5c173252419c9fb",
       "app/pdf-page-view.tsx": "5031367fdf4a85c4b86ee6976a8bee3d6f47b031091a1505e2a37a9354b36675",
       "app/pdf-text-model.mjs": "61eb74e26f6d7165002ac1b239d800335f00bdd1107a0059c2447d2ced260f00",
       "app/reader-virtualization.mjs": "0df45457462979bc5707e03db275a38a3228110deed5008f9af178d64776c262",
@@ -446,7 +446,7 @@
     "passed": true
   },
   "persistence": {
-    "appUrl": "http://127.0.0.1:63575/",
+    "appUrl": "http://127.0.0.1:51474/",
     "beforeReload": {
       "fontSize": 22,
       "lineHeight": 1.78,
@@ -540,8 +540,8 @@
   "browserDiagnostics": {
     "errors": [],
     "console": [],
-    "browserStderr": "\nDevTools listening on ws://127.0.0.1:63615/devtools/browser/f0264fcf-1552-4711-93a2-036bea2cda47\n",
-    "serverLogTail": "\n> linelight@0.1.0 dev\n> WRANGLER_LOG_PATH=.wrangler/wrangler.log vite --host 127.0.0.1 --port 63575 --strictPort\n\n(node:35429) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.\n(Use `node --trace-deprecation ...` to show where the warning was created)\n\n  VITE v8.2.0  ready in 2349 ms\n\n  ➜  Local:   http://127.0.0.1:63575/\n\nThe Cloudflare Vite plugin detected this dev session is running in an AI agent.\nThe Local Explorer API is available at http://127.0.0.1:63575/cdn-cgi/local/explorer/api\nUseful routes:\n  GET http://127.0.0.1:63575/cdn-cgi/local/explorer/api/local/workers - local Workers and bindings\n  GET http://127.0.0.1:63575/cdn-cgi/local/explorer/api/storage/kv/namespaces - KV namespaces\n  GET http://127.0.0.1:63575/cdn-cgi/local/explorer/api/d1/database - D1 databases\n  GET http://127.0.0.1:63575/cdn-cgi/local/explorer/api/r2/buckets - R2 buckets\n  GET http://127.0.0.1:63575/cdn-cgi/local/explorer/api/workers/durable_objects/namespaces - Durable Object namespaces\n  GET http://127.0.0.1:63575/cdn-cgi/local/explorer/api/workflows - Workflows\n  POST http://127.0.0.1:63575/cdn-cgi/local/explorer/api/local/observability/query - run a read-only SQL query (SELECT/WITH only) over captured request traces and console logs. Tables: spans, logs (read attributes via json(attributes)). Example:\n    curl -X POST http://127.0.0.1:63575/cdn-cgi/local/explorer/api/local/observability/query -H 'Content-Type: application/json' -d '{\"sql\":\"SELECT service, name, outcome, duration_ms FROM spans WHERE parent_id IS NULL LIMIT 20\"}'\nIf the routes above don't cover what you need, fetch the full OpenAPI schema (large - use only as a last resort):\n  GET http://127.0.0.1:63575/cdn-cgi/local/explorer/api - OpenAPI schema\n\n GET / 200 in 883ms (compile: 1786638916.9s, render: 853ms)\n GET / 200 in 34ms (compile: 1786638916.9s, render: 23ms)\n GET / 200 in 36ms (compile: 1786638916.9s, render: 23ms)\n"
+    "browserStderr": "\nDevTools listening on ws://127.0.0.1:51505/devtools/browser/8cc3fa9c-d677-40d3-a02f-2813273f2612\n[44426:222306:0813/130011.584335:ERROR:chrome/browser/ui/views/user_education/impl/browser_user_education_interface_impl.cc:186] Attempting to show IPH IPH_BatterySaverMode before browser initialization complete; IPH will not be shown.\n",
+    "serverLogTail": "\n> linelight@0.1.0 dev\n> WRANGLER_LOG_PATH=.wrangler/wrangler.log vite --host 127.0.0.1 --port 51474 --strictPort\n\n(node:44398) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.\n(Use `node --trace-deprecation ...` to show where the warning was created)\n\n  VITE v8.2.0  ready in 2371 ms\n\n  ➜  Local:   http://127.0.0.1:51474/\n\nThe Cloudflare Vite plugin detected this dev session is running in an AI agent.\nThe Local Explorer API is available at http://127.0.0.1:51474/cdn-cgi/local/explorer/api\nUseful routes:\n  GET http://127.0.0.1:51474/cdn-cgi/local/explorer/api/local/workers - local Workers and bindings\n  GET http://127.0.0.1:51474/cdn-cgi/local/explorer/api/storage/kv/namespaces - KV namespaces\n  GET http://127.0.0.1:51474/cdn-cgi/local/explorer/api/d1/database - D1 databases\n  GET http://127.0.0.1:51474/cdn-cgi/local/explorer/api/r2/buckets - R2 buckets\n  GET http://127.0.0.1:51474/cdn-cgi/local/explorer/api/workers/durable_objects/namespaces - Durable Object namespaces\n  GET http://127.0.0.1:51474/cdn-cgi/local/explorer/api/workflows - Workflows\n  POST http://127.0.0.1:51474/cdn-cgi/local/explorer/api/local/observability/query - run a read-only SQL query (SELECT/WITH only) over captured request traces and console logs. Tables: spans, logs (read attributes via json(attributes)). Example:\n    curl -X POST http://127.0.0.1:51474/cdn-cgi/local/explorer/api/local/observability/query -H 'Content-Type: application/json' -d '{\"sql\":\"SELECT service, name, outcome, duration_ms FROM spans WHERE parent_id IS NULL LIMIT 20\"}'\nIf the routes above don't cover what you need, fetch the full OpenAPI schema (large - use only as a last resort):\n  GET http://127.0.0.1:51474/cdn-cgi/local/explorer/api - OpenAPI schema\n\n GET / 200 in 830ms (compile: 1786640407.7s, render: 800ms)\n GET / 200 in 33ms (compile: 1786640407.7s, render: 22ms)\n GET / 200 in 43ms (compile: 1786640407.7s, render: 23ms)\n"
   },
   "failures": [],
   "passed": true

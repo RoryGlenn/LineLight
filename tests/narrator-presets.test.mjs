@@ -29,7 +29,7 @@ test("applies the reviewed podcast-host voice and pace without changing reader l
   assert.equal(PODCAST_HOST_PRESET.label, "Podcast host");
   assert.equal(
     PODCAST_HOST_PRESET.description,
-    "Warm Studio F2 voice · native 44.1 kHz · fully offline",
+    "Natural female voice · native 44.1 kHz · fully offline",
   );
 });
 

@@ -38,57 +38,20 @@ export {
 
 export const OFFLINE_MODEL_RANGE_CHUNK_BYTES = 8 * 1024 * 1024;
 export const OFFLINE_MODEL_CACHE_NAME = "linelight-offline-model-v2";
-export const OFFLINE_VOICE_CACHE_NAME = "linelight-offline-voices-v2";
+export const OFFLINE_VOICE_CACHE_NAME = "linelight-offline-voices-v3";
+export const OFFLINE_RETIRED_VOICE_CACHE_NAMES = [
+  "linelight-offline-voices-v2",
+] as const;
 export const OFFLINE_VOICES = [
   {
-    value: "F1",
-    label: "Studio F1",
-    description: "Female style · native 44.1 kHz",
-  },
-  {
     value: "F2",
-    label: "Studio F2",
-    description: "Female style · native 44.1 kHz",
-  },
-  {
-    value: "F3",
-    label: "Studio F3",
-    description: "Female style · native 44.1 kHz",
-  },
-  {
-    value: "F4",
-    label: "Studio F4",
-    description: "Female style · native 44.1 kHz",
-  },
-  {
-    value: "F5",
-    label: "Studio F5",
-    description: "Female style · native 44.1 kHz",
+    label: "Female",
+    description: "Natural studio voice · native 44.1 kHz",
   },
   {
     value: "M1",
-    label: "Studio M1",
-    description: "Male style · native 44.1 kHz",
-  },
-  {
-    value: "M2",
-    label: "Studio M2",
-    description: "Male style · native 44.1 kHz",
-  },
-  {
-    value: "M3",
-    label: "Studio M3",
-    description: "Male style · native 44.1 kHz",
-  },
-  {
-    value: "M4",
-    label: "Studio M4",
-    description: "Male style · native 44.1 kHz",
-  },
-  {
-    value: "M5",
-    label: "Studio M5",
-    description: "Male style · native 44.1 kHz",
+    label: "Male",
+    description: "Natural studio voice · native 44.1 kHz",
   },
 ] as const;
 

@@ -9,6 +9,7 @@ import {
   OFFLINE_VOICE_ASSETS,
   OFFLINE_VOICE_CACHE_NAME,
   OFFLINE_VOICE_CACHE_URLS,
+  OFFLINE_RETIRED_VOICE_CACHE_NAMES,
   type OfflineVoiceId,
 } from "./offline-speech-config";
 import {
@@ -930,6 +931,9 @@ export async function removeOfflineVoicePack() {
     Promise.all([
       deleteMatchingEntries(OFFLINE_MODEL_CACHE_NAME, OFFLINE_MODEL_ID),
       deleteMatchingEntries(OFFLINE_VOICE_CACHE_NAME, OFFLINE_MODEL_ID),
+      ...OFFLINE_RETIRED_VOICE_CACHE_NAMES.map((cacheName) =>
+        deleteMatchingEntries(cacheName, OFFLINE_MODEL_ID),
+      ),
       deleteMatchingEntries("transformers-cache", OFFLINE_LEGACY_MODEL_ID),
       deleteMatchingEntries("kokoro-voices", OFFLINE_LEGACY_MODEL_ID),
     ]).then(() => undefined),
