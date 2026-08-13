@@ -21,6 +21,7 @@ import {
   OFFLINE_OUTPUT_SAMPLE_RATE,
   OFFLINE_RUNTIME_CACHE_NAME,
   OFFLINE_VOICE_ASSETS,
+  OFFLINE_VOICE_BYTES,
   OFFLINE_WEBGPU_ADAPTER_TIMEOUT_MS,
   OFFLINE_WASM_PROXY,
   OFFLINE_WASM_THREADS,
@@ -82,19 +83,45 @@ test("never silently falls back from offline narration to browser speech", () =>
 
 test("migrates former voices to a valid 44.1 kHz studio style", () => {
   assert.equal(OFFLINE_DEFAULT_VOICE, "F2");
-  assert.equal(normalizeOfflineVoiceId("F4"), "F4");
+  assert.equal(normalizeOfflineVoiceId("F4"), "F2");
+  assert.equal(normalizeOfflineVoiceId("M4"), "M1");
   assert.equal(normalizeOfflineVoiceId("am_michael"), "M1");
   assert.equal(normalizeOfflineVoiceId("bm_george"), "M1");
   assert.equal(normalizeOfflineVoiceId("af_heart"), "F2");
   assert.equal(normalizeOfflineVoiceId(null), "F2");
 });
 
+test("offers one plain-language female and male offline voice", async () => {
+  const [configSource, pageSource] = await Promise.all([
+    readFile("app/offline-speech-config.ts", "utf8"),
+    readFile("app/page.tsx", "utf8"),
+  ]);
+
+  assert.equal(
+    Array.from(configSource.matchAll(/value: "[FM]\d"/gu)).length,
+    2,
+  );
+  assert.match(configSource, /value: "F2",[\s\S]*label: "Female"/u);
+  assert.match(configSource, /value: "M1",[\s\S]*label: "Male"/u);
+  assert.doesNotMatch(configSource, /label: "Studio [FM]\d"/u);
+  assert.match(pageSource, /One female and one male voice are available/u);
+  assert.match(
+    configSource,
+    /OFFLINE_VOICE_CACHE_NAME = "linelight-offline-voices-v3"/u,
+  );
+  assert.match(configSource, /"linelight-offline-voices-v2"/u);
+});
+
 test("pairs the native 44.1 kHz model with a safe runtime ladder", () => {
   assert.equal(OFFLINE_MODEL_DTYPE, "fp32");
   assert.equal(OFFLINE_MODEL_BYTES, 398_361_202);
+  assert.equal(OFFLINE_VOICE_BYTES, 584_171);
   assert.equal(OFFLINE_OUTPUT_SAMPLE_RATE, 44_100);
   assert.equal(OFFLINE_MODEL_ASSETS.length, 6);
-  assert.equal(OFFLINE_VOICE_ASSETS.length, 10);
+  assert.deepEqual(
+    OFFLINE_VOICE_ASSETS.map((voice) => voice.id),
+    ["F2", "M1"],
+  );
   assert.equal(OFFLINE_WEBGPU_ADAPTER_TIMEOUT_MS, 500);
   assert.equal(OFFLINE_MODEL_RUNTIME, "webgpu");
   assert.equal(OFFLINE_WASM_THREADS, 8);
@@ -307,7 +334,15 @@ test("validates native audio before committing the installed model", async () =>
   );
   assert.match(
     workerSource,
-    /installModelFiles[\s\S]*installVoices[\s\S]*initializeSpeech[\s\S]*retainOfflineSpeechRuntime\(\)[\s\S]*commitOfflineModelReadyMarker[\s\S]*removeLegacyOfflineVoicePack/u,
+    /installModelFiles[\s\S]*installVoices[\s\S]*initializeSpeech[\s\S]*retainOfflineSpeechRuntime\(\)[\s\S]*commitOfflineModelReadyMarker[\s\S]*removeRetiredOfflineVoicePacks/u,
+  );
+  assert.match(
+    workerSource,
+    /OFFLINE_RETIRED_VOICE_CACHE_NAMES\.map\(\(cacheName\) =>[\s\S]*caches\.delete\(cacheName\)/u,
+  );
+  assert.match(
+    workerSource,
+    /OFFLINE_RETIRED_MODEL_READY_MARKER_URLS\.map\([\s\S]*getModelCache\(\)[\s\S]*delete\(cacheUrl\)/u,
   );
   assert.match(workerSource, /style,[\s\S]*steps: SUPERTONIC_SYNTHESIS_STEPS/u);
   assert.doesNotMatch(workerSource, /invalidateOfflineModelReadyMarker/u);
@@ -371,7 +406,7 @@ test("selects and verifies each cold backend only once before model construction
 test("keeps the validation receipt private to Cache Storage", () => {
   assert.equal(
     OFFLINE_MODEL_READY_MARKER_VERSION,
-    "supertonic-3-44100-ready-v1",
+    "supertonic-3-44100-two-voices-ready-v2",
   );
   assert.match(OFFLINE_MODEL_READY_MARKER_URL, /supertonic-3/u);
   assert.equal(resolveOfflineModelRequest(OFFLINE_MODEL_READY_MARKER_URL), null);
