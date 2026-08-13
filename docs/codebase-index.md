@@ -217,7 +217,10 @@ with review records in [`docs/evidence/issue-62/`](evidence/issue-62/).
 [`scripts/run-offline-natural-timing-regression.mjs`](../scripts/run-offline-natural-timing-regression.mjs)
 attaches to a disposable headed-Brave profile with the stored local voice pack
 and verifies consecutive PDF highlight updates at 0.75x, 1x, and 1.25x against
-the real Offline-natural worker. Its thresholds and opt-in CDP gate live in
+the real Offline-natural worker. Its optional `--voice` gate selects and records
+the exact voice under test through the current settings UI, and its fixture
+import targets the PDF input only after that panel closes so audiobook timing
+sidecars cannot capture the test file. Its thresholds and opt-in CDP gate live in
 [`tests/offline-natural-timing-harness.test.mjs`](../tests/offline-natural-timing-harness.test.mjs),
 with review records in
 [`docs/evidence/issue-60/`](evidence/issue-60/).
@@ -358,12 +361,14 @@ complete deterministic unit harness.
 
 **Purpose:** Install, validate, retain, load, synthesize, update, and remove the
 private native-44.1 kHz Supertonic 3 voice pack with one reviewed female voice
-(`F4`, warm and conversational) and one reviewed male voice (`M4`, deep and
+(`F4`, warm and conversational) and one reviewed male voice (`M2`, deep and
 grounded) while supporting WebGPU, threaded WebAssembly, a single-thread
 fallback, resumable downloads, and safe cleanup of retired voice caches. The
 two styles were selected locally against the supplied reference recording with
-reference-similarity, naturalness, intelligibility, and signal-quality checks;
-the private recording is never a runtime or repository asset.
+reference-similarity, naturalness, intelligibility, and signal-quality checks.
+The male selection uses a robust approximately 91 Hz reference pitch rather
+than the rejected harmonic estimate. The private recording is never a runtime
+or repository asset.
 
 **Runtime:** Browser main for worker ownership and status; dedicated worker for
 download validation, ONNX initialization, and synthesis; edge worker for pinned

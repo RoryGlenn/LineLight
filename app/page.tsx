@@ -7161,7 +7161,7 @@ export default function Home() {
                           applyNarratorPreset(current) as ReaderSettings,
                       );
                       setNotice(
-                        "Podcast host selected. It uses LineLight's warm Heart voice at a relaxed pace.",
+                        "Podcast host selected. It uses LineLight's warm female voice at a conversational pace.",
                       );
                     }}
                   >

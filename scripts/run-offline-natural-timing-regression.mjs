@@ -26,6 +26,10 @@ const REQUIRED_TRANSITIONS = 12;
 const MAX_LOGICAL_INDEX_DELTA = 1;
 const MAX_ACTIVATIONS_PER_FRAME = 1;
 const MAX_LONG_TASK_MS = 50;
+export const OFFLINE_TIMING_BOOK_INPUT_SELECTOR =
+  'input[type="file"][accept*=".pdf"]';
+export const OFFLINE_TIMING_SETTINGS_CLOSE_SELECTOR =
+  '.settings-panel button[aria-label="Close reading settings"]';
 
 function parseArguments(argv) {
   const options = {
@@ -35,6 +39,7 @@ function parseArguments(argv) {
     outputDirectory: DEFAULT_OUTPUT_DIRECTORY,
     record: false,
     timeoutMs: 180_000,
+    voice: process.env.LINELIGHT_OFFLINE_TIMING_VOICE ?? null,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -44,6 +49,7 @@ function parseArguments(argv) {
     else if (argument === "--fixture") options.fixture = argv[++index];
     else if (argument === "--output") options.outputDirectory = argv[++index];
     else if (argument === "--record") options.record = true;
+    else if (argument === "--voice") options.voice = argv[++index];
     else if (argument === "--timeout") {
       options.timeoutMs = Number(argv[++index]);
     } else if (argument === "--help" || argument === "-h") {
@@ -60,6 +66,7 @@ function parseArguments(argv) {
           "  --fixture PATH Deterministic PDF timing fixture.",
           "  --output DIR   Write transient evidence here.",
           "  --record       Write docs/evidence/issue-60/offline-natural-timing.json.",
+          "  --voice ID     Select an exact Offline-natural voice before playback.",
           "  --timeout MS   Per-rate transition timeout (default: 180000).",
           "",
         ].join("\n"),
@@ -77,6 +84,9 @@ function parseArguments(argv) {
   }
   if (!Number.isFinite(options.timeoutMs) || options.timeoutMs <= 0) {
     throw new Error("--timeout must be a positive number of milliseconds.");
+  }
+  if (options.voice !== null && !String(options.voice).trim()) {
+    throw new Error("--voice must be a non-empty voice ID.");
   }
   if (options.record) options.outputDirectory = RECORDED_EVIDENCE_DIRECTORY;
   options.cdpUrl = options.cdpUrl.replace(/\/$/u, "");
@@ -313,7 +323,7 @@ async function configurePage(cdp, appUrl) {
   return consoleEntries;
 }
 
-async function verifyOfflinePack(cdp) {
+async function verifyOfflinePack(cdp, requestedVoice) {
   const state = await waitForExpression(
     cdp,
     `(() => {
@@ -335,22 +345,56 @@ async function verifyOfflinePack(cdp) {
       "The attached Brave profile does not contain the ready offline voice pack.",
     );
   }
-  const label = await evaluate(
+  if (requestedVoice) {
+    const changed = await evaluate(
+      cdp,
+      `(() => {
+        const select = document.querySelector(".offline-voice-settings select");
+        if (!select || !Array.from(select.options).some((option) => option.value === ${JSON.stringify(requestedVoice)})) {
+          return false;
+        }
+        const setter = Object.getOwnPropertyDescriptor(
+          HTMLSelectElement.prototype,
+          "value"
+        ).set;
+        setter.call(select, ${JSON.stringify(requestedVoice)});
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+        return true;
+      })()`,
+    );
+    if (!changed) {
+      throw new Error(`Offline voice ${requestedVoice} is not available.`);
+    }
+    await waitForExpression(
+      cdp,
+      `document.querySelector(".offline-voice-settings select")?.value === ${JSON.stringify(requestedVoice)}`,
+      `Offline voice ${requestedVoice}`,
+    );
+  }
+  const pack = await evaluate(
     cdp,
-    `document.querySelector(".offline-pack-ready")?.innerText ?? ""`,
+    `({
+      label: document.querySelector(".offline-pack-ready")?.innerText ?? "",
+      voice: document.querySelector(".offline-voice-settings select")?.value ?? ""
+    })`,
   );
   await evaluate(
     cdp,
-    `document.querySelector(".settings-layer .modal-close")?.click(); true`,
+    `document.querySelector(${JSON.stringify(OFFLINE_TIMING_SETTINGS_CLOSE_SELECTOR)})?.click(); true`,
   );
-  return label;
+  return pack;
 }
 
 async function importFixture(cdp, fixture) {
   await waitForExpression(
     cdp,
+    `!document.querySelector(".settings-layer")`,
+    "the reading settings panel to close",
+  );
+  await waitForExpression(
+    cdp,
     `(() => {
-      const input = document.querySelector('input[type="file"]');
+      const input = document.querySelector(${JSON.stringify(OFFLINE_TIMING_BOOK_INPUT_SELECTOR)});
       if (input) return true;
       document.querySelector(".import-button")?.click();
       return false;
@@ -360,7 +404,7 @@ async function importFixture(cdp, fixture) {
   const documentNode = await cdp.send("DOM.getDocument", { depth: -1 });
   const fileInput = await cdp.send("DOM.querySelector", {
     nodeId: documentNode.root.nodeId,
-    selector: 'input[type="file"]',
+    selector: OFFLINE_TIMING_BOOK_INPUT_SELECTOR,
   });
   if (!fileInput.nodeId) throw new Error("The import file input was not found.");
   await cdp.send("DOM.setFileInputFiles", {
@@ -673,6 +717,8 @@ async function sha256File(file) {
 async function sourceEvidence(fixture) {
   const files = [
     "app/page.tsx",
+    "app/offline-model-manifest.mjs",
+    "app/offline-speech-config.ts",
     "app/offline-speech.ts",
     "app/offline-speech.worker.ts",
     "app/offline-speech-utils.mjs",
@@ -706,6 +752,9 @@ export function validateOfflineNaturalTimingEvidence(evidence) {
   if (evidence?.issue !== 60) failures.push("issue must be 60");
   if (!evidence?.source?.commit) failures.push("source.commit is required");
   if (!evidence?.fixture?.sha256) failures.push("fixture.sha256 is required");
+  if (!evidence?.precondition?.offlineVoice) {
+    failures.push("precondition.offlineVoice is required");
+  }
   if (evidence?.rates?.length !== TEST_RATES.length) {
     failures.push(`rates must contain ${TEST_RATES.length} runs`);
   }
@@ -751,7 +800,7 @@ async function run(options) {
   try {
     cdp = await CdpSession.connect(target.webSocketDebuggerUrl);
     const consoleEntries = await configurePage(cdp, options.appUrl);
-    const packLabel = await verifyOfflinePack(cdp);
+    const pack = await verifyOfflinePack(cdp, options.voice);
     await importFixture(cdp, options.fixture);
 
     const browserVersion = await fetch(`${options.cdpUrl}/json/version`).then(
@@ -799,7 +848,8 @@ async function run(options) {
       },
       precondition: {
         profile: "disposable copy of a local Brave profile",
-        offlinePack: packLabel,
+        offlinePack: pack.label,
+        offlineVoice: pack.voice,
       },
       environment: {
         appUrl: options.appUrl,
