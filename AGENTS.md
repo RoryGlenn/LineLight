@@ -2,6 +2,12 @@
 
 This guidance applies to the entire repository.
 
+Project-specific reusable workflow guidance lives in
+[`$ship-linelight-change`](.agents/skills/ship-linelight-change/SKILL.md), and
+the read-only cross-runtime investigator is defined in
+[`linelight_investigator`](.codex/agents/linelight-investigator.toml).
+Files under `app/` also follow [`app/AGENTS.md`](app/AGENTS.md).
+
 Before changing code, read the relevant parts of
 [`docs/codebase-index.md`](docs/codebase-index.md), the product and local setup
 notes in [`README.md`](README.md), and the pull-request workflow in
