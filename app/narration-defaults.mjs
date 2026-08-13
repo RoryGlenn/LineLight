@@ -1,7 +1,12 @@
 export const DEFAULT_NARRATION_ENGINE = "offline";
 export const NARRATION_PREFERENCE_VERSION = 1;
 
-const NARRATION_ENGINES = new Set(["device", "offline", "azure"]);
+const NARRATION_ENGINES = new Set([
+  "device",
+  "offline",
+  "azure",
+  "audiobook",
+]);
 
 /**
  * Restores a saved narration choice while migrating the former browser-voice

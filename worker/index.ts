@@ -7,6 +7,10 @@ import {
 } from "./speech-token";
 import { OFFLINE_MODEL_ROUTE_BASE } from "../app/offline-model-manifest.mjs";
 import { handleOfflineModelRequest } from "./offline-model.mjs";
+import { AUDIOBOOK_ALIGNMENT_MODEL_ROUTE_BASE } from
+  "../app/audiobook-alignment-model.mjs";
+import { handleAudiobookAlignmentModelRequest } from
+  "./alignment-model.mjs";
 
 interface Env extends SpeechEnvironment {
   ASSETS: Fetcher;
@@ -77,6 +81,10 @@ const worker = {
 
     if (url.pathname.startsWith(OFFLINE_MODEL_ROUTE_BASE)) {
       return handleOfflineModelRequest(request);
+    }
+
+    if (url.pathname.startsWith(AUDIOBOOK_ALIGNMENT_MODEL_ROUTE_BASE)) {
+      return handleAudiobookAlignmentModelRequest(request);
     }
 
     if (url.pathname === RUNTIME_ASSET_MANIFEST_PATH) {

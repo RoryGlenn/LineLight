@@ -62,6 +62,8 @@ import {
   type AzureSpeechResult,
 } from "./azure-speech";
 import {
+  OFFLINE_MODEL_DTYPE,
+  OFFLINE_MODEL_REVISION,
   OFFLINE_PACK_BYTES,
   OFFLINE_VOICES,
   type OfflineVoiceId,
@@ -104,6 +106,50 @@ import {
 } from "./narration-defaults.mjs";
 import { normalizeNarrationReadiness } from "./narration-readiness.mjs";
 import {
+  PREPARED_NARRATION_AUDIO_MIME_TYPE,
+  PREPARED_NARRATION_BOOK_RETENTION,
+  PREPARED_NARRATION_CHUNK_CHARACTERS,
+  PREPARED_NARRATION_IDENTITY_ENCODING,
+  PREPARED_NARRATION_RECENT_RETENTION,
+  PREPARED_NARRATION_SCHEMA_VERSION,
+  createPreparedNarrationManifest,
+  createPreparedNarrationProfileKey,
+  decodePreparedNarrationAudio,
+  encodePreparedNarrationAudio,
+  estimatePreparedNarrationStorage,
+  fingerprintPreparedNarrationText,
+} from "./prepared-narration.mjs";
+import {
+  exportPreparedNarration,
+  isPreparedNarrationExportManifest,
+  matchesPreparedNarrationExport,
+  matchesPreparedNarrationExportAudioParts,
+} from "./prepared-narration-export.mjs";
+import {
+  AUDIOBOOK_ALIGNMENT_MODEL_ESTIMATED_BYTES,
+  AUDIOBOOK_ALIGNMENT_MODEL_REVISION,
+  AUDIOBOOK_ALIGNMENT_SCHEMA_VERSION,
+  AUDIOBOOK_ALIGNMENT_MAX_PART_BYTES,
+  AUDIOBOOK_ALIGNMENT_MAX_PART_SECONDS,
+  alignAudiobookTranscriptSegments,
+  buildAudiobookAlignmentWindows,
+  classifyAudiobookFile,
+  createAudiobookManifest,
+  resampleAudiobookWindow,
+  sortAudiobookFiles,
+  updateAudiobookAlignmentManifest,
+} from "./audiobook-alignment.mjs";
+import {
+  disposeAudiobookTranscriber,
+  prepareAudiobookTranscriber,
+  transcribeAudiobookWindow,
+} from "./audiobook-transcriber";
+import {
+  findTimedMediaAnchorAtTime,
+  findTimedMediaPositionForToken,
+  normalizeTimedMediaAnchors,
+} from "./timed-media.mjs";
+import {
   PODCAST_HOST_PRESET,
   applyNarratorPreset,
   isNarratorPresetActive,
@@ -111,23 +157,38 @@ import {
 import {
   DEFAULT_READER_LAYOUT,
   createReaderLayoutStyle,
+  deriveReadingRulerGeometry,
   normalizeReaderLayout,
   selectFocusWindowTokens,
 } from "./reader-layout.mjs";
 import {
   addReaderDocument,
+  attachReaderAudiobook,
   calculateLibraryProgress,
+  commitReaderAudiobookTranscriptWindow,
+  commitReaderPreparedNarrationChunk,
   countDocumentWords,
   filterLibraryEntries,
   getReaderNavigation,
+  getReaderAudiobookSource,
   getReaderDocument,
   getReaderPdfSource,
+  getReaderPreparedNarrationChunk,
+  listReaderPreparedNarrationChunkMetadata,
+  listReaderPreparedNarrationManifests,
+  listReaderAudiobookManifests,
+  listReaderAudiobookTranscriptWindows,
   loadReaderLibrary,
   openReaderDocument,
   openReaderDocumentMetadata,
   removeReaderDocument,
+  removeReaderAudiobook,
+  removeReaderPreparedNarration,
   renameReaderDocument,
   saveReaderNavigation,
+  saveReaderAudiobookManifest,
+  saveReaderPreparedNarrationChunk,
+  saveReaderPreparedNarrationManifest,
   sortLibraryEntries,
 } from "./reader-library.mjs";
 import {
@@ -150,7 +211,7 @@ type ReadingFont = "serif" | "sans" | "system";
 type ReaderViewMode = "focus" | "page";
 type SidebarView = "library" | "contents";
 type FocusLineCount = 0 | 1 | 3 | 5;
-type NarrationEngine = "device" | "offline" | "azure";
+type NarrationEngine = "device" | "offline" | "azure" | "audiobook";
 type OfflinePackState =
   | "checking"
   | "missing"
@@ -165,6 +226,172 @@ type OfflineRuntimeInfo = {
   reusedAudio: boolean;
   synthesisMilliseconds: number;
   wasmThreads: number | null;
+};
+
+type PreparedNarrationManifest = {
+  schemaVersion: number;
+  kind: "offline-prepared-narration";
+  documentId: string;
+  documentFingerprint: string;
+  profileKey: string;
+  modelRevision: string;
+  modelDtype: "fp16" | "q8";
+  voice: OfflineVoiceId;
+  rate: number;
+  chunkCharacters: number;
+  totalTokens: number;
+  nextIndex: number;
+  completedChunks: number;
+  storedBytes: number;
+  status: "preparing" | "paused" | "ready" | "error";
+  error: string | null;
+  createdAt: number;
+  updatedAt: number;
+};
+
+type PreparedNarrationChunkMetadata = {
+  documentId: string;
+  profileKey: string;
+  startIndex: number;
+  nextIndex: number;
+  textFingerprint: string;
+  sourceAudioByteLength: number;
+  audioDurationSeconds: number;
+  boundaries: Array<{
+    audioOffsetSeconds: number;
+    durationSeconds: number;
+    text: string;
+    textOffset: number;
+    wordLength: number;
+    tokenIndex: number;
+  }>;
+};
+
+type PreparedNarrationJobState =
+  | "idle"
+  | "preparing"
+  | "pausing"
+  | "removing"
+  | "error";
+
+type PreparedNarrationExportManifest = {
+  schemaVersion: number;
+  exportSchemaVersion: number;
+  kind: "prepared-narration-export";
+  documentId: string;
+  documentFingerprint: string;
+  title: string;
+  author: string;
+  totalTokens: number;
+  modelRevision: string;
+  modelDtype: "fp16" | "q8";
+  voice: string;
+  rate: number;
+  profileKey: string;
+  parts: Array<{
+    partIndex: number;
+    filename: string;
+    mimeType: string;
+    durationSeconds: number;
+    startIndex: number;
+    nextIndex: number;
+  }>;
+  anchors: Array<{
+    id: string;
+    partIndex: number;
+    timeSeconds: number;
+    tokenIndex: number;
+    confidence: number;
+    source: "prepared";
+    granularity: "word";
+  }>;
+  createdAt: number;
+};
+
+type LocalWritableFile = {
+  write: (data: Blob) => Promise<void>;
+  close: () => Promise<void>;
+};
+
+type LocalFileHandle = {
+  createWritable: () => Promise<LocalWritableFile>;
+};
+
+type LocalDirectoryHandle = {
+  getFileHandle: (
+    name: string,
+    options: { create: boolean },
+  ) => Promise<LocalFileHandle>;
+};
+
+type TimedMediaAnchor = {
+  id: string;
+  partIndex: number;
+  timeSeconds: number;
+  tokenIndex: number;
+  confidence: number;
+  source: "automatic" | "manual" | "imported" | "prepared";
+  granularity: "phrase" | "sentence" | "word";
+};
+
+type AudiobookManifest = {
+  schemaVersion: number;
+  audiobookSchemaVersion: number;
+  kind: "audiobook-alignment";
+  documentId: string;
+  documentFingerprint: string;
+  title: string;
+  author: string;
+  totalTokens: number;
+  audioId: string;
+  modelId: string;
+  modelRevision: string;
+  parts: Array<{
+    partIndex: number;
+    filename: string;
+    mimeType: string;
+    durationSeconds: number;
+    sourceByteLength: number;
+    startIndex: number;
+    nextIndex: number;
+  }>;
+  anchors: TimedMediaAnchor[];
+  status: "attached" | "aligning" | "paused" | "ready" | "error";
+  nextPartIndex: number;
+  nextWindowIndex: number;
+  processedWindows: number;
+  totalWindows: number;
+  alignmentConfidence: number;
+  mismatchLikely: boolean;
+  error: string | null;
+  createdAt: number;
+  updatedAt: number;
+};
+
+type AudiobookTranscriptWindow = {
+  schemaVersion: number;
+  documentId: string;
+  audioId: string;
+  partIndex: number;
+  windowIndex: number;
+  startSeconds: number;
+  endSeconds: number;
+  text: string;
+  segments: Array<{
+    startSeconds: number;
+    endSeconds: number;
+    text: string;
+  }>;
+  modelRevision: string;
+  createdAt: number;
+};
+
+type AudiobookPlaybackState = {
+  audio: HTMLAudioElement;
+  audioId: string;
+  manifest: AudiobookManifest;
+  partIndex: number;
+  sessionId: number;
 };
 
 type OfflineAudioCache = {
@@ -402,6 +629,43 @@ const OFFLINE_AUDIO_CACHE_ENTRIES = 6;
 const OFFLINE_PACK_SIZE_LABEL =
   `${Math.round(OFFLINE_PACK_BYTES / 1_000_000)} MB`;
 
+function formatStorageBytes(bytes: number) {
+  if (bytes < 1_000_000) return `${Math.max(1, Math.round(bytes / 1_000))} KB`;
+  return `${(bytes / 1_000_000).toFixed(bytes < 10_000_000 ? 1 : 0)} MB`;
+}
+
+function readLocalAudioDuration(file: File) {
+  return new Promise<number>((resolve, reject) => {
+    const audio = new Audio();
+    const url = URL.createObjectURL(file);
+    const cleanup = () => {
+      audio.removeAttribute("src");
+      audio.load();
+      URL.revokeObjectURL(url);
+    };
+    audio.preload = "metadata";
+    audio.onloadedmetadata = () => {
+      const duration = audio.duration;
+      cleanup();
+      if (!Number.isFinite(duration) || duration <= 0) {
+        reject(new Error(`${file.name} has no readable audio duration.`));
+        return;
+      }
+      resolve(duration);
+    };
+    audio.onerror = () => {
+      cleanup();
+      reject(
+        new Error(
+          `${file.name} could not be decoded by this browser. Convert it to DRM-free MP3, M4A, or WAV.`,
+        ),
+      );
+    };
+    audio.src = url;
+    audio.load();
+  });
+}
+
 function findWordAtCharacter(tokens: WordToken[], character: number) {
   let low = 0;
   let high = tokens.length - 1;
@@ -586,6 +850,41 @@ export default function Home() {
   const [offlineUpgradeRequired, setOfflineUpgradeRequired] = useState(false);
   const [offlineRuntimeInfo, setOfflineRuntimeInfo] =
     useState<OfflineRuntimeInfo | null>(null);
+  const [documentFingerprint, setDocumentFingerprint] = useState<string | null>(
+    null,
+  );
+  const [preparedNarrationManifest, setPreparedNarrationManifest] =
+    useState<PreparedNarrationManifest | null>(null);
+  const [preparedNarrationMetadata, setPreparedNarrationMetadata] = useState<
+    PreparedNarrationChunkMetadata[]
+  >([]);
+  const [preparedNarrationProfileCount, setPreparedNarrationProfileCount] =
+    useState(0);
+  const [preparedNarrationJobState, setPreparedNarrationJobState] =
+    useState<PreparedNarrationJobState>("idle");
+  const [preparedNarrationMessage, setPreparedNarrationMessage] = useState("");
+  const [preparedExportState, setPreparedExportState] = useState<
+    "idle" | "exporting" | "error"
+  >("idle");
+  const [preparedExportProgress, setPreparedExportProgress] = useState(0);
+  const [preparedExportMessage, setPreparedExportMessage] = useState("");
+  const [validatedTimingManifest, setValidatedTimingManifest] =
+    useState<PreparedNarrationExportManifest | null>(null);
+  const [audiobookManifest, setAudiobookManifest] =
+    useState<AudiobookManifest | null>(null);
+  const [audiobookProfileCount, setAudiobookProfileCount] = useState(0);
+  const [audiobookJobState, setAudiobookJobState] = useState<
+    "idle" | "attaching" | "aligning" | "pausing" | "removing" | "error"
+  >("idle");
+  const [audiobookProgress, setAudiobookProgress] = useState(0);
+  const [audiobookMessage, setAudiobookMessage] = useState("");
+  const [audiobookPlaybackPosition, setAudiobookPlaybackPosition] = useState({
+    partIndex: 0,
+    timeSeconds: 0,
+    durationSeconds: 0,
+  });
+  const [audiobookPlaybackActive, setAudiobookPlaybackActive] =
+    useState(false);
   const [runtimeAssetStorageBytes, setRuntimeAssetStorageBytes] = useState<
     number | null
   >(null);
@@ -708,10 +1007,31 @@ export default function Home() {
         : null;
   const remainingSeconds =
     ((model.tokens.length - activeWord) / (180 * settings.rate)) * 60;
+  const preparedNarrationProgress = preparedNarrationManifest
+    ? Math.round(
+        (preparedNarrationManifest.nextIndex /
+          preparedNarrationManifest.totalTokens) *
+          100,
+      )
+    : 0;
+  const preparedNarrationEstimate = estimatePreparedNarrationStorage({
+    remainingTokens:
+      model.tokens.length - (preparedNarrationManifest?.nextIndex ?? 0),
+    rate: settings.rate,
+  });
+  const canPrepareCurrentDocument =
+    readerDocument.kind !== "demo" &&
+    model.tokens.length > 0 &&
+    (readerDocument.kind !== "pdf" ||
+      readerDocument.pdfImportStatus === "ready");
 
   const readerRef = useRef<HTMLDivElement>(null);
   const wordRefs = useRef<Map<number, HTMLSpanElement>>(new Map());
+  const readingRulerRef = useRef<HTMLDivElement>(null);
+  const readingRulerFrameRef = useRef<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const timingManifestInputRef = useRef<HTMLInputElement>(null);
+  const audiobookInputRef = useRef<HTMLInputElement>(null);
   const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
   const speechOffsetRef = useRef(0);
   const boundarySeenRef = useRef(false);
@@ -728,6 +1048,12 @@ export default function Home() {
   const speechSessionRef = useRef(0);
   const automaticOfflineInstallAttemptedRef = useRef(false);
   const offlineInstallAbortRef = useRef<AbortController | null>(null);
+  const preparedNarrationAbortRef = useRef<AbortController | null>(null);
+  const preparedNarrationJobPromiseRef = useRef<Promise<void> | null>(null);
+  const preparedExportAbortRef = useRef<AbortController | null>(null);
+  const audiobookAlignmentAbortRef = useRef<AbortController | null>(null);
+  const audiobookAlignmentJobPromiseRef = useRef<Promise<void> | null>(null);
+  const audiobookPlaybackRef = useRef<AudiobookPlaybackState | null>(null);
   const pendingOfflineStartIndexRef = useRef<number | null>(null);
   const offlineWarmRestoreAbortRef = useRef<AbortController | null>(null);
   const offlineWarmRestoreIdleRef = useRef<number | null>(null);
@@ -752,6 +1078,48 @@ export default function Home() {
     useRef<PendingPdfProgressRestore | null>(null);
   const pdfTargetScrollGenerationRef = useRef(0);
   const readerLifecycleGenerationRef = useRef(0);
+
+  const positionReadingRuler = useCallback(() => {
+    const ruler = readingRulerRef.current;
+    if (!ruler) return;
+    const reader = readerRef.current;
+    const workspace = ruler.parentElement;
+    const activeElement = wordRefs.current.get(activeWordRef.current);
+    if (!reader || !workspace || !activeElement?.isConnected) {
+      ruler.dataset.visible = "false";
+      return;
+    }
+
+    const surface =
+      activeElement.closest<HTMLElement>(".reading-copy, .pdf-page") ?? reader;
+    const computedLineHeight = Number.parseFloat(
+      window.getComputedStyle(activeElement).lineHeight,
+    );
+    const geometry = deriveReadingRulerGeometry({
+      activeRect: activeElement.getBoundingClientRect(),
+      workspaceRect: workspace.getBoundingClientRect(),
+      viewportRect: reader.getBoundingClientRect(),
+      surfaceRect: surface.getBoundingClientRect(),
+      lineHeight: computedLineHeight,
+    });
+    if (!geometry) {
+      ruler.dataset.visible = "false";
+      return;
+    }
+
+    ruler.style.setProperty("--reading-ruler-left", `${geometry.left}px`);
+    ruler.style.setProperty("--reading-ruler-top", `${geometry.top}px`);
+    ruler.style.setProperty("--reading-ruler-width", `${geometry.width}px`);
+    ruler.dataset.visible = "true";
+  }, []);
+
+  const scheduleReadingRulerPosition = useCallback(() => {
+    if (readingRulerFrameRef.current !== null) return;
+    readingRulerFrameRef.current = window.requestAnimationFrame(() => {
+      readingRulerFrameRef.current = null;
+      positionReadingRuler();
+    });
+  }, [positionReadingRuler]);
 
   const acceptVisiblePdfPosition = useCallback(() => {
     const runtime = activePdfRuntimeRef.current;
@@ -1255,7 +1623,8 @@ export default function Home() {
       current.id = "active-spoken-word";
     }
     renderedActiveWordRef.current = activeWord;
-  }, [activeWord, readerDocument.id, viewMode]);
+    positionReadingRuler();
+  }, [activeWord, positionReadingRuler, readerDocument.id, viewMode]);
 
   useEffect(() => {
     const container = readerRef.current;
@@ -1325,14 +1694,62 @@ export default function Home() {
     viewMode,
   ]);
 
+  useLayoutEffect(() => {
+    if (!settings.ruler) return;
+    positionReadingRuler();
+  }, [
+    activeWord,
+    positionReadingRuler,
+    readerDocument.id,
+    readerLayoutRevision,
+    settings.font,
+    settings.fontSize,
+    settings.letterSpacing,
+    settings.lineHeight,
+    settings.maxLineWidth,
+    settings.paragraphSpacing,
+    settings.ruler,
+    settings.wordSpacing,
+    viewMode,
+  ]);
+
+  useEffect(() => {
+    if (!settings.ruler) return;
+    const reader = readerRef.current;
+    if (!reader) return;
+    const observer =
+      typeof ResizeObserver === "undefined"
+        ? null
+        : new ResizeObserver(scheduleReadingRulerPosition);
+    observer?.observe(reader);
+    reader.addEventListener("scroll", scheduleReadingRulerPosition, {
+      passive: true,
+    });
+    window.addEventListener("resize", scheduleReadingRulerPosition);
+    scheduleReadingRulerPosition();
+
+    return () => {
+      observer?.disconnect();
+      reader.removeEventListener("scroll", scheduleReadingRulerPosition);
+      window.removeEventListener("resize", scheduleReadingRulerPosition);
+      if (readingRulerFrameRef.current !== null) {
+        window.cancelAnimationFrame(readingRulerFrameRef.current);
+        readingRulerFrameRef.current = null;
+      }
+    };
+  }, [scheduleReadingRulerPosition, settings.ruler]);
+
   useEffect(() => {
     let cancelled = false;
+    preparedExportAbortRef.current?.abort();
     bookmarksRef.current = [];
     positionHistoryRef.current = [];
 
     const loadNavigation = async () => {
       await Promise.resolve();
       if (cancelled) return;
+      setValidatedTimingManifest(null);
+      setPreparedExportMessage("");
       setNavigationReady(false);
       setBookmarks([]);
       setPositionHistory([]);
@@ -1363,8 +1780,205 @@ export default function Home() {
 
     return () => {
       cancelled = true;
+      preparedNarrationAbortRef.current?.abort();
     };
   }, [readerDocument.id]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const canPrepare =
+      readerDocument.kind !== "demo" &&
+      model.tokens.length > 0 &&
+      (readerDocument.kind !== "pdf" ||
+        readerDocument.pdfImportStatus === "ready");
+    if (!canPrepare) {
+      queueMicrotask(() => {
+        if (cancelled) return;
+        setDocumentFingerprint(null);
+        setPreparedNarrationManifest(null);
+        setPreparedNarrationMetadata([]);
+        setPreparedNarrationProfileCount(0);
+        setPreparedNarrationMessage("");
+      });
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    const loadPreparedNarration = async () => {
+      try {
+        const fingerprint = await fingerprintPreparedNarrationText(
+          model.fullText,
+        );
+        if (cancelled) return;
+        setDocumentFingerprint(fingerprint);
+        const manifests = (await listReaderPreparedNarrationManifests(
+          readerDocument.id,
+        )) as PreparedNarrationManifest[];
+        if (cancelled) return;
+
+        const compatible = manifests.filter(
+          (manifest) =>
+            manifest.documentFingerprint === fingerprint &&
+            manifest.totalTokens === model.tokens.length &&
+            manifest.modelRevision === OFFLINE_MODEL_REVISION,
+        );
+        setPreparedNarrationProfileCount(compatible.length);
+        for (const incompatible of manifests.filter(
+          (manifest) =>
+            manifest.documentFingerprint !== fingerprint ||
+            manifest.totalTokens !== model.tokens.length ||
+            manifest.modelRevision !== OFFLINE_MODEL_REVISION,
+        )) {
+          void removeReaderPreparedNarration(
+            readerDocument.id,
+            incompatible.profileKey,
+          ).catch(() => undefined);
+        }
+
+        const currentDtype = getOfflineSpeechReadiness().modelDtype;
+        const selected = compatible
+          .filter(
+            (manifest) =>
+              manifest.voice === settings.offlineVoice &&
+              manifest.rate === settings.rate,
+          )
+          .sort(
+            (left, right) =>
+              Number(right.modelDtype === currentDtype) -
+                Number(left.modelDtype === currentDtype) ||
+              Number(right.status === "ready") -
+                Number(left.status === "ready") ||
+              right.updatedAt - left.updatedAt,
+        )[0] ?? null;
+        if (cancelled) return;
+        if (!selected) {
+          setPreparedNarrationManifest(null);
+          setPreparedNarrationMetadata([]);
+          setPreparedNarrationMessage("");
+          return;
+        }
+        const metadata = (await listReaderPreparedNarrationChunkMetadata(
+          readerDocument.id,
+          selected.profileKey,
+        )) as PreparedNarrationChunkMetadata[];
+        if (cancelled) return;
+        setPreparedNarrationManifest(selected);
+        setPreparedNarrationMetadata(metadata);
+        setPreparedNarrationMessage(
+          selected.status === "ready"
+            ? `${metadata.length} offline chunks are ready after reload.`
+            : `Prepared through word ${selected.nextIndex.toLocaleString()} of ${selected.totalTokens.toLocaleString()}.`,
+        );
+      } catch {
+        if (!cancelled) {
+          setDocumentFingerprint(null);
+          setPreparedNarrationManifest(null);
+          setPreparedNarrationMetadata([]);
+          setPreparedNarrationProfileCount(0);
+          setPreparedNarrationMessage(
+            "Prepared narration storage is unavailable in this browser.",
+          );
+        }
+      }
+    };
+    void loadPreparedNarration();
+
+    return () => {
+      cancelled = true;
+      preparedNarrationAbortRef.current?.abort();
+    };
+  }, [
+    model.fullText,
+    model.tokens.length,
+    readerDocument.id,
+    readerDocument.kind,
+    readerDocument.pdfImportStatus,
+    settings.offlineVoice,
+    settings.rate,
+  ]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!documentFingerprint || readerDocument.kind === "demo") {
+      queueMicrotask(() => {
+        if (cancelled) return;
+        setAudiobookManifest(null);
+        setAudiobookProfileCount(0);
+        setAudiobookMessage("");
+      });
+      return () => {
+        cancelled = true;
+      };
+    }
+    const loadAudiobooks = async () => {
+      try {
+        const manifests = (await listReaderAudiobookManifests(
+          readerDocument.id,
+        )) as AudiobookManifest[];
+        if (cancelled) return;
+        const compatible = manifests.filter(
+          (manifest) =>
+            manifest.documentFingerprint === documentFingerprint &&
+            manifest.totalTokens === model.tokens.length,
+        );
+        setAudiobookProfileCount(compatible.length);
+        for (const incompatible of manifests.filter(
+          (manifest) =>
+            manifest.documentFingerprint !== documentFingerprint ||
+            manifest.totalTokens !== model.tokens.length,
+        )) {
+          void removeReaderAudiobook(
+            readerDocument.id,
+            incompatible.audioId,
+          ).catch(() => undefined);
+        }
+        const selected = compatible[0] ?? null;
+        setAudiobookManifest(selected);
+        if (selected) {
+          setAudiobookProgress(
+            selected.totalWindows
+              ? Math.round(
+                  (selected.processedWindows / selected.totalWindows) * 100,
+                )
+              : selected.status === "ready"
+                ? 100
+                : 0,
+          );
+          setAudiobookMessage(
+            selected.status === "ready"
+              ? selected.mismatchLikely
+                ? "Alignment finished, but this may be a different edition. Weak regions remain unsynced."
+                : `Audiobook sync is ready with ${Math.round(
+                    selected.alignmentConfidence * 100,
+                  )}% high-confidence phrase coverage.`
+              : `Audiobook attached. ${selected.processedWindows} of ${selected.totalWindows} alignment windows are stored.`,
+          );
+        } else {
+          setAudiobookProgress(0);
+          setAudiobookMessage("");
+        }
+      } catch {
+        if (!cancelled) {
+          setAudiobookManifest(null);
+          setAudiobookProfileCount(0);
+          setAudiobookMessage(
+            "Local audiobook storage is unavailable in this browser.",
+          );
+        }
+      }
+    };
+    void loadAudiobooks();
+    return () => {
+      cancelled = true;
+      audiobookAlignmentAbortRef.current?.abort();
+    };
+  }, [
+    documentFingerprint,
+    model.tokens.length,
+    readerDocument.id,
+    readerDocument.kind,
+  ]);
 
   useEffect(() => {
     let restoreTimer: number | undefined;
@@ -1681,6 +2295,8 @@ export default function Home() {
     }
     bufferedAudioRef.current = null;
     bufferedSeekStateRef.current = null;
+    audiobookPlaybackRef.current = null;
+    setAudiobookPlaybackActive(false);
   }, [releaseBufferedAudio, releaseNarrationAudioPrime]);
 
   const cancelOfflineWarmRestore = useCallback(
@@ -2012,6 +2628,1099 @@ export default function Home() {
     }
   }, [stopSpeech]);
 
+  const prepareWholeBookNarration = useCallback(() => {
+    if (preparedNarrationJobPromiseRef.current) return;
+    const run = async () => {
+      if (
+        readerDocument.kind === "demo" ||
+        !model.tokens.length ||
+        (readerDocument.kind === "pdf" &&
+          readerDocument.pdfImportStatus !== "ready")
+      ) {
+        setPreparedNarrationMessage(
+          "Wait for the imported book to finish loading before preparing it.",
+        );
+        return;
+      }
+      if (!documentFingerprint) {
+        setPreparedNarrationMessage(
+          "LineLight is still checking this book. Try again in a moment.",
+        );
+        return;
+      }
+      if (offlinePackState !== "ready") {
+        setPreparedNarrationMessage(
+          "Prepare the included offline voices first, then prepare this book.",
+        );
+        void downloadOfflineVoice(false);
+        return;
+      }
+
+      stopSpeech();
+      cancelOfflineWarmRestore({ abortActive: false });
+      const abortController = new AbortController();
+      preparedNarrationAbortRef.current = abortController;
+      setPreparedNarrationJobState("preparing");
+      setPreparedNarrationMessage("Loading the selected offline voice…");
+
+      let currentManifest: PreparedNarrationManifest | null = null;
+      try {
+        const runtime = await initializeOfflineSpeech({
+          voice: settings.offlineVoice,
+          signal: abortController.signal,
+          warm: false,
+          onProgress: ({ label }) => setPreparedNarrationMessage(label),
+        });
+        const modelDtype = runtime.modelDtype;
+        if (modelDtype !== "fp16" && modelDtype !== "q8") {
+          throw new OfflineSpeechError(
+            "The active offline model cannot create a durable voice profile.",
+          );
+        }
+        const profileKey = createPreparedNarrationProfileKey({
+          modelRevision: OFFLINE_MODEL_REVISION,
+          modelDtype,
+          voice: settings.offlineVoice,
+          rate: settings.rate,
+        });
+        const manifests = (await listReaderPreparedNarrationManifests(
+          readerDocument.id,
+        )) as PreparedNarrationManifest[];
+        currentManifest = manifests.find(
+          (manifest) =>
+            manifest.profileKey === profileKey &&
+            manifest.documentFingerprint === documentFingerprint &&
+            manifest.totalTokens === model.tokens.length,
+        ) ?? null;
+        const manifestWasNew = currentManifest === null;
+        if (currentManifest?.status === "ready") {
+          setPreparedNarrationManifest(currentManifest);
+          setPreparedNarrationJobState("idle");
+          setPreparedNarrationMessage("This exact voice and pace are ready offline.");
+          return;
+        }
+        currentManifest = (currentManifest ??
+          createPreparedNarrationManifest({
+            documentId: readerDocument.id,
+            documentFingerprint,
+            profileKey,
+            modelRevision: OFFLINE_MODEL_REVISION,
+            modelDtype,
+            voice: settings.offlineVoice,
+            rate: settings.rate,
+            totalTokens: model.tokens.length,
+          })) as PreparedNarrationManifest;
+
+        const storage = estimatePreparedNarrationStorage({
+          remainingTokens: model.tokens.length - currentManifest.nextIndex,
+          rate: settings.rate,
+        });
+        const storageEstimate = await navigator.storage?.estimate?.();
+        if (
+          Number.isFinite(storageEstimate?.quota) &&
+          Number.isFinite(storageEstimate?.usage) &&
+          storage.estimatedBytes >
+            (storageEstimate!.quota! - storageEstimate!.usage!) * 0.9
+        ) {
+          throw new DOMException(
+            `This voice needs about ${formatStorageBytes(storage.estimatedBytes)} more site storage. Free browser storage and resume.`,
+            "QuotaExceededError",
+          );
+        }
+        await navigator.storage?.persist?.().catch(() => false);
+        currentManifest = {
+          ...currentManifest,
+          status: "preparing",
+          error: null,
+          updatedAt: Date.now(),
+        };
+        if (!(await saveReaderPreparedNarrationManifest(currentManifest))) {
+          throw new Error("This book is no longer in the private library.");
+        }
+        if (manifestWasNew) {
+          setPreparedNarrationProfileCount((current) => current + 1);
+        }
+        setPreparedNarrationManifest(currentManifest);
+        setPreparedNarrationMessage(
+          `Estimated remaining storage: ${formatStorageBytes(storage.estimatedBytes)}.`,
+        );
+
+        while (currentManifest.nextIndex < model.tokens.length) {
+          if (abortController.signal.aborted) {
+            throw new DOMException("Preparation paused.", "AbortError");
+          }
+          const chunk = buildSpeechChunk(
+            model.fullText,
+            model.tokens,
+            currentManifest.nextIndex,
+            PREPARED_NARRATION_CHUNK_CHARACTERS,
+          );
+          if (!chunk) break;
+          setPreparedNarrationMessage(
+            `Generating word ${chunk.startIndex.toLocaleString()} of ${model.tokens.length.toLocaleString()}…`,
+          );
+          const generated = await synthesizeOfflineSpeech({
+            text: chunk.text,
+            voice: settings.offlineVoice,
+            rate: settings.rate,
+            signal: abortController.signal,
+            onProgress: ({ label }) => setPreparedNarrationMessage(label),
+          });
+          if (generated.modelDtype !== currentManifest.modelDtype) {
+            throw new OfflineSpeechError(
+              "The offline model changed during preparation. Resume to start a compatible profile.",
+            );
+          }
+          const textFingerprint = await fingerprintPreparedNarrationText(
+            chunk.text,
+          );
+          const encoded = await encodePreparedNarrationAudio(
+            generated.audioData,
+          );
+          const boundaries = generated.boundaries.map((boundary) => ({
+            ...boundary,
+            tokenIndex: findWordAtCharacter(
+              model.tokens,
+              chunk.startChar + boundary.textOffset,
+            ),
+          }));
+          const record = {
+            schemaVersion: PREPARED_NARRATION_SCHEMA_VERSION,
+            documentId: readerDocument.id,
+            profileKey: currentManifest.profileKey,
+            startIndex: chunk.startIndex,
+            nextIndex: chunk.nextIndex,
+            textFingerprint,
+            audioData: encoded.audioData,
+            audioByteLength: encoded.audioByteLength,
+            audioEncoding: encoded.audioEncoding,
+            sourceAudioByteLength: encoded.sourceAudioByteLength,
+            mimeType: PREPARED_NARRATION_AUDIO_MIME_TYPE,
+            audioDurationSeconds: generated.audioDurationSeconds,
+            boundaries,
+            device: generated.device,
+            modelDtype: generated.modelDtype,
+            synthesisMilliseconds: generated.synthesisMilliseconds,
+            wasmThreads: generated.wasmThreads,
+            retention: PREPARED_NARRATION_BOOK_RETENTION,
+            createdAt: Date.now(),
+          };
+          const committed = (await commitReaderPreparedNarrationChunk(
+            currentManifest,
+            record,
+          )) as PreparedNarrationManifest | null;
+          if (!committed) {
+            throw new Error("This prepared narration profile was superseded.");
+          }
+          currentManifest = committed;
+          setPreparedNarrationManifest(committed);
+          setPreparedNarrationMetadata((current) => [
+            ...current.filter(
+              (metadata) => metadata.startIndex !== record.startIndex,
+            ),
+            {
+              documentId: record.documentId,
+              profileKey: record.profileKey,
+              startIndex: record.startIndex,
+              nextIndex: record.nextIndex,
+              textFingerprint: record.textFingerprint,
+              sourceAudioByteLength: record.sourceAudioByteLength,
+              audioDurationSeconds: record.audioDurationSeconds,
+              boundaries: record.boundaries,
+            },
+          ].sort((left, right) => left.startIndex - right.startIndex));
+          const estimate = await navigator.storage?.estimate?.();
+          if (
+            Number.isFinite(estimate?.quota) &&
+            Number.isFinite(estimate?.usage) &&
+            estimate!.usage! >= estimate!.quota! * 0.98
+          ) {
+            throw new DOMException(
+              "Browser storage is nearly full. Existing chunks are safe; free space and resume.",
+              "QuotaExceededError",
+            );
+          }
+        }
+
+        setPreparedNarrationJobState("idle");
+        setPreparedNarrationMessage(
+          `${currentManifest.completedChunks} chunks are ready offline after reload.`,
+        );
+        setNotice("This book is prepared for offline narration.");
+      } catch (error) {
+        const paused =
+          abortController.signal.aborted ||
+          (error instanceof DOMException && error.name === "AbortError");
+        if (currentManifest && currentManifest.status !== "ready") {
+          const message = paused
+            ? null
+            : error instanceof Error
+              ? error.message
+              : "Prepared narration stopped unexpectedly.";
+          const savedManifest = {
+            ...currentManifest,
+            status: paused ? "paused" as const : "error" as const,
+            error: message,
+            updatedAt: Date.now(),
+          };
+          await saveReaderPreparedNarrationManifest(savedManifest).catch(
+            () => false,
+          );
+          setPreparedNarrationManifest(savedManifest);
+        }
+        setPreparedNarrationJobState(paused ? "idle" : "error");
+        const message = paused
+          ? "Preparation paused. Completed chunks are safe."
+          : error instanceof Error
+            ? error.message
+            : "Prepared narration stopped unexpectedly.";
+        setPreparedNarrationMessage(message);
+        if (!paused) setNotice(message);
+      } finally {
+        if (preparedNarrationAbortRef.current === abortController) {
+          preparedNarrationAbortRef.current = null;
+        }
+      }
+    };
+
+    const job = run();
+    preparedNarrationJobPromiseRef.current = job;
+    void job.finally(() => {
+      if (preparedNarrationJobPromiseRef.current === job) {
+        preparedNarrationJobPromiseRef.current = null;
+      }
+    });
+  }, [
+    cancelOfflineWarmRestore,
+    documentFingerprint,
+    downloadOfflineVoice,
+    model.fullText,
+    model.tokens,
+    offlinePackState,
+    readerDocument.id,
+    readerDocument.kind,
+    readerDocument.pdfImportStatus,
+    settings.offlineVoice,
+    settings.rate,
+    stopSpeech,
+  ]);
+
+  const pausePreparedNarration = useCallback(() => {
+    if (!preparedNarrationAbortRef.current) return;
+    setPreparedNarrationJobState("pausing");
+    setPreparedNarrationMessage("Pausing after the current safe boundary…");
+    preparedNarrationAbortRef.current.abort();
+  }, []);
+
+  const removePreparedNarrationProfile = useCallback(async () => {
+    const profileKey = preparedNarrationManifest?.profileKey;
+    if (!profileKey) return;
+    preparedNarrationAbortRef.current?.abort();
+    await preparedNarrationJobPromiseRef.current?.catch(() => undefined);
+    stopSpeech();
+    setPreparedNarrationJobState("removing");
+    try {
+      await removeReaderPreparedNarration(readerDocument.id, profileKey);
+      setPreparedNarrationManifest(null);
+      setPreparedNarrationMetadata([]);
+      setPreparedNarrationProfileCount((current) => Math.max(0, current - 1));
+      setPreparedNarrationMessage("Selected prepared voice and pace removed.");
+    } finally {
+      setPreparedNarrationJobState("idle");
+    }
+  }, [preparedNarrationManifest?.profileKey, readerDocument.id, stopSpeech]);
+
+  const removeAllPreparedNarration = useCallback(async () => {
+    preparedNarrationAbortRef.current?.abort();
+    await preparedNarrationJobPromiseRef.current?.catch(() => undefined);
+    stopSpeech();
+    setPreparedNarrationJobState("removing");
+    try {
+      await removeReaderPreparedNarration(readerDocument.id);
+      setPreparedNarrationManifest(null);
+      setPreparedNarrationMetadata([]);
+      setPreparedNarrationProfileCount(0);
+      setPreparedNarrationMessage("All prepared narration for this book was removed.");
+    } finally {
+      setPreparedNarrationJobState("idle");
+    }
+  }, [readerDocument.id, stopSpeech]);
+
+  const exportPreparedBook = useCallback(() => {
+    if (
+      preparedExportAbortRef.current ||
+      preparedNarrationManifest?.status !== "ready" ||
+      !documentFingerprint
+    ) {
+      return;
+    }
+    const run = async () => {
+      const abortController = new AbortController();
+      preparedExportAbortRef.current = abortController;
+      setPreparedExportState("exporting");
+      setPreparedExportProgress(0);
+      setPreparedExportMessage("Choose where to save the WAV parts…");
+
+      let directory: LocalDirectoryHandle | null = null;
+      const picker = (
+        window as typeof window & {
+          showDirectoryPicker?: (options: {
+            mode: "readwrite";
+          }) => Promise<LocalDirectoryHandle>;
+        }
+      ).showDirectoryPicker;
+      if (picker) {
+        try {
+          directory = await picker({ mode: "readwrite" });
+        } catch (error) {
+          if (error instanceof DOMException && error.name === "AbortError") {
+            setPreparedExportState("idle");
+            setPreparedExportMessage("Export canceled before any files were written.");
+            preparedExportAbortRef.current = null;
+            return;
+          }
+          throw error;
+        }
+      }
+
+      try {
+        const chunks = (await listReaderPreparedNarrationChunkMetadata(
+          readerDocument.id,
+          preparedNarrationManifest.profileKey,
+        )) as PreparedNarrationChunkMetadata[];
+        if (
+          !chunks.length ||
+          chunks[0].startIndex !== 0 ||
+          chunks.at(-1)?.nextIndex !== model.tokens.length
+        ) {
+          throw new Error(
+            "Prepared narration is incomplete. Resume preparation before exporting.",
+          );
+        }
+        const saveFile = async (filename: string, data: Blob) => {
+          if (abortController.signal.aborted) {
+            throw new DOMException("Export canceled.", "AbortError");
+          }
+          if (directory) {
+            const handle = await directory.getFileHandle(filename, {
+              create: true,
+            });
+            const writable = await handle.createWritable();
+            await writable.write(data);
+            await writable.close();
+            return;
+          }
+          const url = URL.createObjectURL(data);
+          const link = document.createElement("a");
+          link.href = url;
+          link.download = filename;
+          link.hidden = true;
+          document.body.appendChild(link);
+          link.click();
+          link.remove();
+          window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
+        };
+        const manifest = (await exportPreparedNarration({
+          chunks,
+          loadAudio: async (chunk) => {
+            const metadata = chunk as PreparedNarrationChunkMetadata;
+            const record = await getReaderPreparedNarrationChunk({
+              documentId: readerDocument.id,
+              profileKey: preparedNarrationManifest.profileKey,
+              startIndex: metadata.startIndex,
+              nextIndex: metadata.nextIndex,
+              textFingerprint: metadata.textFingerprint,
+            });
+            if (!record) {
+              throw new Error(
+                "A prepared audio chunk is missing. Resume preparation before exporting.",
+              );
+            }
+            return decodePreparedNarrationAudio(record);
+          },
+          saveFile,
+          manifest: {
+            documentId: readerDocument.id,
+            documentFingerprint,
+            title: readerDocument.title,
+            author: readerDocument.author,
+            totalTokens: model.tokens.length,
+            modelRevision: preparedNarrationManifest.modelRevision,
+            modelDtype: preparedNarrationManifest.modelDtype,
+            voice: preparedNarrationManifest.voice,
+            rate: preparedNarrationManifest.rate,
+            profileKey: preparedNarrationManifest.profileKey,
+          },
+          signal: abortController.signal,
+          onProgress: ({ completedParts, totalParts }) => {
+            setPreparedExportProgress(
+              Math.round((completedParts / totalParts) * 100),
+            );
+            setPreparedExportMessage(
+              `Saved WAV part ${completedParts} of ${totalParts}.`,
+            );
+          },
+        })) as PreparedNarrationExportManifest;
+        setValidatedTimingManifest(manifest);
+        setPreparedExportProgress(100);
+        setPreparedExportState("idle");
+        setPreparedExportMessage(
+          `Saved ${manifest.parts.length} bounded WAV ${
+            manifest.parts.length === 1 ? "part" : "parts"
+          } and the timing sidecar.`,
+        );
+      } catch (error) {
+        const canceled =
+          abortController.signal.aborted ||
+          (error instanceof DOMException && error.name === "AbortError");
+        setPreparedExportState(canceled ? "idle" : "error");
+        setPreparedExportMessage(
+          canceled
+            ? "Export canceled. Prepared source audio was not changed."
+            : error instanceof Error
+              ? error.message
+              : "Prepared narration could not be exported.",
+        );
+      } finally {
+        if (preparedExportAbortRef.current === abortController) {
+          preparedExportAbortRef.current = null;
+        }
+      }
+    };
+    void run();
+  }, [
+    documentFingerprint,
+    model.tokens.length,
+    preparedNarrationManifest,
+    readerDocument.author,
+    readerDocument.id,
+    readerDocument.title,
+  ]);
+
+  const cancelPreparedExport = useCallback(() => {
+    preparedExportAbortRef.current?.abort();
+  }, []);
+
+  const importTimingManifest = useCallback(
+    async (file?: File) => {
+      if (!file) return;
+      try {
+        if (file.size > 16 * 1024 * 1024) {
+          throw new Error("This timing sidecar is unexpectedly large.");
+        }
+        const parsed: unknown = JSON.parse(await file.text());
+        if (!isPreparedNarrationExportManifest(parsed)) {
+          throw new Error("This is not a supported LineLight timing sidecar.");
+        }
+        if (
+          !documentFingerprint ||
+          !matchesPreparedNarrationExport(parsed, {
+            documentId: readerDocument.id,
+            documentFingerprint,
+            totalTokens: model.tokens.length,
+          })
+        ) {
+          throw new Error(
+            "This timing sidecar belongs to a different book or edition.",
+          );
+        }
+        const manifest = parsed as PreparedNarrationExportManifest;
+        const attachedAudioNamesMatch = Boolean(
+          audiobookManifest &&
+            audiobookManifest.parts.length === manifest.parts.length &&
+            audiobookManifest.parts.every(
+              (part, index) =>
+                part.filename === manifest.parts[index].filename,
+            ),
+        );
+        const matchesAttachedAudio = Boolean(
+          audiobookManifest &&
+            matchesPreparedNarrationExportAudioParts(
+              manifest,
+              audiobookManifest.parts,
+            ),
+        );
+        if (attachedAudioNamesMatch && !matchesAttachedAudio) {
+          throw new Error(
+            "The timing sidecar filenames match, but the attached audio durations differ.",
+          );
+        }
+        setValidatedTimingManifest(manifest);
+        if (audiobookManifest && matchesAttachedAudio) {
+          const synchronized: AudiobookManifest = {
+            ...audiobookManifest,
+            anchors: manifest.anchors,
+            status: "ready",
+            nextPartIndex: audiobookManifest.parts.length,
+            nextWindowIndex: 0,
+            processedWindows: audiobookManifest.totalWindows,
+            alignmentConfidence: 1,
+            mismatchLikely: false,
+            error: null,
+            updatedAt: Date.now(),
+          };
+          await saveReaderAudiobookManifest(synchronized);
+          setAudiobookManifest(synchronized);
+          setAudiobookProgress(100);
+          setAudiobookMessage(
+            "Timing sidecar, WAV filenames, and durations matched. Audiobook sync is ready.",
+          );
+        }
+        setPreparedExportState("idle");
+        setPreparedExportMessage(
+          matchesAttachedAudio
+            ? "Timing sidecar verified and applied to the attached WAV files."
+            : `Timing sidecar verified for ${manifest.parts.length} WAV ${
+                manifest.parts.length === 1 ? "part" : "parts"
+              }.`,
+        );
+      } catch (error) {
+        setValidatedTimingManifest(null);
+        setPreparedExportState("error");
+        setPreparedExportMessage(
+          error instanceof Error
+            ? error.message
+            : "This timing sidecar could not be opened.",
+        );
+      } finally {
+        if (timingManifestInputRef.current) {
+          timingManifestInputRef.current.value = "";
+        }
+      }
+    },
+    [
+      audiobookManifest,
+      documentFingerprint,
+      model.tokens.length,
+      readerDocument.id,
+    ],
+  );
+
+  const attachAudiobookFiles = useCallback(
+    async (selectedFiles?: FileList | File[]) => {
+      const files = sortAudiobookFiles(
+        Array.from(selectedFiles ?? []) as File[],
+      ) as File[];
+      if (!files.length) return;
+      setAudiobookJobState("attaching");
+      setAudiobookProgress(0);
+      setAudiobookMessage("Checking local audiobook chapters…");
+      try {
+        if (!documentFingerprint || readerDocument.kind === "demo") {
+          throw new Error("Import a book before attaching its audiobook.");
+        }
+        for (const file of files) {
+          const classification = classifyAudiobookFile(file);
+          if (!classification.supported) {
+            throw new Error(`${file.name}: ${classification.reason}`);
+          }
+        }
+        const sourceBytes = files.reduce((total, file) => total + file.size, 0);
+        const describedFiles: Array<{
+          name: string;
+          type: string;
+          size: number;
+          durationSeconds: number;
+        }> = [];
+        for (let index = 0; index < files.length; index += 1) {
+          setAudiobookMessage(
+            `Reading chapter metadata ${index + 1} of ${files.length}…`,
+          );
+          const durationSeconds = await readLocalAudioDuration(files[index]);
+          describedFiles.push({
+            name: files[index].name,
+            type: files[index].type,
+            size: files[index].size,
+            durationSeconds,
+          });
+          setAudiobookProgress(
+            Math.round(((index + 1) / files.length) * 35),
+          );
+        }
+        const timingSidecarNamesMatch = Boolean(
+          validatedTimingManifest &&
+            validatedTimingManifest.parts.length === describedFiles.length &&
+            validatedTimingManifest.parts.every(
+              (part, index) => part.filename === describedFiles[index].name,
+            ),
+        );
+        const willUseTimingSidecar = Boolean(
+          validatedTimingManifest &&
+            matchesPreparedNarrationExportAudioParts(
+              validatedTimingManifest,
+              describedFiles,
+            ),
+        );
+        if (timingSidecarNamesMatch && !willUseTimingSidecar) {
+          throw new Error(
+            "The timing sidecar filenames match, but the selected audio durations differ.",
+          );
+        }
+        const requiredBytes =
+          sourceBytes +
+          (willUseTimingSidecar ? 0 : AUDIOBOOK_ALIGNMENT_MODEL_ESTIMATED_BYTES);
+        const storage = await navigator.storage?.estimate?.();
+        if (
+          Number.isFinite(storage?.quota) &&
+          Number.isFinite(storage?.usage) &&
+          requiredBytes > (storage!.quota! - storage!.usage!) * 0.9
+        ) {
+          throw new DOMException(
+            `Attaching and aligning this audiobook may need ${formatStorageBytes(requiredBytes)} of site storage. Free browser storage and try again.`,
+            "QuotaExceededError",
+          );
+        }
+        await navigator.storage?.persist?.().catch(() => false);
+        const audioId = globalThis.crypto?.randomUUID?.() ??
+          `audiobook-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+        let manifest = createAudiobookManifest({
+          documentId: readerDocument.id,
+          documentFingerprint,
+          title: readerDocument.title,
+          author: readerDocument.author,
+          totalTokens: model.tokens.length,
+          audioId,
+          files: describedFiles,
+        }) as AudiobookManifest;
+        if (willUseTimingSidecar && validatedTimingManifest) {
+          manifest = {
+            ...manifest,
+            anchors: validatedTimingManifest.anchors,
+            status: "ready",
+            nextPartIndex: manifest.parts.length,
+            nextWindowIndex: 0,
+            processedWindows: manifest.totalWindows,
+            alignmentConfidence: 1,
+            mismatchLikely: false,
+            updatedAt: Date.now(),
+          };
+        }
+        if (!(await attachReaderAudiobook(manifest, files))) {
+          throw new Error("This book is no longer in the private library.");
+        }
+        setAudiobookManifest(manifest);
+        setAudiobookProfileCount((current) => current + 1);
+        setAudiobookProgress(manifest.status === "ready" ? 100 : 0);
+        setAudiobookJobState("idle");
+        setSettings((current) => ({
+          ...current,
+          narrationEngine: "audiobook",
+        }));
+        setAudiobookMessage(
+          manifest.status === "ready"
+            ? "Exported WAV timing matched exactly. Audiobook sync is ready without speech recognition."
+            : `Stored ${files.length} local ${
+                files.length === 1 ? "audio file" : "chapter files"
+              }. Start local alignment when ready.`,
+        );
+      } catch (error) {
+        setAudiobookJobState("error");
+        setAudiobookMessage(
+          error instanceof Error
+            ? error.message
+            : "This audiobook could not be attached.",
+        );
+      } finally {
+        if (audiobookInputRef.current) audiobookInputRef.current.value = "";
+      }
+    },
+    [
+      documentFingerprint,
+      model.tokens.length,
+      readerDocument.author,
+      readerDocument.id,
+      readerDocument.kind,
+      readerDocument.title,
+      validatedTimingManifest,
+    ],
+  );
+
+  const alignAttachedAudiobook = useCallback(() => {
+    if (!audiobookManifest || audiobookAlignmentJobPromiseRef.current) return;
+    const manifestAtStart = audiobookManifest;
+    const abortController = new AbortController();
+    audiobookAlignmentAbortRef.current = abortController;
+    let audioContext: AudioContext | null = null;
+    const run = async () => {
+      setAudiobookJobState("aligning");
+      setAudiobookMessage(
+        "Loading the private speech-recognition model on this device…",
+      );
+      let currentManifest = manifestAtStart;
+      try {
+        audioContext = new AudioContext();
+        const oversizedPart = currentManifest.parts.find(
+          (part) =>
+            part.sourceByteLength > AUDIOBOOK_ALIGNMENT_MAX_PART_BYTES ||
+            part.durationSeconds > AUDIOBOOK_ALIGNMENT_MAX_PART_SECONDS,
+        );
+        if (oversizedPart) {
+          throw new Error(
+            `${oversizedPart.filename} is too large for bounded local alignment. Split it into chapters under ${Math.round(
+              AUDIOBOOK_ALIGNMENT_MAX_PART_SECONDS / 60,
+            )} minutes and ${formatStorageBytes(
+              AUDIOBOOK_ALIGNMENT_MAX_PART_BYTES,
+            )}, then attach those files in order.`,
+          );
+        }
+        if (currentManifest.processedWindows === 0) {
+          const storage = await navigator.storage?.estimate?.();
+          if (
+            Number.isFinite(storage?.quota) &&
+            Number.isFinite(storage?.usage) &&
+            AUDIOBOOK_ALIGNMENT_MODEL_ESTIMATED_BYTES >
+              (storage!.quota! - storage!.usage!) * 0.9
+          ) {
+            throw new DOMException(
+              `Local alignment needs about ${formatStorageBytes(
+                AUDIOBOOK_ALIGNMENT_MODEL_ESTIMATED_BYTES,
+              )} for its speech-recognition model. Free browser storage and resume.`,
+              "QuotaExceededError",
+            );
+          }
+        }
+        const windows = buildAudiobookAlignmentWindows(
+          currentManifest.parts,
+        ) as Array<{
+          partIndex: number;
+          windowIndex: number;
+          startSeconds: number;
+          endSeconds: number;
+        }>;
+        const existing = (await listReaderAudiobookTranscriptWindows(
+          currentManifest.documentId,
+          currentManifest.audioId,
+        )) as AudiobookTranscriptWindow[];
+        const storedKeys = new Set(
+          existing.map(
+            (window) => `${window.partIndex}:${window.windowIndex}`,
+          ),
+        );
+        const firstMissing = windows.find(
+          (window) =>
+            !storedKeys.has(`${window.partIndex}:${window.windowIndex}`),
+        );
+        currentManifest = {
+          ...currentManifest,
+          status: "aligning",
+          processedWindows: storedKeys.size,
+          nextPartIndex: firstMissing?.partIndex ?? currentManifest.parts.length,
+          nextWindowIndex: firstMissing?.windowIndex ?? 0,
+          error: null,
+          updatedAt: Date.now(),
+        };
+        await saveReaderAudiobookManifest(currentManifest);
+        setAudiobookManifest(currentManifest);
+        if (firstMissing) {
+          await prepareAudiobookTranscriber({
+            signal: abortController.signal,
+            onProgress: ({ progress, label }) => {
+              setAudiobookMessage(label);
+              if (progress !== null && !storedKeys.size) {
+                setAudiobookProgress(Math.round(progress * 0.08));
+              }
+            },
+          });
+        }
+
+        let decodedPartIndex = -1;
+        let decodedPart: AudioBuffer | null = null;
+        for (let windowIndex = 0; windowIndex < windows.length; windowIndex += 1) {
+          const window = windows[windowIndex];
+          const key = `${window.partIndex}:${window.windowIndex}`;
+          if (storedKeys.has(key)) continue;
+          if (abortController.signal.aborted) {
+            throw new DOMException("Alignment paused.", "AbortError");
+          }
+          if (decodedPartIndex !== window.partIndex) {
+            decodedPart = null;
+            const source = await getReaderAudiobookSource(
+              currentManifest.documentId,
+              currentManifest.audioId,
+              window.partIndex,
+            );
+            if (!source?.blob) {
+              throw new Error("A local audiobook chapter is missing.");
+            }
+            setAudiobookMessage(
+              `Decoding ${currentManifest.parts[window.partIndex].filename} locally…`,
+            );
+            decodedPart = await audioContext.decodeAudioData(
+              await source.blob.arrayBuffer(),
+            );
+            decodedPartIndex = window.partIndex;
+          }
+          if (!decodedPart) {
+            throw new Error("This audiobook chapter could not be decoded.");
+          }
+          const startSample = Math.max(
+            0,
+            Math.floor(window.startSeconds * decodedPart.sampleRate),
+          );
+          const endSample = Math.min(
+            decodedPart.length,
+            Math.ceil(window.endSeconds * decodedPart.sampleRate),
+          );
+          const channels = Array.from(
+            { length: decodedPart.numberOfChannels },
+            (_, channel) =>
+              decodedPart!.getChannelData(channel).subarray(
+                startSample,
+                endSample,
+              ),
+          );
+          const pcm = resampleAudiobookWindow(
+            channels,
+            decodedPart.sampleRate,
+          );
+          setAudiobookMessage(
+            `Aligning chapter ${window.partIndex + 1}, window ${
+              window.windowIndex + 1
+            }…`,
+          );
+          const transcript = await transcribeAudiobookWindow({
+            audio: pcm,
+            windowStartSeconds: window.startSeconds,
+            windowEndSeconds: window.endSeconds,
+            signal: abortController.signal,
+          });
+          const record: AudiobookTranscriptWindow = {
+            schemaVersion: AUDIOBOOK_ALIGNMENT_SCHEMA_VERSION,
+            documentId: currentManifest.documentId,
+            audioId: currentManifest.audioId,
+            partIndex: window.partIndex,
+            windowIndex: window.windowIndex,
+            startSeconds: window.startSeconds,
+            endSeconds: window.endSeconds,
+            text: transcript.text,
+            segments: transcript.segments,
+            modelRevision: AUDIOBOOK_ALIGNMENT_MODEL_REVISION,
+            createdAt: Date.now(),
+          };
+          storedKeys.add(key);
+          const nextMissing = windows
+            .slice(windowIndex + 1)
+            .find(
+              (candidate) =>
+                !storedKeys.has(
+                  `${candidate.partIndex}:${candidate.windowIndex}`,
+                ),
+            );
+          const progressed = {
+            ...currentManifest,
+            status: "aligning" as const,
+            processedWindows: storedKeys.size,
+            nextPartIndex:
+              nextMissing?.partIndex ?? currentManifest.parts.length,
+            nextWindowIndex: nextMissing?.windowIndex ?? 0,
+            error: null,
+            updatedAt: Date.now(),
+          };
+          await commitReaderAudiobookTranscriptWindow(progressed, record);
+          currentManifest = progressed;
+          setAudiobookManifest(progressed);
+          setAudiobookProgress(
+            Math.round((storedKeys.size / windows.length) * 100),
+          );
+        }
+        decodedPart = null;
+
+        const transcriptWindows = (await listReaderAudiobookTranscriptWindows(
+          currentManifest.documentId,
+          currentManifest.audioId,
+        )) as AudiobookTranscriptWindow[];
+        const alignedSegments = transcriptWindows.flatMap((window) => {
+          const nextWindow = transcriptWindows.find(
+            (candidate) =>
+              candidate.partIndex === window.partIndex &&
+              candidate.windowIndex === window.windowIndex + 1,
+          );
+          return window.segments
+            .filter(
+              (segment) =>
+                !nextWindow ||
+                (segment.startSeconds + segment.endSeconds) / 2 <
+                  nextWindow.startSeconds,
+            )
+            .map((segment, segmentIndex) => ({
+              id: `asr-${window.partIndex}-${window.windowIndex}-${segmentIndex}`,
+              partIndex: window.partIndex,
+              startSeconds: segment.startSeconds,
+              endSeconds: segment.endSeconds,
+              text: segment.text,
+            }));
+        });
+        const alignment = alignAudiobookTranscriptSegments(
+          alignedSegments,
+          model.tokens.map((token) => ({
+            index: token.index,
+            text: token.text,
+          })),
+        );
+        const completed = updateAudiobookAlignmentManifest(
+          currentManifest,
+          {
+            anchors: alignment.anchors,
+            summary: alignment.summary,
+            complete: true,
+            nextPartIndex: currentManifest.parts.length,
+            nextWindowIndex: 0,
+            processedWindows: windows.length,
+          },
+        ) as AudiobookManifest;
+        await saveReaderAudiobookManifest(completed);
+        setAudiobookManifest(completed);
+        setAudiobookProgress(100);
+        setAudiobookJobState("idle");
+        setAudiobookMessage(
+          completed.mismatchLikely
+            ? "Alignment completed, but the audiobook may be a different edition. Only strong phrase matches will move the reading highlight."
+            : `Alignment ready. ${alignment.summary.confidentSegments} of ${alignment.summary.totalSegments} spoken phrases matched confidently; weak regions remain unsynced.`,
+        );
+      } catch (error) {
+        const paused =
+          abortController.signal.aborted ||
+          (error instanceof DOMException && error.name === "AbortError");
+        const failedManifest: AudiobookManifest = {
+          ...currentManifest,
+          status: paused ? "paused" : "error",
+          error: paused
+            ? null
+            : error instanceof Error
+              ? error.message
+              : "Local audiobook alignment stopped unexpectedly.",
+          updatedAt: Date.now(),
+        };
+        await saveReaderAudiobookManifest(failedManifest).catch(() => false);
+        setAudiobookManifest(failedManifest);
+        setAudiobookJobState(paused ? "idle" : "error");
+        setAudiobookMessage(
+          paused
+            ? "Alignment paused. Completed windows are safe and resumable."
+            : failedManifest.error ?? "Local alignment stopped.",
+        );
+      } finally {
+        disposeAudiobookTranscriber();
+        await audioContext?.close().catch(() => undefined);
+        if (audiobookAlignmentAbortRef.current === abortController) {
+          audiobookAlignmentAbortRef.current = null;
+        }
+      }
+    };
+    const job = run();
+    audiobookAlignmentJobPromiseRef.current = job;
+    void job.finally(() => {
+      if (audiobookAlignmentJobPromiseRef.current === job) {
+        audiobookAlignmentJobPromiseRef.current = null;
+      }
+    });
+  }, [audiobookManifest, model.tokens]);
+
+  const pauseAudiobookAlignment = useCallback(() => {
+    if (!audiobookAlignmentAbortRef.current) return;
+    setAudiobookJobState("pausing");
+    setAudiobookMessage("Pausing after the current local audio boundary…");
+    audiobookAlignmentAbortRef.current.abort();
+    disposeAudiobookTranscriber();
+  }, []);
+
+  const syncCurrentSentenceToAudiobook = useCallback(async () => {
+    const playback = audiobookPlaybackRef.current;
+    if (!playback || !audiobookManifest) {
+      setAudiobookMessage(
+        "Play or pause the attached audiobook at the matching sentence first.",
+      );
+      return;
+    }
+    const active = model.tokens[activeWordRef.current];
+    if (!active) return;
+    const sentenceStart = model.tokens.find(
+      (token) => token.sentenceIndex === active.sentenceIndex,
+    )?.index ?? active.index;
+    const manualAnchor: TimedMediaAnchor = {
+      id: globalThis.crypto?.randomUUID?.() ?? `manual-${Date.now()}`,
+      partIndex: playback.partIndex,
+      timeSeconds: playback.audio.currentTime,
+      tokenIndex: sentenceStart,
+      confidence: 1,
+      source: "manual",
+      granularity: "sentence",
+    };
+    const anchors = normalizeTimedMediaAnchors([
+      ...audiobookManifest.anchors.filter(
+        (anchor) =>
+          anchor.source === "manual" ||
+          (anchor.partIndex !== manualAnchor.partIndex ||
+            Math.abs(anchor.timeSeconds - manualAnchor.timeSeconds) > 2),
+      ),
+      manualAnchor,
+    ]) as TimedMediaAnchor[];
+    const corrected: AudiobookManifest = {
+      ...audiobookManifest,
+      anchors,
+      updatedAt: Date.now(),
+    };
+    await saveReaderAudiobookManifest(corrected);
+    setAudiobookManifest(corrected);
+    audiobookPlaybackRef.current = { ...playback, manifest: corrected };
+    setAudiobookMessage(
+      "Manual sentence sync saved on this device. It overrides nearby automatic timing.",
+    );
+  }, [audiobookManifest, model.tokens]);
+
+  const removeAttachedAudiobook = useCallback(async () => {
+    if (!audiobookManifest) return;
+    audiobookAlignmentAbortRef.current?.abort();
+    await audiobookAlignmentJobPromiseRef.current?.catch(() => undefined);
+    stopSpeech();
+    setAudiobookJobState("removing");
+    try {
+      await removeReaderAudiobook(
+        readerDocument.id,
+        audiobookManifest.audioId,
+      );
+      setAudiobookManifest(null);
+      setAudiobookProfileCount((current) => Math.max(0, current - 1));
+      setAudiobookProgress(0);
+      setAudiobookMessage(
+        "Attached audio, transcript windows, and sync anchors were removed.",
+      );
+      setSettings((current) =>
+        current.narrationEngine === "audiobook"
+          ? { ...current, narrationEngine: "offline" }
+          : current,
+      );
+    } finally {
+      setAudiobookJobState("idle");
+    }
+  }, [audiobookManifest, readerDocument.id, stopSpeech]);
+
+  const removeAllAttachedAudiobooks = useCallback(async () => {
+    audiobookAlignmentAbortRef.current?.abort();
+    await audiobookAlignmentJobPromiseRef.current?.catch(() => undefined);
+    stopSpeech();
+    setAudiobookJobState("removing");
+    try {
+      const manifests = (await listReaderAudiobookManifests(
+        readerDocument.id,
+      )) as AudiobookManifest[];
+      for (const manifest of manifests) {
+        await removeReaderAudiobook(readerDocument.id, manifest.audioId);
+      }
+      setAudiobookManifest(null);
+      setAudiobookProfileCount(0);
+      setAudiobookProgress(0);
+      setAudiobookMessage("All attached audiobooks for this book were removed.");
+      setSettings((current) =>
+        current.narrationEngine === "audiobook"
+          ? { ...current, narrationEngine: "offline" }
+          : current,
+      );
+    } finally {
+      setAudiobookJobState("idle");
+    }
+  }, [readerDocument.id, stopSpeech]);
+
   const scrollToActiveWord = useCallback(
     (behavior: ScrollBehavior = "smooth") => {
       const word = wordRefs.current.get(activeWordRef.current);
@@ -2035,12 +3744,16 @@ export default function Home() {
         if (index === activeWordRef.current) {
           element.dataset.activeToken = "true";
           element.id = "active-spoken-word";
+          scheduleReadingRulerPosition();
         }
       } else {
         wordRefs.current.delete(index);
+        if (index === activeWordRef.current) {
+          scheduleReadingRulerPosition();
+        }
       }
     },
-    [],
+    [scheduleReadingRulerPosition],
   );
 
   const queueNavigationSave = useCallback(
@@ -2610,7 +4323,7 @@ export default function Home() {
 
   const startBufferedSpeech = useCallback(
     (
-      engine: Exclude<NarrationEngine, "device">,
+      engine: "offline" | "azure",
       startIndex = activeWordRef.current,
     ) => {
       if (!model.tokens.length) return;
@@ -2619,8 +4332,22 @@ export default function Home() {
         Math.max(0, startIndex),
         model.tokens.length - 1,
       );
+      const preparedRange =
+        isOffline &&
+        preparedNarrationManifest &&
+        preparedNarrationManifest.documentId === readerDocument.id &&
+        preparedNarrationManifest.voice === settings.offlineVoice &&
+        preparedNarrationManifest.rate === settings.rate
+          ? preparedNarrationMetadata.find(
+              (metadata) =>
+                metadata.startIndex <= safeIndex &&
+                safeIndex < metadata.nextIndex,
+            ) ?? null
+          : null;
+      const queueStartIndex = preparedRange?.startIndex ?? safeIndex;
+      let initialPreparedSeekIndex = preparedRange ? safeIndex : null;
 
-      if (isOffline && offlinePackState !== "ready") {
+      if (isOffline && offlinePackState !== "ready" && !preparedRange) {
         pendingOfflineStartIndexRef.current = safeIndex;
         if (offlinePackState === "missing" || offlinePackState === "error") {
           automaticOfflineInstallAttemptedRef.current = true;
@@ -2676,7 +4403,21 @@ export default function Home() {
           : "Preparing a natural voice…",
       );
 
-      let waitingChunkStart: number | null = safeIndex;
+      let waitingChunkStart: number | null = queueStartIndex;
+      const expectedOfflineModelDtype = isOffline
+        ? getOfflineSpeechReadiness().modelDtype ??
+          (offlineUpgradeRequired ? "q8" : OFFLINE_MODEL_DTYPE)
+        : null;
+      const expectedOfflineProfileKey = preparedRange
+        ? preparedNarrationManifest!.profileKey
+        : expectedOfflineModelDtype
+          ? createPreparedNarrationProfileKey({
+            modelRevision: OFFLINE_MODEL_REVISION,
+            modelDtype: expectedOfflineModelDtype,
+            voice: settings.offlineVoice,
+            rate: settings.rate,
+          })
+          : null;
       const reportNarrationReadiness = (
         chunkStart: number,
         nextProgress: number,
@@ -2712,7 +4453,9 @@ export default function Home() {
         }
       };
 
-      let offlineChunkCharacters = OFFLINE_FIRST_CHUNK_CHARACTERS;
+      let offlineChunkCharacters = preparedRange
+        ? PREPARED_NARRATION_CHUNK_CHARACTERS
+        : OFFLINE_FIRST_CHUNK_CHARACTERS;
 
       const buildChunk = (chunkStartIndex: number) =>
         buildSpeechChunk(
@@ -2741,12 +4484,51 @@ export default function Home() {
         let reusedAudio = false;
         let synthesis: AzureSpeechResult | OfflineSpeechResult;
         if (isOffline) {
+          if (!expectedOfflineProfileKey) {
+            throw new OfflineSpeechError(
+              "The offline voice profile is unavailable.",
+            );
+          }
           const cacheKey = JSON.stringify([
-            settings.offlineVoice,
-            settings.rate,
+            expectedOfflineProfileKey,
+            chunk.startIndex,
+            chunk.nextIndex,
             chunk.text,
           ]);
-          const cachedSynthesis = offlineAudioCacheRef.current?.get(cacheKey);
+          let cachedSynthesis = offlineAudioCacheRef.current?.get(cacheKey);
+          let textFingerprint: string | null = null;
+          if (!cachedSynthesis && readerDocument.kind !== "demo") {
+            try {
+              textFingerprint = await fingerprintPreparedNarrationText(
+                chunk.text,
+              );
+              const durableSynthesis =
+                await getReaderPreparedNarrationChunk({
+                  documentId: readerDocument.id,
+                  profileKey: expectedOfflineProfileKey,
+                  startIndex: chunk.startIndex,
+                  nextIndex: chunk.nextIndex,
+                  textFingerprint,
+                });
+              if (durableSynthesis) {
+                const playableAudio = await decodePreparedNarrationAudio(
+                  durableSynthesis,
+                );
+                cachedSynthesis = {
+                  ...durableSynthesis,
+                  audioData: playableAudio,
+                } as OfflineSpeechResult;
+                offlineAudioCacheRef.current?.set(
+                  cacheKey,
+                  cachedSynthesis,
+                  playableAudio.byteLength,
+                );
+              }
+            } catch {
+              // Durable reuse is optional. Live local synthesis remains
+              // available if browser storage or Web Crypto is unavailable.
+            }
+          }
           if (cachedSynthesis) {
             reusedAudio = true;
             synthesis = cachedSynthesis;
@@ -2756,6 +4538,12 @@ export default function Home() {
               "Reusing prepared narration audio…",
             );
           } else {
+            if (abortController.signal.aborted || signal.aborted) {
+              throw new DOMException(
+                "Speech preparation was canceled.",
+                "AbortError",
+              );
+            }
             reportNarrationReadiness(
               chunk.startIndex,
               4,
@@ -2784,11 +4572,66 @@ export default function Home() {
             });
             synthesis = generatedSynthesis;
             if (!abortController.signal.aborted && !signal.aborted) {
+              const generatedProfileKey =
+                createPreparedNarrationProfileKey({
+                  modelRevision: OFFLINE_MODEL_REVISION,
+                  modelDtype: generatedSynthesis.modelDtype,
+                  voice: settings.offlineVoice,
+                  rate: settings.rate,
+                });
+              const generatedCacheKey = JSON.stringify([
+                generatedProfileKey,
+                chunk.startIndex,
+                chunk.nextIndex,
+                chunk.text,
+              ]);
               offlineAudioCacheRef.current?.set(
-                cacheKey,
+                generatedCacheKey,
                 generatedSynthesis,
                 generatedSynthesis.audioData.byteLength,
               );
+              if (readerDocument.kind !== "demo") {
+                try {
+                  textFingerprint ??=
+                    await fingerprintPreparedNarrationText(chunk.text);
+                  const durableBoundaries = generatedSynthesis.boundaries.map(
+                    (boundary) => ({
+                      ...boundary,
+                      tokenIndex: findWordAtCharacter(
+                        model.tokens,
+                        chunk.startChar + boundary.textOffset,
+                      ),
+                    }),
+                  );
+                  void saveReaderPreparedNarrationChunk({
+                    schemaVersion: PREPARED_NARRATION_SCHEMA_VERSION,
+                    documentId: readerDocument.id,
+                    profileKey: generatedProfileKey,
+                    startIndex: chunk.startIndex,
+                    nextIndex: chunk.nextIndex,
+                    textFingerprint,
+                    audioData: generatedSynthesis.audioData,
+                    audioByteLength: generatedSynthesis.audioData.byteLength,
+                    audioEncoding: PREPARED_NARRATION_IDENTITY_ENCODING,
+                    sourceAudioByteLength:
+                      generatedSynthesis.audioData.byteLength,
+                    mimeType: PREPARED_NARRATION_AUDIO_MIME_TYPE,
+                    audioDurationSeconds:
+                      generatedSynthesis.audioDurationSeconds,
+                    boundaries: durableBoundaries,
+                    device: generatedSynthesis.device,
+                    modelDtype: generatedSynthesis.modelDtype,
+                    synthesisMilliseconds:
+                      generatedSynthesis.synthesisMilliseconds,
+                    wasmThreads: generatedSynthesis.wasmThreads,
+                    retention: PREPARED_NARRATION_RECENT_RETENTION,
+                    createdAt: Date.now(),
+                  }).catch(() => undefined);
+                } catch {
+                  // Playback must not fail when opportunistic persistence is
+                  // unavailable. Explicit preparation will report such errors.
+                }
+              }
             }
           }
         } else {
@@ -2811,7 +4654,7 @@ export default function Home() {
           );
         }
 
-        if (isOffline && !reusedAudio) {
+        if (isOffline && !preparedRange) {
           const offlineSynthesis = synthesis as OfflineSpeechResult;
           offlineChunkCharacters = adaptOfflineSpeechChunkCharacters({
             currentCharacters: offlineChunkCharacters,
@@ -2895,7 +4738,7 @@ export default function Home() {
       };
 
       const prefetchQueue = createSpeechPrefetchQueue({
-        startIndex: safeIndex,
+        startIndex: queueStartIndex,
         endIndex: model.tokens.length,
         lookahead: 1,
         buildChunk,
@@ -2980,6 +4823,22 @@ export default function Home() {
           nextIndex: chunk.nextIndex,
           boundaries: timedWords,
         };
+        if (
+          initialPreparedSeekIndex !== null &&
+          chunk.startIndex <= initialPreparedSeekIndex &&
+          initialPreparedSeekIndex < chunk.nextIndex
+        ) {
+          const audioOffset = findBufferedSeekOffset(
+            bufferedSeekStateRef.current,
+            initialPreparedSeekIndex,
+          );
+          if (audioOffset !== null) {
+            audio.currentTime = audioOffset;
+            activeWordRef.current = initialPreparedSeekIndex;
+            setActiveWord(initialPreparedSeekIndex);
+          }
+          initialPreparedSeekIndex = null;
+        }
 
         const updateBoundary = () => {
           if (
@@ -3144,7 +5003,12 @@ export default function Home() {
       model.fullText,
       model.tokens,
       offlinePackState,
+      offlineUpgradeRequired,
+      preparedNarrationManifest,
+      preparedNarrationMetadata,
       primeNarrationAudioOutput,
+      readerDocument.id,
+      readerDocument.kind,
       releaseBufferedAudio,
       releaseNarrationAudioPrime,
       settings.azureVoice,
@@ -3152,6 +5016,183 @@ export default function Home() {
       settings.rate,
       speechAvailable,
       startDeviceSpeech,
+    ],
+  );
+
+  const startAudiobookPlayback = useCallback(
+    (startIndex = activeWordRef.current) => {
+      if (!audiobookManifest) {
+        setShowSettings(true);
+        setNotice("Attach a DRM-free local audiobook before selecting Audiobook.");
+        return;
+      }
+      let position = findTimedMediaPositionForToken(
+        audiobookManifest.anchors,
+        startIndex,
+      ) as (TimedMediaAnchor & { interpolated: boolean }) | null;
+      if (
+        position &&
+        !position.interpolated &&
+        Math.abs(position.tokenIndex - startIndex) > 80
+      ) {
+        position = null;
+      }
+      const sessionId = speechSessionRef.current + 1;
+      speechSessionRef.current = sessionId;
+      if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+      clearSpeechStartTimer();
+      clearFallbackTimer();
+      clearBufferedPlayback();
+      primeNarrationAudioOutput();
+      setIsPreparingSpeech(true);
+      setNarrationReadiness(
+        normalizeNarrationReadiness(10, "Opening the local audiobook…"),
+      );
+      setIsPlaying(false);
+      setNotice(
+        position
+          ? "Opening the locally attached audiobook…"
+          : "No reliable sync exists near this sentence. Playing from the audiobook start without moving the text highlight.",
+      );
+
+      const playPart = async (partIndex: number, timeSeconds: number) => {
+        if (speechSessionRef.current !== sessionId) return;
+        const source = await getReaderAudiobookSource(
+          audiobookManifest.documentId,
+          audiobookManifest.audioId,
+          partIndex,
+        );
+        if (speechSessionRef.current !== sessionId) return;
+        if (!source?.blob) {
+          throw new Error("This local audiobook chapter is missing.");
+        }
+        setNarrationReadiness(
+          normalizeNarrationReadiness(70, "Loading the local audio chapter…"),
+        );
+        const audio = new Audio();
+        const audioUrl = URL.createObjectURL(source.blob);
+        bufferedAudioUrlsRef.current.set(audio, audioUrl);
+        audio.preload = "auto";
+        audio.defaultPlaybackRate = settings.rate;
+        audio.playbackRate = settings.rate;
+        audio.src = audioUrl;
+        audio.load();
+        bufferedAudioRef.current = audio;
+        bufferedSeekStateRef.current = null;
+        const playback: AudiobookPlaybackState = {
+          audio,
+          audioId: audiobookManifest.audioId,
+          manifest: audiobookManifest,
+          partIndex,
+          sessionId,
+        };
+        audiobookPlaybackRef.current = playback;
+        setAudiobookPlaybackActive(true);
+
+        audio.onloadedmetadata = () => {
+          if (speechSessionRef.current !== sessionId) return;
+          audio.currentTime = Math.min(
+            Math.max(0, timeSeconds),
+            Math.max(0, audio.duration - 0.01),
+          );
+          setAudiobookPlaybackPosition({
+            partIndex,
+            timeSeconds: audio.currentTime,
+            durationSeconds: audio.duration,
+          });
+        };
+        audio.ontimeupdate = () => {
+          if (speechSessionRef.current !== sessionId) return;
+          setAudiobookPlaybackPosition({
+            partIndex,
+            timeSeconds: audio.currentTime,
+            durationSeconds: Number.isFinite(audio.duration)
+              ? audio.duration
+              : audiobookManifest.parts[partIndex].durationSeconds,
+          });
+          const anchor = findTimedMediaAnchorAtTime(
+            audiobookPlaybackRef.current?.manifest.anchors ?? [],
+            partIndex,
+            audio.currentTime,
+          ) as TimedMediaAnchor | null;
+          if (anchor && anchor.tokenIndex !== activeWordRef.current) {
+            activeWordRef.current = anchor.tokenIndex;
+            setActiveWord(anchor.tokenIndex);
+          }
+        };
+        audio.onplay = () => {
+          if (speechSessionRef.current !== sessionId) return;
+          setIsPreparingSpeech(false);
+          setIsPlaying(true);
+          releaseNarrationAudioPrime();
+        };
+        audio.onpause = () => {
+          if (speechSessionRef.current === sessionId && !audio.ended) {
+            setIsPlaying(false);
+          }
+        };
+        audio.onerror = () => {
+          if (speechSessionRef.current !== sessionId) return;
+          clearBufferedPlayback();
+          setIsPreparingSpeech(false);
+          setIsPlaying(false);
+          setNotice("This audiobook chapter could not be played locally.");
+        };
+        audio.onended = () => {
+          if (speechSessionRef.current !== sessionId) return;
+          const nextPartIndex = partIndex + 1;
+          releaseBufferedAudio(audio);
+          audiobookPlaybackRef.current = null;
+          if (nextPartIndex >= audiobookManifest.parts.length) {
+            setAudiobookPlaybackActive(false);
+            setIsPlaying(false);
+            setIsPreparingSpeech(false);
+            return;
+          }
+          setIsPreparingSpeech(true);
+          void playPart(nextPartIndex, 0).catch((error: unknown) => {
+            if (speechSessionRef.current !== sessionId) return;
+            setIsPreparingSpeech(false);
+            setIsPlaying(false);
+            setNotice(
+              error instanceof Error
+                ? error.message
+                : "The next audiobook chapter could not be opened.",
+            );
+          });
+        };
+        if (speechSessionRef.current !== sessionId) {
+          releaseBufferedAudio(audio);
+          return;
+        }
+        await audio.play();
+      };
+
+      void playPart(position?.partIndex ?? 0, position?.timeSeconds ?? 0).catch(
+        (error: unknown) => {
+          if (speechSessionRef.current !== sessionId) return;
+          clearBufferedPlayback();
+          setIsPreparingSpeech(false);
+          setIsPlaying(false);
+          setNotice(
+            error instanceof DOMException && error.name === "NotAllowedError"
+              ? "The audiobook is ready. Allow sound, then press Play again."
+              : error instanceof Error
+                ? error.message
+                : "The local audiobook could not be opened.",
+          );
+        },
+      );
+    },
+    [
+      audiobookManifest,
+      clearBufferedPlayback,
+      clearFallbackTimer,
+      clearSpeechStartTimer,
+      primeNarrationAudioOutput,
+      releaseBufferedAudio,
+      releaseNarrationAudioPrime,
+      settings.rate,
     ],
   );
 
@@ -3181,13 +5222,22 @@ export default function Home() {
 
   const startSpeech = useCallback(
     (startIndex = activeWordRef.current) => {
+      if (settings.narrationEngine === "audiobook") {
+        startAudiobookPlayback(startIndex);
+        return;
+      }
       if (settings.narrationEngine !== "device") {
         startBufferedSpeech(settings.narrationEngine, startIndex);
         return;
       }
       startDeviceSpeech(startIndex);
     },
-    [settings.narrationEngine, startBufferedSpeech, startDeviceSpeech],
+    [
+      settings.narrationEngine,
+      startAudiobookPlayback,
+      startBufferedSpeech,
+      startDeviceSpeech,
+    ],
   );
 
   const togglePlayback = useCallback(() => {
@@ -4250,7 +6300,14 @@ export default function Home() {
           )}
         </div>
 
-        {settings.ruler && <div className="reading-ruler" aria-hidden="true" />}
+        {settings.ruler && (
+          <div
+            className="reading-ruler"
+            data-visible="false"
+            ref={readingRulerRef}
+            aria-hidden="true"
+          />
+        )}
 
         {(followPaused || positionHistory.length > 0) && (
           <div className="position-action-stack">
@@ -5100,7 +7157,7 @@ export default function Home() {
                           applyNarratorPreset(current) as ReaderSettings,
                       );
                       setNotice(
-                        "Podcast host selected. It uses LineLight's included Michael voice at a relaxed pace.",
+                        "Podcast host selected. It uses LineLight's warm Heart voice at a relaxed pace.",
                       );
                     }}
                   >
@@ -5120,7 +7177,7 @@ export default function Home() {
                   </button>
                 </div>
                 <div
-                  className="segmented three narration-source"
+                  className="segmented four narration-source"
                   aria-label="Narration source"
                 >
                   {(
@@ -5128,6 +7185,7 @@ export default function Home() {
                       ["offline", "Offline natural"],
                       ["device", "Device"],
                       ["azure", "Online natural"],
+                      ["audiobook", "Audiobook"],
                     ] as [NarrationEngine, string][]
                   ).map(([value, label]) => (
                     <button
@@ -5150,7 +7208,197 @@ export default function Home() {
                   ))}
                 </div>
 
-                {settings.narrationEngine === "azure" ? (
+                {settings.narrationEngine === "audiobook" ? (
+                  <div className="audiobook-settings">
+                    <div className="audiobook-card">
+                      <div>
+                        <strong>Attach your DRM-free audiobook</strong>
+                        <p>
+                          Audio stays in this browser. Choose one or more MP3,
+                          M4A/M4B, AAC, WAV, FLAC, Ogg, Opus, or WebM chapter
+                          files in playback order. Audible AA/AAX is not
+                          supported and LineLight does not bypass DRM.
+                        </p>
+                      </div>
+                      <div className="prepared-narration-actions">
+                        <button
+                          type="button"
+                          disabled={
+                            !canPrepareCurrentDocument ||
+                            audiobookJobState === "attaching" ||
+                            audiobookJobState === "aligning" ||
+                            audiobookJobState === "removing"
+                          }
+                          onClick={() => audiobookInputRef.current?.click()}
+                        >
+                          {audiobookJobState === "attaching"
+                            ? "Attaching…"
+                            : "Attach audio files"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            timingManifestInputRef.current?.click()
+                          }
+                        >
+                          Verify timing sidecar
+                        </button>
+                        <input
+                          ref={audiobookInputRef}
+                          type="file"
+                          hidden
+                          multiple
+                          accept=".mp3,.m4a,.m4b,.aac,.wav,.flac,.ogg,.opus,.webm,audio/*"
+                          onChange={(event) =>
+                            void attachAudiobookFiles(event.target.files ?? [])
+                          }
+                        />
+                        <input
+                          ref={timingManifestInputRef}
+                          type="file"
+                          hidden
+                          accept=".json,application/json"
+                          onChange={(event) =>
+                            void importTimingManifest(
+                              event.target.files?.[0],
+                            )
+                          }
+                        />
+                      </div>
+                      {audiobookManifest && (
+                        <>
+                          <div
+                            className="prepared-narration-progress"
+                            role="progressbar"
+                            aria-label="Audiobook alignment progress"
+                            aria-valuemin={0}
+                            aria-valuemax={100}
+                            aria-valuenow={audiobookProgress}
+                          >
+                            <span style={{ width: `${audiobookProgress}%` }} />
+                          </div>
+                          <div className="audiobook-summary">
+                            <strong>
+                              {audiobookManifest.parts.length}{" "}
+                              {audiobookManifest.parts.length === 1
+                                ? "audio file"
+                                : "chapter files"}
+                            </strong>
+                            <span>
+                              {formatStorageBytes(
+                                audiobookManifest.parts.reduce(
+                                  (total, part) =>
+                                    total + part.sourceByteLength,
+                                  0,
+                                ),
+                              )}{" "}
+                              stored locally
+                            </span>
+                          </div>
+                        </>
+                      )}
+                      <p className="prepared-narration-status" aria-live="polite">
+                        {audiobookMessage ||
+                          "Attach the matching audiobook, then align it locally or use a verified LineLight timing sidecar."}
+                      </p>
+                      {audiobookManifest && (
+                        <div className="prepared-narration-actions">
+                          {audiobookJobState === "aligning" ||
+                          audiobookJobState === "pausing" ? (
+                            <button
+                              type="button"
+                              disabled={audiobookJobState === "pausing"}
+                              onClick={pauseAudiobookAlignment}
+                            >
+                              {audiobookJobState === "pausing"
+                                ? "Pausing…"
+                                : "Pause alignment"}
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              disabled={
+                                audiobookManifest.status === "ready" ||
+                                audiobookJobState === "removing"
+                              }
+                              onClick={alignAttachedAudiobook}
+                            >
+                              {audiobookManifest.processedWindows
+                                ? "Resume local alignment"
+                                : "Align locally"}
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() =>
+                              void syncCurrentSentenceToAudiobook()
+                            }
+                          >
+                            Sync this sentence here
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void removeAttachedAudiobook()}
+                          >
+                            Remove this audiobook
+                          </button>
+                          {audiobookProfileCount > 1 && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                void removeAllAttachedAudiobooks()
+                              }
+                            >
+                              Remove all audiobooks
+                            </button>
+                          )}
+                        </div>
+                      )}
+                      {audiobookPlaybackActive && (
+                        <label className="audiobook-scrubber">
+                          <span>
+                            Chapter {audiobookPlaybackPosition.partIndex + 1}{" "}
+                            · {Math.floor(audiobookPlaybackPosition.timeSeconds / 60)}:
+                            {String(
+                              Math.floor(audiobookPlaybackPosition.timeSeconds % 60),
+                            ).padStart(2, "0")}
+                          </span>
+                          <input
+                            type="range"
+                            min={0}
+                            max={Math.max(
+                              0.1,
+                              audiobookPlaybackPosition.durationSeconds,
+                            )}
+                            step={0.1}
+                            value={Math.min(
+                              audiobookPlaybackPosition.timeSeconds,
+                              audiobookPlaybackPosition.durationSeconds || 0,
+                            )}
+                            onChange={(event) => {
+                              const playback = audiobookPlaybackRef.current;
+                              if (!playback) return;
+                              playback.audio.currentTime = Number(
+                                event.target.value,
+                              );
+                            }}
+                          />
+                        </label>
+                      )}
+                    </div>
+                    <p className="online-voice-note offline-voice-note">
+                      Local alignment downloads a pinned ~{Math.round(
+                        AUDIOBOOK_ALIGNMENT_MODEL_ESTIMATED_BYTES / 1_000_000,
+                      )} MB speech-recognition model once, processes one
+                      bounded chapter and 30-second window at a time, and keeps
+                      transcripts, anchors, audio, and reading text on this
+                      device. Split files longer than {Math.round(
+                        AUDIOBOOK_ALIGNMENT_MAX_PART_SECONDS / 60,
+                      )} minutes before alignment. Low-confidence or
+                      different-edition passages deliberately stay unsynced.
+                    </p>
+                  </div>
+                ) : settings.narrationEngine === "azure" ? (
                   <>
                     <label className="select-setting stacked">
                       <span>Natural voice</span>
@@ -5315,6 +7563,183 @@ export default function Home() {
                                 ? "Try preparing again"
                                 : "Prepare offline voices now"}
                         </button>
+                      </div>
+                    )}
+                    {readerDocument.kind !== "demo" && (
+                      <div className="prepared-narration-card">
+                        <div>
+                          <strong>Prepare this book</strong>
+                          <p>
+                            Generate this exact offline voice and pace once,
+                            then replay it without synthesis—even after a
+                            reload. Estimated remaining storage: {" "}
+                            {formatStorageBytes(
+                              preparedNarrationEstimate.estimatedBytes,
+                            )}.
+                          </p>
+                        </div>
+                        {preparedNarrationManifest && (
+                          <div
+                            className="prepared-narration-progress"
+                            role="progressbar"
+                            aria-label="Prepared narration progress"
+                            aria-valuemin={0}
+                            aria-valuemax={100}
+                            aria-valuenow={preparedNarrationProgress}
+                          >
+                            <span
+                              style={{
+                                width: `${preparedNarrationProgress}%`,
+                              }}
+                            />
+                          </div>
+                        )}
+                        <p className="prepared-narration-status" aria-live="polite">
+                          {preparedNarrationMessage ||
+                            (canPrepareCurrentDocument
+                              ? "Not prepared for this voice and pace."
+                              : "Finish importing this book before preparing it.")}
+                        </p>
+                        <div className="prepared-narration-actions">
+                          {preparedNarrationJobState === "preparing" ||
+                          preparedNarrationJobState === "pausing" ? (
+                            <>
+                              <button
+                                type="button"
+                                disabled={
+                                  preparedNarrationJobState === "pausing"
+                                }
+                                onClick={pausePreparedNarration}
+                              >
+                                {preparedNarrationJobState === "pausing"
+                                  ? "Pausing…"
+                                  : "Pause"}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  void removePreparedNarrationProfile()
+                                }
+                              >
+                                Cancel &amp; remove
+                              </button>
+                            </>
+                          ) : (
+                            <button
+                              type="button"
+                              disabled={
+                                !canPrepareCurrentDocument ||
+                                offlinePackState !== "ready" ||
+                                preparedNarrationJobState === "removing" ||
+                                preparedNarrationManifest?.status === "ready"
+                              }
+                              onClick={prepareWholeBookNarration}
+                            >
+                              {preparedNarrationManifest?.nextIndex
+                                ? "Resume preparation"
+                                : "Prepare book"}
+                            </button>
+                          )}
+                          {preparedNarrationManifest &&
+                            preparedNarrationJobState !== "preparing" &&
+                            preparedNarrationJobState !== "pausing" && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  void removePreparedNarrationProfile()
+                                }
+                              >
+                                Remove this voice &amp; pace
+                              </button>
+                            )}
+                          {preparedNarrationProfileCount > 0 && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                void removeAllPreparedNarration()
+                              }
+                            >
+                              Remove all prepared audio
+                            </button>
+                          )}
+                        </div>
+                        <div className="prepared-export-card">
+                          <div>
+                            <strong>WAV + synced text</strong>
+                            <p>
+                              Export bounded WAV parts for the selected
+                              LineLight offline voice, plus a JSON timing
+                              sidecar that maps every spoken word back to this
+                              exact edition. Device/browser voices cannot be
+                              captured reliably.
+                            </p>
+                          </div>
+                          {preparedExportState === "exporting" && (
+                            <div
+                              className="prepared-narration-progress"
+                              role="progressbar"
+                              aria-label="WAV export progress"
+                              aria-valuemin={0}
+                              aria-valuemax={100}
+                              aria-valuenow={preparedExportProgress}
+                            >
+                              <span
+                                style={{ width: `${preparedExportProgress}%` }}
+                              />
+                            </div>
+                          )}
+                          <p className="prepared-narration-status" aria-live="polite">
+                            {preparedExportMessage ||
+                              "Prepare this voice and pace before exporting."}
+                          </p>
+                          <div className="prepared-narration-actions">
+                            {preparedExportState === "exporting" ? (
+                              <button
+                                type="button"
+                                onClick={cancelPreparedExport}
+                              >
+                                Cancel export
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                disabled={
+                                  preparedNarrationManifest?.status !== "ready"
+                                }
+                                onClick={exportPreparedBook}
+                              >
+                                Export WAV + timing
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() =>
+                                timingManifestInputRef.current?.click()
+                              }
+                            >
+                              Verify timing sidecar
+                            </button>
+                            <input
+                              ref={timingManifestInputRef}
+                              type="file"
+                              hidden
+                              accept=".json,application/json"
+                              onChange={(event) =>
+                                void importTimingManifest(
+                                  event.target.files?.[0],
+                                )
+                              }
+                            />
+                          </div>
+                          {validatedTimingManifest && (
+                            <small>
+                              Verified locally · {validatedTimingManifest.parts.length}{" "}
+                              {validatedTimingManifest.parts.length === 1
+                                ? "part"
+                                : "parts"}
+                            </small>
+                          )}
+                        </div>
                       </div>
                     )}
                     {runtimeAssetStorageBytes !== null && (

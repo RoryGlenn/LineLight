@@ -63,10 +63,18 @@ test("preserves explicit narration choices after preference migration", () => {
       .narrationEngine,
     "azure",
   );
+  assert.equal(
+    restoreNarrationPreference({
+      narrationEngine: "audiobook",
+      narrationPreferenceVersion: NARRATION_PREFERENCE_VERSION,
+    }).narrationEngine,
+    "audiobook",
+  );
 });
 
 test("never silently falls back from offline narration to browser speech", () => {
   assert.equal(allowsDeviceFallback("offline"), false);
+  assert.equal(allowsDeviceFallback("audiobook"), false);
   assert.equal(allowsDeviceFallback("azure"), true);
 });
 

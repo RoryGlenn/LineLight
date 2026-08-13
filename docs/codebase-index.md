@@ -25,9 +25,10 @@ update the affected entry in the same pull request.
 - **Browser main:** React, EPUB/text parsing, reader state, media playback,
   lightweight PDF bitmap composition and DOM text measurement, and browser
   storage coordination in the page's main execution context.
-- **Dedicated worker:** CPU- or GPU-intensive offline narration and the
-  app-owned PDF document pipeline, isolated from the browser main thread. The
-  PDF document worker creates a nested PDF.js worker for parser internals.
+- **Dedicated worker:** CPU- or GPU-intensive offline narration, local
+  audiobook transcription, and the app-owned PDF document pipeline, isolated
+  from the browser main thread. The PDF document worker creates a nested PDF.js
+  worker for parser internals.
 - **Service worker:** installable-app and immutable runtime-asset caching.
 - **Edge worker:** Cloudflare/vinext request routing, response headers, model
   asset delivery, and Azure token exchange.
@@ -41,6 +42,7 @@ update the affected entry in the same pull request.
 - [Local library, navigation, and reader layout](#local-library-navigation-and-reader-layout)
 - [Narration control, device speech, and Azure](#narration-control-device-speech-and-azure)
 - [Offline natural narration and voice-pack lifecycle](#offline-natural-narration-and-voice-pack-lifecycle)
+- [Prepared narration, WAV export, and audiobook sync](#prepared-narration-wav-export-and-audiobook-sync)
 - [PWA caching and browser runtime isolation](#pwa-caching-and-browser-runtime-isolation)
 - [Edge routes and deployment assembly](#edge-routes-and-deployment-assembly)
 - [Offline voice quality review](#offline-voice-quality-review)
@@ -164,7 +166,7 @@ changes must be reviewed with [`app/globals.css`](../app/globals.css), follow
 scrolling in the coordinator, and virtualization.
 
 **State and I/O:** User-selected PDFs are transferred directly to the document
-worker and never uploaded. IndexedDB v4 stores one local source `Blob`, a
+worker and never uploaded. IndexedDB v7 stores one local source `Blob`, a
 lightweight manifest, and independently keyed page text/layout/model records;
 page one commits and publishes its semantic model before initial rasterization
 or background extraction. Ready documents stream page one directly and then
@@ -242,8 +244,15 @@ the device.
 
 **Owns:** [`app/reader-library.mjs`](../app/reader-library.mjs) owns the versioned
 IndexedDB schema, migrations, document records, library entries, active-document
-state, per-document navigation records, and the v4 PDF source/page stores with
-revision-guarded staging, completion, recovery, and cleanup.
+state, per-document navigation records, the PDF source/page stores, prepared
+narration manifests/chunks/metadata, and audiobook manifests/source
+blobs/transcript windows with document-scoped cleanup. PDF storage retains its
+revision-guarded staging, completion, and recovery behavior.
+[`app/prepared-narration.mjs`](../app/prepared-narration.mjs) owns the versioned
+offline narration profile key, whole-book resumable manifest, independent
+compression, storage estimate, bounded source-text fingerprint, and strict
+stored audio/timing record validation. Audiobook record validation belongs to
+[`app/audiobook-alignment.mjs`](../app/audiobook-alignment.mjs).
 [`app/reader-navigation.mjs`](../app/reader-navigation.mjs) owns contextual
 position snapshots, recovery after text changes, bounded history, and document
 word search. [`app/reader-layout.mjs`](../app/reader-layout.mjs) owns layout
@@ -263,7 +272,11 @@ changes must be reviewed with focus rendering, virtualization estimates, and
 the CSS variables that consume them.
 
 **State and I/O:** Documents, library metadata, active-document identity,
-navigation records, PDF sources, and keyed PDF pages live in IndexedDB.
+navigation records, PDF sources, keyed PDF pages, exact-profile narration
+manifests/chunks, audiobook files, transcript windows, and sync anchors live in
+IndexedDB. Automatically retained WAV chunks use a bounded recent-cache policy;
+explicit whole-book preparation has a reserved distinct retention class and
+stores audio separately from export metadata.
 Settings, progress, and view selection remain in `localStorage` under the
 coordinator. Removing a document must clean every owned record without
 affecting other local documents; interrupted PDFs remain explicit resumable
@@ -271,7 +284,11 @@ revisions rather than orphaned anonymous pages.
 
 **Verification:** Use
 [`tests/reader-library.test.mjs`](../tests/reader-library.test.mjs) for schema,
-migration, and lifecycle behavior;
+migration, prepared-audio cleanup, and lifecycle behavior;
+[`tests/prepared-narration.test.mjs`](../tests/prepared-narration.test.mjs) for
+profile identity, source fingerprints, and stored-chunk validation;
+[`tests/audiobook-alignment.test.mjs`](../tests/audiobook-alignment.test.mjs)
+for audiobook record, window, alignment, and confidence contracts;
 [`tests/reader-navigation.test.mjs`](../tests/reader-navigation.test.mjs) for
 snapshots, recovery, history, and search; and
 [`tests/reader-layout.test.mjs`](../tests/reader-layout.test.mjs) plus
@@ -282,8 +299,8 @@ for layout and render-window behavior.
 
 **Purpose:** Turn document tokens into bounded speech passages, keep the active
 word synchronized with playback, provide instant in-buffer seeking, and route
-requests to device, offline, or Azure narration without silently changing the
-reader's privacy choice.
+requests to device, offline, audiobook, or Azure narration without silently
+changing the reader's privacy choice.
 
 **Runtime:** Browser main for scheduling and playback; edge worker for Azure
 authorization; the operating system or browser may own device-voice synthesis.
@@ -294,6 +311,9 @@ authorization; the operating system or browser may own device-voice synthesis.
 timed-boundary lookup, sentence navigation, buffered seek offsets, and device
 error classification. [`app/speech-prefetch.mjs`](../app/speech-prefetch.mjs)
 owns the bounded preparation queue and audio cache.
+[`app/prepared-narration.mjs`](../app/prepared-narration.mjs) binds durable
+offline chunks to an exact model, voice, pace, token range, and source-text
+fingerprint before reuse.
 [`app/narration-defaults.mjs`](../app/narration-defaults.mjs) owns engine defaults
 and fallback policy; [`app/narration-readiness.mjs`](../app/narration-readiness.mjs)
 owns monotonic readiness presentation; and
@@ -311,12 +331,14 @@ enter [`app/azure-speech.ts`](../app/azure-speech.ts) and call the edge route
 implemented by [`worker/speech-token.ts`](../worker/speech-token.ts).
 
 **Change together:** Passage shapes and offsets must remain
-consistent with the document token model and all three engines. Queue changes
+consistent with the document token model and all four engines. Queue changes
 must preserve cancellation, pause/resume, seek, audio disposal, and the
 one-passage lookahead bound. Azure changes require synchronized browser and
 edge contracts. Engine fallback must respect the policy in narration defaults.
 
 **State and I/O:** Voice, engine, rate, and preset selections are local settings.
+Matching Offline-natural chunks generated for saved books are retained with
+their timing boundaries in browser-owned IndexedDB and removed with the book.
 Device narration uses the Web Speech API. Azure sends only the current short
 passage and one prepared-ahead passage after obtaining a short-lived token from
 `/api/speech/token`; credentials are supplied through the variables documented
@@ -325,6 +347,7 @@ in [`.env.example`](../.env.example) and stay on the edge worker.
 **Verification:** Use
 [`tests/speech-utils.test.mjs`](../tests/speech-utils.test.mjs),
 [`tests/speech-prefetch.test.mjs`](../tests/speech-prefetch.test.mjs),
+[`tests/prepared-narration.test.mjs`](../tests/prepared-narration.test.mjs),
 [`tests/narration-readiness.test.mjs`](../tests/narration-readiness.test.mjs), and
 [`tests/narrator-presets.test.mjs`](../tests/narrator-presets.test.mjs). Device
 boundary behavior, browser audio startup, and the live Azure SDK/token route
@@ -480,6 +503,79 @@ waveform, recovery-shape, onset-boundary, cache, and privacy gate for invalid
 fp16 samples is recorded in
 [`docs/evidence/issue-70/offline-audio-recovery.json`](evidence/issue-70/offline-audio-recovery.json).
 
+## Prepared narration, WAV export, and audiobook sync
+
+**Purpose:** Make an exact offline voice/pace reusable for a complete book,
+export portable bounded WAV parts with text timing, and synchronize a matching
+DRM-free local audiobook without uploading book or audio content.
+
+**Runtime:** Browser main coordinates jobs, IndexedDB, decoding, playback, and
+file saves. Dedicated workers own Kokoro synthesis and Whisper transcription.
+The edge worker streams only pinned public model assets.
+
+**Owns:** [`app/prepared-narration.mjs`](../app/prepared-narration.mjs) owns
+prepared profile identity, resumable manifest transitions, independent
+gzip/identity chunk encoding, quota estimates, and exact chunk validation.
+[`app/prepared-narration-export.mjs`](../app/prepared-narration-export.mjs)
+owns RIFF/WAVE parsing, sequential duration/byte-bounded part planning, portable
+filenames, word-anchor sidecars, cancellation, and exact-edition re-import
+validation. [`app/timed-media.mjs`](../app/timed-media.mjs) owns the shared
+manifest/anchor shape, confidence threshold, audio-to-text lookup, and
+confidence-bounded text-to-audio interpolation.
+[`app/audiobook-alignment.mjs`](../app/audiobook-alignment.mjs) owns DRM-free
+format policy, natural chapter ordering, bounded overlapping windows, local
+transcript-to-token alignment, mismatch reporting, resampling, resumable
+manifest validation, and preservation of manual corrections.
+[`app/audiobook-alignment-model.mjs`](../app/audiobook-alignment-model.mjs)
+owns the pinned Whisper model identity and allowlisted same-origin paths.
+[`app/audiobook-transcriber.ts`](../app/audiobook-transcriber.ts) owns page-side
+worker RPC and termination-based cancellation;
+[`app/audiobook-alignment.worker.ts`](../app/audiobook-alignment.worker.ts)
+owns local-only q8 Whisper inference for one transferred PCM window.
+[`worker/alignment-model.mjs`](../worker/alignment-model.mjs) owns the edge
+model-file stream. The controls and job orchestration live in
+[`app/page.tsx`](../app/page.tsx), and durable records live behind
+[`app/reader-library.mjs`](../app/reader-library.mjs).
+
+**Entry points:** Narration settings start, pause, resume, cancel, export,
+sidecar verification, audiobook attachment/alignment, manual sentence sync, and
+cleanup. Play and sentence navigation enter the common reader transport; a
+ready prepared profile reuses the containing independent chunk, while an
+audiobook uses only qualified or manual anchors for text seeking.
+
+**Change together:** Changes to token indices, chunk boundaries, sidecar fields,
+or confidence rules must update preparation, export, audiobook alignment,
+IndexedDB validation/migration, playback seeking, and all three focused test
+suites. Model changes require an immutable revision, a minimal allowlist,
+worker/runtime review, size/privacy copy, and edge-route tests. Never treat a
+weak alignment as an exact word timestamp or add DRM circumvention.
+
+**State and I/O:** Prepared audio is committed as independently playable,
+optionally compressed WAV chunks plus audio-free metadata and a manifest keyed
+by exact document fingerprint, model, voice, and generated pace. Export reads
+one bounded part at a time and writes locally through the File System Access
+API or browser downloads. Audiobook source `Blob`s, local transcript windows,
+confidence-scored anchors, and manual corrections remain in book-scoped
+IndexedDB records. A ready LineLight WAV sidecar can bypass ASR only when its
+book fingerprint and ordered filenames match. Whisper model requests contain no
+book text or audio; only pinned public files cross the network. Book and profile
+removal clean their owned audio, metadata, transcript, and anchor records.
+
+**Verification:** Use
+[`tests/prepared-narration.test.mjs`](../tests/prepared-narration.test.mjs),
+[`tests/prepared-narration-export.test.mjs`](../tests/prepared-narration-export.test.mjs),
+[`tests/prepared-narration-ui.test.mjs`](../tests/prepared-narration-ui.test.mjs),
+and [`tests/timed-media.test.mjs`](../tests/timed-media.test.mjs) for preparation,
+WAV, sidecar, and shared seek contracts. Use
+[`tests/audiobook-alignment.test.mjs`](../tests/audiobook-alignment.test.mjs),
+[`tests/audiobook-worker.test.mjs`](../tests/audiobook-worker.test.mjs), and
+[`tests/alignment-model.test.mjs`](../tests/alignment-model.test.mjs) for local
+ASR, confidence, cancellation, route, and reader-wiring contracts.
+[`tests/reader-library.test.mjs`](../tests/reader-library.test.mjs) establishes
+atomic progress, per-profile cleanup, and cross-book isolation. Real codec
+support, download prompts, long-running local inference, and audio output still
+need representative browser checks.
+
 ## PWA caching and browser runtime isolation
 
 **Purpose:** Make the app installable, retain immutable runtime assets for
@@ -569,7 +665,9 @@ headers.
 
 **Owns:** [`worker/index.ts`](../worker/index.ts) is the edge request router and
 vinext entry point. [`worker/offline-model.mjs`](../worker/offline-model.mjs) owns
-the pinned public model proxy, and
+the pinned public Kokoro model proxy,
+[`worker/alignment-model.mjs`](../worker/alignment-model.mjs) owns the pinned
+Whisper alignment-model proxy, and
 [`worker/speech-token.ts`](../worker/speech-token.ts) owns the Azure token route.
 [`vite.config.ts`](../vite.config.ts) owns vinext/Cloudflare composition, local
 bindings, the phonemizer alias, worker format, and development server settings.
@@ -601,7 +699,8 @@ application bundle; current product document storage does not use D1.
 [`scripts/validate-artifact.sh`](../scripts/validate-artifact.sh), and
 [`tests/rendered-html.test.mjs`](../tests/rendered-html.test.mjs). Model route
 contracts are covered by
-[`tests/offline-model.test.mjs`](../tests/offline-model.test.mjs). Live binding,
+[`tests/offline-model.test.mjs`](../tests/offline-model.test.mjs) and
+[`tests/alignment-model.test.mjs`](../tests/alignment-model.test.mjs). Live binding,
 header, and secret changes need a local Cloudflare or hosted smoke test.
 
 ## Offline voice quality review
