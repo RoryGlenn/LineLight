@@ -1,0 +1,4 @@
+interface:
+  display_name: "Ship a LineLight Change"
+  short_description: "Implement and validate LineLight changes"
+  default_prompt: "Use $ship-linelight-change to implement this LineLight change and carry it through repository validation."

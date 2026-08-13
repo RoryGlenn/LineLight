@@ -777,12 +777,20 @@ evidence plan, and upstream and modification notices live under
 [`docs/dependency-security.md`](dependency-security.md) explains the reviewed
 dependency posture. [`.github/workflows/ci.yml`](../.github/workflows/ci.yml)
 owns required hosted checks. [`.gitignore`](../.gitignore) owns repository-local
-generated and secret-file exclusions.
+generated and secret-file exclusions. [`AGENTS.md`](../AGENTS.md) and
+[`app/AGENTS.md`](../app/AGENTS.md) own durable repository and reader-runtime
+instructions for coding agents. The
+[`ship-linelight-change` skill](../.agents/skills/ship-linelight-change/SKILL.md)
+owns the repeatable change-to-validation workflow, while the
+[`linelight_investigator` agent](../.codex/agents/linelight-investigator.toml)
+owns read-only cross-runtime diagnosis.
 
 **Entry points:** Contributors use the scripts in
 [`package.json`](../package.json). GitHub invokes
 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml), which installs,
 audits, lints, type-checks, builds, tests, and validates the current change.
+Codex discovers the instruction chain from `AGENTS.md`, the project skill from
+`.agents/skills`, and the custom investigator from `.codex/agents`.
 
 **Change together:** Dependency updates require lockfile,
 override, audit-policy, compatibility, production-exposure, and artifact review.
@@ -794,7 +802,9 @@ install patch does not change those ONNX records.
 Build-output changes require synchronized Sites staging and artifact validation.
 Repository workflow belongs in [`CONTRIBUTING.md`](../CONTRIBUTING.md); developer
 orientation belongs in [`README.md`](../README.md), this index, and
-[`AGENTS.md`](../AGENTS.md).
+[`AGENTS.md`](../AGENTS.md). Keep agent instructions and skills concise, link to
+this index instead of duplicating fast-changing architecture, and preserve the
+investigator's read-only boundary.
 
 **State and I/O:** Build state is written only to ignored local output directories
 and the generated Sites artifact. Secrets belong in ignored `.env` files or
@@ -815,6 +825,9 @@ described by the offline narration gate.
 The semantic-index contract itself is covered by
 [`tests/codebase-index.test.mjs`](../tests/codebase-index.test.mjs), which checks
 the domain schema, relative links, and tracked first-party path coverage.
+[`tests/agent-customization.test.mjs`](../tests/agent-customization.test.mjs)
+checks project customization discovery, skill metadata, and the investigator's
+required read-only configuration.
 Run `npm run lint`, `npm run typecheck`, `npm test`, and `git diff --check` before
 handoff. `npm test` performs the production build before running every
 [`tests/*.test.mjs`](../tests) file.
