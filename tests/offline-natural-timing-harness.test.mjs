@@ -6,7 +6,11 @@ import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 
-import { validateOfflineNaturalTimingEvidence } from "../scripts/run-offline-natural-timing-regression.mjs";
+import {
+  OFFLINE_TIMING_BOOK_INPUT_SELECTOR,
+  OFFLINE_TIMING_SETTINGS_CLOSE_SELECTOR,
+  validateOfflineNaturalTimingEvidence,
+} from "../scripts/run-offline-natural-timing-regression.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -30,6 +34,7 @@ function passingEvidence() {
     issue: 60,
     source: { commit: "test" },
     fixture: { sha256: "test" },
+    precondition: { offlineVoice: "M2" },
     rates: [0.75, 1, 1.25].map(passingRate),
     browserDiagnostics: { errors: [] },
   };
@@ -39,6 +44,21 @@ test("accepts consecutive Offline-natural highlights at every required rate", ()
   assert.deepEqual(
     validateOfflineNaturalTimingEvidence(passingEvidence()),
     [],
+  );
+});
+
+test("selects the book input instead of an audiobook timing sidecar", () => {
+  assert.equal(
+    OFFLINE_TIMING_BOOK_INPUT_SELECTOR,
+    'input[type="file"][accept*=".pdf"]',
+  );
+  assert.doesNotMatch(OFFLINE_TIMING_BOOK_INPUT_SELECTOR, /json/iu);
+});
+
+test("closes the current reading settings panel before importing", () => {
+  assert.equal(
+    OFFLINE_TIMING_SETTINGS_CLOSE_SELECTOR,
+    '.settings-panel button[aria-label="Close reading settings"]',
   );
 });
 
@@ -76,6 +96,9 @@ test(
             "http://127.0.0.1:5189/",
           "--output",
           outputDirectory,
+          ...(process.env.LINELIGHT_OFFLINE_TIMING_VOICE
+            ? ["--voice", process.env.LINELIGHT_OFFLINE_TIMING_VOICE]
+            : []),
         ],
         { cwd: path.resolve("."), timeout: 590_000 },
       );

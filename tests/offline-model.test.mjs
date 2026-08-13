@@ -85,9 +85,10 @@ test("never silently falls back from offline narration to browser speech", () =>
 test("migrates former voices to a valid 44.1 kHz studio style", () => {
   assert.equal(OFFLINE_DEFAULT_VOICE, "F4");
   assert.equal(normalizeOfflineVoiceId("F2"), "F4");
-  assert.equal(normalizeOfflineVoiceId("M1"), "M4");
-  assert.equal(normalizeOfflineVoiceId("am_michael"), "M4");
-  assert.equal(normalizeOfflineVoiceId("bm_george"), "M4");
+  assert.equal(normalizeOfflineVoiceId("M1"), "M2");
+  assert.equal(normalizeOfflineVoiceId("M4"), "M2");
+  assert.equal(normalizeOfflineVoiceId("am_michael"), "M2");
+  assert.equal(normalizeOfflineVoiceId("bm_george"), "M2");
   assert.equal(normalizeOfflineVoiceId("af_heart"), "F4");
   assert.equal(normalizeOfflineVoiceId(null), "F4");
 });
@@ -103,13 +104,19 @@ test("offers one plain-language female and male offline voice", async () => {
     2,
   );
   assert.match(configSource, /value: "F4",[\s\S]*label: "Female"/u);
-  assert.match(configSource, /value: "M4",[\s\S]*label: "Male"/u);
+  assert.match(configSource, /value: "M2",[\s\S]*label: "Male"/u);
   assert.doesNotMatch(configSource, /label: "Studio [FM]\d"/u);
   assert.match(pageSource, /One female and one male voice are available/u);
   assert.match(
-    configSource,
-    /OFFLINE_VOICE_CACHE_NAME = "linelight-offline-voices-v4"/u,
+    pageSource,
+    /warm female voice at a conversational pace/u,
   );
+  assert.doesNotMatch(pageSource, /warm Heart voice at a relaxed pace/u);
+  assert.match(
+    configSource,
+    /OFFLINE_VOICE_CACHE_NAME = "linelight-offline-voices-v5"/u,
+  );
+  assert.match(configSource, /"linelight-offline-voices-v4"/u);
   assert.match(configSource, /"linelight-offline-voices-v3"/u);
   assert.match(configSource, /"linelight-offline-voices-v2"/u);
 });
@@ -117,12 +124,12 @@ test("offers one plain-language female and male offline voice", async () => {
 test("pairs the native 44.1 kHz model with a safe runtime ladder", () => {
   assert.equal(OFFLINE_MODEL_DTYPE, "fp32");
   assert.equal(OFFLINE_MODEL_BYTES, 398_361_202);
-  assert.equal(OFFLINE_VOICE_BYTES, 583_330);
+  assert.equal(OFFLINE_VOICE_BYTES, 583_863);
   assert.equal(OFFLINE_OUTPUT_SAMPLE_RATE, 44_100);
   assert.equal(OFFLINE_MODEL_ASSETS.length, 6);
   assert.deepEqual(
     OFFLINE_VOICE_ASSETS.map((voice) => voice.id),
-    ["F4", "M4"],
+    ["F4", "M2"],
   );
   assert.equal(OFFLINE_WEBGPU_ADAPTER_TIMEOUT_MS, 500);
   assert.equal(OFFLINE_MODEL_RUNTIME, "webgpu");
@@ -408,7 +415,7 @@ test("selects and verifies each cold backend only once before model construction
 test("keeps the validation receipt private to Cache Storage", () => {
   assert.equal(
     OFFLINE_MODEL_READY_MARKER_VERSION,
-    "supertonic-3-44100-reference-voices-ready-v3",
+    "supertonic-3-44100-reference-voices-ready-v4",
   );
   assert.match(OFFLINE_MODEL_READY_MARKER_URL, /supertonic-3/u);
   assert.equal(resolveOfflineModelRequest(OFFLINE_MODEL_READY_MARKER_URL), null);
@@ -417,6 +424,7 @@ test("keeps the validation receipt private to Cache Storage", () => {
       url.slice(OFFLINE_MODEL_ROUTE_PREFIX.length),
     ),
     [
+      "__linelight_supertonic-3-44100-reference-voices-ready-v3",
       "__linelight_supertonic-3-44100-two-voices-ready-v2",
       "__linelight_supertonic-3-44100-ready-v1",
     ],

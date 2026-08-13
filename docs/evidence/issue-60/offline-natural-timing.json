@@ -1,82 +1,97 @@
 {
   "schemaVersion": 1,
   "issue": 60,
-  "generatedAt": "2026-08-09T14:32:01.820Z",
+  "generatedAt": "2026-08-13T18:38:46.737Z",
   "source": {
-    "commit": "f4c61267656a30f874a7c7ee903faa5c4bbca434",
-    "dirty": false,
+    "commit": "43d85c44fa67a75d1f230e4457505612ced28c47",
+    "dirty": true,
     "files": {
-      "app/page.tsx": "f26b0f7b287f694b881f4df79af175de1d6db456e7b9734369ea143f4bef680d",
-      "app/offline-speech.ts": "47abb7b703d8ec2f5a456791bdb9b5638e3862bb96c2769da73fce7ebfddf3b5",
-      "app/offline-speech.worker.ts": "ecf03554ee7bb4684e6d9390480e59a953423f04f6913ce52c1dec57a609e418",
-      "app/offline-speech-utils.mjs": "506c2ee652268aece655246690d7e991f0effb29214ff095510a2339df338bab",
-      "app/pdf-page-view.tsx": "0c31810b7d0ceaa41cc63797e14d25319fd01be6cdbc7731b958c3d172703866",
-      "scripts/generate-pdf-highlight-fixture.mjs": "f3865bbdfa8d8b0207f7a53ac9393eef0f7397f07a605b0b9574ac9ad052e1ec",
-      "scripts/run-offline-natural-timing-regression.mjs": "60243da6e806cae4848749bbf7cf56f3e1ed934356e8a58fbe314c4d1b86bca4",
-      "tests/offline-natural-timing-harness.test.mjs": "d0684f7e5dbf74475f4be06eafc50cac3eb320d4f2c6612218939a3182334570",
-      "tests/fixtures/pdf-highlights/issue-60-geometry.pdf": "66725f0c984b158e5282b9728e1c9fd830d2a4eef4ed6efc74c0d0f2eaf4c0b3"
+      "app/page.tsx": "91114bb64ae6e8d6e5762fddb22cae34474b6891a1d58fc1c10620a95c742f90",
+      "app/offline-model-manifest.mjs": "c035369e22fcd32fd1f06dd945bbc60bde83762ae0ee9fb616b9ad4ac58308ed",
+      "app/offline-speech-config.ts": "35b60dc7cbedba87637a46c3a6643e01c4ad99b0e9d574ae0bd9aa2d0affd06c",
+      "app/offline-speech.ts": "4130525445e21307f171cad67e399e6e6602b8e3378fac120deb3076f3058ac1",
+      "app/offline-speech.worker.ts": "4f9e058ebd7ce6b8f601a2129dac35e0d43675d48e1454e16505b2279296ed47",
+      "app/offline-speech-utils.mjs": "cc247f348d750328846008974a2a4d8261f2c20153ee55109a6713664f2a75e3",
+      "app/pdf-page-view.tsx": "5031367fdf4a85c4b86ee6976a8bee3d6f47b031091a1505e2a37a9354b36675",
+      "scripts/generate-pdf-highlight-fixture.mjs": "804d853367452febeab134e7639652a985fc3ac77ab53415e77ae04555805ed4",
+      "scripts/run-offline-natural-timing-regression.mjs": "c47167e9a3dd57a6d09af04f8fe5d93300bce6cb6e7485e25bd315b2ddecaece",
+      "tests/offline-natural-timing-harness.test.mjs": "0c46365f8693dd5f4775a7602a5ec77baa2275c19a36a259c15ef749df21cbf7",
+      "tests/fixtures/pdf-highlights/issue-60-geometry.pdf": "1addfceae4b869eec37dae4755d576ccd0fd7e1ce505dc856da3b96acbf3f06c"
     }
   },
   "fixture": {
     "path": "tests/fixtures/pdf-highlights/issue-60-geometry.pdf",
-    "sha256": "66725f0c984b158e5282b9728e1c9fd830d2a4eef4ed6efc74c0d0f2eaf4c0b3",
+    "sha256": "1addfceae4b869eec37dae4755d576ccd0fd7e1ce505dc856da3b96acbf3f06c",
     "passage": "deterministic synthetic Issue 60 fixture; no imported private text is recorded"
   },
   "precondition": {
     "profile": "disposable copy of a local Brave profile",
-    "offlinePack": "Stored on this device\nFive voices are available without internet.\nRemove"
+    "offlinePack": "Stored on this device\nOne female and one male voice are available without internet.\nRemove",
+    "offlineVoice": "M2"
   },
   "environment": {
-    "appUrl": "http://127.0.0.1:5189/",
-    "browserProduct": "Chrome/151.0.7922.108",
-    "browserRevision": "537.36 (@e4e05577d5cc4f3000c0bae2a555102127e4e84)",
-    "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
-    "platform": "Linux x86_64",
-    "hardwareConcurrency": 12,
-    "devicePixelRatio": 1,
+    "appUrl": "http://localhost:5173/",
+    "browserProduct": "Chrome/151.0.7922.137",
+    "browserRevision": "537.36 (@5fc858bc071f0e132044dda20b5553712e24bb9)",
+    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+    "platform": "MacIntel",
+    "hardwareConcurrency": 10,
+    "devicePixelRatio": 2.200000047683716,
     "visualViewportScale": 1,
     "crossOriginIsolated": true,
     "workerResources": [
       {
-        "name": "http://127.0.0.1:5189/app/offline-speech.worker.ts?worker&url",
+        "name": "http://localhost:5173/app/offline-speech.worker.ts?t=1786640647502&worker&url",
         "initiatorType": "script",
-        "durationMs": 6.46000000834465,
+        "durationMs": 4.650000000372529,
         "transferSize": 300
       },
       {
-        "name": "http://127.0.0.1:5189/app/offline-speech.worker.ts?worker_file&type=module",
+        "name": "http://localhost:5173/app/offline-speech.worker.ts?worker_file&type=module",
         "initiatorType": "other",
-        "durationMs": -23.844999998807907,
+        "durationMs": -5.480000000447035,
         "transferSize": 300
       },
       {
-        "name": "http://127.0.0.1:5189/node_modules/.vite/deps/kokoro-js.js?v=05fd2d00",
+        "name": "http://localhost:5173/node_modules/.vite/deps/onnxruntime-web.js?v=ed542648",
         "initiatorType": "script",
-        "durationMs": 4.159999996423721,
+        "durationMs": 3.6549999993294477,
         "transferSize": 0
       },
       {
-        "name": "http://127.0.0.1:5189/node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.jsep.wasm?import&url",
+        "name": "http://localhost:5173/node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.jsep.wasm?import&url",
         "initiatorType": "script",
-        "durationMs": 8.060000002384186,
+        "durationMs": 1.9150000009685755,
         "transferSize": 300
       },
       {
-        "name": "http://127.0.0.1:5189/app/offline-speech.worker.ts?worker_file&type=module",
+        "name": "http://localhost:5173/app/supertonic-runtime.mjs?t=1786639695891",
+        "initiatorType": "script",
+        "durationMs": 3.4900000002235174,
+        "transferSize": 300
+      },
+      {
+        "name": "http://localhost:5173/app/offline-speech.worker.ts?worker_file&type=module",
         "initiatorType": "other",
-        "durationMs": -13.590000003576279,
+        "durationMs": -5.4849999994039536,
         "transferSize": 300
       },
       {
-        "name": "http://127.0.0.1:5189/node_modules/.vite/deps/kokoro-js.js?v=05fd2d00",
+        "name": "http://localhost:5173/node_modules/.vite/deps/onnxruntime-web.js?v=ed542648",
         "initiatorType": "script",
-        "durationMs": 4.180000007152557,
+        "durationMs": 4.054999999701977,
         "transferSize": 0
       },
       {
-        "name": "http://127.0.0.1:5189/node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.jsep.wasm?import&url",
+        "name": "http://localhost:5173/node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.jsep.wasm?import&url",
         "initiatorType": "script",
-        "durationMs": 7.680000007152557,
+        "durationMs": 3.0599999986588955,
+        "transferSize": 300
+      },
+      {
+        "name": "http://localhost:5173/app/supertonic-runtime.mjs?t=1786639695891",
+        "initiatorType": "script",
+        "durationMs": 5.9150000009685755,
         "transferSize": 300
       }
     ]
@@ -95,74 +110,74 @@
       "observedTransitions": 12,
       "transitions": [
         {
-          "at": 6454.455000013113,
-          "frame": 808,
+          "at": 5029.104999998584,
+          "frame": 565,
           "index": 8,
           "label": "my"
         },
         {
-          "at": 6841.145000010729,
-          "frame": 858,
+          "at": 5358.979999998584,
+          "frame": 604,
           "index": 9,
           "label": "friend"
         },
         {
-          "at": 7489.2300000190735,
-          "frame": 945,
+          "at": 5926.2050000000745,
+          "frame": 672,
           "index": 10,
           "label": "Tiarnán"
         },
         {
-          "at": 8484.710000008345,
-          "frame": 1088,
+          "at": 6776.289999999106,
+          "frame": 774,
           "index": 11,
           "label": "de"
         },
         {
-          "at": 9296.155000001192,
-          "frame": 1199,
+          "at": 7674.77499999851,
+          "frame": 882,
           "index": 12,
           "label": "Burca’s"
         },
         {
-          "at": 9918.805000007153,
-          "frame": 1283,
+          "at": 8239.914999999106,
+          "frame": 949,
           "index": 13,
           "label": "definition"
         },
         {
-          "at": 11042.390000015497,
-          "frame": 1439,
+          "at": 9250.584999999031,
+          "frame": 1070,
           "index": 14,
           "label": "of"
         },
         {
-          "at": 11295.865000009537,
-          "frame": 1475,
+          "at": 9476.284999998286,
+          "frame": 1097,
           "index": 15,
           "label": "senior"
         },
         {
-          "at": 11917.230000019073,
-          "frame": 1559,
+          "at": 10027.854999998584,
+          "frame": 1164,
           "index": 16,
           "label": "engineer"
         },
         {
-          "at": 13299.25,
-          "frame": 1752,
+          "at": 11269.27999999933,
+          "frame": 1313,
           "index": 17,
           "label": "the"
         },
         {
-          "at": 13647.675000011921,
-          "frame": 1801,
+          "at": 11489.304999999702,
+          "frame": 1339,
           "index": 18,
           "label": "level"
         },
         {
-          "at": 14775.885000020266,
-          "frame": 1957,
+          "at": 12064.104999998584,
+          "frame": 1407,
           "index": 19,
           "label": "at"
         }
@@ -185,13 +200,13 @@
       "maximumLogicalIndexDelta": 1,
       "maximumActivationsPerFrame": 1,
       "transitionIntervalsMs": {
-        "minimum": 253.47499999403954,
-        "mean": 756.4936363642865,
-        "maximum": 1382.0199999809265
+        "minimum": 220.02500000037253,
+        "mean": 639.5454545454545,
+        "maximum": 1241.425000000745
       },
-      "synthesisAndDecodeWaitMs": 4063.4749999940395,
-      "firstHighlightAfterAudioMs": 1094.2400000095367,
-      "observedPlaybackMs": 9425.375,
+      "synthesisAndDecodeWaitMs": 2562.964999999851,
+      "firstHighlightAfterAudioMs": 1108.0299999993294,
+      "observedPlaybackMs": 8145.970000000671,
       "silentAudioPrime": {
         "sourceKind": "blob",
         "loop": true,
@@ -200,110 +215,74 @@
       },
       "audioChunks": [
         {
-          "calledAtMs": 4034.185000002384,
-          "resolvedAtMs": 4063.485000014305,
+          "calledAtMs": 2541.9000000003725,
+          "resolvedAtMs": 2562.9749999996275,
           "sourceKind": "blob",
           "rejected": null,
           "events": [
             {
               "name": "play",
-              "time": 5356.045000016689,
+              "time": 3915.559999998659,
               "currentTime": 0,
               "duration": null,
-              "timeMs": 4059.3050000071526
+              "timeMs": 2557.449999999255
             },
             {
               "name": "waiting",
-              "time": 5356.4000000059605,
+              "time": 3915.7299999985844,
               "currentTime": 0,
               "duration": null,
-              "timeMs": 4059.6599999964237
+              "timeMs": 2557.6199999991804
             },
             {
               "name": "playing",
-              "time": 5360.215000003576,
+              "time": 3921.074999999255,
               "currentTime": 0,
-              "duration": 2.875,
-              "timeMs": 4063.4749999940395
+              "duration": 2.794558,
+              "timeMs": 2562.964999999851
             },
             {
               "name": "pause",
-              "time": 8471.90000000596,
-              "currentTime": 2.875,
-              "duration": 2.875,
-              "timeMs": 7175.159999996424
+              "time": 6760.964999999851,
+              "currentTime": 2.794558,
+              "duration": 2.794558,
+              "timeMs": 5402.855000000447
             },
             {
               "name": "ended",
-              "time": 8472.485000014305,
+              "time": 6764.104999998584,
               "currentTime": 0,
               "duration": null,
-              "timeMs": 7175.745000004768
+              "timeMs": 5405.99499999918
             }
           ]
         },
         {
-          "calledAtMs": 7175.639999985695,
-          "resolvedAtMs": 7188.25,
+          "calledAtMs": 5405.11999999918,
+          "resolvedAtMs": 5418.410000000149,
           "sourceKind": "blob",
           "rejected": null,
           "events": [
             {
               "name": "play",
-              "time": 8484.765000015497,
+              "time": 6776.339999999851,
               "currentTime": 0,
-              "duration": 4.925,
-              "timeMs": 7188.0250000059605
+              "duration": 8.654127,
+              "timeMs": 5418.230000000447
             },
             {
               "name": "playing",
-              "time": 8484.975000023842,
+              "time": 6776.5099999997765,
               "currentTime": 0,
-              "duration": 4.925,
-              "timeMs": 7188.235000014305
+              "duration": 8.654127,
+              "timeMs": 5418.4000000003725
             },
             {
               "name": "pause",
-              "time": 13634.635000020266,
-              "currentTime": 4.925,
-              "duration": 4.925,
-              "timeMs": 12337.895000010729
-            },
-            {
-              "name": "ended",
-              "time": 13635.225000023842,
-              "currentTime": 0,
-              "duration": null,
-              "timeMs": 12338.485000014305
-            }
-          ]
-        },
-        {
-          "calledAtMs": 12338.330000013113,
-          "resolvedAtMs": 12351.175000011921,
-          "sourceKind": "blob",
-          "rejected": null,
-          "events": [
-            {
-              "name": "play",
-              "time": 13647.710000008345,
-              "currentTime": 0,
-              "duration": 5.525,
-              "timeMs": 12350.969999998808
-            },
-            {
-              "name": "playing",
-              "time": 13647.905000001192,
-              "currentTime": 0,
-              "duration": 5.525,
-              "timeMs": 12351.164999991655
-            },
-            {
-              "name": "pause",
-              "time": 14814.645000010729,
-              "currentTime": 0.929445,
-              "duration": 5.525,
-              "timeMs": 13517.905000001192
+              "time": 12084.594999998808,
+              "currentTime": 5.239108,
+              "duration": 8.654127,
+              "timeMs": 10726.484999999404
             }
           ]
         }
@@ -320,74 +299,74 @@
       "observedTransitions": 12,
       "transitions": [
         {
-          "at": 22043.855000019073,
-          "frame": 2975,
+          "at": 13613.11999999918,
+          "frame": 1594,
           "index": 8,
           "label": "my"
         },
         {
-          "at": 22313.955000013113,
-          "frame": 3008,
+          "at": 13877.65499999933,
+          "frame": 1625,
           "index": 9,
           "label": "friend"
         },
         {
-          "at": 22783.110000014305,
-          "frame": 3068,
+          "at": 14317.269999999553,
+          "frame": 1678,
           "index": 10,
           "label": "Tiarnán"
         },
         {
-          "at": 23504.07500001788,
-          "frame": 3172,
+          "at": 14994.61499999836,
+          "frame": 1759,
           "index": 11,
           "label": "de"
         },
         {
-          "at": 24201.605000019073,
-          "frame": 3267,
+          "at": 15733.02999999933,
+          "frame": 1849,
           "index": 12,
           "label": "Burca’s"
         },
         {
-          "at": 24616.930000007153,
-          "frame": 3321,
+          "at": 16158.284999998286,
+          "frame": 1899,
           "index": 13,
           "label": "definition"
         },
         {
-          "at": 25342.55000001192,
-          "frame": 3420,
+          "at": 16909.534999998286,
+          "frame": 1989,
           "index": 14,
           "label": "of"
         },
         {
-          "at": 25508.17000001669,
-          "frame": 3444,
+          "at": 17065.43499999866,
+          "frame": 2008,
           "index": 15,
           "label": "senior"
         },
         {
-          "at": 25909.010000020266,
-          "frame": 3496,
+          "at": 17487.71499999985,
+          "frame": 2058,
           "index": 16,
           "label": "engineer"
         },
         {
-          "at": 26812.814999997616,
-          "frame": 3620,
+          "at": 18392.769999999553,
+          "frame": 2167,
           "index": 17,
           "label": "the"
         },
         {
-          "at": 26972.915000021458,
-          "frame": 3643,
+          "at": 18565.95999999903,
+          "frame": 2188,
           "index": 18,
           "label": "level"
         },
         {
-          "at": 27382.225000023842,
-          "frame": 3696,
+          "at": 18983.455000000075,
+          "frame": 2238,
           "index": 19,
           "label": "at"
         }
@@ -410,13 +389,13 @@
       "maximumLogicalIndexDelta": 1,
       "maximumActivationsPerFrame": 1,
       "transitionIntervalsMs": {
-        "minimum": 160.10000002384186,
-        "mean": 485.30636363679713,
-        "maximum": 903.8049999773502
+        "minimum": 155.90000000037253,
+        "mean": 488.212272727354,
+        "maximum": 905.054999999702
       },
-      "synthesisAndDecodeWaitMs": 6104.664999991655,
-      "firstHighlightAfterAudioMs": 917.1000000238419,
-      "observedPlaybackMs": 6275.300000011921,
+      "synthesisAndDecodeWaitMs": 516.5999999996275,
+      "firstHighlightAfterAudioMs": 805.410000000149,
+      "observedPlaybackMs": 6178.915000000969,
       "silentAudioPrime": {
         "sourceKind": "blob",
         "loop": true,
@@ -425,74 +404,74 @@
       },
       "audioChunks": [
         {
-          "calledAtMs": 6072.5250000059605,
-          "resolvedAtMs": 6104.675000011921,
+          "calledAtMs": 497.02999999932945,
+          "resolvedAtMs": 516.605000000447,
           "sourceKind": "blob",
           "rejected": null,
           "events": [
             {
               "name": "play",
-              "time": 21122.735000014305,
+              "time": 12803.539999999106,
               "currentTime": 0,
               "duration": null,
-              "timeMs": 6100.645000010729
+              "timeMs": 512.429999999702
             },
             {
               "name": "waiting",
-              "time": 21123.055000007153,
+              "time": 12803.705000000075,
               "currentTime": 0,
               "duration": null,
-              "timeMs": 6100.965000003576
+              "timeMs": 512.5950000006706
             },
             {
               "name": "playing",
-              "time": 21126.75499999523,
+              "time": 12807.709999999031,
               "currentTime": 0,
-              "duration": 2.125,
-              "timeMs": 6104.664999991655
+              "duration": 2.095918,
+              "timeMs": 516.5999999996275
             },
             {
               "name": "pause",
-              "time": 23490.640000015497,
-              "currentTime": 2.125,
-              "duration": 2.125,
-              "timeMs": 8468.550000011921
+              "time": 14976.73999999836,
+              "currentTime": 2.095918,
+              "duration": 2.095918,
+              "timeMs": 2685.629999998957
             },
             {
               "name": "ended",
-              "time": 23491.105000019073,
+              "time": 14978.984999999404,
               "currentTime": 0,
               "duration": null,
-              "timeMs": 8469.015000015497
+              "timeMs": 2687.875
             }
           ]
         },
         {
-          "calledAtMs": 8468.92000001669,
-          "resolvedAtMs": 8482.245000004768,
+          "calledAtMs": 2687.2400000002235,
+          "resolvedAtMs": 2703.7599999997765,
           "sourceKind": "blob",
           "rejected": null,
           "events": [
             {
               "name": "play",
-              "time": 23504.105000019073,
+              "time": 14994.644999999553,
               "currentTime": 0,
-              "duration": 4.225,
-              "timeMs": 8482.015000015497
+              "duration": 6.49059,
+              "timeMs": 2703.535000000149
             },
             {
               "name": "playing",
-              "time": 23504.32500001788,
+              "time": 14994.859999999404,
               "currentTime": 0,
-              "duration": 4.225,
-              "timeMs": 8482.235000014305
+              "duration": 6.49059,
+              "timeMs": 2703.75
             },
             {
               "name": "pause",
-              "time": 27423.975000023842,
-              "currentTime": 3.682415,
-              "duration": 4.225,
-              "timeMs": 12401.885000020266
+              "time": 19005.444999998435,
+              "currentTime": 3.943378,
+              "duration": 6.49059,
+              "timeMs": 6714.334999999031
             }
           ]
         }
@@ -509,74 +488,74 @@
       "observedTransitions": 12,
       "transitions": [
         {
-          "at": 29300.590000003576,
-          "frame": 3953,
+          "at": 20339.384999999776,
+          "frame": 2402,
           "index": 8,
           "label": "my"
         },
         {
-          "at": 29518.70000001788,
-          "frame": 3978,
+          "at": 20560.969999998808,
+          "frame": 2428,
           "index": 9,
           "label": "friend"
         },
         {
-          "at": 29884.490000009537,
-          "frame": 4024,
+          "at": 20918.169999999925,
+          "frame": 2470,
           "index": 10,
           "label": "Tiarnán"
         },
         {
-          "at": 30458.915000021458,
-          "frame": 4106,
+          "at": 21492.70999999903,
+          "frame": 2539,
           "index": 11,
           "label": "de"
         },
         {
-          "at": 31114.405000001192,
-          "frame": 4194,
+          "at": 22181.75,
+          "frame": 2623,
           "index": 12,
           "label": "Burca’s"
         },
         {
-          "at": 31463.225000023842,
-          "frame": 4237,
+          "at": 22505.80999999866,
+          "frame": 2661,
           "index": 13,
           "label": "definition"
         },
         {
-          "at": 32069.19500002265,
-          "frame": 4318,
+          "at": 23099.544999999925,
+          "frame": 2732,
           "index": 14,
           "label": "of"
         },
         {
-          "at": 32209.655000001192,
-          "frame": 4338,
+          "at": 23218.52999999933,
+          "frame": 2746,
           "index": 15,
           "label": "senior"
         },
         {
-          "at": 32558.219999998808,
-          "frame": 4382,
+          "at": 23550.15499999933,
+          "frame": 2786,
           "index": 16,
           "label": "engineer"
         },
         {
-          "at": 33298.29500001669,
-          "frame": 4483,
+          "at": 24258.139999998733,
+          "frame": 2871,
           "index": 17,
           "label": "the"
         },
         {
-          "at": 33436.36500000954,
-          "frame": 4503,
+          "at": 24399.359999999404,
+          "frame": 2888,
           "index": 18,
           "label": "level"
         },
         {
-          "at": 33776.935000002384,
-          "frame": 4546,
+          "at": 24716.479999998584,
+          "frame": 2926,
           "index": 19,
           "label": "at"
         }
@@ -599,13 +578,13 @@
       "maximumLogicalIndexDelta": 1,
       "maximumActivationsPerFrame": 1,
       "transitionIntervalsMs": {
-        "minimum": 138.06999999284744,
-        "mean": 406.9404545453462,
-        "maximum": 740.0750000178814
+        "minimum": 118.98499999940395,
+        "mean": 397.9177272726189,
+        "maximum": 707.984999999404
       },
-      "synthesisAndDecodeWaitMs": 913.9749999940395,
-      "firstHighlightAfterAudioMs": 758.3700000047684,
-      "observedPlaybackMs": 5301.700000017881,
+      "synthesisAndDecodeWaitMs": 514.640000000596,
+      "firstHighlightAfterAudioMs": 608.5050000008196,
+      "observedPlaybackMs": 5057.620000001043,
       "silentAudioPrime": {
         "sourceKind": "blob",
         "loop": true,
@@ -614,74 +593,74 @@
       },
       "audioChunks": [
         {
-          "calledAtMs": 884.8499999940395,
-          "resolvedAtMs": 913.9850000143051,
+          "calledAtMs": 495.76500000059605,
+          "resolvedAtMs": 514.6450000014156,
           "sourceKind": "blob",
           "rejected": null,
           "events": [
             {
               "name": "play",
-              "time": 28539.085000008345,
+              "time": 19726.83499999903,
               "currentTime": 0,
               "duration": null,
-              "timeMs": 910.8400000035763
+              "timeMs": 510.59500000067055
             },
             {
               "name": "waiting",
-              "time": 28539.37999999523,
+              "time": 19727.019999999553,
               "currentTime": 0,
               "duration": null,
-              "timeMs": 911.1349999904633
+              "timeMs": 510.7800000011921
             },
             {
               "name": "playing",
-              "time": 28542.219999998808,
+              "time": 19730.879999998957,
               "currentTime": 0,
-              "duration": 1.675,
-              "timeMs": 913.9749999940395
+              "duration": 1.676735,
+              "timeMs": 514.640000000596
             },
             {
               "name": "pause",
-              "time": 30445.64500001073,
-              "currentTime": 1.675,
-              "duration": 1.675,
-              "timeMs": 2817.4000000059605
+              "time": 21475.31499999948,
+              "currentTime": 1.676735,
+              "duration": 1.676735,
+              "timeMs": 2259.0750000011176
             },
             {
               "name": "ended",
-              "time": 30446.205000013113,
+              "time": 21476.65499999933,
               "currentTime": 0,
               "duration": null,
-              "timeMs": 2817.9600000083447
+              "timeMs": 2260.4150000009686
             }
           ]
         },
         {
-          "calledAtMs": 2817.8499999940395,
-          "resolvedAtMs": 2831.015000015497,
+          "calledAtMs": 2259.9850000012666,
+          "resolvedAtMs": 2276.7550000008196,
           "sourceKind": "blob",
           "rejected": null,
           "events": [
             {
               "name": "play",
-              "time": 30458.955000013113,
+              "time": 21492.74499999918,
               "currentTime": 0,
-              "duration": 3.575,
-              "timeMs": 2830.7100000083447
+              "duration": 5.192472,
+              "timeMs": 2276.5050000008196
             },
             {
               "name": "playing",
-              "time": 30459.235000014305,
+              "time": 21492.979999998584,
               "currentTime": 0,
-              "duration": 3.575,
-              "timeMs": 2830.9900000095367
+              "duration": 5.192472,
+              "timeMs": 2276.7400000002235
             },
             {
               "name": "pause",
-              "time": 33865.110000014305,
-              "currentTime": 3.156108,
-              "duration": 3.575,
-              "timeMs": 6236.865000009537
+              "time": 24811.61499999836,
+              "currentTime": 3.245848,
+              "duration": 5.192472,
+              "timeMs": 5595.375
             }
           ]
         }
@@ -696,25 +675,61 @@
     "errors": [],
     "consoleEntries": [
       {
-        "type": "warning",
+        "type": "error",
         "values": [
-          "No available adapters."
+          "\u001b[0;93m2026-08-13 14:38:23.646314 [W:onnxruntime:, session_state.cc:1280 VerifyEachNodeIsAssignedToAnEp] Some nodes were not assigned to the preferred execution providers which may or may not have an negative impact on performance. e.g. ORT explicitly assigns shape related ops to CPU to improve perf.\u001b[m"
         ]
       },
       {
-        "type": "warning",
+        "type": "error",
         "values": [
-          "No available adapters."
+          "\u001b[0;93m2026-08-13 14:38:23.647069 [W:onnxruntime:, session_state.cc:1282 VerifyEachNodeIsAssignedToAnEp] Rerunning with verbose output on a non-minimal build will show node assignments.\u001b[m"
         ]
       },
       {
-        "type": "warning",
+        "type": "error",
         "values": [
-          "No available adapters."
+          "\u001b[0;93m2026-08-13 14:38:23.917334 [W:onnxruntime:, session_state.cc:1280 VerifyEachNodeIsAssignedToAnEp] Some nodes were not assigned to the preferred execution providers which may or may not have an negative impact on performance. e.g. ORT explicitly assigns shape related ops to CPU to improve perf.\u001b[m"
+        ]
+      },
+      {
+        "type": "error",
+        "values": [
+          "\u001b[0;93m2026-08-13 14:38:23.917454 [W:onnxruntime:, session_state.cc:1282 VerifyEachNodeIsAssignedToAnEp] Rerunning with verbose output on a non-minimal build will show node assignments.\u001b[m"
+        ]
+      },
+      {
+        "type": "error",
+        "values": [
+          "\u001b[0;93m2026-08-13 14:38:24.386439 [W:onnxruntime:, session_state.cc:1280 VerifyEachNodeIsAssignedToAnEp] Some nodes were not assigned to the preferred execution providers which may or may not have an negative impact on performance. e.g. ORT explicitly assigns shape related ops to CPU to improve perf.\u001b[m"
+        ]
+      },
+      {
+        "type": "error",
+        "values": [
+          "\u001b[0;93m2026-08-13 14:38:24.386695 [W:onnxruntime:, session_state.cc:1282 VerifyEachNodeIsAssignedToAnEp] Rerunning with verbose output on a non-minimal build will show node assignments.\u001b[m"
+        ]
+      },
+      {
+        "type": "error",
+        "values": [
+          "\u001b[0;93m2026-08-13 14:38:24.944390 [W:onnxruntime:, session_state.cc:1280 VerifyEachNodeIsAssignedToAnEp] Some nodes were not assigned to the preferred execution providers which may or may not have an negative impact on performance. e.g. ORT explicitly assigns shape related ops to CPU to improve perf.\u001b[m"
+        ]
+      },
+      {
+        "type": "error",
+        "values": [
+          "\u001b[0;93m2026-08-13 14:38:24.944624 [W:onnxruntime:, session_state.cc:1282 VerifyEachNodeIsAssignedToAnEp] Rerunning with verbose output on a non-minimal build will show node assignments.\u001b[m"
         ]
       }
     ],
-    "allLongTasks": []
+    "allLongTasks": [
+      {
+        "startTime": 170.85999999940395,
+        "duration": 75,
+        "name": "self"
+      }
+    ]
   },
   "failures": [],
   "passed": true

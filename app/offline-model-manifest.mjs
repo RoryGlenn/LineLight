@@ -43,7 +43,7 @@ export const OFFLINE_MODEL_ASSETS = Object.freeze([
 
 export const OFFLINE_VOICE_ASSETS = Object.freeze([
   Object.freeze({ id: "F4", file: "voice_styles/F4.json", bytes: 291_808 }),
-  Object.freeze({ id: "M4", file: "voice_styles/M4.json", bytes: 291_522 }),
+  Object.freeze({ id: "M2", file: "voice_styles/M2.json", bytes: 292_055 }),
 ]);
 
 export const OFFLINE_MODEL_FILES = OFFLINE_MODEL_ASSETS.map(
@@ -83,10 +83,11 @@ export const OFFLINE_VOICE_URLS = OFFLINE_VOICE_ASSETS.map(
 );
 
 export const OFFLINE_MODEL_READY_MARKER_VERSION =
-  "supertonic-3-44100-reference-voices-ready-v3";
+  "supertonic-3-44100-reference-voices-ready-v4";
 export const OFFLINE_MODEL_READY_MARKER_URL =
   `${OFFLINE_MODEL_ROUTE_PREFIX}__linelight_${OFFLINE_MODEL_READY_MARKER_VERSION}`;
 export const OFFLINE_RETIRED_MODEL_READY_MARKER_URLS = Object.freeze([
+  `${OFFLINE_MODEL_ROUTE_PREFIX}__linelight_supertonic-3-44100-reference-voices-ready-v3`,
   `${OFFLINE_MODEL_ROUTE_PREFIX}__linelight_supertonic-3-44100-two-voices-ready-v2`,
   `${OFFLINE_MODEL_ROUTE_PREFIX}__linelight_supertonic-3-44100-ready-v1`,
 ]);
@@ -135,7 +136,7 @@ export function normalizeOfflineVoiceId(value) {
     typeof value === "string" &&
     /^(?:M[1-5]$|[ab]?m_)/u.test(value)
   ) {
-    return "M4";
+    return "M2";
   }
   return OFFLINE_DEFAULT_VOICE;
 }
