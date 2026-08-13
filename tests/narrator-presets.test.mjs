@@ -7,10 +7,10 @@ import {
   isNarratorPresetActive,
 } from "../app/narrator-presets.mjs";
 
-test("applies the podcast-host voice and pace without changing reader layout", () => {
+test("applies the reviewed podcast-host voice and pace without changing reader layout", () => {
   const settings = {
     narrationEngine: "device",
-    offlineVoice: "af_heart",
+    offlineVoice: "am_michael",
     rate: 1.25,
     font: "serif",
     lineHeight: 1.78,
@@ -23,10 +23,14 @@ test("applies the podcast-host voice and pace without changing reader layout", (
   assert.deepEqual(result, {
     ...settings,
     narrationEngine: "offline",
-    offlineVoice: "am_michael",
+    offlineVoice: "af_heart",
     rate: 0.9,
   });
   assert.equal(PODCAST_HOST_PRESET.label, "Podcast host");
+  assert.equal(
+    PODCAST_HOST_PRESET.description,
+    "Warm, natural Heart voice · fully offline",
+  );
 });
 
 test("marks the preset active only while all of its voice settings match", () => {

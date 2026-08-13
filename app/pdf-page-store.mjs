@@ -3,7 +3,18 @@
  * outside React state. Consumers subscribe to one numeric revision and select
  * only the currently virtualized range.
  */
-export function createPdfPageStore({ maxBitmaps = 8 } = {}) {
+function scheduleStoreNotification(callback) {
+  if (typeof globalThis.requestAnimationFrame === "function") {
+    globalThis.requestAnimationFrame(callback);
+    return;
+  }
+  callback();
+}
+
+export function createPdfPageStore({
+  maxBitmaps = 8,
+  scheduleNotification = scheduleStoreNotification,
+} = {}) {
   /** @type {Map<number, any>} */
   const pages = new Map();
   /** @type {Array<{pageNumber:number,width:number,height:number,wordStart:number}>} */
@@ -14,10 +25,30 @@ export function createPdfPageStore({ maxBitmaps = 8 } = {}) {
   const bitmapPins = new Map();
   const listeners = new Set();
   let version = 0;
+  let notificationPending = false;
+
+  const deliverNotification = () => {
+    notificationPending = false;
+    // React can replace an external-store subscription while handling a
+    // notification. Iterating the live Set would then visit that re-added
+    // listener again during the same publish and can exceed React's nested
+    // update limit. Each listener present at publish time receives one update.
+    for (const listener of [...listeners]) listener();
+  };
 
   const notify = () => {
     version += 1;
-    for (const listener of listeners) listener();
+    // PDF workers can deliver hundreds of page or bitmap updates in a burst.
+    // Keep the snapshot exact while limiting React to one render notification
+    // for the current animation frame.
+    if (notificationPending) return;
+    notificationPending = true;
+    try {
+      scheduleNotification(deliverNotification);
+    } catch (error) {
+      notificationPending = false;
+      throw error;
+    }
   };
 
   const evictBitmaps = () => {
