@@ -1,25 +1,21 @@
 import {
-  KOKORO_VOICE_CACHE_NAME,
-  LEGACY_OFFLINE_MODEL_URLS,
-  OFFLINE_LEGACY_Q8_MODEL_CACHE_URLS,
-  OFFLINE_MODEL_BYTES,
-  OFFLINE_MODEL_FILES,
+  OFFLINE_DEFAULT_VOICE,
+  OFFLINE_MODEL_ASSETS,
+  OFFLINE_MODEL_CACHE_NAME,
   OFFLINE_MODEL_ID,
   OFFLINE_MODEL_RANGE_CHUNK_BYTES,
   OFFLINE_MODEL_URLS,
   OFFLINE_PACK_BYTES,
-  OFFLINE_VOICES,
-  OFFLINE_VOICE_BYTES,
+  OFFLINE_VOICE_ASSETS,
+  OFFLINE_VOICE_CACHE_NAME,
   OFFLINE_VOICE_CACHE_URLS,
-  TRANSFORMERS_CACHE_NAME,
   type OfflineVoiceId,
 } from "./offline-speech-config";
 import {
-  OFFLINE_FP16_READY_MARKER_URL,
-  OFFLINE_FP16_READY_MARKER_VERSION,
-  OFFLINE_LEGACY_Q8_MODEL_BYTES,
+  OFFLINE_MODEL_READY_MARKER_URL,
+  OFFLINE_MODEL_READY_MARKER_VERSION,
+  OFFLINE_LEGACY_MODEL_ID,
   OFFLINE_MODEL_DTYPE,
-  OFFLINE_WEBGPU_MODEL_DTYPE,
   constrainOfflineBackendPreference,
   nextOfflineSpeechBackend,
 } from "./offline-model-manifest.mjs";
@@ -32,7 +28,6 @@ import {
   isCachedOfflineAssetComplete,
 } from "./offline-pack-installer.mjs";
 import {
-  assessOfflineModelAvailability,
   mapOfflineInstallProgress,
 } from "./offline-preparation.mjs";
 import { createOfflineRunCancellationController } from "./offline-run-cancellation.mjs";
@@ -40,10 +35,7 @@ import { describeWorkerStartupFailure } from "./worker-startup-diagnostics.mjs";
 import offlineSpeechWorkerUrl from "./offline-speech.worker.ts?worker&url";
 
 export type OfflineSpeechDevice = "webgpu" | "wasm";
-export type OfflineSpeechModelDtype =
-  | typeof OFFLINE_MODEL_DTYPE
-  | typeof OFFLINE_WEBGPU_MODEL_DTYPE
-  | "q8";
+export type OfflineSpeechModelDtype = typeof OFFLINE_MODEL_DTYPE;
 export type OfflineSpeechStage =
   | "downloading"
   | "verifying"
@@ -244,7 +236,7 @@ let readiness: OfflineSpeechReadiness = {
   error: null,
 };
 let initializedVoice: OfflineVoiceId | null = null;
-const OFFLINE_PACK_LOCK_NAME = "linelight-offline-voice-pack-v1";
+const OFFLINE_PACK_LOCK_NAME = "linelight-offline-voice-pack-v2";
 const runCancellationController = createOfflineRunCancellationController({
   onTimeout: recoverWorkerAfterCancellationTimeout,
 });
@@ -424,45 +416,35 @@ export async function getOfflineVoicePackRetainedBytes() {
 
   try {
     const [modelCache, voiceCache] = await Promise.all([
-      caches.open(TRANSFORMERS_CACHE_NAME),
-      caches.open(KOKORO_VOICE_CACHE_NAME),
+      caches.open(OFFLINE_MODEL_CACHE_NAME),
+      caches.open(OFFLINE_VOICE_CACHE_NAME),
     ]);
-    const modelIndex = OFFLINE_MODEL_FILES.findIndex((file) =>
-      file.endsWith(".onnx"),
+    const retainedModelBytes = await Promise.all(
+      OFFLINE_MODEL_ASSETS.map((asset, index) =>
+        getCachedOfflineAssetRetainedBytes({
+          cache: modelCache,
+          cacheUrl: OFFLINE_MODEL_URLS[index],
+          expectedBytes: asset.bytes,
+          rangeChunkBytes: asset.rangeBacked
+            ? OFFLINE_MODEL_RANGE_CHUNK_BYTES
+            : undefined,
+        }),
+      ),
     );
-    const currentModelBytes =
-      modelIndex < 0
-        ? 0
-        : await getCachedOfflineAssetRetainedBytes({
-            cache: modelCache,
-            cacheUrl: OFFLINE_MODEL_URLS[modelIndex],
-            expectedBytes: OFFLINE_MODEL_BYTES,
-            rangeChunkBytes: OFFLINE_MODEL_RANGE_CHUNK_BYTES,
-          });
-    const legacyModelComplete =
-      modelIndex >= 0 &&
-      (await isCachedOfflineAssetComplete({
-        cache: modelCache,
-        cacheUrl: LEGACY_OFFLINE_MODEL_URLS[modelIndex],
-        expectedBytes: OFFLINE_MODEL_BYTES,
-        rangeChunkBytes: OFFLINE_MODEL_RANGE_CHUNK_BYTES,
-      }));
     const retainedVoiceBytes = await Promise.all(
-      OFFLINE_VOICE_CACHE_URLS.map((cacheUrl) =>
+      OFFLINE_VOICE_ASSETS.map((asset, index) =>
         getCachedOfflineAssetRetainedBytes({
           cache: voiceCache,
-          cacheUrl,
-          expectedBytes: OFFLINE_VOICE_BYTES,
+          cacheUrl: OFFLINE_VOICE_CACHE_URLS[index],
+          expectedBytes: asset.bytes,
         }),
       ),
     );
 
     return Math.min(
       OFFLINE_PACK_BYTES,
-      Math.max(
-        currentModelBytes,
-        legacyModelComplete ? OFFLINE_MODEL_BYTES : 0,
-      ) + retainedVoiceBytes.reduce((total, bytes) => total + bytes, 0),
+      retainedModelBytes.reduce((total, bytes) => total + bytes, 0) +
+        retainedVoiceBytes.reduce((total, bytes) => total + bytes, 0),
     );
   } catch {
     // A conservative fresh-install preflight is safer when Cache Storage
@@ -557,7 +539,7 @@ function getWorker() {
             webGpuDisabledForSession = true;
           }
           backendPreference = {
-            device: nextBackend.device,
+            device: nextBackend.device as OfflineSpeechDevice,
             wasmThreads: nextBackend.wasmThreads ?? undefined,
           };
           const retryRequests = Array.from(pendingRequests.entries());
@@ -739,79 +721,43 @@ function requestWorker<T>(
   });
 }
 
-async function cacheContainsEvery(
-  cacheName: string,
-  urls: readonly string[],
-  expectedBytes: number,
-) {
-  const cache = await caches.open(cacheName);
-  const matches = await Promise.all(
-    urls.map((cacheUrl) =>
+async function cacheContainsOfflineModelVariant() {
+  const cache = await caches.open(OFFLINE_MODEL_CACHE_NAME);
+  const modelMatches = await Promise.all(
+    OFFLINE_MODEL_ASSETS.map((asset, index) =>
       isCachedOfflineAssetComplete({
         cache,
-        cacheUrl,
-        expectedBytes,
+        cacheUrl: OFFLINE_MODEL_URLS[index],
+        expectedBytes: asset.bytes,
+        rangeChunkBytes: asset.rangeBacked
+          ? OFFLINE_MODEL_RANGE_CHUNK_BYTES
+          : undefined,
+      }),
+    ),
+  );
+  const modelValidated = await hasOfflineModelReadyMarker({
+    cache,
+    cacheUrl: OFFLINE_MODEL_READY_MARKER_URL,
+    value: OFFLINE_MODEL_READY_MARKER_VERSION,
+  });
+  return {
+    installed: modelMatches.every(Boolean) && modelValidated,
+    upgradeRequired: false,
+  };
+}
+
+async function cacheContainsOfflineVoices() {
+  const cache = await caches.open(OFFLINE_VOICE_CACHE_NAME);
+  const matches = await Promise.all(
+    OFFLINE_VOICE_ASSETS.map((asset, index) =>
+      isCachedOfflineAssetComplete({
+        cache,
+        cacheUrl: OFFLINE_VOICE_CACHE_URLS[index],
+        expectedBytes: asset.bytes,
       }),
     ),
   );
   return matches.every(Boolean);
-}
-
-async function cacheContainsOfflineModelVariant() {
-  const cache = await caches.open(TRANSFORMERS_CACHE_NAME);
-  const setupMatches = await Promise.all(
-    OFFLINE_MODEL_FILES.map(async (file, index) => {
-      if (file.endsWith(".onnx")) return true;
-      return Boolean(
-        (await cache.match(OFFLINE_MODEL_URLS[index])) ??
-          (await cache.match(LEGACY_OFFLINE_MODEL_URLS[index])),
-      );
-    }),
-  );
-  const wasmModelIndex = OFFLINE_MODEL_FILES.findIndex((file) =>
-    file.endsWith(".onnx"),
-  );
-  const hasWasmModel =
-    wasmModelIndex >= 0 &&
-    ((await isCachedOfflineAssetComplete({
-      cache,
-      cacheUrl: OFFLINE_MODEL_URLS[wasmModelIndex],
-      expectedBytes: OFFLINE_MODEL_BYTES,
-      rangeChunkBytes: OFFLINE_MODEL_RANGE_CHUNK_BYTES,
-    })) ||
-      (await isCachedOfflineAssetComplete({
-        cache,
-        cacheUrl: LEGACY_OFFLINE_MODEL_URLS[wasmModelIndex],
-        expectedBytes: OFFLINE_MODEL_BYTES,
-        rangeChunkBytes: OFFLINE_MODEL_RANGE_CHUNK_BYTES,
-      })));
-  const legacyModelMatches = await Promise.all(
-    OFFLINE_LEGACY_Q8_MODEL_CACHE_URLS.map((cacheUrl) =>
-      isCachedOfflineAssetComplete({
-        cache,
-        cacheUrl,
-        expectedBytes: OFFLINE_LEGACY_Q8_MODEL_BYTES,
-        rangeChunkBytes: OFFLINE_MODEL_RANGE_CHUNK_BYTES,
-      }),
-    ),
-  );
-  const legacyModelComplete = legacyModelMatches.some(Boolean);
-  const preferredModelValidated = await hasOfflineModelReadyMarker({
-    cache,
-    cacheUrl: OFFLINE_FP16_READY_MARKER_URL,
-    value: OFFLINE_FP16_READY_MARKER_VERSION,
-  });
-  return {
-    ...assessOfflineModelAvailability({
-      legacyModelComplete,
-      preferredModelComplete: hasWasmModel,
-      preferredModelValidated,
-      setupComplete: setupMatches.every(Boolean),
-    }),
-    legacyModelComplete,
-    preferredModelComplete: hasWasmModel,
-    preferredModelValidated,
-  };
 }
 
 export async function getOfflineVoicePackStatus(): Promise<OfflineVoicePackStatus> {
@@ -822,11 +768,7 @@ export async function getOfflineVoicePackStatus(): Promise<OfflineVoicePackStatu
   try {
     const [modelAvailability, hasVoices] = await Promise.all([
       cacheContainsOfflineModelVariant(),
-      cacheContainsEvery(
-        KOKORO_VOICE_CACHE_NAME,
-        OFFLINE_VOICE_CACHE_URLS,
-        OFFLINE_VOICE_BYTES,
-      ),
+      cacheContainsOfflineVoices(),
     ]);
     return {
       installed: modelAvailability.installed && hasVoices,
@@ -898,7 +840,7 @@ export async function initializeOfflineSpeech({
 }
 
 export async function installOfflineVoicePack({
-  voice = OFFLINE_VOICES[0].value,
+  voice = OFFLINE_DEFAULT_VOICE,
   signal,
   onProgress,
 }: {
@@ -917,9 +859,8 @@ export async function installOfflineVoicePack({
     state: "downloading",
     error: null,
   });
-  // A q8 compatibility run records a WASM preference. An explicit fp16 update
-  // should probe the full capability ladder again, unless this page already
-  // observed a real WebGPU runtime failure.
+  // Each explicit install probes the full capability ladder again unless this
+  // page already observed a real WebGPU runtime failure.
   backendPreference = webGpuDisabledForSession
     ? { device: "wasm" }
     : {};
@@ -987,8 +928,10 @@ export async function removeOfflineVoicePack() {
 
   await withOfflinePackLock(() =>
     Promise.all([
-      deleteMatchingEntries(TRANSFORMERS_CACHE_NAME, OFFLINE_MODEL_ID),
-      deleteMatchingEntries(KOKORO_VOICE_CACHE_NAME, OFFLINE_MODEL_ID),
+      deleteMatchingEntries(OFFLINE_MODEL_CACHE_NAME, OFFLINE_MODEL_ID),
+      deleteMatchingEntries(OFFLINE_VOICE_CACHE_NAME, OFFLINE_MODEL_ID),
+      deleteMatchingEntries("transformers-cache", OFFLINE_LEGACY_MODEL_ID),
+      deleteMatchingEntries("kokoro-voices", OFFLINE_LEGACY_MODEL_ID),
     ]).then(() => undefined),
   );
 }

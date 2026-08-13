@@ -39,8 +39,8 @@ parent package constrains them to an advisory-affected release:
   `@esbuild-kit` loader. `drizzle-kit check`, type checking, and the production
   build exercise this path.
 - `sharp` 0.35.3 replaces the vulnerable 0.34 line required by
-  `@huggingface/transformers` 3.8.1. Kokoro 1.2.1 requires Transformers 3.x, so
-  moving LineLight to Transformers 4.x is not currently compatible.
+  `@huggingface/transformers` 3.8.1. The pinned local audiobook-alignment
+  runtime still uses the reviewed Transformers 3.x browser API.
 
 Sharp 0.35 drops Node.js 18 and removes several deprecated image options.
 LineLight requires Node.js 22.13 or newer, and Transformers 3.8.1 does not call
@@ -50,17 +50,14 @@ affine and Lanczos resizing, padding, cropping, PNG encoding, and decoding.
 
 ## Sharp production exposure
 
-Offline narration runs Transformers and Kokoro in a browser Web Worker. That
-path uses browser image primitives and audio inference; it does not invoke the
-Node-only Sharp adapter. The production bundle retains an ignored Sharp module
-stub because Transformers ships both browser and Node branches in one source
-module, but no Sharp native addon, `@img` platform package, or libvips binary is
-packaged in `dist`.
+Local audiobook alignment runs Transformers in a browser Web Worker. That path
+does not invoke the Node-only Sharp adapter. Offline narration now calls ONNX
+Runtime directly for Supertonic and does not bundle Transformers. No Sharp
+native addon, `@img` platform package, or libvips binary is packaged in `dist`.
 
 The artifact test enforces that boundary after every production build. Sharp is
 still installed for Node-side development imports, so the adapter compatibility
-test remains necessary until Kokoro accepts a Transformers release whose Sharp
-range includes the patched line.
+test remains necessary while the local alignment worker imports Transformers.
 
 ## Transformers inference-queue and cancellation-diagnostic patch
 
@@ -159,7 +156,7 @@ notices are also deployed unchanged in
 
 ## Maintenance
 
-When Kokoro, Transformers, or ONNX Runtime Web changes:
+When Supertonic, Transformers, or ONNX Runtime Web changes:
 
 1. remove or update the corresponding override or guarded patch in a dedicated
    dependency update;

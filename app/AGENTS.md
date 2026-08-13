@@ -27,8 +27,8 @@ This guidance applies to source files under `app/` and supplements the root
 - Keep model and runtime routes pinned and allowlisted. They may transfer public
   assets, never imported text, audiobook bytes, transcripts, or generated
   narration.
-- Treat Kokoro word timing as an audio-synchronized estimate. Do not present it
-  as an exact model-provided timestamp.
+- Treat Supertonic word timing as an audio-synchronized estimate. Do not
+  present it as an exact model-provided timestamp.
 
 ## React and external-store behavior
 

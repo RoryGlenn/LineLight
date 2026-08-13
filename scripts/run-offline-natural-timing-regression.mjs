@@ -213,7 +213,7 @@ const INSTRUMENTATION_SOURCE = `
       highlightScope: "sentence",
       follow: false,
       rate: 1,
-      offlineVoice: "af_heart"
+      offlineVoice: "F2"
     }));
   } catch {}
 
@@ -767,7 +767,7 @@ async function run(options) {
         visualViewportScale: visualViewport?.scale ?? 1,
         crossOriginIsolated,
         workerResources: performance.getEntriesByType("resource")
-          .filter((entry) => /offline-speech\\.worker|kokoro-js|onnxruntime/iu.test(entry.name))
+          .filter((entry) => /offline-speech\\.worker|supertonic|onnxruntime/iu.test(entry.name))
           .map((entry) => ({
             name: entry.name,
             initiatorType: entry.initiatorType,

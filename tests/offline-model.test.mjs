@@ -10,21 +10,23 @@ import {
 } from "../app/narration-defaults.mjs";
 import {
   OFFLINE_MODEL_DTYPE,
-  OFFLINE_FP16_READY_MARKER_URL,
-  OFFLINE_FP16_READY_MARKER_VERSION,
-  OFFLINE_LEGACY_Q8_MODEL_FILE,
+  OFFLINE_MODEL_ASSETS,
+  OFFLINE_MODEL_BYTES,
+  OFFLINE_DEFAULT_VOICE,
+  OFFLINE_MODEL_READY_MARKER_URL,
+  OFFLINE_MODEL_READY_MARKER_VERSION,
   OFFLINE_MODEL_REVISION,
   OFFLINE_MODEL_ROUTE_PREFIX,
   OFFLINE_MODEL_RUNTIME,
+  OFFLINE_OUTPUT_SAMPLE_RATE,
   OFFLINE_RUNTIME_CACHE_NAME,
-  OFFLINE_WEBGPU_MODEL_BYTES,
+  OFFLINE_VOICE_ASSETS,
   OFFLINE_WEBGPU_ADAPTER_TIMEOUT_MS,
-  OFFLINE_WEBGPU_MODEL_DTYPE,
-  OFFLINE_WEBGPU_MODEL_FILE,
   OFFLINE_WASM_PROXY,
   OFFLINE_WASM_THREADS,
   constrainOfflineBackendPreference,
   nextOfflineSpeechBackend,
+  normalizeOfflineVoiceId,
   probeWebGpuAdapter,
   resolveOfflineModelRequest,
   selectOfflineModelDtype,
@@ -78,11 +80,21 @@ test("never silently falls back from offline narration to browser speech", () =>
   assert.equal(allowsDeviceFallback("azure"), true);
 });
 
-test("pairs device-specific Kokoro artifacts with a safe runtime ladder", () => {
-  assert.equal(OFFLINE_MODEL_DTYPE, "fp16");
-  assert.equal(OFFLINE_WEBGPU_MODEL_DTYPE, "fp16");
-  assert.equal(OFFLINE_WEBGPU_MODEL_FILE, "onnx/model_fp16.onnx");
-  assert.equal(OFFLINE_WEBGPU_MODEL_BYTES, 163_234_740);
+test("migrates former voices to a valid 44.1 kHz studio style", () => {
+  assert.equal(OFFLINE_DEFAULT_VOICE, "F2");
+  assert.equal(normalizeOfflineVoiceId("F4"), "F4");
+  assert.equal(normalizeOfflineVoiceId("am_michael"), "M1");
+  assert.equal(normalizeOfflineVoiceId("bm_george"), "M1");
+  assert.equal(normalizeOfflineVoiceId("af_heart"), "F2");
+  assert.equal(normalizeOfflineVoiceId(null), "F2");
+});
+
+test("pairs the native 44.1 kHz model with a safe runtime ladder", () => {
+  assert.equal(OFFLINE_MODEL_DTYPE, "fp32");
+  assert.equal(OFFLINE_MODEL_BYTES, 398_361_202);
+  assert.equal(OFFLINE_OUTPUT_SAMPLE_RATE, 44_100);
+  assert.equal(OFFLINE_MODEL_ASSETS.length, 6);
+  assert.equal(OFFLINE_VOICE_ASSETS.length, 10);
   assert.equal(OFFLINE_WEBGPU_ADAPTER_TIMEOUT_MS, 500);
   assert.equal(OFFLINE_MODEL_RUNTIME, "webgpu");
   assert.equal(OFFLINE_WASM_THREADS, 8);
@@ -172,30 +184,8 @@ test("pairs device-specific Kokoro artifacts with a safe runtime ladder", () => 
   );
 });
 
-test("keeps q8 selected until an explicit fp16 validation commits", () => {
-  assert.equal(
-    selectOfflineModelDtype({
-      fp16Available: false,
-      legacyQ8Available: true,
-    }),
-    "q8",
-  );
-  assert.equal(
-    selectOfflineModelDtype({
-      fp16Available: true,
-      legacyQ8Available: true,
-    }),
-    "q8",
-  );
-  assert.equal(
-    selectOfflineModelDtype({
-      fp16Available: true,
-      legacyQ8Available: true,
-      preferFp16: true,
-    }),
-    "fp16",
-  );
-  assert.equal(selectOfflineModelDtype(), "fp16");
+test("uses the reviewed float32 model on every backend", () => {
+  assert.equal(selectOfflineModelDtype(), "fp32");
 });
 
 test("bounds WebGPU adapter detection and ignores late results", async () => {
@@ -296,7 +286,7 @@ test("reports bounded offline worker startup details without serializing private
   assert.doesNotMatch(diagnostic, /reader|secret|private narration|private document/u);
 });
 
-test("validates waveforms before ready and preserves q8 after a model-only load", async () => {
+test("validates native audio before committing the installed model", async () => {
   const workerSource = await readFile("app/offline-speech.worker.ts", "utf8");
 
   assert.match(
@@ -313,16 +303,17 @@ test("validates waveforms before ready and preserves q8 after a model-only load"
   assert.match(workerSource, /stage: warm \? "ready" : "loaded"/u);
   assert.match(
     workerSource,
-    /const warm = message\.warm !== false;[\s\S]*initializeSpeech\([\s\S]*if \(warm\) \{[\s\S]*removeUnusedModelArtifact/u,
+    /const warm = message\.warm !== false;[\s\S]*initializeSpeech\([\s\S]*if \(warm\) \{[\s\S]*retainOfflineSpeechRuntime/u,
   );
   assert.match(
     workerSource,
-    /installModelFiles[\s\S]*installBackend\.wasmThreads \?\? undefined,\s*true,\s*true,[\s\S]*retainOfflineSpeechRuntime\(\)[\s\S]*await removeUnusedModelArtifact\(\);[\s\S]*commitOfflineModelReadyMarker/u,
+    /installModelFiles[\s\S]*installVoices[\s\S]*initializeSpeech[\s\S]*retainOfflineSpeechRuntime\(\)[\s\S]*commitOfflineModelReadyMarker[\s\S]*removeLegacyOfflineVoicePack/u,
   );
+  assert.match(workerSource, /style,[\s\S]*steps: SUPERTONIC_SYNTHESIS_STEPS/u);
   assert.doesNotMatch(workerSource, /invalidateOfflineModelReadyMarker/u);
 });
 
-test("uses every validated fp16 cache alias for WebGPU selection", async () => {
+test("requires the complete reviewed model before WebGPU selection", async () => {
   const workerSource = await readFile("app/offline-speech.worker.ts", "utf8");
   const start = workerSource.indexOf("const webGpuAvailable =");
   const selection = workerSource.slice(
@@ -330,9 +321,8 @@ test("uses every validated fp16 cache alias for WebGPU selection", async () => {
     workerSource.indexOf("const selectedBackend =", start),
   );
 
-  assert.match(selection, /fp16Available/u);
+  assert.match(selection, /hasCompleteModelPack/u);
   assert.match(selection, /hasWebGpuAdapter/u);
-  assert.doesNotMatch(selection, /hasWebGpuModelArtifact/u);
 });
 
 test("selects and verifies each cold backend only once before model construction", async () => {
@@ -354,7 +344,7 @@ test("selects and verifies each cold backend only once before model construction
   assert.equal(
     count(
       initializeSource,
-      /assertOfflineFilesAvailable\(voice, selectedBackend\)/gu,
+      /assertOfflineFilesAvailable\(voice\)/gu,
     ),
     1,
   );
@@ -364,7 +354,7 @@ test("selects and verifies each cold backend only once before model construction
   assert.equal(
     count(
       generateSource,
-      /assertOfflineFilesAvailable\(voice, selectedBackend\)/gu,
+      /assertOfflineFilesAvailable\(voice\)/gu,
     ),
     1,
   );
@@ -379,9 +369,12 @@ test("selects and verifies each cold backend only once before model construction
 });
 
 test("keeps the validation receipt private to Cache Storage", () => {
-  assert.equal(OFFLINE_FP16_READY_MARKER_VERSION, "fp16-ready-v1");
-  assert.match(OFFLINE_FP16_READY_MARKER_URL, /Kokoro-82M/u);
-  assert.equal(resolveOfflineModelRequest(OFFLINE_FP16_READY_MARKER_URL), null);
+  assert.equal(
+    OFFLINE_MODEL_READY_MARKER_VERSION,
+    "supertonic-3-44100-ready-v1",
+  );
+  assert.match(OFFLINE_MODEL_READY_MARKER_URL, /supertonic-3/u);
+  assert.equal(resolveOfflineModelRequest(OFFLINE_MODEL_READY_MARKER_URL), null);
 });
 
 test("shares one stable cache for the retained speech runtime", async () => {
@@ -396,7 +389,7 @@ test("shares one stable cache for the retained speech runtime", async () => {
 
 test("only resolves pinned, allowlisted offline model assets", () => {
   const allowed = resolveOfflineModelRequest(
-    `${OFFLINE_MODEL_ROUTE_PREFIX}${OFFLINE_WEBGPU_MODEL_FILE}`,
+    `${OFFLINE_MODEL_ROUTE_PREFIX}onnx/vector_estimator.onnx`,
   );
 
   assert.ok(allowed);
@@ -413,10 +406,11 @@ test("only resolves pinned, allowlisted offline model assets", () => {
     ),
     null,
   );
-  assert.ok(
+  assert.equal(
     resolveOfflineModelRequest(
-      `${OFFLINE_MODEL_ROUTE_PREFIX}${OFFLINE_LEGACY_Q8_MODEL_FILE}`,
+      `${OFFLINE_MODEL_ROUTE_PREFIX}onnx/model_quantized.onnx`,
     ),
+    null,
   );
 });
 
@@ -424,11 +418,11 @@ test("streams model files without duplicating the browser cache", async () => {
   let upstreamRequest;
   const response = await handleOfflineModelRequest(
     new Request(
-      `https://linelight.example${OFFLINE_MODEL_ROUTE_PREFIX}config.json`,
+      `https://linelight.example${OFFLINE_MODEL_ROUTE_PREFIX}onnx/tts.json`,
     ),
     async (request) => {
       upstreamRequest = request;
-      return new Response('{"model_type":"kokoro"}', {
+      return new Response('{"tts_version":"v1.7.3"}', {
         headers: {
           "Content-Length": "23",
           "Content-Type": "application/json",
@@ -454,14 +448,14 @@ test("streams model files without duplicating the browser cache", async () => {
     "same-origin",
   );
   assert.equal(response.headers.get("etag"), '"model-etag"');
-  assert.equal(await response.text(), '{"model_type":"kokoro"}');
+  assert.equal(await response.text(), '{"tts_version":"v1.7.3"}');
 });
 
 test("forwards bounded model range requests", async () => {
   let upstreamRequest;
   const response = await handleOfflineModelRequest(
     new Request(
-      `https://linelight.example${OFFLINE_MODEL_ROUTE_PREFIX}onnx/model_quantized.onnx`,
+      `https://linelight.example${OFFLINE_MODEL_ROUTE_PREFIX}onnx/vector_estimator.onnx`,
       { headers: { Range: "bytes=0-7" } },
     ),
     async (request) => {
@@ -470,7 +464,7 @@ test("forwards bounded model range requests", async () => {
         status: 206,
         headers: {
           "Content-Length": "8",
-          "Content-Range": "bytes 0-7/92361116",
+          "Content-Range": "bytes 0-7/256534781",
           "Content-Type": "application/octet-stream",
         },
       });
@@ -482,7 +476,7 @@ test("forwards bounded model range requests", async () => {
   assert.equal(response.status, 206);
   assert.equal(
     response.headers.get("content-range"),
-    "bytes 0-7/92361116",
+    "bytes 0-7/256534781",
   );
   assert.equal((await response.arrayBuffer()).byteLength, 8);
 });
@@ -504,7 +498,7 @@ test("does not proxy unknown model paths", async () => {
 test("only permits read requests for model assets", async () => {
   const response = await handleOfflineModelRequest(
     new Request(
-      `https://linelight.example${OFFLINE_MODEL_ROUTE_PREFIX}config.json`,
+      `https://linelight.example${OFFLINE_MODEL_ROUTE_PREFIX}onnx/tts.json`,
       { method: "POST" },
     ),
   );

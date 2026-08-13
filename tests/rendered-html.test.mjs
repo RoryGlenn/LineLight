@@ -313,7 +313,7 @@ test("serves the pinned offline model through the production worker", async () =
   let upstreamUrl = "";
   globalThis.fetch = async (request) => {
     upstreamUrl = request.url;
-    return new Response('{"model_type":"kokoro"}', {
+    return new Response('{"tts_version":"v1.7.3"}', {
       headers: { "Content-Type": "application/json" },
     });
   };
@@ -322,7 +322,7 @@ test("serves the pinned offline model through the production worker", async () =
     const { default: worker } = await loadBuiltWorker();
     const response = await worker.fetch(
       new Request(
-        `http://localhost${OFFLINE_MODEL_ROUTE_PREFIX}config.json`,
+        `http://localhost${OFFLINE_MODEL_ROUTE_PREFIX}onnx/tts.json`,
       ),
       {
         ASSETS: {
@@ -345,7 +345,7 @@ test("serves the pinned offline model through the production worker", async () =
       response.headers.get("cross-origin-resource-policy"),
       "same-origin",
     );
-    assert.equal(await response.text(), '{"model_type":"kokoro"}');
+    assert.equal(await response.text(), '{"tts_version":"v1.7.3"}');
   } finally {
     globalThis.fetch = originalFetch;
   }

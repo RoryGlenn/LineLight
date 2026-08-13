@@ -2,10 +2,10 @@
 // delay before a missing default voice can begin downloading.
 export const OFFLINE_INSTALL_IDLE_DELAY_MS = 0;
 export const OFFLINE_WARM_IDLE_TIMEOUT_MS = 5_000;
-// The model/voice byte total excludes the bundled ONNX runtime (about 22 MB),
-// Cache Storage metadata, and setup assets. A 30% margin covers those files
-// without requiring a second full model copy during normal installation.
-export const OFFLINE_STORAGE_HEADROOM_MULTIPLIER = 1.3;
+// The model/voice byte total excludes the bundled ONNX runtime (about 22 MB)
+// and Cache Storage metadata. A fixed 50 MB margin covers both without making
+// larger model packs reserve a needless percentage-based surplus.
+export const OFFLINE_STORAGE_HEADROOM_BYTES = 50_000_000;
 export const OFFLINE_FIRST_CHUNK_CHARACTERS = 24;
 export const OFFLINE_MIN_CHUNK_CHARACTERS = 48;
 export const OFFLINE_MAX_CHUNK_CHARACTERS = 360;
@@ -87,39 +87,8 @@ export function shouldAbortOfflineWarmRestore({
 }
 
 /**
- * A retained q8 model keeps an interrupted upgrade recoverable, but it must not
- * make the faster fp16 pack look current forever. Treat it as migration input,
- * not as completed preparation.
- *
- * @param {{
- *   legacyModelComplete?: boolean,
- *   preferredModelComplete: boolean,
- *   preferredModelValidated?: boolean,
- *   setupComplete: boolean,
- * }} state
- */
-export function assessOfflineModelAvailability(state) {
-  const preferredInstalled =
-    state.setupComplete === true &&
-    state.preferredModelComplete === true &&
-    state.preferredModelValidated === true;
-  const legacyInstalled =
-    state.setupComplete === true && state.legacyModelComplete === true;
-  return {
-    installed: preferredInstalled || legacyInstalled,
-    // The retained q8 artifact is also the durable commit marker. Normal Play
-    // keeps using it until an explicit fp16 warm-up succeeds and removes q8.
-    upgradeRequired: legacyInstalled,
-  };
-}
-
-/**
- * Range-backed model downloads retain one durable copy. Keep modest overhead
- * for Cache Storage metadata, voice files, and the small setup assets.
- *
- * Retained model ranges no longer need to fit a second time on retry. Keep the
- * original fixed margin for the bundled runtime and Cache Storage metadata,
- * then reserve only the part of the pack that is still missing.
+ * Range-backed model downloads retain one durable copy. Reserve only the part
+ * of the pack that is missing plus a fixed runtime/metadata margin.
  *
  * @param {number} packBytes
  * @param {{ quota?: number, usage?: number } | undefined} estimate
@@ -136,10 +105,8 @@ export function evaluateOfflineStorageHeadroom(
     Math.max(0, Number(retainedBytes) || 0),
   );
   const remainingPackBytes = normalizedPackBytes - normalizedRetainedBytes;
-  const runtimeAndMetadataMargin =
-    normalizedPackBytes * (OFFLINE_STORAGE_HEADROOM_MULTIPLIER - 1);
   const requiredBytes = Math.ceil(
-    remainingPackBytes + runtimeAndMetadataMargin,
+    remainingPackBytes + OFFLINE_STORAGE_HEADROOM_BYTES,
   );
   const quota = Number(estimate?.quota);
   const usage = Number(estimate?.usage);

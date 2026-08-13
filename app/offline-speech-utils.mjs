@@ -120,9 +120,9 @@ export function hasUsableOfflineAudio(samples, samplingRate) {
 }
 
 /**
- * Add a lexical-free context token when fp16 inference returns invalid audio.
- * Kokoro ignores the leading comma as a spoken word, while its tokenizer avoids
- * the input shapes that can produce non-finite WASM output for short fragments.
+ * Add a lexical-free context token when inference returns invalid audio.
+ * The leading comma is not a spoken word, while it changes the tokenizer shape
+ * that can occasionally produce non-finite WASM output for short fragments.
  *
  * @param {string} text
  */
@@ -137,8 +137,8 @@ const OFFLINE_AUDIO_RECOVERY_PREFIXES = Object.freeze([
 
 /**
  * Build a bounded set of lexical-free tokenizer shapes for a waveform that
- * failed validation. Punctuation changes Kokoro's token/style shape without
- * adding a spoken word. Keep the original first, prefer the previously proven
+ * failed validation. Punctuation changes the token/style shape without adding
+ * a spoken word. Keep the original first, prefer the previously proven
  * comma recovery, then use three ASCII stops to select a genuinely different
  * token-count/style row. A Set keeps exact candidate strings unique if
  * strategies ever converge.
@@ -168,7 +168,7 @@ export class InvalidOfflineAudioError extends Error {
 /**
  * Decide whether a thrown synthesis failure belongs to the ONNX backend
  * ladder. Invalid waveform exhaustion is a deterministic request result, not
- * a crashed runtime: replaying the same fp16 graph in a fresh worker or at a
+ * a crashed runtime: replaying the same graph in a fresh worker or at a
  * different WASM thread count is expensive and does not repair that token
  * shape.
  *
@@ -181,7 +181,7 @@ export function shouldRetryOfflineSpeechBackend(error, device) {
 }
 
 /**
- * Validate every model result before playback. If fp16 produces non-finite or
+ * Validate every model result before playback. If inference produces non-finite or
  * silent samples for a short tokenizer shape, try a bounded, deduplicated set
  * of lexical-free punctuation contexts. No corrupt waveform is ever accepted.
  *
@@ -243,8 +243,8 @@ function punctuationPauseUnits(trailingText) {
 
 /**
  * Build an estimated word timeline from the waveform's real duration and a
- * phoneme count for every source word. Kokoro's public ONNX export does not
- * expose forced-alignment timestamps, so this keeps highlighting synchronized
+ * phoneme count for every source word. The speech graph does not expose
+ * forced-alignment timestamps, so this keeps highlighting synchronized
  * without pretending the estimates are exact model boundaries.
  *
  * @param {string} text

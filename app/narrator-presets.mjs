@@ -1,9 +1,9 @@
 export const PODCAST_HOST_PRESET = Object.freeze({
   id: "podcast-host",
   label: "Podcast host",
-  description: "Warm, natural Heart voice · fully offline",
+  description: "Warm Studio F2 voice · native 44.1 kHz · fully offline",
   narrationEngine: "offline",
-  offlineVoice: "af_heart",
+  offlineVoice: "F2",
   rate: 0.9,
 });
 

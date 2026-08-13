@@ -7,7 +7,7 @@ export const PREPARED_NARRATION_BOOK_RETENTION = "prepared";
 export const PREPARED_NARRATION_RECENT_MAX_ENTRIES = 24;
 export const PREPARED_NARRATION_RECENT_MAX_BYTES = 48 * 1024 * 1024;
 export const PREPARED_NARRATION_CHUNK_CHARACTERS = 360;
-export const PREPARED_NARRATION_ESTIMATED_BYTES_PER_SECOND = 96_000;
+export const PREPARED_NARRATION_ESTIMATED_BYTES_PER_SECOND = 88_200;
 export const PREPARED_NARRATION_ESTIMATED_COMPRESSION_RATIO = 0.78;
 
 function isNonEmptyString(value) {
@@ -40,7 +40,7 @@ function isSha256(value) {
 
 /**
  * Produce a stable key for narration whose generated audio is interchangeable.
- * The model dtype keeps incompatible q8 and fp16 output in separate profiles.
+ * The model dtype keeps incompatible engine output in separate profiles.
  *
  * @param {{ modelRevision: string, modelDtype: string, voice: string, rate: number }} profile
  */
@@ -175,7 +175,7 @@ export async function decodePreparedNarrationAudio(
 }
 
 /**
- * Estimate conservative browser storage for generated 24 kHz float32 audio.
+ * Estimate conservative browser storage for native 44.1 kHz PCM-16 audio.
  * This is deliberately presented as an estimate; quota is checked again for
  * every committed chunk.
  *
@@ -248,7 +248,7 @@ export function isPreparedNarrationManifest(value) {
       isSha256(manifest.documentFingerprint) &&
       isNonEmptyString(manifest.profileKey) &&
       isNonEmptyString(manifest.modelRevision) &&
-      ["fp16", "q8"].includes(manifest.modelDtype) &&
+      ["fp32", "fp16", "q8"].includes(manifest.modelDtype) &&
       isNonEmptyString(manifest.voice) &&
       Number.isFinite(manifest.rate) &&
       manifest.rate >= 0.5 &&
@@ -365,7 +365,7 @@ export function isPreparedNarrationChunk(value) {
           boundary.tokenIndex < chunk.nextIndex,
       ) &&
       ["webgpu", "wasm"].includes(chunk.device) &&
-      ["fp16", "q8"].includes(chunk.modelDtype) &&
+      ["fp32", "fp16", "q8"].includes(chunk.modelDtype) &&
       isNonNegativeFiniteNumber(chunk.synthesisMilliseconds) &&
       (chunk.wasmThreads === null ||
         (Number.isInteger(chunk.wasmThreads) && chunk.wasmThreads > 0)) &&
