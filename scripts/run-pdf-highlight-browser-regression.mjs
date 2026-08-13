@@ -131,6 +131,8 @@ export function delay(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
+const closedProcessGroups = new Set();
+
 async function getFreePort() {
   return new Promise((resolve, reject) => {
     const server = net.createServer();
@@ -157,6 +159,10 @@ function signalProcessGroup(processGroupId, signal) {
     return true;
   } catch (error) {
     if (error?.code === "ESRCH") return false;
+    // On macOS a terminating process group can transiently report EPERM for a
+    // signal-0 existence probe while an unreaped member is still present. Keep
+    // waiting; a real SIGTERM/SIGKILL permission failure still throws.
+    if (error?.code === "EPERM" && signal === 0) return true;
     throw error;
   }
 }
@@ -178,6 +184,14 @@ export async function stopProcessGroup(
   processGroupId,
   timeoutMs = 3_000,
 ) {
+  if (closedProcessGroups.has(processGroupId)) {
+    return {
+      closed: true,
+      forced: false,
+      processGroupId,
+      termSent: false,
+    };
+  }
   const termSent = signalProcessGroup(processGroupId, "SIGTERM");
   let closed = await waitForProcessGroupExit(processGroupId, timeoutMs);
   let forced = false;
@@ -185,6 +199,7 @@ export async function stopProcessGroup(
     forced = signalProcessGroup(processGroupId, "SIGKILL");
     closed = await waitForProcessGroupExit(processGroupId, timeoutMs);
   }
+  if (closed) closedProcessGroups.add(processGroupId);
   return { closed, forced, processGroupId, termSent };
 }
 

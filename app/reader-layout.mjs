@@ -80,6 +80,93 @@ export function createReaderLayoutStyle(value) {
 }
 
 /**
+ * Calculate the reading ruler's position below the active rendered word. The
+ * result is relative to the workspace because the ruler is an overlay outside
+ * the scrolling reader content.
+ *
+ * @param {{
+ *   activeRect: { top: number, right: number, bottom: number, left: number, height: number },
+ *   workspaceRect: { top: number, right: number, bottom: number, left: number },
+ *   viewportRect: { top: number, right: number, bottom: number, left: number },
+ *   surfaceRect: { top: number, right: number, bottom: number, left: number },
+ *   lineHeight?: number,
+ * }} input
+ * @returns {{ left: number, top: number, width: number } | null}
+ */
+export function deriveReadingRulerGeometry({
+  activeRect,
+  workspaceRect,
+  viewportRect,
+  surfaceRect,
+  lineHeight,
+}) {
+  const values = [
+    activeRect?.top,
+    activeRect?.right,
+    activeRect?.bottom,
+    activeRect?.left,
+    activeRect?.height,
+    workspaceRect?.top,
+    workspaceRect?.right,
+    workspaceRect?.bottom,
+    workspaceRect?.left,
+    viewportRect?.top,
+    viewportRect?.right,
+    viewportRect?.bottom,
+    viewportRect?.left,
+    surfaceRect?.top,
+    surfaceRect?.right,
+    surfaceRect?.bottom,
+    surfaceRect?.left,
+  ];
+  if (!values.every(Number.isFinite)) return null;
+  if (
+    activeRect.bottom <= viewportRect.top ||
+    activeRect.top >= viewportRect.bottom ||
+    activeRect.right <= viewportRect.left ||
+    activeRect.left >= viewportRect.right
+  ) {
+    return null;
+  }
+
+  const visibleLeft = Math.max(
+    surfaceRect.left,
+    viewportRect.left,
+    workspaceRect.left,
+  );
+  const visibleRight = Math.min(
+    surfaceRect.right,
+    viewportRect.right,
+    workspaceRect.right,
+  );
+  if (visibleRight - visibleLeft < 24) return null;
+
+  const activeHeight = Math.max(0, activeRect.height);
+  const resolvedLineHeight =
+    Number.isFinite(lineHeight) && Number(lineHeight) > 0
+      ? Number(lineHeight)
+      : activeHeight;
+  const lineGap = Math.min(
+    10,
+    Math.max(4, (resolvedLineHeight - activeHeight) / 2),
+  );
+  const rulerViewportTop = activeRect.bottom + lineGap;
+  if (
+    rulerViewportTop < viewportRect.top ||
+    rulerViewportTop > viewportRect.bottom
+  ) {
+    return null;
+  }
+
+  const roundPixel = (value) => Math.round(value * 100) / 100;
+  return {
+    left: roundPixel(visibleLeft - workspaceRect.left),
+    top: roundPixel(rulerViewportTop - workspaceRect.top),
+    width: roundPixel(visibleRight - visibleLeft),
+  };
+}
+
+/**
  * Select the tokens belonging to the requested number of rendered lines,
  * centered on the active token where possible.
  *

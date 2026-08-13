@@ -12,6 +12,11 @@ import {
   OFFLINE_MODEL_REVISION,
   OFFLINE_MODEL_ROUTE_PREFIX,
 } from "../app/offline-model-manifest.mjs";
+import {
+  AUDIOBOOK_ALIGNMENT_MODEL_ROUTE_PREFIX,
+} from "../app/audiobook-alignment-model.mjs";
+import { AUDIOBOOK_ALIGNMENT_MODEL_REVISION } from
+  "../app/audiobook-alignment.mjs";
 import { stopProcessGroup } from "../scripts/run-pdf-highlight-browser-regression.mjs";
 
 const developmentPreviewMeta =
@@ -341,6 +346,48 @@ test("serves the pinned offline model through the production worker", async () =
       "same-origin",
     );
     assert.equal(await response.text(), '{"model_type":"kokoro"}');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("serves the pinned audiobook alignment model through production", async () => {
+  const originalFetch = globalThis.fetch;
+  let upstreamUrl = "";
+  globalThis.fetch = async (request) => {
+    upstreamUrl = request.url;
+    return new Response('{"model_type":"whisper"}', {
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+
+  try {
+    const { default: worker } = await loadBuiltWorker();
+    const response = await worker.fetch(
+      new Request(
+        `http://localhost${AUDIOBOOK_ALIGNMENT_MODEL_ROUTE_PREFIX}config.json`,
+      ),
+      {
+        ASSETS: {
+          fetch: async () => new Response("Not found", { status: 404 }),
+        },
+      },
+      {
+        waitUntil() {},
+        passThroughOnException() {},
+      },
+    );
+
+    assert.equal(response.status, 200);
+    assert.match(
+      upstreamUrl,
+      new RegExp(AUDIOBOOK_ALIGNMENT_MODEL_REVISION),
+    );
+    assert.equal(
+      response.headers.get("cross-origin-resource-policy"),
+      "same-origin",
+    );
+    assert.equal(await response.text(), '{"model_type":"whisper"}');
   } finally {
     globalThis.fetch = originalFetch;
   }

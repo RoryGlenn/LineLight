@@ -28,6 +28,52 @@ test("selects only a bounded page range from the external store", () => {
   unsubscribe();
 });
 
+test("notifies a resubscribing listener only once per store update", () => {
+  const store = createPdfPageStore();
+  let notifications = 0;
+  let unsubscribe = () => {};
+  const listener = () => {
+    notifications += 1;
+    unsubscribe();
+    unsubscribe = store.subscribe(listener);
+  };
+  unsubscribe = store.subscribe(listener);
+
+  assert.equal(store.appendPage(page(1)), true);
+  assert.equal(notifications, 1);
+  assert.equal(store.getSnapshot(), 1);
+
+  assert.equal(store.appendPage(page(2)), true);
+  assert.equal(notifications, 2);
+  assert.equal(store.getSnapshot(), 2);
+  unsubscribe();
+});
+
+test("coalesces a burst of worker page updates into one render notification", () => {
+  const scheduledNotifications = [];
+  const store = createPdfPageStore({
+    scheduleNotification: (callback) => scheduledNotifications.push(callback),
+  });
+  let notifications = 0;
+  const unsubscribe = store.subscribe(() => notifications++);
+
+  for (let pageNumber = 1; pageNumber <= 359; pageNumber += 1) {
+    assert.equal(store.appendPage(page(pageNumber)), true);
+  }
+
+  assert.equal(store.getSnapshot(), 359);
+  assert.equal(scheduledNotifications.length, 1);
+  assert.equal(notifications, 0);
+  scheduledNotifications.shift()();
+  assert.equal(notifications, 1);
+
+  assert.equal(store.setBitmap(1, { bitmap: { close() {} } }), undefined);
+  assert.equal(scheduledNotifications.length, 1);
+  scheduledNotifications.shift()();
+  assert.equal(notifications, 2);
+  unsubscribe();
+});
+
 test("bounds raster memory and closes replaced, evicted, and cleared bitmaps", () => {
   const store = createPdfPageStore({ maxBitmaps: 2 });
   const closed = [];

@@ -18,8 +18,10 @@ release.
 - Import PDF, EPUB, and plain-text files
 - Choose a continuous sentence or paragraph highlight while exact word clicks
   still seek narration
-- Choose a private device voice, downloaded offline neural voices, or optional
-  Azure neural narration
+- Choose a private device voice, downloaded offline neural voices, an attached
+  DRM-free audiobook, or optional Azure neural narration
+- Prepare a whole book for instant offline replay, or export bounded WAV parts
+  with a text-sync timing sidecar
 - Automatically follow the narration or return to the spoken position
 - Switch between a reflowed focus view and the original PDF page
 - Adjust font, text size, line spacing, colors, reading ruler, and speed
@@ -29,7 +31,7 @@ release.
 
 ## How narration works
 
-LineLight has three narration modes:
+LineLight has four narration modes:
 
 - **Offline natural** is the default for new readers. On first launch,
   LineLight automatically stores an included roughly 166 MB Kokoro model pack
@@ -51,6 +53,11 @@ LineLight has three narration modes:
   exchanges the server-side subscription key for a short-lived token, requests
   audio for the current passage, and follows Azure's timed word boundaries.
   The key is never sent to the browser.
+- **Audiobook** stores user-selected DRM-free audio files in the book's local
+  IndexedDB records. A pinned Whisper Tiny English q8 model can transcribe
+  bounded 30-second windows in a dedicated browser worker and align only
+  confidence-supported phrases to the book. Manual sentence anchors can repair
+  difficult regions. AA/AAX files are rejected; LineLight does not bypass DRM.
 
 Offline natural narration prepares a short first passage, adapts later passage
 sizes to measured generation speed, and keeps at most one passage ahead. Pause
@@ -60,8 +67,21 @@ generation-scoped shared cancellation mailbox so active graph execution can
 end cooperatively while the initialized worker and model session remain warm.
 A bounded watchdog replaces the worker only if a canceled run never reaches a
 terminal acknowledgment; the replacement may load prepared assets only from
-the local browser cache. A small bounded audio cache avoids regenerating
-recently heard passages. During an interrupted update, an older stored q8 pack
+the local browser cache. A small bounded memory cache avoids regenerating
+recently heard passages. For saved books, a bounded recent set of completed
+offline chunks and their timing boundaries is also stored in IndexedDB under
+the exact model, voice, pace, token range, and source-text fingerprint, so a
+later session can reuse matching audio without sending text anywhere or running
+inference again.
+The reader can also prepare every bounded passage in a saved book as a
+resumable job. Each independently playable WAV chunk is compressed and committed
+with its timing metadata before progress advances, so pause, cancellation,
+reload, and quota errors preserve completed work. A ready profile can be
+exported sequentially as duration- and size-bounded WAV parts plus a JSON
+sidecar that binds word anchors to the exact book fingerprint, model, voice,
+and generated pace; LineLight never builds one whole-book audio buffer.
+Deleting a book deletes its retained narration. During an interrupted update,
+an older stored q8 pack
 remains usable offline until fp16 passes runtime validation; the Narration
 panel offers that faster fp16 update when the device reconnects.
 Kokoro also generates at the selected reading speed instead of relying on
@@ -112,7 +132,12 @@ device narration may use processing supplied by the operating system or voice
 provider. Offline natural narration performs synthesis entirely in the browser
 after its included model files have been stored. The model route handles only
 the pinned public model assets; it never receives imported documents or
-narration text. When Natural online is selected, only short narration passages
+narration text. Matching generated passages and timing data for saved books may
+be retained in that book's local IndexedDB records for later playback. Attached
+audiobook files, local speech-recognition transcripts, confidence scores, and
+manual sync anchors also stay in book-scoped IndexedDB records. The alignment
+model route receives only pinned public model-file requests, never book text,
+audio, or transcripts. When Natural online is selected, only short narration passages
 (including one prepared ahead) are sent to Azure AI Speech for synthesis.
 
 ## Large PDF loading
@@ -149,6 +174,11 @@ confirms the cleanup transaction.
 - Kokoro's public ONNX output contains audio but not exact word timestamps.
   Offline highlighting therefore uses the waveform's real duration, source-word
   lengths, and punctuation pauses to estimate word timing.
+- Audiobook alignment supports DRM-free formats the browser can decode. Local
+  speech recognition is English-only, requires a one-time roughly 52 MB model,
+  and asks users to split files longer than 20 minutes or 128 MB into ordered
+  chapter files before alignment. Different editions and weak matches remain
+  visibly unsynced rather than receiving guessed timing.
 - Browser support and available voices differ across iPhone, macOS, and Ubuntu.
 - Offline model loading and synthesis speed depend on device memory and WebGPU
   support. The WebAssembly fallback works on more browsers but is slower.

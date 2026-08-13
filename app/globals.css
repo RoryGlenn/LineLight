@@ -1180,14 +1180,29 @@ input:focus-visible {
 }
 
 .reading-ruler {
+  --reading-ruler-left: 0px;
+  --reading-ruler-top: 0px;
+  --reading-ruler-width: 0px;
   position: absolute;
   z-index: 8;
-  top: 52%;
-  right: max(40px, calc((100% - 780px) / 2));
-  left: max(40px, calc((100% - 780px) / 2));
-  height: calc(var(--reader-size) * var(--reader-leading) + 12px);
+  top: 0;
+  left: 0;
+  width: var(--reading-ruler-width);
+  height: 0;
   border-bottom: 2px solid color-mix(in srgb, var(--accent) 54%, transparent);
+  opacity: 0;
   pointer-events: none;
+  transform: translate3d(
+    var(--reading-ruler-left),
+    var(--reading-ruler-top),
+    0
+  );
+  transition: opacity 80ms ease;
+  will-change: width, transform;
+}
+
+.reading-ruler[data-visible="true"] {
+  opacity: 1;
 }
 
 .position-action-stack {
@@ -2377,6 +2392,129 @@ input:focus-visible {
   margin-top: 0;
 }
 
+.prepared-narration-card {
+  display: grid;
+  gap: 9px;
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--line));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 4%, var(--paper));
+}
+
+.prepared-narration-card strong {
+  color: var(--ink);
+  font-size: 11px;
+}
+
+.prepared-narration-card p {
+  margin: 3px 0 0;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.prepared-narration-progress {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 12%, var(--line));
+}
+
+.prepared-narration-progress span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 180ms ease;
+}
+
+.prepared-narration-status {
+  min-height: 14px;
+}
+
+.prepared-narration-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.prepared-narration-actions button {
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line));
+  border-radius: 8px;
+  background: var(--paper);
+  color: var(--accent);
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.prepared-narration-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.prepared-export-card {
+  display: grid;
+  gap: 8px;
+  margin-top: 2px;
+  padding-top: 11px;
+  border-top: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
+}
+
+.prepared-export-card small {
+  color: var(--accent);
+  font-size: 9px;
+  font-weight: 650;
+}
+
+.audiobook-settings,
+.audiobook-card {
+  display: grid;
+  gap: 10px;
+}
+
+.audiobook-card {
+  padding: 13px;
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--line));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 4%, var(--paper));
+}
+
+.audiobook-card strong {
+  color: var(--ink);
+  font-size: 11px;
+}
+
+.audiobook-card p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.audiobook-summary {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.audiobook-scrubber {
+  display: grid;
+  gap: 6px;
+  color: var(--muted-strong);
+  font-size: 9px;
+  font-weight: 650;
+}
+
+.audiobook-scrubber input {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
 .switch-row {
   display: flex;
   min-height: 64px;
@@ -2665,10 +2803,6 @@ input:focus-visible {
     bottom: calc(130px + env(safe-area-inset-bottom));
   }
 
-  .reading-ruler {
-    right: 18px;
-    left: 18px;
-  }
 }
 
 @media (max-width: 430px) {

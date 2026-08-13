@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { IDBFactory } from "fake-indexeddb";
+import { IDBFactory, IDBKeyRange } from "fake-indexeddb";
 
 import {
   ACTIVE_DOCUMENT_ID_KEY,
@@ -12,12 +12,37 @@ import {
   PDF_PAGE_DOCUMENT_INDEX,
   PDF_PAGE_STORE,
   PDF_SOURCE_STORE,
+  PREPARED_NARRATION_MANIFEST_STORE,
+  PREPARED_NARRATION_METADATA_STORE,
+  PREPARED_NARRATION_DOCUMENT_INDEX,
+  PREPARED_NARRATION_RECENT_INDEX,
+  PREPARED_NARRATION_STORE,
+  AUDIOBOOK_DOCUMENT_INDEX,
+  AUDIOBOOK_MANIFEST_STORE,
+  AUDIOBOOK_PROFILE_INDEX,
+  AUDIOBOOK_SOURCE_STORE,
+  AUDIOBOOK_TRANSCRIPT_STORE,
   READER_DATABASE_VERSION,
   STATE_STORE,
   calculateLibraryProgress,
   createReaderLibrary,
   filterLibraryEntries,
 } from "../app/reader-library.mjs";
+import {
+  PREPARED_NARRATION_AUDIO_MIME_TYPE,
+  PREPARED_NARRATION_BOOK_RETENTION,
+  PREPARED_NARRATION_IDENTITY_ENCODING,
+  PREPARED_NARRATION_RECENT_MAX_ENTRIES,
+  PREPARED_NARRATION_RECENT_RETENTION,
+  PREPARED_NARRATION_SCHEMA_VERSION,
+  createPreparedNarrationManifest,
+  createPreparedNarrationProfileKey,
+} from "../app/prepared-narration.mjs";
+import {
+  AUDIOBOOK_ALIGNMENT_MODEL_REVISION,
+  AUDIOBOOK_ALIGNMENT_SCHEMA_VERSION,
+  createAudiobookManifest,
+} from "../app/audiobook-alignment.mjs";
 
 function document(id, title = `Book ${id}`) {
   return {
@@ -27,6 +52,93 @@ function document(id, title = `Book ${id}`) {
     kind: "txt",
     paragraphs: ["One short sentence.", "A second sentence follows."],
   };
+}
+
+function preparedNarrationChunk(documentId, overrides = {}) {
+  const chunk = {
+    schemaVersion: PREPARED_NARRATION_SCHEMA_VERSION,
+    documentId,
+    profileKey: createPreparedNarrationProfileKey({
+      modelRevision: "revision-one",
+      modelDtype: "fp16",
+      voice: "af_heart",
+      rate: 1,
+    }),
+    startIndex: 0,
+    nextIndex: 4,
+    textFingerprint: "a".repeat(64),
+    audioData: new ArrayBuffer(64),
+    audioByteLength: 64,
+    audioEncoding: PREPARED_NARRATION_IDENTITY_ENCODING,
+    sourceAudioByteLength: 64,
+    mimeType: PREPARED_NARRATION_AUDIO_MIME_TYPE,
+    audioDurationSeconds: 1.5,
+    boundaries: [
+      {
+        audioOffsetSeconds: 0.05,
+        durationSeconds: 0.3,
+        text: "One",
+        textOffset: 0,
+        wordLength: 3,
+        tokenIndex: 0,
+      },
+    ],
+    device: "wasm",
+    modelDtype: "fp16",
+    synthesisMilliseconds: 400,
+    wasmThreads: 4,
+    retention: PREPARED_NARRATION_RECENT_RETENTION,
+    createdAt: 100,
+    ...overrides,
+  };
+  if (!overrides.boundaries) {
+    chunk.boundaries = chunk.boundaries.map((boundary) => ({
+      ...boundary,
+      tokenIndex: chunk.startIndex,
+    }));
+  }
+  return chunk;
+}
+
+function preparedNarrationManifest(documentId, overrides = {}) {
+  const profileKey = overrides.profileKey ?? createPreparedNarrationProfileKey({
+    modelRevision: "revision-one",
+    modelDtype: "fp16",
+    voice: "af_heart",
+    rate: 1,
+  });
+  return createPreparedNarrationManifest({
+    documentId,
+    documentFingerprint: "d".repeat(64),
+    profileKey,
+    modelRevision: "revision-one",
+    modelDtype: "fp16",
+    voice: "af_heart",
+    rate: 1,
+    totalTokens: 7,
+    now: 100,
+    ...overrides,
+  });
+}
+
+function audiobookManifest(documentId, audioId = "audio-one") {
+  return createAudiobookManifest({
+    documentId,
+    documentFingerprint: "e".repeat(64),
+    title: `Book ${documentId}`,
+    author: "LineLight",
+    totalTokens: 7,
+    audioId,
+    files: [
+      {
+        name: "Chapter 1.mp3",
+        type: "audio/mpeg",
+        size: 11,
+        durationSeconds: 24,
+      },
+    ],
+    now: 200,
+  });
 }
 
 function openDatabase(indexedDB, name, version, upgrade) {
@@ -200,6 +312,300 @@ test("adds, opens, renames, and removes independent documents", async () => {
   });
 });
 
+test("persists exact prepared narration and cleans it up with its book", async () => {
+  const indexedDB = new IDBFactory();
+  const library = createReaderLibrary({
+    indexedDB,
+    keyRange: IDBKeyRange,
+    databaseName: "prepared-narration-lifecycle",
+  });
+  const firstChunk = preparedNarrationChunk("one");
+  const secondChunk = preparedNarrationChunk("two", {
+    textFingerprint: "b".repeat(64),
+  });
+
+  assert.equal(await library.savePreparedNarrationChunk(firstChunk), false);
+  await library.addDocument(document("one"));
+  await library.addDocument(document("two"));
+  assert.equal(await library.savePreparedNarrationChunk(firstChunk), true);
+  assert.equal(await library.savePreparedNarrationChunk(secondChunk), true);
+
+  const expected = {
+    documentId: firstChunk.documentId,
+    profileKey: firstChunk.profileKey,
+    startIndex: firstChunk.startIndex,
+    nextIndex: firstChunk.nextIndex,
+    textFingerprint: firstChunk.textFingerprint,
+  };
+  const restored = await library.getPreparedNarrationChunk(expected);
+  assert.equal(restored.audioData.byteLength, firstChunk.audioData.byteLength);
+  assert.deepEqual(restored.boundaries, firstChunk.boundaries);
+  assert.equal(
+    await library.getPreparedNarrationChunk({
+      ...expected,
+      textFingerprint: "c".repeat(64),
+    }),
+    null,
+  );
+
+  await library.removeDocument("one");
+  assert.equal(await library.getPreparedNarrationChunk(expected), null);
+  assert.notEqual(
+    await library.getPreparedNarrationChunk({
+      documentId: secondChunk.documentId,
+      profileKey: secondChunk.profileKey,
+      startIndex: secondChunk.startIndex,
+      nextIndex: secondChunk.nextIndex,
+      textFingerprint: secondChunk.textFingerprint,
+    }),
+    null,
+  );
+
+  await library.removePreparedNarration("two");
+  assert.equal(
+    await library.getPreparedNarrationChunk({
+      documentId: secondChunk.documentId,
+      profileKey: secondChunk.profileKey,
+      startIndex: secondChunk.startIndex,
+      nextIndex: secondChunk.nextIndex,
+      textFingerprint: secondChunk.textFingerprint,
+    }),
+    null,
+  );
+  assert.notEqual(await library.getDocument("two"), null);
+});
+
+test("atomically resumes prepared narration and removes one exact profile", async () => {
+  const indexedDB = new IDBFactory();
+  let timestamp = 300;
+  const library = createReaderLibrary({
+    indexedDB,
+    keyRange: IDBKeyRange,
+    databaseName: "prepared-narration-manifest-lifecycle",
+    now: () => ++timestamp,
+  });
+  await library.addDocument(document("one"));
+  const manifest = preparedNarrationManifest("one");
+  assert.equal(await library.savePreparedNarrationManifest(manifest), true);
+
+  const firstChunk = preparedNarrationChunk("one", {
+    nextIndex: 4,
+    retention: PREPARED_NARRATION_BOOK_RETENTION,
+  });
+  let progress = await library.commitPreparedNarrationChunk(
+    manifest,
+    firstChunk,
+  );
+  assert.equal(progress.status, "preparing");
+  assert.equal(progress.nextIndex, 4);
+  assert.equal(progress.completedChunks, 1);
+
+  const restoredProgress = await library.getPreparedNarrationManifest({
+    documentId: manifest.documentId,
+    documentFingerprint: manifest.documentFingerprint,
+    profileKey: manifest.profileKey,
+    totalTokens: manifest.totalTokens,
+  });
+  assert.equal(restoredProgress.nextIndex, 4);
+  assert.deepEqual(
+    (await library.listPreparedNarrationChunkMetadata("one", manifest.profileKey))
+      .map((chunk) => [chunk.startIndex, chunk.nextIndex]),
+    [[0, 4]],
+  );
+  assert.equal(
+    (await library.findPreparedNarrationChunk("one", manifest.profileKey, 2))
+      .startIndex,
+    0,
+  );
+
+  const secondChunk = preparedNarrationChunk("one", {
+    profileKey: manifest.profileKey,
+    startIndex: 4,
+    nextIndex: 7,
+    retention: PREPARED_NARRATION_BOOK_RETENTION,
+  });
+  progress = await library.commitPreparedNarrationChunk(
+    restoredProgress,
+    secondChunk,
+  );
+  assert.equal(progress.status, "ready");
+  assert.equal(progress.nextIndex, 7);
+
+  const otherProfile = preparedNarrationManifest("one", {
+    profileKey: createPreparedNarrationProfileKey({
+      modelRevision: "revision-one",
+      modelDtype: "fp16",
+      voice: "af_bella",
+      rate: 1,
+    }),
+    voice: "af_bella",
+  });
+  assert.equal(await library.savePreparedNarrationManifest(otherProfile), true);
+  assert.equal((await library.listPreparedNarrationManifests("one")).length, 2);
+
+  await library.removePreparedNarration("one", manifest.profileKey);
+  assert.equal(
+    await library.getPreparedNarrationManifest({
+      documentId: "one",
+      profileKey: manifest.profileKey,
+    }),
+    null,
+  );
+  assert.equal(
+    (await library.listPreparedNarrationManifests("one"))[0].profileKey,
+    otherProfile.profileKey,
+  );
+});
+
+test("stores resumable audiobook alignment and cleans only the selected book", async () => {
+  const indexedDB = new IDBFactory();
+  const library = createReaderLibrary({
+    indexedDB,
+    keyRange: IDBKeyRange,
+    databaseName: "audiobook-alignment-lifecycle",
+  });
+  const one = audiobookManifest("one", "narrator-one");
+  const two = audiobookManifest("two", "narrator-two");
+  const source = new Blob(["hello audio"], { type: "audio/mpeg" });
+
+  assert.equal(await library.attachAudiobook(one, [source]), false);
+  await library.addDocument(document("one"));
+  await library.addDocument(document("two"));
+  assert.equal(await library.attachAudiobook(one, [source]), true);
+  assert.equal(await library.attachAudiobook(two, [source]), true);
+  assert.equal(await library.attachAudiobook(one, [source]), true);
+  assert.equal(
+    (await library.getAudiobookSource("one", one.audioId, 0)).blob.size,
+    source.size,
+  );
+
+  const transcriptWindow = {
+    schemaVersion: AUDIOBOOK_ALIGNMENT_SCHEMA_VERSION,
+    documentId: "one",
+    audioId: one.audioId,
+    partIndex: 0,
+    windowIndex: 0,
+    startSeconds: 0,
+    endSeconds: 24,
+    text: "One short sentence",
+    segments: [
+      {
+        startSeconds: 0.4,
+        endSeconds: 2.2,
+        text: "One short sentence",
+      },
+    ],
+    modelRevision: AUDIOBOOK_ALIGNMENT_MODEL_REVISION,
+    createdAt: 250,
+  };
+  const aligning = {
+    ...one,
+    status: "aligning",
+    nextWindowIndex: 1,
+    processedWindows: 1,
+    updatedAt: 251,
+  };
+  assert.equal(
+    await library.commitAudiobookTranscriptWindow(aligning, transcriptWindow),
+    true,
+  );
+  assert.equal(
+    (await library.listAudiobookTranscriptWindows("one", one.audioId)).length,
+    1,
+  );
+
+  const corrected = {
+    ...aligning,
+    anchors: [
+      {
+        id: "manual-one",
+        partIndex: 0,
+        timeSeconds: 1.25,
+        tokenIndex: 0,
+        confidence: 1,
+        source: "manual",
+        granularity: "sentence",
+      },
+    ],
+    status: "paused",
+    updatedAt: 252,
+  };
+  assert.equal(await library.saveAudiobookManifest(corrected), true);
+  assert.equal(
+    (await library.getAudiobookManifest("one", one.audioId)).anchors[0].source,
+    "manual",
+  );
+
+  await library.removeAudiobook("one", one.audioId);
+  assert.equal(await library.getAudiobookManifest("one", one.audioId), null);
+  assert.equal(await library.getAudiobookSource("one", one.audioId, 0), null);
+  assert.notEqual(await library.getAudiobookManifest("two", two.audioId), null);
+
+  await library.removeDocument("two");
+  assert.equal(await library.getAudiobookManifest("two", two.audioId), null);
+  assert.equal(await library.getAudiobookSource("two", two.audioId, 0), null);
+});
+
+test("bounds incidental narration without pruning an explicitly prepared book", async () => {
+  const indexedDB = new IDBFactory();
+  const library = createReaderLibrary({
+    indexedDB,
+    keyRange: IDBKeyRange,
+    databaseName: "bounded-prepared-narration",
+  });
+  await library.addDocument(document("one"));
+
+  const preparedChunk = preparedNarrationChunk("one", {
+    profileKey: createPreparedNarrationProfileKey({
+      modelRevision: "revision-one",
+      modelDtype: "fp16",
+      voice: "af_bella",
+      rate: 1,
+    }),
+    retention: PREPARED_NARRATION_BOOK_RETENTION,
+  });
+  await library.savePreparedNarrationChunk(preparedChunk);
+
+  for (let index = 0; index <= PREPARED_NARRATION_RECENT_MAX_ENTRIES; index += 1) {
+    await library.savePreparedNarrationChunk(
+      preparedNarrationChunk("one", {
+        startIndex: index,
+        nextIndex: index + 1,
+        createdAt: 1_000 + index,
+      }),
+    );
+  }
+
+  const expected = (chunk) => ({
+    documentId: chunk.documentId,
+    profileKey: chunk.profileKey,
+    startIndex: chunk.startIndex,
+    nextIndex: chunk.nextIndex,
+    textFingerprint: chunk.textFingerprint,
+  });
+  assert.equal(
+    await library.getPreparedNarrationChunk(
+      expected(preparedNarrationChunk("one", { nextIndex: 1 })),
+    ),
+    null,
+  );
+  assert.notEqual(
+    await library.getPreparedNarrationChunk(
+      expected(
+        preparedNarrationChunk("one", {
+          startIndex: PREPARED_NARRATION_RECENT_MAX_ENTRIES,
+          nextIndex: PREPARED_NARRATION_RECENT_MAX_ENTRIES + 1,
+        }),
+      ),
+    ),
+    null,
+  );
+  assert.notEqual(
+    await library.getPreparedNarrationChunk(expected(preparedChunk)),
+    null,
+  );
+});
+
 test("upgrades v3 libraries with paged PDF stores without cloning legacy documents", async () => {
   const indexedDB = new IDBFactory();
   const databaseName = "pdf-v4-upgrade";
@@ -276,6 +682,19 @@ test("upgrades v3 libraries with paged PDF stores without cloning legacy documen
   );
   assert.equal(upgraded.objectStoreNames.contains(PDF_SOURCE_STORE), true);
   assert.equal(upgraded.objectStoreNames.contains(PDF_PAGE_STORE), true);
+  assert.equal(
+    upgraded.objectStoreNames.contains(PREPARED_NARRATION_STORE),
+    true,
+  );
+  for (const storeName of [
+    PREPARED_NARRATION_METADATA_STORE,
+    PREPARED_NARRATION_MANIFEST_STORE,
+    AUDIOBOOK_MANIFEST_STORE,
+    AUDIOBOOK_SOURCE_STORE,
+    AUDIOBOOK_TRANSCRIPT_STORE,
+  ]) {
+    assert.equal(upgraded.objectStoreNames.contains(storeName), true);
+  }
   const read = upgraded.transaction(PDF_PAGE_STORE, "readonly");
   assert.equal(
     read
@@ -284,6 +703,51 @@ test("upgrades v3 libraries with paged PDF stores without cloning legacy documen
     true,
   );
   await transactionDone(read);
+  const preparedRead = upgraded.transaction(
+    PREPARED_NARRATION_STORE,
+    "readonly",
+  );
+  assert.equal(
+    preparedRead
+      .objectStore(PREPARED_NARRATION_STORE)
+      .indexNames.contains(PREPARED_NARRATION_DOCUMENT_INDEX),
+    true,
+  );
+  assert.equal(
+    preparedRead
+      .objectStore(PREPARED_NARRATION_STORE)
+      .indexNames.contains(PREPARED_NARRATION_RECENT_INDEX),
+    true,
+  );
+  await transactionDone(preparedRead);
+  const preparedManifestRead = upgraded.transaction(
+    PREPARED_NARRATION_MANIFEST_STORE,
+    "readonly",
+  );
+  assert.equal(
+    preparedManifestRead
+      .objectStore(PREPARED_NARRATION_MANIFEST_STORE)
+      .indexNames.contains(PREPARED_NARRATION_DOCUMENT_INDEX),
+    true,
+  );
+  await transactionDone(preparedManifestRead);
+  const audiobookRead = upgraded.transaction(
+    [AUDIOBOOK_MANIFEST_STORE, AUDIOBOOK_SOURCE_STORE],
+    "readonly",
+  );
+  assert.equal(
+    audiobookRead
+      .objectStore(AUDIOBOOK_MANIFEST_STORE)
+      .indexNames.contains(AUDIOBOOK_DOCUMENT_INDEX),
+    true,
+  );
+  assert.equal(
+    audiobookRead
+      .objectStore(AUDIOBOOK_SOURCE_STORE)
+      .indexNames.contains(AUDIOBOOK_PROFILE_INDEX),
+    true,
+  );
+  await transactionDone(audiobookRead);
   upgraded.close();
 });
 
