@@ -424,7 +424,13 @@ export async function waitForExpression(
     try {
       const value = await evaluate(cdp, expression);
       if (value) return value;
-    } catch {
+    } catch (error) {
+      if (
+        typeof cdp?.webSocket?.readyState === "number" &&
+        cdp.webSocket.readyState !== 1
+      ) {
+        throw error;
+      }
       // React may be replacing the queried subtree while it settles.
     }
     await delay(100);
@@ -526,7 +532,7 @@ export async function configurePage(cdp, appUrl) {
   return consoleEntries;
 }
 
-export async function importFixture(cdp, fixture) {
+export async function selectFixtureFile(cdp, fixture) {
   await waitForExpression(
     cdp,
     `(() => {
@@ -547,6 +553,10 @@ export async function importFixture(cdp, fixture) {
     files: [fixture],
     nodeId: fileInput.nodeId,
   });
+}
+
+export async function importFixture(cdp, fixture) {
+  await selectFixtureFile(cdp, fixture);
   await waitForExpression(
     cdp,
     `Boolean(document.querySelector('.pdf-page-view')) &&

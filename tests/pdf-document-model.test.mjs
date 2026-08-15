@@ -10,6 +10,10 @@ import {
   createProgressiveDocumentModel,
   pdfRenderRequestKey,
   prioritizePdfRenderRequests,
+  reconcilePdfActiveRenderRequest,
+  resolvePdfRenderFallbackQueueActivation,
+  retainPdfRenderUpgrades,
+  updatePdfRenderQueue,
 } from "../app/pdf-document-model.mjs";
 import {
   canStartPdfInitialRaster,
@@ -87,7 +91,7 @@ test("prioritizes visible raster work and gives every request a revision key", (
   );
 });
 
-test("coalesces a page to its newest scale without losing visibility priority", () => {
+test("replaces historical visibility with the page's current queue priority", () => {
   const queued = coalescePdfRenderRequests(
     [
       {
@@ -113,11 +117,159 @@ test("coalesces a page to its newest scale without losing visibility priority", 
       pageNumber: 4,
       scale: 2,
       sequence: 3,
-      visible: true,
-      distance: 0,
+      visible: false,
+      distance: 8,
     },
   );
   assert.equal(queued.filter((request) => request.pageNumber === 4).length, 1);
+});
+
+test("removes stale queued pages and keeps rapid-scroll viewport work first", () => {
+  let queued = [
+    { pageNumber: 1, scale: 3, sequence: 1, visible: true, distance: 0 },
+    { pageNumber: 2, scale: 1.25, sequence: 2, visible: false, distance: 1 },
+    { pageNumber: 8, scale: 1.25, sequence: 3, visible: false, distance: 6 },
+  ];
+  queued = coalescePdfRenderRequests(queued, {
+    pageNumber: 1,
+    scale: 0,
+    sequence: 4,
+    enabled: false,
+    visible: false,
+    distance: 9,
+  });
+  queued = coalescePdfRenderRequests(queued, {
+    pageNumber: 2,
+    scale: 0,
+    sequence: 5,
+    enabled: false,
+    visible: false,
+    distance: 8,
+  });
+  queued = coalescePdfRenderRequests(queued, {
+    pageNumber: 8,
+    scale: 0,
+    sequence: 6,
+    enabled: false,
+    visible: false,
+    distance: 2,
+  });
+  queued = coalescePdfRenderRequests(queued, {
+    pageNumber: 10,
+    scale: 3,
+    sequence: 7,
+    visible: true,
+    distance: 0,
+  });
+  queued = coalescePdfRenderRequests(queued, {
+    pageNumber: 9,
+    scale: 1.25,
+    sequence: 8,
+    visible: false,
+    distance: 1,
+  });
+
+  assert.equal(queued.some((request) => request.pageNumber === 1), false);
+  assert.deepEqual(
+    prioritizePdfRenderRequests(queued).map((request) => request.pageNumber),
+    [10, 9],
+  );
+});
+
+test("reconciles active priority without duplicating sharp work", () => {
+  const active = {
+    pageNumber: 4,
+    scale: 3,
+    sequence: 10,
+    visible: true,
+    distance: 0,
+  };
+  assert.deepEqual(
+    reconcilePdfActiveRenderRequest(active, {
+      pageNumber: 4,
+      scale: 3,
+      sequence: 11,
+      visible: false,
+      distance: 1,
+    }),
+    {
+      cancelActive: false,
+      enqueue: false,
+      updatedActive: { ...active, visible: false, distance: 1 },
+    },
+  );
+  assert.deepEqual(
+    reconcilePdfActiveRenderRequest(active, {
+      pageNumber: 4,
+      scale: 1.25,
+      sequence: 12,
+      visible: false,
+      distance: 1,
+    }),
+    { cancelActive: true, enqueue: true, updatedActive: active },
+  );
+  assert.deepEqual(
+    reconcilePdfActiveRenderRequest(
+      active,
+      {
+        pageNumber: 4,
+        scale: 3,
+        sequence: 13,
+        visible: true,
+        distance: 0,
+      },
+      { activeCancelled: true },
+    ),
+    { cancelActive: false, enqueue: true, updatedActive: active },
+  );
+});
+
+test("the first fallback signal clears queued rasters and rejects new work", () => {
+  const active = {
+    pageNumber: 4,
+    scale: 3,
+    sequence: 10,
+    visible: true,
+    distance: 0,
+  };
+  const activation = resolvePdfRenderFallbackQueueActivation(active);
+  assert.deepEqual(activation, {
+    cancelSequence: 10,
+    fallbackActive: true,
+    requests: [],
+  });
+  assert.deepEqual(
+    updatePdfRenderQueue(
+      activation.requests,
+      {
+        pageNumber: 9,
+        scale: 3,
+        sequence: 11,
+        visible: true,
+        distance: 0,
+      },
+      { fallbackActive: activation.fallbackActive },
+    ),
+    [],
+  );
+});
+
+test("drops a completed page preview but retains its queued sharp upgrade", () => {
+  assert.deepEqual(
+    retainPdfRenderUpgrades(
+      [
+        { pageNumber: 1, scale: 1.25 },
+        { pageNumber: 1, scale: 2.25 },
+        { pageNumber: 2, scale: 1.25 },
+      ],
+      1,
+      1.25,
+    ),
+    [
+      { pageNumber: 1, scale: 2.25 },
+      { pageNumber: 2, scale: 1.25 },
+    ],
+  );
 });
 
 test("shares the in-flight page-one raster and serializes a newer scale", async () => {

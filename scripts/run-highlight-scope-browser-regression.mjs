@@ -411,7 +411,17 @@ export function visualStateFingerprintExpression(regionSelector) {
         left.bottom - right.bottom || left.right - right.right
       );
     const fontsStatus = document.fonts?.status ?? 'unsupported';
-    const pdfLoadingCount = document.querySelectorAll('.pdf-page-loading').length;
+    const readerBounds = reader?.getBoundingClientRect() ?? null;
+    const pdfLoadingCount = readerBounds
+      ? Array.from(document.querySelectorAll('.pdf-page-loading')).filter((loading) => {
+          const loadingBounds = loading.getBoundingClientRect();
+          return loadingBounds.width > 0 && loadingBounds.height > 0 &&
+            loadingBounds.bottom > readerBounds.top &&
+            loadingBounds.top < readerBounds.bottom &&
+            loadingBounds.right > readerBounds.left &&
+            loadingBounds.left < readerBounds.right;
+        }).length
+      : 0;
     const hasReadyGeometry = Boolean(reader && active && regions.length > 0);
     return JSON.stringify({
       ready: hasReadyGeometry &&

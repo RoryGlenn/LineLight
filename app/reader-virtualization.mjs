@@ -1,6 +1,15 @@
 export const PDF_PAGE_OVERSCAN = 2;
 export const FOCUS_PARAGRAPH_OVERSCAN = 4;
 
+export function distanceFromViewport(index, viewportStart, viewportEnd) {
+  const target = Math.max(0, Math.trunc(index) || 0);
+  const start = Math.max(0, Math.trunc(viewportStart) || 0);
+  const end = Math.max(start, Math.trunc(viewportEnd) || 0);
+  if (target < start) return start - target;
+  if (target > end) return target - end;
+  return 0;
+}
+
 /**
  * Expand the currently visible and active items into one small render window.
  * Lightweight placeholder elements can remain mounted outside this window so

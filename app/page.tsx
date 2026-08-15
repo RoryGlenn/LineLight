@@ -194,6 +194,7 @@ import {
   saveReaderPreparedNarrationManifest,
   sortLibraryEntries,
 } from "./reader-library.mjs";
+import { isReaderLifecycleRestoreCurrent } from "./reader-lifecycle.mjs";
 import {
   MAX_POSITION_HISTORY,
   createPositionSnapshot,
@@ -1991,6 +1992,13 @@ export default function Home() {
     let restoreTimer: number | undefined;
     let cancelled = false;
     let disposeServiceWorker = () => {};
+    let expectedRestoreGeneration = readerLifecycleGenerationRef.current;
+    const restoreIsCurrent = () =>
+      isReaderLifecycleRestoreCurrent({
+        cancelled,
+        currentGeneration: readerLifecycleGenerationRef.current,
+        restoreGeneration: expectedRestoreGeneration,
+      });
     try {
       const savedSettings = localStorage.getItem("guided-reader-settings");
       const savedProgress = localStorage.getItem(
@@ -2036,7 +2044,7 @@ export default function Home() {
 
     loadReaderLibrary()
       .then(async (snapshot) => {
-        if (cancelled) return;
+        if (!restoreIsCurrent()) return;
         const entries = snapshot.entries as LibraryEntry[];
         setLibraryEntries(entries);
         if (!snapshot.activeDocumentId) return;
@@ -2045,7 +2053,7 @@ export default function Home() {
         );
         if (activeEntry?.kind === "pdf") {
           await openReaderDocumentMetadata(activeEntry.id);
-          if (cancelled) return;
+          if (!restoreIsCurrent()) return;
           let readyView: ReaderViewMode = "page";
           try {
             if (
@@ -2057,19 +2065,23 @@ export default function Home() {
           } catch {
             // The page view remains the default when preferences are unavailable.
           }
-          await startPdfRuntime({
+          if (!restoreIsCurrent()) return;
+          const restorePromise = startPdfRuntime({
             documentId: activeEntry.id,
             title: activeEntry.title,
             author: activeEntry.author,
             restoredWord: storedProgressFor(activeEntry.id) ?? 0,
             readyView,
           });
+          expectedRestoreGeneration = readerLifecycleGenerationRef.current;
+          await restorePromise;
+          if (!restoreIsCurrent()) return;
           return;
         }
         const storedDocument = (await getReaderDocument(
           snapshot.activeDocumentId,
         )) as ReaderDocument | null;
-        if (!storedDocument || cancelled) return;
+        if (!storedDocument || !restoreIsCurrent()) return;
         const storedProgress = clampStoredProgress(storedDocument);
         setReaderDocument(storedDocument);
         setActiveWord(storedProgress);
@@ -2077,7 +2089,7 @@ export default function Home() {
         setViewMode(initialViewFor(storedDocument));
       })
       .catch(() => {
-        if (!cancelled) {
+        if (restoreIsCurrent()) {
           setNotice(
             "LineLight could not open the private library. The starter document is still available.",
           );

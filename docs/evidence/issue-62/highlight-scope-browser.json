@@ -1,27 +1,27 @@
 {
   "schemaVersion": 1,
   "issue": 62,
-  "recordedAt": "2026-08-13T18:24:38.454Z",
+  "recordedAt": "2026-08-15T15:45:01.634Z",
   "source": {
     "branch": "agent/issue-62-highlight-scope",
     "files": {
       "app/focus-document-view.tsx": "d5f16767180d5e61f4e658030468ce27640b13aa9567a4e4433c35176927792b",
       "app/globals.css": "7ab560e1a4d8c3770978d8709ed705e90b6bdb9f9847f49d231ee7eb3400cf4c",
       "app/highlight-scope.mjs": "84474122fafee6410a162bc789d94907b095e9efc5d3411011e55f0be55cc73b",
-      "app/page.tsx": "91114bb64ae6e8d6e5762fddb22cae34474b6891a1d58fc1c10620a95c742f90",
-      "app/pdf-page-view.tsx": "5031367fdf4a85c4b86ee6976a8bee3d6f47b031091a1505e2a37a9354b36675",
+      "app/page.tsx": "dca8b6cce6fb865a5a7fde01a05ee5e114b67462986cdb613aca788d7371365c",
+      "app/pdf-page-view.tsx": "c7e7a6bb1fe129b333e3f1848f16d596ccca3cdae6d4d3c7336a9e6ab085f004",
       "app/pdf-text-model.mjs": "61eb74e26f6d7165002ac1b239d800335f00bdd1107a0059c2447d2ced260f00",
-      "app/reader-virtualization.mjs": "0df45457462979bc5707e03db275a38a3228110deed5008f9af178d64776c262",
-      "scripts/run-highlight-scope-browser-regression.mjs": "a529c8150508b87896363e7a7436b57de41c1b5db3319dcf0c06b559dc79c192",
+      "app/reader-virtualization.mjs": "40630476ec2439486f3864cb9ba8be15b2175ee3f1b90db0b9da32cfee8fa0c3",
+      "scripts/run-highlight-scope-browser-regression.mjs": "89962a988ad633dfc41cfb53ebeee07133f31eee3780775a8716f882beca4e24",
       "tests/highlight-scope.test.mjs": "96d4a76c7ec4bd21ffe9cca5994d1afa8fb2e7af484c825782c29656c953a778",
       "tests/pdf-text-model.test.mjs": "8c8129a8c3210c01f5a5be0e46330015ae2ab1e8cf76077ffed638f992e6b8aa",
-      "tests/reader-virtualization.test.mjs": "31783fdf7bfb4541c8785964cf00adc78b0fc12a9c0ae56642b617e5ec2b398a"
+      "tests/reader-virtualization.test.mjs": "b5716acacb47d104e16ea6d1560a3deb1cf260fd631abb4fd91c4e0dc53befc7"
     }
   },
   "browser": {
-    "executable": "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+    "executable": "/usr/bin/brave-browser",
     "headed": true,
-    "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+    "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
     "viewport": {
       "width": 1440,
       "height": 1000,
@@ -86,44 +86,44 @@
         "fragmentCount": 5,
         "fragments": [
           {
-            "left": 579.3515625,
-            "top": 362.0546875,
-            "right": 1127.625,
-            "bottom": 392.0546875,
-            "width": 548.2734375,
-            "height": 30
+            "left": 601.5,
+            "top": 364.546875,
+            "right": 1101.34375,
+            "bottom": 389.546875,
+            "width": 499.84375,
+            "height": 25
           },
           {
-            "left": 579.3515625,
-            "top": 401.2109375,
-            "right": 1133.4921875,
-            "bottom": 431.2109375,
-            "width": 554.140625,
-            "height": 30
+            "left": 601.5,
+            "top": 403.703125,
+            "right": 1102.5,
+            "bottom": 428.703125,
+            "width": 501,
+            "height": 25
           },
           {
-            "left": 579.3515625,
-            "top": 440.3671875,
-            "right": 1146.6875,
-            "bottom": 470.3671875,
-            "width": 567.3359375,
-            "height": 30
+            "left": 601.5,
+            "top": 442.859375,
+            "right": 1113.703125,
+            "bottom": 467.859375,
+            "width": 512.203125,
+            "height": 25
           },
           {
-            "left": 579.3515625,
-            "top": 479.5234375,
-            "right": 1084.6484375,
-            "bottom": 509.5234375,
-            "width": 505.296875,
-            "height": 30
+            "left": 601.5,
+            "top": 482.015625,
+            "right": 1050.5625,
+            "bottom": 507.015625,
+            "width": 449.0625,
+            "height": 25
           },
           {
-            "left": 579.3515625,
-            "top": 518.6796875,
-            "right": 899.4609375,
-            "bottom": 548.6796875,
-            "width": 320.109375,
-            "height": 30
+            "left": 601.5,
+            "top": 521.171875,
+            "right": 892.546875,
+            "bottom": 546.171875,
+            "width": 291.046875,
+            "height": 25
           }
         ],
         "activeRegionIndices": [
@@ -138,67 +138,67 @@
         },
         "overlayAriaHidden": null,
         "screenshot": "focus-sentence.png",
-        "screenshotSha256": "22c549dbc92361b5953926cc069b6d82768c26e9e687c413c2ed4297eb9e0710"
+        "screenshotSha256": "6548ece7e9e0d76a685d035d1f6e7173f300afd6c8d3766c01b41a2c90f384a0"
       },
       "paragraph": {
         "regionCount": 1,
         "fragmentCount": 7,
         "fragments": [
           {
-            "left": 579.3515625,
-            "top": 362.0546875,
-            "right": 1127.625,
-            "bottom": 392.0546875,
-            "width": 548.2734375,
-            "height": 30
+            "left": 601.5,
+            "top": 364.546875,
+            "right": 1101.34375,
+            "bottom": 389.546875,
+            "width": 499.84375,
+            "height": 25
           },
           {
-            "left": 579.3515625,
-            "top": 401.2109375,
-            "right": 1133.4921875,
-            "bottom": 431.2109375,
-            "width": 554.140625,
-            "height": 30
+            "left": 601.5,
+            "top": 403.703125,
+            "right": 1102.5,
+            "bottom": 428.703125,
+            "width": 501,
+            "height": 25
           },
           {
-            "left": 579.3515625,
-            "top": 440.3671875,
-            "right": 1146.6875,
-            "bottom": 470.3671875,
-            "width": 567.3359375,
-            "height": 30
+            "left": 601.5,
+            "top": 442.859375,
+            "right": 1113.703125,
+            "bottom": 467.859375,
+            "width": 512.203125,
+            "height": 25
           },
           {
-            "left": 579.3515625,
-            "top": 479.5234375,
-            "right": 1084.6484375,
-            "bottom": 509.5234375,
-            "width": 505.296875,
-            "height": 30
+            "left": 601.5,
+            "top": 482.015625,
+            "right": 1050.5625,
+            "bottom": 507.015625,
+            "width": 449.0625,
+            "height": 25
           },
           {
-            "left": 579.3515625,
-            "top": 518.6796875,
-            "right": 1145.6875,
-            "bottom": 548.6796875,
-            "width": 566.3359375,
-            "height": 30
+            "left": 601.5,
+            "top": 521.171875,
+            "right": 1108.875,
+            "bottom": 546.171875,
+            "width": 507.375,
+            "height": 25
           },
           {
-            "left": 579.3515625,
-            "top": 557.8359375,
-            "right": 1165.203125,
-            "bottom": 587.8359375,
-            "width": 585.8515625,
-            "height": 30
+            "left": 601.5,
+            "top": 560.328125,
+            "right": 1128.109375,
+            "bottom": 585.328125,
+            "width": 526.609375,
+            "height": 25
           },
           {
-            "left": 579.3515625,
-            "top": 596.9921875,
-            "right": 643.1015625,
-            "bottom": 626.9921875,
-            "width": 63.75,
-            "height": 30
+            "left": 601.5,
+            "top": 599.484375,
+            "right": 658.328125,
+            "bottom": 624.484375,
+            "width": 56.828125,
+            "height": 25
           }
         ],
         "activeRegionIndices": [
@@ -213,7 +213,7 @@
         },
         "overlayAriaHidden": null,
         "screenshot": "focus-paragraph.png",
-        "screenshotSha256": "d94cd87c04a8fb35970a1fad96e34a5145bb40ca867c5bd793aef3af56a1de71"
+        "screenshotSha256": "30906f79d4bbdc748816ffd156f7a88748c6fb703a056a60e531340008a32fc0"
       }
     },
     "page": {
@@ -222,28 +222,28 @@
         "fragmentCount": 3,
         "fragments": [
           {
-            "left": 490,
-            "top": 183.765625,
-            "right": 1087.15625,
-            "bottom": 202.2578125,
-            "width": 597.15625,
-            "height": 18.4921875
+            "left": 482.5,
+            "top": 183.40625,
+            "right": 1079.078125,
+            "bottom": 201.390625,
+            "width": 596.578125,
+            "height": 17.984375
           },
           {
-            "left": 490,
-            "top": 210.15625,
-            "right": 1109.890625,
-            "bottom": 228.6484375,
-            "width": 619.890625,
-            "height": 18.4921875
+            "left": 482.5,
+            "top": 209.921875,
+            "right": 1101.796875,
+            "bottom": 227.90625,
+            "width": 619.296875,
+            "height": 17.984375
           },
           {
-            "left": 490,
-            "top": 236.671875,
-            "right": 1084.6015625,
-            "bottom": 255.1640625,
-            "width": 594.6015625,
-            "height": 18.4921875
+            "left": 482.5,
+            "top": 236.3125,
+            "right": 1076.546875,
+            "bottom": 254.296875,
+            "width": 594.046875,
+            "height": 17.984375
           }
         ],
         "activeRegionIndices": [
@@ -260,43 +260,43 @@
         },
         "overlayAriaHidden": true,
         "screenshot": "page-sentence.png",
-        "screenshotSha256": "788bcdfcc2fb6d5f0fc54f037b0ad8f1e209c1009353668fa13a78119c982558"
+        "screenshotSha256": "88edb0cf899964d1762430197e15be6a9c3b8c3422ddfe285c7d98074af77490"
       },
       "paragraph": {
         "regionCount": 4,
         "fragmentCount": 4,
         "fragments": [
           {
-            "left": 490,
-            "top": 183.765625,
-            "right": 1087.15625,
-            "bottom": 202.2578125,
-            "width": 597.15625,
-            "height": 18.4921875
+            "left": 482.5,
+            "top": 183.40625,
+            "right": 1079.078125,
+            "bottom": 201.390625,
+            "width": 596.578125,
+            "height": 17.984375
           },
           {
-            "left": 490,
-            "top": 210.15625,
-            "right": 1109.890625,
-            "bottom": 228.6484375,
-            "width": 619.890625,
-            "height": 18.4921875
+            "left": 482.5,
+            "top": 209.921875,
+            "right": 1101.796875,
+            "bottom": 227.90625,
+            "width": 619.296875,
+            "height": 17.984375
           },
           {
-            "left": 490,
-            "top": 236.671875,
-            "right": 1084.6015625,
-            "bottom": 255.1640625,
-            "width": 594.6015625,
-            "height": 18.4921875
+            "left": 482.5,
+            "top": 236.3125,
+            "right": 1076.546875,
+            "bottom": 254.296875,
+            "width": 594.046875,
+            "height": 17.984375
           },
           {
-            "left": 490,
-            "top": 263.0625,
-            "right": 1157.46875,
-            "bottom": 281.5546875,
-            "width": 667.46875,
-            "height": 18.4921875
+            "left": 482.5,
+            "top": 262.703125,
+            "right": 1149.34375,
+            "bottom": 280.6875,
+            "width": 666.84375,
+            "height": 17.984375
           }
         ],
         "activeRegionIndices": [
@@ -314,7 +314,7 @@
         },
         "overlayAriaHidden": true,
         "screenshot": "page-paragraph.png",
-        "screenshotSha256": "8ee48e19a5d682164174f9c8f66f4b5ce9348a68f95fa1a862ff2528973fabf6"
+        "screenshotSha256": "e83a85198905e808a3272630ce330289e5ee1e3b74d836aefff09dfedd27afbe"
       }
     }
   },
@@ -446,7 +446,7 @@
     "passed": true
   },
   "persistence": {
-    "appUrl": "http://127.0.0.1:55125/",
+    "appUrl": "http://127.0.0.1:41363/",
     "beforeReload": {
       "fontSize": 22,
       "lineHeight": 1.78,
@@ -540,8 +540,8 @@
   "browserDiagnostics": {
     "errors": [],
     "console": [],
-    "browserStderr": "\nDevTools listening on ws://127.0.0.1:55152/devtools/browser/f6585b21-ca81-4d5e-ae45-acb46f3b4a27\n",
-    "serverLogTail": "\n> linelight@0.1.0 dev\n> WRANGLER_LOG_PATH=.wrangler/wrangler.log vite --host 127.0.0.1 --port 55125 --strictPort\n\n(node:69524) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.\n(Use `node --trace-deprecation ...` to show where the warning was created)\n\n  VITE v8.2.0  ready in 2313 ms\n\n  ➜  Local:   http://127.0.0.1:55125/\n\nThe Cloudflare Vite plugin detected this dev session is running in an AI agent.\nThe Local Explorer API is available at http://127.0.0.1:55125/cdn-cgi/local/explorer/api\nUseful routes:\n  GET http://127.0.0.1:55125/cdn-cgi/local/explorer/api/local/workers - local Workers and bindings\n  GET http://127.0.0.1:55125/cdn-cgi/local/explorer/api/storage/kv/namespaces - KV namespaces\n  GET http://127.0.0.1:55125/cdn-cgi/local/explorer/api/d1/database - D1 databases\n  GET http://127.0.0.1:55125/cdn-cgi/local/explorer/api/r2/buckets - R2 buckets\n  GET http://127.0.0.1:55125/cdn-cgi/local/explorer/api/workers/durable_objects/namespaces - Durable Object namespaces\n  GET http://127.0.0.1:55125/cdn-cgi/local/explorer/api/workflows - Workflows\n  POST http://127.0.0.1:55125/cdn-cgi/local/explorer/api/local/observability/query - run a read-only SQL query (SELECT/WITH only) over captured request traces and console logs. Tables: spans, logs (read attributes via json(attributes)). Example:\n    curl -X POST http://127.0.0.1:55125/cdn-cgi/local/explorer/api/local/observability/query -H 'Content-Type: application/json' -d '{\"sql\":\"SELECT service, name, outcome, duration_ms FROM spans WHERE parent_id IS NULL LIMIT 20\"}'\nIf the routes above don't cover what you need, fetch the full OpenAPI schema (large - use only as a last resort):\n  GET http://127.0.0.1:55125/cdn-cgi/local/explorer/api - OpenAPI schema\n\n GET / 200 in 801ms (compile: 1786645466.8s, render: 766ms)\n GET / 200 in 44ms (compile: 1786645466.8s, render: 30ms)\n GET / 200 in 47ms (compile: 1786645466.8s, render: 34ms)\n"
+    "browserStderr": "\nDevTools listening on ws://127.0.0.1:42741/devtools/browser/c6d0f34a-d401-4b19-a27e-b0f055bfa2cd\nMESA-LOADER: failed to open dri: /usr/lib/x86_64-linux-gnu/gbm/dri_gbm.so: cannot open shared object file: Permission denied (search paths /usr/lib/x86_64-linux-gnu/gbm, suffix _gbm)\n",
+    "serverLogTail": "\n> linelight@0.1.0 dev\n> WRANGLER_LOG_PATH=.wrangler/wrangler.log vite --host 127.0.0.1 --port 41363 --strictPort\n\n\n  VITE v8.2.0  ready in 2937 ms\n\n  ➜  Local:   http://127.0.0.1:41363/\n\nThe Cloudflare Vite plugin detected this dev session is running in an AI agent.\nThe Local Explorer API is available at http://127.0.0.1:41363/cdn-cgi/local/explorer/api\nUseful routes:\n  GET http://127.0.0.1:41363/cdn-cgi/local/explorer/api/local/workers - local Workers and bindings\n  GET http://127.0.0.1:41363/cdn-cgi/local/explorer/api/storage/kv/namespaces - KV namespaces\n  GET http://127.0.0.1:41363/cdn-cgi/local/explorer/api/d1/database - D1 databases\n  GET http://127.0.0.1:41363/cdn-cgi/local/explorer/api/r2/buckets - R2 buckets\n  GET http://127.0.0.1:41363/cdn-cgi/local/explorer/api/workers/durable_objects/namespaces - Durable Object namespaces\n  GET http://127.0.0.1:41363/cdn-cgi/local/explorer/api/workflows - Workflows\n  POST http://127.0.0.1:41363/cdn-cgi/local/explorer/api/local/observability/query - run a read-only SQL query (SELECT/WITH only) over captured request traces and console logs. Tables: spans, logs (read attributes via json(attributes)). Example:\n    curl -X POST http://127.0.0.1:41363/cdn-cgi/local/explorer/api/local/observability/query -H 'Content-Type: application/json' -d '{\"sql\":\"SELECT service, name, outcome, duration_ms FROM spans WHERE parent_id IS NULL LIMIT 20\"}'\nIf the routes above don't cover what you need, fetch the full OpenAPI schema (large - use only as a last resort):\n  GET http://127.0.0.1:41363/cdn-cgi/local/explorer/api - OpenAPI schema\n\n GET / 200 in 1.3s (compile: 1786808689.5s, render: 1.2s)\n GET / 200 in 263ms (compile: 1786808689.5s, render: 228ms)\n GET / 200 in 260ms (compile: 1786808689.5s, render: 219ms)\n"
   },
   "failures": [],
   "passed": true

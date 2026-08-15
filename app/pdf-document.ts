@@ -164,7 +164,7 @@ export class PdfDocumentClient {
   requestRender(
     pageNumber: number,
     scale: number,
-    options: { visible?: boolean; distance?: number } = {},
+    options: { enabled?: boolean; visible?: boolean; distance?: number } = {},
   ) {
     if (!this.#worker) return;
     this.#worker.postMessage({

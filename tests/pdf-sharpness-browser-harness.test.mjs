@@ -1,0 +1,15516 @@
+import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
+import { mkdtemp, readFile, rm, symlink } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+import { promisify } from "node:util";
+import { runInNewContext } from "node:vm";
+import { deflateSync } from "node:zlib";
+
+import {
+  waitForExpression as waitForHighlightExpression,
+} from "../scripts/run-pdf-highlight-browser-regression.mjs";
+
+import {
+  PDF_SHARPNESS_MATRIX,
+  PDF_SHARPNESS_MAX_BITMAP_COUNT,
+  PDF_SHARPNESS_MAX_BITMAP_PIXELS,
+  PDF_SHARPNESS_MAX_RASTER_PIXELS,
+  PDF_SHARPNESS_SCHEMA_VERSION,
+  PDF_SHARPNESS_SOURCE_FILES,
+  validatePdfSharpnessEvidence,
+} from "../scripts/pdf-sharpness-evidence.mjs";
+import {
+  APP_MATRIX_RUNTIME_DIAGNOSTIC_STAGES,
+  FALLBACK_IMPORT_DIAGNOSTIC_STAGES,
+  FALLBACK_IMPORT_DIAGNOSTIC_STEPS,
+  REFERENCE_CAPTURE_DIAGNOSTIC_CANDIDATES,
+  REFERENCE_CAPTURE_DIAGNOSTIC_CONFIGURATIONS,
+  REFERENCE_CAPTURE_DIAGNOSTIC_STAGES,
+  REFERENCE_CAPTURE_DIAGNOSTIC_STEPS,
+  analyzeReferencePixels,
+  analyzeReferenceTarget,
+  asyncBrowserExpression,
+  advanceCdpFixedPointStability,
+  buildCdpNetworkFixedPointDiagnostic,
+  buildFallbackWorkerModuleSource,
+  buildFallbackImportDiagnosticReport,
+  buildAppMatrixRuntimeDiagnosticReport,
+  buildFirstNetworkDiagnosticReport,
+  buildReferenceCaptureDiagnosticReport,
+  classifyCdpDiagnosticUrl,
+  classifyPdfRasterTransition,
+  completeCdpNetworkRequest,
+  createAppMatrixScenarioFinalizationCache,
+  createFallbackImportDiagnosticProgress,
+  createReferenceCaptureDiagnosticProgress,
+  decodePngScreenshot,
+  derivePdfPreviewRasterTarget,
+  dispatchPausedServiceWorkerCommands,
+  dispatchToCdpSession,
+  hasCdpPhasePdfBootstrapCoverage,
+  isCdpAttachmentStateHealthy,
+  isCdpFixedPointDiagnosticHealthy,
+  isAppMatrixRuntimeIntegrityReasonsValid,
+  isFallbackImportNetworkDiagnosticHealthy,
+  isCdpServiceWorkerBootstrapRequest,
+  isCdpTargetBootstrapRequest,
+  isCdpTargetSetupComplete,
+  matchesPdfFallbackInjection,
+  markFallbackImportDiagnosticStage,
+  markReferenceCaptureDiagnosticStage,
+  navigateReferenceCaptureDiagnosticPage,
+  planPdfVirtualScroll,
+  planPdfPageCenterCorrection,
+  probePdfBitmapBudget,
+  recordCdpNetworkRequest,
+  reconcileCdpServiceWorkerBootstraps,
+  reconcileCdpTargetBootstrapRequests,
+  referenceViewportContract,
+  runBoundedDiagnosticOperation,
+  collectAppMatrixRuntimeLongAnimationFrameBatch,
+  selectPdfLongTasksForWindow,
+  selectPdfFallbackAbortCandidate,
+  selectPdfFallbackScenarioEvents,
+  selectPdfPriorityPreviewSettlement,
+  selectPdfRasterCompositionSettlement,
+  sendToCdpSession,
+  sanitizeAppMatrixRuntimePriorityMountDiagnostic,
+  sanitizeAppMatrixRuntimePreviewCompositionDiagnostic,
+  settleCdpCommandDispatches,
+  summarizePdfFallbackCancellationDiagnostic,
+  summarizePdfModelCompletion,
+  summarizePdfPageCenteringStability,
+  summarizePdfRestoreReadiness,
+  summarizeFallbackImportLifecycle,
+  summarizeFallbackDiagnosticProgress,
+  summarizeFallbackDiagnosticSetup,
+  validateCdpInitialTargetBaseline,
+} from
+  "../scripts/run-pdf-sharpness-browser-regression.mjs";
+
+const execFileAsync = promisify(execFile);
+const COMMIT = "a".repeat(40);
+const TREE = "b".repeat(40);
+const SHA = "c".repeat(64);
+const DEPLOYMENT = "issue-68-test-deployment";
+const diagnosticIdentity = (...parts) => createHash("sha256")
+  .update(JSON.stringify(parts))
+  .digest("hex");
+const DOCUMENT_KEY = "issue-68-document:issue-68-revision";
+const REVISION = "issue-68-revision";
+const FAILED_ABORT_SIGNAL_ID = 1;
+const RETRY_ABORT_SIGNAL_ID = 2;
+const CANCELLATION_ABORT_SIGNAL_ID = 3;
+const passingFallbackDiagnosticProgress = () => ({
+  history: [...FALLBACK_IMPORT_DIAGNOSTIC_STAGES],
+  terminalStage: FALLBACK_IMPORT_DIAGNOSTIC_STAGES.at(-1),
+});
+const completedCdpTargetSetup = ({
+  cdpIdStart = 1,
+  serviceWorker = false,
+  startedAt = 10,
+} = {}) => {
+  const dispatchTimes = serviceWorker
+    ? [startedAt, startedAt + 1, startedAt + 2, startedAt + 3, startedAt + 4]
+    : [startedAt, startedAt + 1, startedAt + 4, startedAt + 6, startedAt + 8];
+  const resultTimes = serviceWorker
+    ? [startedAt + 6, startedAt + 7, startedAt + 8, startedAt + 9,
+      startedAt + 5]
+    : [startedAt + 2, startedAt + 3, startedAt + 5, startedAt + 7,
+      startedAt + 9];
+  const resultOrder = serviceWorker ? [2, 3, 4, 5, 1] : [1, 2, 3, 4, 5];
+  const deadlineAt = serviceWorker ? startedAt + 100 : null;
+  const definitions = [
+    ["network-enable", "Network.enable"],
+    ["runtime-enable", "Runtime.enable"],
+    ["cache-disable", "Network.setCacheDisabled"],
+    ["auto-attach", "Target.setAutoAttach"],
+    ["resume", "Runtime.runIfWaitingForDebugger"],
+  ];
+  return {
+    commandDeadlineAt: deadlineAt,
+    commands: definitions.map(([name, method], index) => ({
+      cdpId: cdpIdStart + index,
+      deadlineAt,
+      dispatchedAt: dispatchTimes[index],
+      dispatchSequence: index + 1,
+      method,
+      name,
+      resultAt: resultTimes[index],
+      resultSequence: resultOrder[index],
+      status: "completed",
+    })),
+    lifecycleStrategy: serviceWorker
+      ? "setup-dispatched-before-resume"
+      : "setup-completed-before-resume",
+    resumeDispatchedAt: dispatchTimes[4],
+  };
+};
+const PUBLIC_PDF_FIXTURE =
+  "tests/fixtures/pdf-highlights/issue-60-geometry.pdf";
+const PUBLIC_PDF_FIXTURE_BYTES = 4_745;
+const PUBLIC_PDF_FIXTURE_SHA256 =
+  "1addfceae4b869eec37dae4755d576ccd0fd7e1ce505dc856da3b96acbf3f06c";
+
+const passingReferenceDiagnosticSource = () => ({
+  commit: COMMIT,
+  files: Object.fromEntries(
+    PDF_SHARPNESS_SOURCE_FILES.map((file) => [file, SHA]),
+  ),
+  postCaptureCommit: COMMIT,
+  postCaptureStatus: [],
+  postCaptureTree: TREE,
+  preflightStatus: [],
+  tree: TREE,
+});
+
+const passingReferenceAnalysis = () => ({
+  height: 900,
+  inkPixels: 9_106,
+  inkRatio: 0.014523125996810207,
+  inkRowBands: 4,
+  inkSpanRatio: 0.6855263157894737,
+  pageBounds: { height: 841, width: 774, x: 306, y: 59 },
+  pagePixels: 627_000,
+  pageWhitePixels: 614_930,
+  pageWhiteRatio: 0.980749601275917,
+  proof: "white-page-with-rendered-ink",
+  renderedPage: true,
+  runnerUpWhiteArea: 14_947,
+  segmentationVersion: 2,
+  substantialComponents: [{
+    pageBounds: { height: 841, width: 774, x: 306, y: 59 },
+    whiteArea: 637_220,
+  }],
+  substantialComponentCount: 1,
+  width: 1_100,
+  winnerDominanceRatio: 42.63196628085903,
+  winnerWhiteArea: 637_220,
+});
+
+const emptyReferenceAnalysis = (width, height) => ({
+  height,
+  inkPixels: 0,
+  inkRatio: 0,
+  inkRowBands: 0,
+  inkSpanRatio: 0,
+  pageBounds: null,
+  pagePixels: 0,
+  pageWhitePixels: 0,
+  pageWhiteRatio: 0,
+  proof: "white-page-with-rendered-ink",
+  renderedPage: false,
+  runnerUpWhiteArea: 0,
+  segmentationVersion: 2,
+  substantialComponents: [],
+  substantialComponentCount: 0,
+  width,
+  winnerDominanceRatio: null,
+  winnerWhiteArea: 0,
+});
+
+const passingReferenceTarget = (
+  analysis = passingReferenceAnalysis(),
+  requestedPage = 2,
+) => {
+  const selected = analysis.substantialComponents[0];
+  const cropWidth = selected.pageBounds.width;
+  const cropHeight = selected.pageBounds.height;
+  return {
+    anchorLimit: Math.max(80, Math.ceil(analysis.height * 0.25)),
+    components: analysis.substantialComponents.map((component) => ({
+      bounds: { ...component.pageBounds },
+      whiteArea: component.whiteArea,
+    })),
+    cropBounds: { ...selected.pageBounds },
+    policy: "unique-top-anchored-substantial-component",
+    readiness: {
+      ...analysis,
+      height: cropHeight,
+      pageBounds: { height: cropHeight, width: cropWidth, x: 0, y: 0 },
+      runnerUpWhiteArea: 0,
+      substantialComponents: [{
+        pageBounds: { height: cropHeight, width: cropWidth, x: 0, y: 0 },
+        whiteArea: selected.whiteArea,
+      }],
+      width: cropWidth,
+      winnerDominanceRatio: null,
+    },
+    requestedPage,
+    selectedComponentIndex: 0,
+    selectionVersion: 1,
+    sourceHeight: analysis.height,
+    sourceWidth: analysis.width,
+  };
+};
+
+const emptyReferenceTarget = (analysis, requestedPage) => ({
+  anchorLimit: Math.max(80, Math.ceil(analysis.height * 0.25)),
+  components: [],
+  cropBounds: null,
+  policy: "unique-top-anchored-substantial-component",
+  readiness: null,
+  requestedPage,
+  selectedComponentIndex: null,
+  selectionVersion: 1,
+  sourceHeight: analysis.height,
+  sourceWidth: analysis.width,
+});
+
+const referenceViewport = ({ dpr, height, width }) => ({
+  devicePixelRatio: dpr,
+  innerHeight: height,
+  innerWidth: width,
+  screenHeight: height,
+  screenWidth: width,
+  visualViewportHeight: height,
+  visualViewportScale: 1,
+  visualViewportWidth: width,
+});
+
+const passingReferenceCaptureMechanics = ({ dpr, height, width }) => ({
+  baseline: {
+    checked: true,
+    frameId: "fresh-main-frame",
+    frameTreeMainOnly: true,
+    frameUrlClass: "about-blank",
+    locationClass: "about-blank",
+    pageCount: 1,
+    pageUrlClass: "about",
+    readyStateComplete: true,
+    targetCount: 1,
+    workerCount: 0,
+  },
+  configuredViewport: referenceViewport({ dpr, height, width }),
+  navigation: {
+    dispatchSequence: 1,
+    errorText: null,
+    finalSequence: 4,
+    frameId: "fresh-main-frame",
+    isDownload: false,
+    lifecycleLoad: {
+      frameId: "fresh-main-frame",
+      loaderId: "new-pdf-loader",
+      name: "load",
+      sequence: 2,
+    },
+    loadEvent: { sequence: 3 },
+    loaderId: "new-pdf-loader",
+    newDocument: true,
+    responseSequence: 4,
+  },
+  viewer: {
+    contentType: "text/html",
+    pdfEmbedPresent: true,
+    protocol: "chrome-extension:",
+    readyStateComplete: true,
+    viewport: referenceViewport({ dpr, height, width }),
+  },
+});
+
+function artifact(name, digit) {
+  return {
+    bytes: 1024,
+    path: `outputs/issue-68/${name}`,
+    sha256: String(digit).repeat(64),
+  };
+}
+
+function cleanDiagnosticTeardown() {
+  return {
+    app: {
+      cdpClosed: true,
+      error: null,
+      present: true,
+      processClosed: true,
+      profileRemoved: true,
+    },
+    browserClosed: true,
+    cdpClosed: true,
+    errors: [],
+    profilesRemoved: true,
+    reference: {
+      cdpClosed: true,
+      error: null,
+      present: false,
+      processClosed: true,
+      profileRemoved: true,
+    },
+    referenceBrowserClosed: true,
+    server: {
+      error: null,
+      present: true,
+      processClosed: true,
+    },
+    serverClosed: true,
+  };
+}
+
+function passingFallbackImportCapture() {
+  const documentId = "pdf-current-public-fixture";
+  const revision = "fallback-import-revision";
+  const documentKey = `${documentId}:${revision}`;
+  const jobId = 7;
+  const workerInstanceId = 2;
+  let eventId = 10;
+  const event = (value) => ({
+    at: eventId,
+    eventId: eventId++,
+    jobId,
+    revision,
+    workerInstanceId,
+    ...value,
+  });
+  const workerEvents = [
+    event({
+      direction: "to-worker",
+      documentKey,
+      type: "import",
+    }),
+    event({
+      direction: "from-worker",
+      documentKey,
+      pageCount: 6,
+      pageNumber: 1,
+      type: "page",
+    }),
+    event({ direction: "from-worker", type: "render-fallback" }),
+    event({
+      completedPages: 1,
+      direction: "from-worker",
+      pageCount: 6,
+      type: "progress",
+    }),
+  ];
+  for (let pageNumber = 2; pageNumber <= 6; pageNumber += 1) {
+    workerEvents.push(
+      event({
+        direction: "from-worker",
+        documentKey,
+        pageCount: 6,
+        pageNumber,
+        type: "page",
+      }),
+      event({
+        completedPages: pageNumber,
+        direction: "from-worker",
+        pageCount: 6,
+        type: "progress",
+      }),
+    );
+  }
+  workerEvents.push(
+    event({ direction: "from-worker", documentKey, pageCount: 6, type: "complete" }),
+  );
+  return {
+    boundary: {
+      sourceFileStart: 0,
+      startedAt: 1,
+      workerEventStart: 0,
+      workerLifecycleStart: 0,
+    },
+    dom: {
+      fallbackActive: true,
+      fileInputDisabled: false,
+      fileInputPresent: true,
+      importDialogPresent: false,
+      loadingPageCount: 0,
+      mountedPageCount: 3,
+      noticeCategory: "render-fallback",
+      noticePresent: true,
+      pageOneCanvasHeight: 990,
+      pageOneCanvasSource: "main-fallback",
+      pageOneCanvasWidth: 765,
+      pageOnePresent: true,
+      pageOneVisible: true,
+      pageOneWordOverlayCount: 24,
+      pageViewPresent: true,
+    },
+    libraryAfter: {
+      activeDocumentIdentityHash: diagnosticIdentity(documentId),
+      activeDocumentPresent: true,
+      available: true,
+      documentCount: 2,
+      entryCount: 2,
+      pageCount: 12,
+      pdfEntryCount: 2,
+      sourceCount: 2,
+    },
+    libraryBefore: {
+      activeDocumentIdentityHash: diagnosticIdentity("pdf-restored-fixture"),
+      activeDocumentPresent: true,
+      available: true,
+      documentCount: 1,
+      entryCount: 1,
+      pageCount: 6,
+      pdfEntryCount: 1,
+      sourceCount: 1,
+    },
+    importRequestObserved: true,
+    networkBoundary: {
+      attachPromiseCount: 3,
+      requestCount: 10,
+      settlementCount: 2,
+      targetCount: 3,
+    },
+    outcome: "import-chain-reached",
+    snapshot: {
+      errors: [],
+      fallback: { signalAt: 12 },
+      notices: [{ at: 13, text: "OffscreenCanvas is unavailable; cooperative visible-page rendering." }],
+      sourceFiles: [{
+        at: 11,
+        eventId: 1,
+        sha256: PUBLIC_PDF_FIXTURE_SHA256,
+        size: PUBLIC_PDF_FIXTURE_BYTES,
+      }],
+      workerEvents,
+      workerLifecycle: [
+        {
+          at: 8,
+          forceFallback: true,
+          type: "constructed",
+          urlClass: "pdf-document-worker",
+          workerInstanceId,
+          wrapped: true,
+        },
+        {
+          at: 10,
+          documentKey,
+          jobId,
+          messageType: "import",
+          revision,
+          type: "post-message",
+          urlClass: "pdf-document-worker",
+          workerInstanceId,
+        },
+        {
+          at: 11,
+          documentKey,
+          jobId,
+          messageType: "page",
+          pageNumber: 1,
+          revision,
+          type: "first-message",
+          urlClass: "pdf-document-worker",
+          workerInstanceId,
+        },
+      ],
+    },
+  };
+}
+
+function passingFallbackNetworkDiagnostic() {
+  const serviceWorker = {
+    ancestry: [],
+    attachComplete: true,
+    ...completedCdpTargetSetup({ cdpIdStart: 10, serviceWorker: true }),
+    identityHash: diagnosticIdentity(
+      "service-worker-session",
+      "service-worker-target",
+    ),
+    phase: "fallback-diagnostic-setup",
+    resumed: true,
+    sessionId: "service-worker-session",
+    targetId: "service-worker-target",
+    type: "service_worker",
+    urlClass: "app-asset",
+    waitingForDebugger: true,
+    workerInstanceId: null,
+  };
+  const setupDocument = {
+    ancestry: [],
+    attachComplete: true,
+    ...completedCdpTargetSetup({ cdpIdStart: 20 }),
+    identityHash: diagnosticIdentity(
+      "setup-document-session",
+      "setup-document-target",
+    ),
+    parentSessionId: null,
+    phase: "fallback-diagnostic-setup",
+    resumed: true,
+    sessionId: "setup-document-session",
+    targetId: "setup-document-target",
+    type: "worker",
+    urlClass: "pdf-document-worker",
+    waitingForDebugger: true,
+  };
+  const setupParser = {
+    ancestry: [{
+      phase: setupDocument.phase,
+      sessionId: setupDocument.sessionId,
+      type: setupDocument.type,
+      urlClass: setupDocument.urlClass,
+    }],
+    attachComplete: true,
+    ...completedCdpTargetSetup({ cdpIdStart: 30 }),
+    identityHash: diagnosticIdentity(
+      "setup-parser-session",
+      "setup-parser-target",
+    ),
+    parentSessionId: setupDocument.sessionId,
+    phase: "fallback-diagnostic-setup",
+    resumed: true,
+    sessionId: "setup-parser-session",
+    targetId: "setup-parser-target",
+    type: "worker",
+    urlClass: "pdf-parser-worker",
+    waitingForDebugger: true,
+  };
+  const oldTargets = [serviceWorker, setupDocument, setupParser];
+  const blobTarget = {
+    ancestry: [],
+    attachComplete: true,
+    ...completedCdpTargetSetup({ cdpIdStart: 50 }),
+    identityHash: diagnosticIdentity("fallback-blob-session", "fallback-blob-target"),
+    parentSessionId: null,
+    phase: "fallback-import-diagnostic",
+    resumed: true,
+    sessionId: "fallback-blob-session",
+    targetId: "fallback-blob-target",
+    type: "worker",
+    urlClass: "blob",
+    waitingForDebugger: true,
+  };
+  const parserTarget = {
+    ancestry: [{
+      phase: "fallback-import-diagnostic",
+      sessionId: blobTarget.sessionId,
+      type: "worker",
+      urlClass: "blob",
+    }],
+    attachComplete: true,
+    ...completedCdpTargetSetup({ cdpIdStart: 60 }),
+    identityHash: diagnosticIdentity("fallback-parser-session", "fallback-parser-target"),
+    parentSessionId: blobTarget.sessionId,
+    phase: "fallback-import-diagnostic",
+    resumed: true,
+    sessionId: "fallback-parser-session",
+    targetId: "fallback-parser-target",
+    type: "worker",
+    urlClass: "pdf-parser-worker",
+    waitingForDebugger: true,
+  };
+  const appWorkerTarget = {
+    ancestry: [],
+    attachComplete: true,
+    ...completedCdpTargetSetup({ cdpIdStart: 70 }),
+    identityHash: diagnosticIdentity(
+      "fallback-app-worker-session",
+      "fallback-app-worker-target",
+    ),
+    parentSessionId: null,
+    phase: "fallback-import-diagnostic",
+    resumed: true,
+    sessionId: "fallback-app-worker-session",
+    targetId: "fallback-app-worker-target",
+    type: "worker",
+    urlClass: "app-asset",
+    waitingForDebugger: true,
+  };
+  blobTarget.workerInstanceId = 2;
+  const targets = [...oldTargets, blobTarget, appWorkerTarget, parserTarget];
+  const settlement = ({ requestId, requestSessionId, target }) => ({
+    identityHash: diagnosticIdentity(
+      requestSessionId,
+      requestId,
+      target.sessionId,
+      target.targetId,
+    ),
+    method: "GET",
+    phase: target.phase,
+    requestId,
+    requestSessionId,
+    resourceType: "Script",
+    targetDetachedAtSettlement: false,
+    targetId: target.targetId,
+    targetParentSessionId: target.parentSessionId,
+    targetSessionId: target.sessionId,
+    targetType: "worker",
+    terminalReason: "target-attached",
+    urlClass: target.urlClass,
+  });
+  const targetBootstrapSettlements = [
+    settlement({
+      requestId: "setup-document-request",
+      requestSessionId: null,
+      target: setupDocument,
+    }),
+    settlement({
+      requestId: "setup-parser-request",
+      requestSessionId: setupDocument.sessionId,
+      target: setupParser,
+    }),
+    settlement({
+      requestId: "fallback-blob-request",
+      requestSessionId: null,
+      target: blobTarget,
+    }),
+    settlement({
+      requestId: "fallback-app-worker-request",
+      requestSessionId: null,
+      target: appWorkerTarget,
+    }),
+    settlement({
+      requestId: "fallback-parser-request",
+      requestSessionId: blobTarget.sessionId,
+      target: parserTarget,
+    }),
+  ];
+  const importBoundary = {
+    attachPromiseCount: oldTargets.length,
+    requestCount: 10,
+    settlementCount: 2,
+    targetCount: oldTargets.length,
+  };
+  const requestProof = ({
+    bootstrapTargetSessionId = null,
+    method = "GET",
+    phase,
+    requestId,
+    sequence,
+    sessionId = null,
+    type = "Fetch",
+    urlClass = "app-asset",
+  }) => ({
+    bootstrapTargetIdentityHash: bootstrapTargetSessionId
+      ? diagnosticIdentity(bootstrapTargetSessionId)
+      : null,
+    identityHash: diagnosticIdentity(sessionId, requestId),
+    method,
+    phase,
+    sequence,
+    sessionIdentityHash: sessionId ? diagnosticIdentity(sessionId) : null,
+    sessionScoped: sessionId !== null,
+    type,
+    urlClass,
+  });
+  const requests = Array.from({ length: importBoundary.requestCount },
+    (_, index) => requestProof({
+      phase: "fallback-diagnostic-setup",
+      requestId: `setup-request-${index + 1}`,
+      sequence: index + 1,
+    }));
+  for (const [target, requestId, sessionId] of [
+    [blobTarget, "fallback-blob-request", null],
+    [appWorkerTarget, "fallback-app-worker-request", null],
+    [parserTarget, "fallback-parser-request", blobTarget.sessionId],
+  ]) {
+    requests.push(requestProof({
+      bootstrapTargetSessionId: target.sessionId,
+      phase: "fallback-import-diagnostic",
+      requestId,
+      sequence: requests.length + 1,
+      sessionId,
+      type: "Script",
+      urlClass: target.urlClass,
+    }));
+  }
+  for (let index = requests.length; index < 20; index += 1) {
+    requests.push(requestProof({
+      phase: "fallback-import-diagnostic",
+      requestId: `fallback-runtime-request-${index + 1}`,
+      sequence: index + 1,
+      sessionId: parserTarget.sessionId,
+    }));
+  }
+  return {
+    attachErrors: [],
+    counts: {
+      attachErrorCount: 0,
+      attachPromiseCount: targets.length,
+      completedRequestCount: 20,
+      externalRequestCount: 0,
+      inflightRequestCount: 0,
+      networkFailureCount: 0,
+      pendingAttachCount: 0,
+      requestCount: 20,
+      serviceWorkerBootstrapObservationCount: 1,
+      targetBootstrapSettlementCount: targetBootstrapSettlements.length,
+      targetCount: targets.length,
+    },
+    fallbackRequestProof: {
+      complete: true,
+      finalRequestCount: requests.length,
+      requests,
+    },
+    inflightRequests: [],
+    initialTargetBaseline: {
+      checked: true,
+      pageCount: 1,
+      pageUrlClass: "about",
+      targetCount: 1,
+      workerCount: 0,
+    },
+    importBoundary,
+    label: "fallback-import-diagnostic",
+    outcome: "fixed-point-reached",
+    pendingAttaches: [],
+    serviceWorkerBypassed: true,
+    serviceWorkerBootstrapObservations: [{
+      identityHash: diagnosticIdentity(
+        serviceWorker.sessionId,
+        "service-worker-request",
+        serviceWorker.sessionId,
+        serviceWorker.targetId,
+      ),
+      earlierRequestCount: 0,
+      method: "GET",
+      phase: serviceWorker.phase,
+      requestId: "service-worker-request",
+      requestIsFirst: true,
+      requestSequence: 1,
+      requestSessionId: serviceWorker.sessionId,
+      requestStartedAt: serviceWorker.resumeDispatchedAt + 1,
+      resourceType: "Script",
+      resumeDispatchedAt: serviceWorker.resumeDispatchedAt,
+      sessionFailureCount: 0,
+      sessionRequestCount: 1,
+      targetDetachedAtObservation: false,
+      targetId: serviceWorker.targetId,
+      targetSessionId: serviceWorker.sessionId,
+      targetType: "service_worker",
+      targetUrlMatched: true,
+      terminalAt: serviceWorker.resumeDispatchedAt + 2,
+      terminalReason: "loading-finished",
+      urlClass: serviceWorker.urlClass,
+    }],
+    targetBootstrapSettlements,
+    targets,
+    wait: {
+      recentSamples: [1, 2, 3].map((stableSamples) => ({
+        attachErrorCount: 0,
+        attachmentReady: true,
+        incompleteTargetCount: 0,
+        inflightRequestCount: 0,
+        pendingAttachCount: 0,
+        requestCount: 20,
+        serviceWorkerBypassed: true,
+        stableSamples,
+        targetCount: targets.length,
+      })),
+      requiredStableSamples: 3,
+      stableSamples: 3,
+    },
+  };
+}
+
+test("builds the forced fallback worker with one static dependency import", async () => {
+  const source = buildFallbackWorkerModuleSource(
+    "https://local.test/assets/pdf-document.worker.js",
+    2,
+  );
+  const staticImport =
+    'import "https://local.test/assets/pdf-document.worker.js";';
+  assert.equal(source.split("\n")[0], staticImport);
+  assert.equal(source.match(/^import\s+/gmu)?.length, 1);
+  assert.doesNotMatch(source, /\bawait\s+import\s*\(/u);
+  assert.doesNotMatch(source, /\bimport\s*\(/u);
+  assert.match(source, /globalThis\.Worker = new Proxy\(NativeNestedWorker/u);
+  assert.match(
+    source,
+    /const resolved = new URL\(url, "https:\/\/local\.test\/assets\/pdf-document\.worker\.js"\);/u,
+  );
+  assert.match(
+    source,
+    /Reflect\.construct\(target, \[resolved, \.\.\.rest\], newTarget\)/u,
+  );
+  const proxyBody = source.slice(
+    source.indexOf("const NativeNestedWorker"),
+    source.indexOf("try { Object.defineProperty"),
+  );
+  assert.doesNotMatch(proxyBody, /catch|ready|replay/u);
+  assert.ok(
+    source.indexOf("NativeNestedWorker") > source.indexOf(staticImport),
+  );
+  assert.ok(source.indexOf("OffscreenCanvas") > source.indexOf(staticImport));
+  assert.ok(
+    source.indexOf("__linelight_issue68_worker__") >
+      source.indexOf("OffscreenCanvas"),
+  );
+  assert.match(source, /__linelight_issue68_worker__', 2\);/u);
+  assert.throws(
+    () => buildFallbackWorkerModuleSource("", 2),
+    /Fallback worker identity is invalid/u,
+  );
+  assert.throws(
+    () => buildFallbackWorkerModuleSource("https://local.test/worker.js", 0),
+    /Fallback worker identity is invalid/u,
+  );
+  assert.throws(
+    () => buildFallbackWorkerModuleSource("/relative-worker.js", 2),
+    /Fallback worker identity is invalid/u,
+  );
+
+  const nativeFailure = new Error("native-constructor-sentinel");
+  const zeroArgumentFailure = new Error("native-zero-argument-sentinel");
+  class NativeWorker {
+    static surface = "native-worker-surface";
+
+    constructor(url, options) {
+      if (arguments.length === 0) throw zeroArgumentFailure;
+      if (url.pathname === "/native-failure.js") throw nativeFailure;
+      this.options = options;
+      this.url = url;
+    }
+  }
+  const sentinelCalls = [];
+  const context = {
+    OffscreenCanvas: class OffscreenCanvas {},
+    URL,
+    Worker: NativeWorker,
+    console: {
+      debug: (...args) => sentinelCalls.push(args),
+    },
+  };
+  runInNewContext(source.split("\n").slice(1).join("\n"), context);
+  const WrappedWorker = context.Worker;
+  const options = { type: "module" };
+  const rootRelative = new WrappedWorker("/assets/pdf-parser.worker.js", options);
+  const relative = new WrappedWorker("pdf-parser.worker.js", options);
+  const absolute = new WrappedWorker("https://other.test/parser.js", options);
+  const urlObject = new URL("https://third.test/parser.js");
+  const fromUrlObject = new WrappedWorker(urlObject, options);
+  assert.equal(rootRelative.url.href, "https://local.test/assets/pdf-parser.worker.js");
+  assert.equal(relative.url.href, "https://local.test/assets/pdf-parser.worker.js");
+  assert.equal(absolute.url.href, "https://other.test/parser.js");
+  assert.equal(fromUrlObject.url.href, urlObject.href);
+  assert.equal(rootRelative.options, options);
+  assert.equal(WrappedWorker.surface, NativeWorker.surface);
+  assert.equal(WrappedWorker.prototype, NativeWorker.prototype);
+  assert.ok(rootRelative instanceof NativeWorker);
+  assert.throws(() => WrappedWorker("/assets/parser.js"), TypeError);
+  assert.throws(() => new WrappedWorker(), (error) => error === zeroArgumentFailure);
+  assert.throws(
+    () => new WrappedWorker("/native-failure.js"),
+    (error) => error === nativeFailure,
+  );
+  class DerivedWorker extends WrappedWorker {}
+  const derived = new DerivedWorker("/assets/derived-parser.js", options);
+  assert.ok(derived instanceof DerivedWorker);
+  assert.ok(derived instanceof NativeWorker);
+  assert.equal(derived.url.href, "https://local.test/assets/derived-parser.js");
+  assert.equal(context.OffscreenCanvas, undefined);
+  assert.deepEqual(sentinelCalls, [["__linelight_issue68_worker__", 2]]);
+
+  const runnerSource = await readFile(
+    new URL("../scripts/run-pdf-sharpness-browser-regression.mjs", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    runnerSource,
+    /const source = buildFallbackWorkerModuleSource\(\s*resolved,\s*workerInstanceId\s*\);/u,
+  );
+  assert.doesNotMatch(runnerSource, /await\s+import\s*\(/u);
+});
+
+test("binds fallback import completion to the exact post-change worker chain", () => {
+  const capture = passingFallbackImportCapture();
+  capture.snapshot.workerEvents.unshift({
+    at: 5,
+    direction: "to-worker",
+    documentKey: "pdf-restored:restore-revision",
+    eventId: 5,
+    jobId: 6,
+    revision: "restore-revision",
+    type: "open",
+    workerInstanceId: 1,
+  });
+  const summary = summarizeFallbackImportLifecycle(capture, {
+    bytes: PUBLIC_PDF_FIXTURE_BYTES,
+    sha256: PUBLIC_PDF_FIXTURE_SHA256,
+  });
+  assert.equal(summary.importCompleted, true);
+  assert.equal(summary.importRequestCount, 1);
+  assert.equal(summary.laterStartCount, 0);
+  assert.deepEqual(summary.chain.pageNumbers, [1, 2, 3, 4, 5, 6]);
+  assert.deepEqual(summary.chain.progressPages, [1, 2, 3, 4, 5, 6]);
+  assert.equal(summary.worker.wrapped, true);
+  assert.equal(summary.worker.postBound, true);
+  assert.equal(summary.dom.pageOneWordOverlayCount, 24);
+  const serialized = JSON.stringify(summary);
+  assert.doesNotMatch(serialized, /fallback-import-revision/u);
+  assert.doesNotMatch(serialized, /pdf-current-public-fixture/u);
+});
+
+test("binds one wrapped import post to six pages and its exact parser child", () => {
+  const capture = passingFallbackImportCapture();
+  const summary = summarizeFallbackImportLifecycle(capture, {
+    bytes: PUBLIC_PDF_FIXTURE_BYTES,
+    sha256: PUBLIC_PDF_FIXTURE_SHA256,
+  });
+  const network = passingFallbackNetworkDiagnostic();
+  const importBlob = network.targets.find(
+    (target) => target.urlClass === "blob" && target.workerInstanceId === 2,
+  );
+  const importParsers = network.targets.filter(
+    (target) =>
+      target.urlClass === "pdf-parser-worker" &&
+      target.parentSessionId === importBlob?.sessionId,
+  );
+  const importPosts = capture.snapshot.workerLifecycle.filter(
+    (event) =>
+      event.type === "post-message" &&
+      event.messageType === "import" &&
+      event.workerInstanceId === summary.importIdentity.workerInstanceId,
+  );
+
+  assert.equal(summary.importCompleted, true);
+  assert.equal(summary.importRequestCount, 1);
+  assert.equal(importPosts.length, 1);
+  assert.equal(summary.worker.firstMessageType, "page");
+  assert.equal(summary.chain.pageEventCount, 6);
+  assert.deepEqual(summary.chain.pageNumbers, [1, 2, 3, 4, 5, 6]);
+  assert.equal(summary.chain.progressEventCount, 6);
+  assert.deepEqual(summary.chain.progressPages, [1, 2, 3, 4, 5, 6]);
+  assert.equal(summary.chain.fallbackEventCount, 1);
+  assert.equal(summary.chain.completeEventCount, 1);
+  assert.equal(summary.laterStartCount, 0);
+  assert.equal(importParsers.length, 1);
+  assert.equal(
+    isFallbackImportNetworkDiagnosticHealthy(
+      network,
+      capture.networkBoundary,
+      summary.importIdentity.workerInstanceId,
+    ),
+    true,
+  );
+});
+
+test("fallback import lifecycle mutations fail closed", () => {
+  const mutations = [
+    (capture) => {
+      capture.snapshot.workerEvents.push({
+        at: 100,
+        direction: "to-worker",
+        documentKey: "restored-late:late-revision",
+        eventId: 100,
+        jobId: 8,
+        revision: "late-revision",
+        type: "open",
+      });
+    },
+    (capture) => {
+      capture.snapshot.workerEvents.find(
+        (event) => event.type === "page" && event.pageNumber === 6,
+      ).documentKey = "wrong-document:wrong-revision";
+    },
+    (capture) => {
+      capture.snapshot.workerEvents.find(
+        (event) => event.type === "progress" && event.completedPages === 6,
+      ).revision = "stale-revision";
+    },
+    (capture) => {
+      capture.snapshot.workerEvents.find(
+        (event) => event.type === "complete",
+      ).documentKey = "wrong-document:wrong-revision";
+    },
+    (capture) => {
+      capture.snapshot.workerEvents = capture.snapshot.workerEvents.filter(
+        (event) => event.type !== "render-fallback",
+      );
+    },
+    (capture) => {
+      capture.snapshot.sourceFiles[0].sha256 = "d".repeat(64);
+    },
+    (capture) => {
+      capture.snapshot.workerLifecycle.push({
+        category: "worker-error",
+        type: "error",
+        workerInstanceId: 2,
+      });
+    },
+    (capture) => {
+      capture.snapshot.workerLifecycle.push({
+        at: 12,
+        type: "terminated",
+        workerInstanceId: 2,
+      });
+    },
+    (capture) => {
+      capture.libraryAfter.activeDocumentIdentityHash =
+        capture.libraryBefore.activeDocumentIdentityHash;
+    },
+    (capture) => {
+      capture.dom.fallbackActive = false;
+    },
+    (capture) => {
+      capture.dom.pageOneWordOverlayCount = 0;
+    },
+    (capture) => {
+      capture.outcome = "import-request-timeout";
+    },
+    (capture) => {
+      capture.importRequestObserved = false;
+    },
+    (capture) => {
+      capture.snapshot.workerLifecycle.push(
+        structuredClone(capture.snapshot.workerLifecycle[0]),
+      );
+    },
+    (capture) => {
+      capture.snapshot.workerLifecycle = capture.snapshot.workerLifecycle.filter(
+        (event) => event.type !== "post-message",
+      );
+    },
+    (capture) => {
+      capture.snapshot.workerLifecycle.push(
+        structuredClone(
+          capture.snapshot.workerLifecycle.find(
+            (event) => event.type === "post-message",
+          ),
+        ),
+      );
+    },
+    (capture) => {
+      capture.snapshot.workerLifecycle = capture.snapshot.workerLifecycle.filter(
+        (event) => event.type !== "first-message",
+      );
+    },
+    (capture) => {
+      capture.snapshot.workerLifecycle.push(
+        structuredClone(
+          capture.snapshot.workerLifecycle.find(
+            (event) => event.type === "first-message",
+          ),
+        ),
+      );
+    },
+    (capture) => {
+      capture.snapshot.workerLifecycle.find(
+        (event) => event.type === "first-message",
+      ).workerInstanceId = 99;
+    },
+    (capture) => {
+      capture.snapshot.workerLifecycle.find(
+        (event) => event.type === "first-message",
+      ).jobId = 99;
+    },
+    (capture) => {
+      capture.snapshot.workerLifecycle.find(
+        (event) => event.type === "first-message",
+      ).revision = "wrong-revision";
+    },
+    (capture) => {
+      capture.snapshot.workerLifecycle.find(
+        (event) => event.type === "first-message",
+      ).documentKey = "wrong-document:wrong-revision";
+    },
+    (capture) => {
+      capture.snapshot.workerLifecycle.find(
+        (event) => event.type === "first-message",
+      ).at = 9;
+    },
+    (capture) => {
+      capture.snapshot.workerLifecycle.find(
+        (event) => event.type === "first-message",
+      ).pageNumber = 2;
+    },
+    (capture) => {
+      capture.dom.noticeCategory = "document-open-failed";
+    },
+    (capture) => {
+      capture.dom.pageOneCanvasSource = null;
+    },
+    (capture) => {
+      const duplicate = structuredClone(
+        capture.snapshot.workerEvents.find(
+          (event) => event.direction === "to-worker" && event.type === "import",
+        ),
+      );
+      duplicate.at = 100;
+      duplicate.eventId = 100;
+      capture.snapshot.workerEvents.push(duplicate);
+    },
+    ...["page", "progress", "complete", "render-fallback"].map(
+      (type) => (capture) => {
+        const duplicate = structuredClone(
+          capture.snapshot.workerEvents.find(
+            (event) => event.direction === "from-worker" && event.type === type,
+          ),
+        );
+        duplicate.at = 100;
+        duplicate.eventId = 100;
+        capture.snapshot.workerEvents.push(duplicate);
+      },
+    ),
+    ...["page", "progress", "complete", "render-fallback"].map(
+      (type) => (capture) => {
+        capture.snapshot.workerEvents.find(
+          (event) => event.type === type,
+        ).workerInstanceId = 99;
+      },
+    ),
+  ];
+  for (const mutate of mutations) {
+    const capture = passingFallbackImportCapture();
+    mutate(capture);
+    assert.equal(
+      summarizeFallbackImportLifecycle(capture, {
+        bytes: PUBLIC_PDF_FIXTURE_BYTES,
+        sha256: PUBLIC_PDF_FIXTURE_SHA256,
+      }).importCompleted,
+      false,
+    );
+  }
+});
+
+test("requires a clean fallback blob/parser CDP lifecycle after the setup boundary", () => {
+  const diagnostic = passingFallbackNetworkDiagnostic();
+  const boundary = passingFallbackImportCapture().networkBoundary;
+  assert.equal(
+    diagnostic.targetBootstrapSettlements.some(
+      (entry) =>
+        entry.phase === "fallback-import-diagnostic" &&
+        entry.urlClass === "app-asset",
+    ),
+    true,
+  );
+  assert.equal(
+    isFallbackImportNetworkDiagnosticHealthy(diagnostic, boundary, 2),
+    true,
+  );
+  assert.equal(
+    isFallbackImportNetworkDiagnosticHealthy(
+      diagnostic,
+      { ...boundary, privatePath: "/home/private.pdf" },
+      2,
+    ),
+    false,
+  );
+  assert.equal(
+    isFallbackImportNetworkDiagnosticHealthy(
+      diagnostic,
+      { ...boundary, attachPromiseCount: boundary.attachPromiseCount + 1 },
+      2,
+    ),
+    false,
+  );
+  for (const delta of [-1, 1]) {
+    const changedDiagnostic = structuredClone(diagnostic);
+    const changedBoundary = {
+      ...boundary,
+      requestCount: boundary.requestCount + delta,
+    };
+    changedDiagnostic.importBoundary.requestCount =
+      changedBoundary.requestCount;
+    assert.equal(
+      isFallbackImportNetworkDiagnosticHealthy(
+        changedDiagnostic,
+        changedBoundary,
+        2,
+      ),
+      false,
+      `request boundary ${delta < 0 ? "rewind" : "advance"}`,
+    );
+  }
+  const mutations = [
+    (value) => { value.counts.attachErrorCount = 1; },
+    (value) => { value.counts.inflightRequestCount = 1; },
+    (value) => { value.counts.externalRequestCount = 1; },
+    (value) => { value.targets.at(-1).attachComplete = false; },
+    (value) => { value.targets.at(-1).parentSessionId = "wrong-parent"; },
+    (value) => { value.targetBootstrapSettlements = []; },
+    (value) => {
+      const blobSettlement = value.targetBootstrapSettlements.find(
+        (entry) => entry.urlClass === "blob",
+      );
+      value.targetBootstrapSettlements = value.targetBootstrapSettlements.filter(
+        (entry) => entry !== blobSettlement,
+      );
+      value.counts.targetBootstrapSettlementCount -= 1;
+    },
+    (value) => {
+      const blobSettlement = value.targetBootstrapSettlements.find(
+        (entry) => entry.urlClass === "blob",
+      );
+      value.targetBootstrapSettlements.push(structuredClone(blobSettlement));
+      value.counts.targetBootstrapSettlementCount += 1;
+    },
+    (value) => {
+      const parserSettlement = value.targetBootstrapSettlements.find(
+        (entry) =>
+          entry.phase === "fallback-import-diagnostic" &&
+          entry.urlClass === "pdf-parser-worker",
+      );
+      value.targetBootstrapSettlements = value.targetBootstrapSettlements.filter(
+        (entry) => entry !== parserSettlement,
+      );
+      value.counts.targetBootstrapSettlementCount -= 1;
+    },
+    (value) => {
+      const parserSettlement = value.targetBootstrapSettlements.find(
+        (entry) =>
+          entry.phase === "fallback-import-diagnostic" &&
+          entry.urlClass === "pdf-parser-worker",
+      );
+      value.targetBootstrapSettlements.push(structuredClone(parserSettlement));
+      value.counts.targetBootstrapSettlementCount += 1;
+    },
+    (value) => {
+      const blobSettlement = value.targetBootstrapSettlements.find(
+        (entry) => entry.urlClass === "blob",
+      );
+      blobSettlement.requestSessionId = "wrong-root-parent";
+      blobSettlement.identityHash = diagnosticIdentity(
+        blobSettlement.requestSessionId,
+        blobSettlement.requestId,
+        blobSettlement.targetSessionId,
+        blobSettlement.targetId,
+      );
+    },
+    (value) => {
+      const blobSettlement = value.targetBootstrapSettlements.find(
+        (entry) => entry.urlClass === "blob",
+      );
+      blobSettlement.targetSessionId = "wrong-blob-session";
+      blobSettlement.identityHash = diagnosticIdentity(
+        blobSettlement.requestSessionId,
+        blobSettlement.requestId,
+        blobSettlement.targetSessionId,
+        blobSettlement.targetId,
+      );
+    },
+    (value) => {
+      const parserSettlement = value.targetBootstrapSettlements.find(
+        (entry) => entry.urlClass === "pdf-parser-worker" &&
+          entry.phase === "fallback-import-diagnostic",
+      );
+      parserSettlement.requestSessionId = "wrong-parser-parent";
+      parserSettlement.targetParentSessionId = "wrong-parser-parent";
+      parserSettlement.identityHash = diagnosticIdentity(
+        parserSettlement.requestSessionId,
+        parserSettlement.requestId,
+        parserSettlement.targetSessionId,
+        parserSettlement.targetId,
+      );
+    },
+    (value) => {
+      const blobSettlement = value.targetBootstrapSettlements.find(
+        (entry) => entry.urlClass === "blob",
+      );
+      blobSettlement.targetId = "wrong-blob-target";
+      blobSettlement.identityHash = diagnosticIdentity(
+        blobSettlement.requestSessionId,
+        blobSettlement.requestId,
+        blobSettlement.targetSessionId,
+        blobSettlement.targetId,
+      );
+    },
+    (value) => {
+      value.targetBootstrapSettlements.find(
+        (entry) => entry.urlClass === "blob",
+      ).urlClass = "pdf-document-worker";
+    },
+    (value) => {
+      value.targets.find(
+        (target) =>
+          target.phase === "fallback-import-diagnostic" &&
+          target.urlClass === "pdf-parser-worker",
+      ).ancestry[0].sessionId = "forged-parser-ancestor";
+    },
+    (value) => {
+      const appSettlement = value.targetBootstrapSettlements.find(
+        (entry) =>
+          entry.phase === "fallback-import-diagnostic" &&
+          entry.urlClass === "app-asset",
+      );
+      appSettlement.identityHash = "0".repeat(64);
+    },
+    (value) => {
+      const appSettlement = value.targetBootstrapSettlements.find(
+        (entry) =>
+          entry.phase === "fallback-import-diagnostic" &&
+          entry.urlClass === "app-asset",
+      );
+      appSettlement.targetType = "service_worker";
+    },
+    (value) => {
+      const appSettlement = value.targetBootstrapSettlements.find(
+        (entry) =>
+          entry.phase === "fallback-import-diagnostic" &&
+          entry.urlClass === "app-asset",
+      );
+      appSettlement.phase = "wrong-phase";
+    },
+    (value) => {
+      const appSettlement = value.targetBootstrapSettlements.find(
+        (entry) =>
+          entry.phase === "fallback-import-diagnostic" &&
+          entry.urlClass === "app-asset",
+      );
+      appSettlement.method = "POST";
+    },
+    (value) => {
+      const appSettlement = value.targetBootstrapSettlements.find(
+        (entry) =>
+          entry.phase === "fallback-import-diagnostic" &&
+          entry.urlClass === "app-asset",
+      );
+      appSettlement.resourceType = "Other";
+    },
+    (value) => {
+      const appSettlement = value.targetBootstrapSettlements.find(
+        (entry) =>
+          entry.phase === "fallback-import-diagnostic" &&
+          entry.urlClass === "app-asset",
+      );
+      appSettlement.terminalReason = "loading-finished";
+    },
+    (value) => {
+      const appSettlement = value.targetBootstrapSettlements.find(
+        (entry) =>
+          entry.phase === "fallback-import-diagnostic" &&
+          entry.urlClass === "app-asset",
+      );
+      appSettlement.targetDetachedAtSettlement = true;
+    },
+    (value) => {
+      const blobSettlement = value.targetBootstrapSettlements.find(
+        (entry) => entry.urlClass === "blob",
+      );
+      const appSettlement = value.targetBootstrapSettlements.find(
+        (entry) =>
+          entry.phase === "fallback-import-diagnostic" &&
+          entry.urlClass === "app-asset",
+      );
+      appSettlement.requestId = blobSettlement.requestId;
+      appSettlement.identityHash = diagnosticIdentity(
+        appSettlement.requestSessionId,
+        appSettlement.requestId,
+        appSettlement.targetSessionId,
+        appSettlement.targetId,
+      );
+    },
+    (value) => {
+      value.targetBootstrapSettlements.push({
+        ...structuredClone(value.targetBootstrapSettlements.at(-1)),
+        identityHash: diagnosticIdentity(
+          null,
+          "orphan-request",
+          "orphan-session",
+          "orphan-target",
+        ),
+        requestId: "orphan-request",
+        requestSessionId: null,
+        targetId: "orphan-target",
+        targetParentSessionId: null,
+        targetSessionId: "orphan-session",
+        urlClass: "blob",
+      });
+      value.counts.targetBootstrapSettlementCount += 1;
+    },
+    (value) => { value.targets = value.targets.filter((target) => target.urlClass !== "blob"); },
+    (value) => { value.wait.stableSamples = 2; },
+    (value) => { value.targets.at(-1).identityHash = "0".repeat(64); },
+    (value) => { value.targets.at(-1).commands[0].dispatchSequence = 2; },
+    (value) => { value.counts.targetCount += 1; },
+    (value) => { value.serviceWorkerBootstrapObservations = []; },
+    (value) => { value.initialTargetBaseline.workerCount = 1; },
+    (value) => { value.targetBootstrapSettlements.at(-1).method = "POST"; },
+    (value) => { value.wait.recentSamples.at(-1).requestCount -= 1; },
+    (value) => { value.targets.find((target) => target.urlClass === "blob").workerInstanceId = null; },
+  ];
+  for (const mutate of mutations) {
+    const value = structuredClone(diagnostic);
+    mutate(value);
+    assert.equal(
+      isFallbackImportNetworkDiagnosticHealthy(value, boundary, 2),
+      false,
+    );
+  }
+  assert.equal(
+    isFallbackImportNetworkDiagnosticHealthy(diagnostic, boundary, 3),
+    false,
+  );
+  assert.equal(
+    isFallbackImportNetworkDiagnosticHealthy(
+      diagnostic,
+      { ...boundary, targetCount: boundary.targetCount + 1 },
+      2,
+    ),
+    false,
+  );
+  assert.equal(
+    isFallbackImportNetworkDiagnosticHealthy(
+      diagnostic,
+      { ...boundary, settlementCount: boundary.settlementCount + 1 },
+      2,
+    ),
+    false,
+  );
+});
+
+test("rejects a fallback parser attached to a different wrapped worker", () => {
+  const diagnostic = passingFallbackNetworkDiagnostic();
+  const boundary = passingFallbackImportCapture().networkBoundary;
+  const parserTarget = diagnostic.targets.find(
+    (target) =>
+      target.phase === "fallback-import-diagnostic" &&
+      target.urlClass === "pdf-parser-worker",
+  );
+  const parserSettlement = diagnostic.targetBootstrapSettlements.find(
+    (entry) =>
+      entry.phase === "fallback-import-diagnostic" &&
+      entry.urlClass === "pdf-parser-worker",
+  );
+  const restoredBlob = {
+    ancestry: [],
+    attachComplete: true,
+    ...completedCdpTargetSetup({ cdpIdStart: 80 }),
+    identityHash: diagnosticIdentity(
+      "restored-blob-session",
+      "restored-blob-target",
+    ),
+    parentSessionId: null,
+    phase: "fallback-import-diagnostic",
+    resumed: true,
+    sessionId: "restored-blob-session",
+    targetId: "restored-blob-target",
+    type: "worker",
+    urlClass: "blob",
+    waitingForDebugger: true,
+    workerInstanceId: 1,
+  };
+  diagnostic.targets.push(restoredBlob);
+  parserTarget.parentSessionId = restoredBlob.sessionId;
+  parserTarget.ancestry = [{
+    phase: restoredBlob.phase,
+    sessionId: restoredBlob.sessionId,
+    type: restoredBlob.type,
+    urlClass: restoredBlob.urlClass,
+  }];
+  parserSettlement.requestSessionId = restoredBlob.sessionId;
+  parserSettlement.targetParentSessionId = restoredBlob.sessionId;
+  parserSettlement.identityHash = diagnosticIdentity(
+    parserSettlement.requestSessionId,
+    parserSettlement.requestId,
+    parserSettlement.targetSessionId,
+    parserSettlement.targetId,
+  );
+  diagnostic.targetBootstrapSettlements.push({
+    identityHash: diagnosticIdentity(
+      null,
+      "restored-blob-request",
+      restoredBlob.sessionId,
+      restoredBlob.targetId,
+    ),
+    method: "GET",
+    phase: restoredBlob.phase,
+    requestId: "restored-blob-request",
+    requestSessionId: null,
+    resourceType: "Script",
+    targetDetachedAtSettlement: false,
+    targetId: restoredBlob.targetId,
+    targetParentSessionId: null,
+    targetSessionId: restoredBlob.sessionId,
+    targetType: "worker",
+    terminalReason: "target-attached",
+    urlClass: "blob",
+  });
+  diagnostic.counts.attachPromiseCount += 1;
+  diagnostic.counts.completedRequestCount += 1;
+  diagnostic.counts.requestCount += 1;
+  diagnostic.counts.targetBootstrapSettlementCount += 1;
+  diagnostic.counts.targetCount += 1;
+  for (const sample of diagnostic.wait.recentSamples) {
+    sample.requestCount += 1;
+    sample.targetCount += 1;
+  }
+
+  assert.equal(
+    isFallbackImportNetworkDiagnosticHealthy(diagnostic, boundary, 2),
+    false,
+  );
+});
+
+test("rejects a second parser child for the exact fallback import worker", () => {
+  const diagnostic = passingFallbackNetworkDiagnostic();
+  const boundary = passingFallbackImportCapture().networkBoundary;
+  const importBlob = diagnostic.targets.find(
+    (target) => target.urlClass === "blob" && target.workerInstanceId === 2,
+  );
+  const secondParser = {
+    ancestry: [{
+      phase: importBlob.phase,
+      sessionId: importBlob.sessionId,
+      type: importBlob.type,
+      urlClass: importBlob.urlClass,
+    }],
+    attachComplete: true,
+    ...completedCdpTargetSetup({ cdpIdStart: 90 }),
+    identityHash: diagnosticIdentity(
+      "second-parser-session",
+      "second-parser-target",
+    ),
+    parentSessionId: importBlob.sessionId,
+    phase: "fallback-import-diagnostic",
+    resumed: true,
+    sessionId: "second-parser-session",
+    targetId: "second-parser-target",
+    type: "worker",
+    urlClass: "pdf-parser-worker",
+    waitingForDebugger: true,
+  };
+  diagnostic.targets.push(secondParser);
+  diagnostic.targetBootstrapSettlements.push({
+    identityHash: diagnosticIdentity(
+      importBlob.sessionId,
+      "second-parser-request",
+      secondParser.sessionId,
+      secondParser.targetId,
+    ),
+    method: "GET",
+    phase: secondParser.phase,
+    requestId: "second-parser-request",
+    requestSessionId: importBlob.sessionId,
+    resourceType: "Script",
+    targetDetachedAtSettlement: false,
+    targetId: secondParser.targetId,
+    targetParentSessionId: importBlob.sessionId,
+    targetSessionId: secondParser.sessionId,
+    targetType: "worker",
+    terminalReason: "target-attached",
+    urlClass: "pdf-parser-worker",
+  });
+  diagnostic.counts.attachPromiseCount += 1;
+  diagnostic.counts.completedRequestCount += 1;
+  diagnostic.counts.requestCount += 1;
+  diagnostic.counts.targetBootstrapSettlementCount += 1;
+  diagnostic.counts.targetCount += 1;
+  for (const sample of diagnostic.wait.recentSamples) {
+    sample.requestCount += 1;
+    sample.targetCount += 1;
+  }
+
+  assert.equal(
+    isFallbackImportNetworkDiagnosticHealthy(diagnostic, boundary, 2),
+    false,
+  );
+});
+
+test("builds a noncanonical privacy-safe reference-capture diagnostic", () => {
+  const outputDirectory = path.join(
+    os.tmpdir(),
+    "issue-68-reference-capture-diagnostic",
+  );
+  const progress = createReferenceCaptureDiagnosticProgress();
+  for (const stage of REFERENCE_CAPTURE_DIAGNOSTIC_STAGES) {
+    markReferenceCaptureDiagnosticStage(progress, stage);
+  }
+  const candidates = REFERENCE_CAPTURE_DIAGNOSTIC_CANDIDATES.map(
+    (name, index) => {
+      const analysis = passingReferenceAnalysis();
+      return {
+        analysis,
+        attempt: index + 4,
+        bytes: 43_448,
+        path: path.relative(path.resolve("."), path.join(outputDirectory, name)),
+        referenceTarget: passingReferenceTarget(analysis, 2),
+        sha256: "d".repeat(64),
+      };
+    },
+  );
+  const input = {
+    capture: {
+      ...passingReferenceCaptureMechanics({ dpr: 1, height: 900, width: 1_100 }),
+      attempts: 5,
+      candidates,
+      captureErrorCount: 0,
+      configurationId: PDF_SHARPNESS_MATRIX[0].id,
+      referenceScheme: "file:",
+      targetPage: 2,
+    },
+    fixture: {
+      bytes: PUBLIC_PDF_FIXTURE_BYTES,
+      path: PUBLIC_PDF_FIXTURE,
+      sha256: PUBLIC_PDF_FIXTURE_SHA256,
+    },
+    outputDirectory,
+    progress,
+    recordedAt: "2026-08-10T00:00:00.000Z",
+    referenceConfigurationId: PDF_SHARPNESS_MATRIX[0].id,
+    runnerFailure: null,
+    source: passingReferenceDiagnosticSource(),
+    teardown: {
+      errorCount: 0,
+      reference: {
+        cdpClosed: true,
+        error: null,
+        present: true,
+        processClosed: true,
+        profileRemoved: true,
+      },
+    },
+  };
+  const report = buildReferenceCaptureDiagnosticReport(input);
+  assert.equal(report.diagnostic, true);
+  assert.equal(report.diagnosticSchemaVersion, 2);
+  assert.equal(report.completed, true);
+  assert.equal(report.capture.stableByteIdentical, true);
+  assert.equal(report.execution.sequenceComplete, true);
+  assert.equal(report.mode, "reference-capture");
+  assert.deepEqual(report.failures, []);
+  assert.equal(report.artifacts.candidates.length, 2);
+  assert.equal(report.artifacts.candidates[0].analysis.renderedPage, true);
+  assert.deepEqual(
+    report.artifacts.candidates.map(({ artifact: value }) => value.path),
+    [...REFERENCE_CAPTURE_DIAGNOSTIC_CANDIDATES],
+  );
+  assert.equal("passed" in report, false);
+  assert.equal("schemaVersion" in report, false);
+  assert.doesNotMatch(JSON.stringify(report), new RegExp(outputDirectory, "u"));
+  assert.doesNotMatch(
+    JSON.stringify(report),
+    /fresh-main-frame|new-pdf-loader|chrome-extension:/u,
+  );
+
+  const mutations = [
+    (value) => { value.fixture.bytes -= 1; },
+    (value) => { value.source.files[PDF_SHARPNESS_SOURCE_FILES[0]] = null; },
+    (value) => { value.source.postCaptureStatus = ["private/path.pdf"]; },
+    (value) => { value.progress.history.pop(); },
+    (value) => { value.referenceConfigurationId = "unknown-configuration"; },
+    (value) => { value.capture.configurationId = "mobile-dpr3-zoom100"; },
+    (value) => { value.capture.referenceScheme = "https:"; },
+    (value) => { value.capture.targetPage = 3; },
+    (value) => { value.capture.baseline.locationClass = "other"; },
+    (value) => { value.capture.navigation.loaderId = ""; },
+    (value) => { value.capture.navigation.frameId = "different-frame"; },
+    (value) => { value.capture.navigation.isDownload = true; },
+    (value) => { value.capture.navigation.errorText = "private path"; },
+    (value) => { value.capture.navigation.newDocument = false; },
+    (value) => { value.capture.navigation.loadEvent.sequence = 1; },
+    (value) => {
+      value.capture.navigation.lifecycleLoad.loaderId = "stale-loader";
+    },
+    (value) => {
+      value.capture.navigation.lifecycleLoad.frameId = "stale-frame";
+    },
+    (value) => { value.capture.configuredViewport.devicePixelRatio = 2; },
+    (value) => { value.capture.configuredViewport.innerWidth = 1; },
+    (value) => { value.capture.configuredViewport.innerHeight = 2; },
+    (value) => { value.capture.configuredViewport.visualViewportWidth = 3; },
+    (value) => { value.capture.configuredViewport.visualViewportHeight = 4; },
+    (value) => { value.capture.viewer.viewport.innerWidth = 1_099; },
+    (value) => { value.capture.viewer.protocol = "https:"; },
+    (value) => { value.capture.viewer.contentType = "text/plain"; },
+    (value) => { value.capture.candidates.pop(); },
+    (value) => { value.capture.captureErrorCount = value.capture.attempts - 1; },
+    (value) => { value.capture.candidates[1].sha256 = "e".repeat(64); },
+    (value) => { value.capture.candidates[1].analysis.inkPixels += 1; },
+    (value) => {
+      value.capture.candidates[1].referenceTarget.requestedPage += 1;
+    },
+    (value) => {
+      value.capture.candidates[1].referenceTarget.components.push(
+        structuredClone(
+          value.capture.candidates[1].referenceTarget.components[0],
+        ),
+      );
+    },
+    (value) => {
+      value.capture.candidates[1].referenceTarget.cropBounds.x += 1;
+    },
+    (value) => {
+      value.capture.candidates[1].referenceTarget.readiness.inkPixels = 0;
+    },
+    (value) => {
+      delete value.capture.candidates[1].analysis.segmentationVersion;
+    },
+    (value) => {
+      value.capture.candidates[1].analysis.winnerDominanceRatio += 1;
+    },
+    (value) => { value.capture.candidates[1].attempt = 4; },
+    (value) => { value.teardown.reference.profileRemoved = false; },
+  ];
+  for (const mutate of mutations) {
+    const value = structuredClone(input);
+    mutate(value);
+    const failed = buildReferenceCaptureDiagnosticReport(value);
+    assert.ok(failed.failures.length > 0);
+    assert.equal(failed.completed, false);
+  }
+
+  const mobileObservation = structuredClone(input);
+  mobileObservation.referenceConfigurationId = "mobile-dpr3-zoom100";
+  Object.assign(mobileObservation.capture, {
+    ...passingReferenceCaptureMechanics({ dpr: 3, height: 844, width: 390 }),
+    configurationId: "mobile-dpr3-zoom100",
+    targetPage: 3,
+  });
+  mobileObservation.capture.configuredViewport = {
+    devicePixelRatio: 3,
+    innerHeight: 2_121,
+    innerWidth: 980,
+    screenHeight: 844,
+    screenWidth: 390,
+    visualViewportHeight: 844,
+    visualViewportScale: 1,
+    visualViewportWidth: 390,
+  };
+  mobileObservation.capture.viewer.viewport = {
+    devicePixelRatio: 3,
+    innerHeight: 2_121,
+    innerWidth: 980,
+    screenHeight: 844,
+    screenWidth: 390,
+    visualViewportHeight: 844 * 980 / 390,
+    visualViewportScale: 390 / 980,
+    visualViewportWidth: 980,
+  };
+  for (const candidate of mobileObservation.capture.candidates) {
+    candidate.analysis = emptyReferenceAnalysis(1_170, 2_532);
+    candidate.referenceTarget = emptyReferenceTarget(candidate.analysis, 3);
+  }
+  const mobileReport = buildReferenceCaptureDiagnosticReport(
+    mobileObservation,
+  );
+  assert.equal(mobileReport.completed, true);
+  assert.deepEqual(mobileReport.failures, []);
+  assert.equal(mobileReport.configuration.mobile, true);
+  assert.equal(mobileReport.configuration.targetPage, 3);
+  assert.equal(
+    mobileReport.artifacts.candidates[0].analysis.renderedPage,
+    false,
+  );
+  assert.equal(
+    referenceViewportContract(
+      {
+        devicePixelRatio: 3,
+        layoutHeight: 844,
+        layoutWidth: 390,
+        mobile: true,
+        visualViewportScale: 1,
+      },
+      mobileObservation.capture.configuredViewport,
+      mobileObservation.capture.viewer.viewport,
+    ),
+    true,
+  );
+  for (const field of [
+    "innerWidth",
+    "innerHeight",
+    "visualViewportWidth",
+    "visualViewportHeight",
+  ]) {
+    const forgedMobile = structuredClone(mobileObservation);
+    forgedMobile.capture.configuredViewport[field] = 1;
+    const failed = buildReferenceCaptureDiagnosticReport(forgedMobile);
+    assert.equal(failed.completed, false);
+    assert.ok(failed.failures.length > 0);
+  }
+
+  const forgedMobileLayout = structuredClone(mobileObservation);
+  const forgedInnerWidth = 10_000;
+  const forgedInnerHeight = forgedInnerWidth * 844 / 390;
+  Object.assign(forgedMobileLayout.capture.configuredViewport, {
+    innerHeight: forgedInnerHeight,
+    innerWidth: forgedInnerWidth,
+  });
+  Object.assign(forgedMobileLayout.capture.viewer.viewport, {
+    innerHeight: forgedInnerHeight,
+    innerWidth: forgedInnerWidth,
+    visualViewportHeight: forgedInnerHeight,
+    visualViewportScale: 390 / forgedInnerWidth,
+    visualViewportWidth: forgedInnerWidth,
+  });
+  const forgedMobileLayoutReport = buildReferenceCaptureDiagnosticReport(
+    forgedMobileLayout,
+  );
+  assert.equal(forgedMobileLayoutReport.completed, false);
+  assert.ok(forgedMobileLayoutReport.failures.length > 0);
+
+  const fractionalMobileLayout = structuredClone(mobileObservation);
+  fractionalMobileLayout.capture.configuredViewport.innerHeight += 0.5;
+  fractionalMobileLayout.capture.viewer.viewport.innerHeight += 0.5;
+  const fractionalMobileLayoutReport = buildReferenceCaptureDiagnosticReport(
+    fractionalMobileLayout,
+  );
+  assert.equal(fractionalMobileLayoutReport.completed, false);
+  assert.ok(fractionalMobileLayoutReport.failures.length > 0);
+
+  const impossibleStableAnalyses = [
+    (analysis) => {
+      analysis.winnerWhiteArea = analysis.runnerUpWhiteArea;
+      analysis.winnerDominanceRatio = 1;
+    },
+    (analysis) => {
+      analysis.substantialComponentCount = 0;
+      analysis.winnerWhiteArea = 0;
+      analysis.runnerUpWhiteArea = 0;
+      analysis.winnerDominanceRatio = null;
+    },
+    (analysis) => {
+      analysis.inkRowBands = 1;
+    },
+  ];
+  for (const mutate of impossibleStableAnalyses) {
+    const value = structuredClone(input);
+    for (const candidate of value.capture.candidates) {
+      mutate(candidate.analysis);
+    }
+    const failed = buildReferenceCaptureDiagnosticReport(value);
+    assert.equal(failed.completed, false);
+    assert.ok(failed.failures.length > 0);
+    assert.deepEqual(failed.artifacts.candidates, []);
+  }
+
+  const correlatedComponentOverflow = structuredClone(input);
+  for (const candidate of correlatedComponentOverflow.capture.candidates) {
+    const overflowComponent = {
+      pageBounds: { height: 600, width: 1_000, x: 0, y: 250 },
+      whiteArea: 500_000,
+    };
+    candidate.analysis.substantialComponents.push(overflowComponent);
+    candidate.analysis.substantialComponentCount = 2;
+    candidate.analysis.runnerUpWhiteArea = overflowComponent.whiteArea;
+    candidate.analysis.winnerDominanceRatio =
+      candidate.analysis.winnerWhiteArea / overflowComponent.whiteArea;
+    candidate.referenceTarget = passingReferenceTarget(candidate.analysis, 2);
+  }
+  const componentOverflowReport = buildReferenceCaptureDiagnosticReport(
+    correlatedComponentOverflow,
+  );
+  assert.equal(componentOverflowReport.completed, false);
+  assert.ok(componentOverflowReport.failures.length > 0);
+  assert.deepEqual(componentOverflowReport.artifacts.candidates, []);
+
+  const impossibleConnectedComponentArea = structuredClone(input);
+  for (const candidate of impossibleConnectedComponentArea.capture.candidates) {
+    const impossibleComponent = {
+      pageBounds: { height: 674, width: 300, x: 0, y: 226 },
+      whiteArea: 1,
+    };
+    candidate.analysis.substantialComponents.push(impossibleComponent);
+    candidate.analysis.substantialComponentCount = 2;
+    candidate.analysis.runnerUpWhiteArea = impossibleComponent.whiteArea;
+    candidate.analysis.winnerDominanceRatio =
+      candidate.analysis.winnerWhiteArea / impossibleComponent.whiteArea;
+    candidate.referenceTarget = passingReferenceTarget(candidate.analysis, 2);
+  }
+  const impossibleComponentReport = buildReferenceCaptureDiagnosticReport(
+    impossibleConnectedComponentArea,
+  );
+  assert.equal(impossibleComponentReport.completed, false);
+  assert.ok(impossibleComponentReport.failures.length > 0);
+  assert.deepEqual(impossibleComponentReport.artifacts.candidates, []);
+
+  const diagnosticRunnerMutations = [
+    (candidate) => {
+      const readiness = candidate.referenceTarget.readiness;
+      const minimumWidth = Math.max(120, Math.ceil(readiness.width * 0.25));
+      const minimumHeight = Math.max(80, Math.ceil(readiness.height * 0.25));
+      const maximumNonSubstantial = Math.max(
+        (minimumWidth - 1) * readiness.height,
+        readiness.width * (minimumHeight - 1),
+      );
+      readiness.runnerUpWhiteArea = maximumNonSubstantial + 1;
+      readiness.winnerDominanceRatio =
+        readiness.winnerWhiteArea / readiness.runnerUpWhiteArea;
+    },
+    (candidate) => {
+      const listed = {
+        pageBounds: { height: 674, width: 600, x: 0, y: 226 },
+        whiteArea: 200_000,
+      };
+      candidate.analysis.substantialComponents.push(listed);
+      candidate.analysis.substantialComponentCount = 2;
+      candidate.analysis.runnerUpWhiteArea = 1;
+      candidate.analysis.winnerDominanceRatio =
+        candidate.analysis.winnerWhiteArea;
+      candidate.referenceTarget = passingReferenceTarget(candidate.analysis, 2);
+    },
+    (candidate) => {
+      const tiedArea = 400_000;
+      const tied = {
+        pageBounds: { height: 674, width: 600, x: 0, y: 226 },
+        whiteArea: tiedArea,
+      };
+      candidate.analysis.substantialComponents[0].whiteArea = tiedArea;
+      candidate.analysis.substantialComponents.push(tied);
+      candidate.analysis.substantialComponentCount = 2;
+      candidate.analysis.winnerWhiteArea = tiedArea;
+      candidate.analysis.runnerUpWhiteArea = 1;
+      candidate.analysis.winnerDominanceRatio = tiedArea;
+      candidate.analysis.pageWhitePixels = 350_000;
+      candidate.analysis.pageWhiteRatio =
+        candidate.analysis.pageWhitePixels / candidate.analysis.pagePixels;
+      candidate.referenceTarget = passingReferenceTarget(candidate.analysis, 2);
+    },
+  ];
+  for (const mutateRunner of diagnosticRunnerMutations) {
+    const value = structuredClone(input);
+    for (const candidate of value.capture.candidates) mutateRunner(candidate);
+    const failed = buildReferenceCaptureDiagnosticReport(value);
+    assert.equal(failed.completed, false);
+    assert.ok(failed.failures.length > 0);
+    assert.deepEqual(failed.artifacts.candidates, []);
+  }
+
+  const diagnosticDominanceIdentity = structuredClone(input);
+  for (const candidate of diagnosticDominanceIdentity.capture.candidates) {
+    candidate.analysis.winnerDominanceRatio += 5e-10;
+  }
+  const diagnosticDominanceReport = buildReferenceCaptureDiagnosticReport(
+    diagnosticDominanceIdentity,
+  );
+  assert.equal(diagnosticDominanceReport.completed, false);
+  assert.ok(diagnosticDominanceReport.failures.length > 0);
+  assert.deepEqual(diagnosticDominanceReport.artifacts.candidates, []);
+
+  for (const mutateTargetReadiness of [
+    (readiness) => {
+      const insetY = Math.max(2, Math.floor(readiness.pageBounds.height * 0.01));
+      readiness.inkRowBands =
+        Math.ceil((readiness.pageBounds.height - insetY * 2) / 3) + 1;
+    },
+    (readiness) => {
+      readiness.inkPixels =
+        readiness.pagePixels - readiness.pageWhitePixels + 1;
+      readiness.inkRatio = readiness.inkPixels / readiness.pagePixels;
+    },
+    (readiness) => {
+      readiness.inkSpanRatio = 0.6500001;
+    },
+    (readiness) => {
+      readiness.pageWhitePixels =
+        readiness.winnerWhiteArea -
+          (readiness.pageBounds.width * readiness.pageBounds.height -
+            readiness.pagePixels) - 1;
+      readiness.pageWhiteRatio =
+        readiness.pageWhitePixels / readiness.pagePixels;
+    },
+    (readiness) => {
+      readiness.pageWhiteRatio += 5e-10;
+    },
+    (readiness) => {
+      readiness.inkRatio += 5e-10;
+    },
+    (readiness) => {
+      const insetX = Math.max(2, Math.floor(readiness.pageBounds.width * 0.01));
+      const interiorWidth = readiness.pageBounds.width - insetX * 2;
+      const spanPixels = Math.round(readiness.inkSpanRatio * interiorWidth);
+      readiness.inkSpanRatio = (spanPixels + 5e-8) / interiorWidth;
+    },
+  ]) {
+    const value = structuredClone(input);
+    for (const candidate of value.capture.candidates) {
+      mutateTargetReadiness(candidate.referenceTarget.readiness);
+    }
+    const failed = buildReferenceCaptureDiagnosticReport(value);
+    assert.equal(failed.completed, false);
+    assert.ok(failed.failures.length > 0);
+    assert.deepEqual(failed.artifacts.candidates, []);
+  }
+
+
+  const diagnosticFalseInkStates = [
+    () => ({ bands: 0, ink: 50, span: 0 }),
+    () => ({ bands: 0, ink: 0, span: 1 }),
+    ({ height }) => ({ bands: 0, ink: 2 * height + 1, span: 3 }),
+    () => ({ bands: 2, ink: 6, span: 1 }),
+    ({ height }) => ({
+      bands: 2,
+      ink: (height - 2) * 3 + 5,
+      span: 3,
+    }),
+  ];
+  for (const createInkState of diagnosticFalseInkStates) {
+    const value = structuredClone(input);
+    for (const candidate of value.capture.candidates) {
+      const readiness = candidate.referenceTarget.readiness;
+      const insetX = Math.max(2, Math.floor(readiness.pageBounds.width * 0.01));
+      const insetY = Math.max(2, Math.floor(readiness.pageBounds.height * 0.01));
+      const interiorWidth = readiness.pageBounds.width - insetX * 2;
+      const interiorHeight = readiness.pageBounds.height - insetY * 2;
+      const state = createInkState({ height: interiorHeight });
+      readiness.inkPixels = state.ink;
+      readiness.inkRatio = state.ink / readiness.pagePixels;
+      readiness.inkRowBands = state.bands;
+      readiness.inkSpanRatio = state.span / interiorWidth;
+      readiness.renderedPage = false;
+    }
+    const failed = buildReferenceCaptureDiagnosticReport(value);
+    assert.equal(failed.completed, false);
+    assert.ok(failed.failures.length > 0);
+    assert.deepEqual(failed.artifacts.candidates, []);
+  }
+
+  const tiedObservation = structuredClone(input);
+  for (const candidate of tiedObservation.capture.candidates) {
+    const components = [
+      {
+        pageBounds: { height: 300, width: 300, x: 100, y: 59 },
+        whiteArea: 36_000,
+      },
+      {
+        pageBounds: { height: 300, width: 300, x: 500, y: 100 },
+        whiteArea: 36_000,
+      },
+    ];
+    Object.assign(candidate.analysis, {
+      inkPixels: 0,
+      inkRatio: 0,
+      inkRowBands: 0,
+      inkSpanRatio: 0,
+      pageBounds: null,
+      pagePixels: 0,
+      pageWhitePixels: 0,
+      pageWhiteRatio: 0,
+      renderedPage: false,
+      runnerUpWhiteArea: 36_000,
+      substantialComponents: components,
+      substantialComponentCount: 2,
+      winnerDominanceRatio: 1,
+      winnerWhiteArea: 36_000,
+    });
+    candidate.referenceTarget = {
+      anchorLimit: 225,
+      components: components.map((component) => ({
+        bounds: { ...component.pageBounds },
+        whiteArea: component.whiteArea,
+      })),
+      cropBounds: null,
+      policy: "unique-top-anchored-substantial-component",
+      readiness: null,
+      requestedPage: 2,
+      selectedComponentIndex: null,
+      selectionVersion: 1,
+      sourceHeight: 900,
+      sourceWidth: 1_100,
+    };
+  }
+  const tiedReport = buildReferenceCaptureDiagnosticReport(tiedObservation);
+  assert.equal(tiedReport.completed, true);
+  assert.deepEqual(tiedReport.failures, []);
+  assert.equal(
+    tiedReport.artifacts.candidates[0].analysis.renderedPage,
+    false,
+  );
+
+  const repositoryOutput = structuredClone(input);
+  repositoryOutput.outputDirectory = path.join(
+    path.resolve("."),
+    "outputs/reference-diagnostic",
+  );
+  const repositoryReport = buildReferenceCaptureDiagnosticReport(
+    repositoryOutput,
+  );
+  assert.equal(repositoryReport.completed, false);
+  assert.ok(repositoryReport.failures.length > 0);
+
+  const privateProfile = structuredClone(input);
+  privateProfile.capture.profileDirectory =
+    "/tmp/private-profile-secret-token";
+  privateProfile.capture.candidates[0].referenceTarget.rawUrl =
+    "file:///tmp/private.pdf?secret=token";
+  const privateProfileBytes = JSON.stringify(
+    buildReferenceCaptureDiagnosticReport(privateProfile),
+  );
+  assert.doesNotMatch(privateProfileBytes, /private-profile|private\.pdf|secret/u);
+
+  const firstFailure = structuredClone(input);
+  firstFailure.runnerFailure = new Error(
+    "private /tmp/profile-a document paragraph secret=alpha",
+  );
+  firstFailure.progress.history = REFERENCE_CAPTURE_DIAGNOSTIC_STAGES.slice(
+    0,
+    9,
+  );
+  firstFailure.progress.terminalStage = firstFailure.progress.history.at(-1);
+  const secondFailure = structuredClone(firstFailure);
+  secondFailure.runnerFailure = new Error(
+    "different https://example.test/?token=beta private text",
+  );
+  const firstBytes = JSON.stringify(
+    buildReferenceCaptureDiagnosticReport(firstFailure),
+  );
+  const secondBytes = JSON.stringify(
+    buildReferenceCaptureDiagnosticReport(secondFailure),
+  );
+  assert.equal(firstBytes, secondBytes);
+  assert.doesNotMatch(
+    firstBytes,
+    /profile-a|paragraph|secret|example\.test|token=beta|private text/u,
+  );
+});
+
+test("enforces the exact reference-capture diagnostic stage order", () => {
+  const progress = createReferenceCaptureDiagnosticProgress();
+  assert.equal(
+    markReferenceCaptureDiagnosticStage(
+      progress,
+      REFERENCE_CAPTURE_DIAGNOSTIC_STAGES[0],
+    ),
+    REFERENCE_CAPTURE_DIAGNOSTIC_STAGES[0],
+  );
+  assert.throws(
+    () => markReferenceCaptureDiagnosticStage(
+      progress,
+      REFERENCE_CAPTURE_DIAGNOSTIC_STAGES[2],
+    ),
+    /stage ordering is invalid/u,
+  );
+});
+
+test("binds reference navigation to one new loader and both load signals", async () => {
+  const listeners = new Map();
+  const cdp = {
+    on(method, listener) {
+      listeners.set(method, listener);
+    },
+    send(method) {
+      assert.equal(method, "Page.navigate");
+      queueMicrotask(() => {
+        listeners.get("Page.lifecycleEvent")?.({
+          frameId: "fresh-main-frame",
+          loaderId: "new-pdf-loader",
+          name: "load",
+        });
+        listeners.get("Page.loadEventFired")?.({});
+      });
+      return Promise.resolve({
+        frameId: "fresh-main-frame",
+        loaderId: "new-pdf-loader",
+      });
+    },
+  };
+  const result = await navigateReferenceCaptureDiagnosticPage(
+    cdp,
+    "file:///public-fixture.pdf#page=3",
+    100,
+  );
+  assert.equal(result.newDocument, true);
+  assert.equal(result.lifecycleLoad.loaderId, result.loaderId);
+  assert.equal(result.lifecycleLoad.frameId, result.frameId);
+  assert.ok(result.lifecycleLoad.sequence > result.dispatchSequence);
+  assert.ok(result.loadEvent.sequence > result.dispatchSequence);
+
+  const staleListeners = new Map();
+  const stale = {
+    on(method, listener) {
+      staleListeners.set(method, listener);
+    },
+    send() {
+      queueMicrotask(() => {
+        staleListeners.get("Page.lifecycleEvent")?.({
+          frameId: "fresh-main-frame",
+          loaderId: "stale-loader",
+          name: "load",
+        });
+        staleListeners.get("Page.loadEventFired")?.({});
+      });
+      return Promise.resolve({
+        frameId: "fresh-main-frame",
+        loaderId: "new-pdf-loader",
+      });
+    },
+  };
+  await assert.rejects(
+    navigateReferenceCaptureDiagnosticPage(
+      stale,
+      "file:///public-fixture.pdf#page=3",
+      1,
+    ),
+    /new loader's load lifecycle/u,
+  );
+});
+
+test("builds a noncanonical privacy-safe fallback import diagnostic", () => {
+  const outputDirectory = path.join(os.tmpdir(), "issue-68-fallback-diagnostic");
+  const capture = passingFallbackImportCapture();
+  capture.screenshot = {
+    ...artifact("linelight-fallback-import-diagnostic.png", 8),
+    path: path.relative(
+      path.resolve("."),
+      path.join(outputDirectory, "linelight-fallback-import-diagnostic.png"),
+    ),
+  };
+  const setupDocumentIdentity = capture.libraryBefore.activeDocumentIdentityHash;
+  const input = {
+    build: { localManifest: { deploymentId: DEPLOYMENT } },
+    capture,
+    diagnosticProgress: passingFallbackDiagnosticProgress(),
+    fixture: {
+      bytes: PUBLIC_PDF_FIXTURE_BYTES,
+      path: PUBLIC_PDF_FIXTURE,
+      sha256: PUBLIC_PDF_FIXTURE_SHA256,
+    },
+    networkDiagnostic: passingFallbackNetworkDiagnostic(),
+    outputDirectory,
+    recordedAt: "2026-08-10T00:00:00.000Z",
+    runnerFailure: null,
+    setup: {
+      completeEventCount: 1,
+      documentIdentityHash: setupDocumentIdentity,
+      fileSelected: true,
+      library: capture.libraryBefore,
+      librarySnapshotCompleted: true,
+      navigationCompleted: true,
+      networkFixedPointReached: true,
+      pageEventCount: 6,
+      source: {
+        bytes: PUBLIC_PDF_FIXTURE_BYTES,
+        sha256: PUBLIC_PDF_FIXTURE_SHA256,
+      },
+      sourceSelectionCount: 1,
+    },
+    source: { commit: COMMIT, tree: TREE },
+    teardown: cleanDiagnosticTeardown(),
+  };
+  const report = buildFallbackImportDiagnosticReport(input);
+  assert.equal(report.diagnostic, true);
+  assert.equal(report.diagnosticSchemaVersion, 2);
+  assert.equal(report.completed, true);
+  assert.equal(report.importCompleted, true);
+  assert.equal(report.networkSettled, true);
+  assert.equal(report.execution.sequenceComplete, true);
+  assert.equal(report.execution.errorCategory, "none");
+  assert.equal(report.mode, "fallback-import-lifecycle");
+  assert.deepEqual(report.failures, []);
+  assert.equal(report.setup.bound, true);
+  assert.equal(
+    report.artifacts.screenshots[0].path,
+    "linelight-fallback-import-diagnostic.png",
+  );
+  assert.equal("passed" in report, false);
+  assert.equal("schemaVersion" in report, false);
+
+  const privateFailure = structuredClone(input);
+  privateFailure.capture.snapshot.errors = [
+    "private text /tmp/private-profile https://example.test/?token=secret",
+  ];
+  privateFailure.capture.snapshot.notices = [{
+    text: "private paragraph from a local PDF",
+  }];
+  const privateReport = buildFallbackImportDiagnosticReport(privateFailure);
+  const serialized = JSON.stringify(privateReport);
+  assert.doesNotMatch(serialized, /private text|private-profile|token=secret|private paragraph/u);
+  assert.doesNotMatch(serialized, /"passed"|"schemaVersion"/u);
+
+  const mutations = [
+    (value) => { value.fixture.bytes -= 1; },
+    (value) => { value.setup.pageEventCount = 5; },
+    (value) => { value.diagnosticProgress.history.pop(); },
+    (value) => {
+      value.diagnosticProgress.history[4] = "fallback-chain-started";
+    },
+    (value) => { value.capture.snapshot.fallback.signalAt = null; },
+    (value) => { value.capture.screenshot.path = "substituted.png"; },
+    (value) => { value.networkDiagnostic.counts.inflightRequestCount = 1; },
+    (value) => { value.teardown.app.profileRemoved = false; },
+  ];
+  for (const mutate of mutations) {
+    const value = structuredClone(input);
+    mutate(value);
+    const failed = buildFallbackImportDiagnosticReport(value);
+    assert.ok(failed.failures.length > 0);
+  }
+
+  const firstRawFailure = structuredClone(input);
+  firstRawFailure.runnerFailure = new Error(
+    "private /tmp/first-profile?secret=alpha",
+  );
+  firstRawFailure.diagnosticProgress.history =
+    FALLBACK_IMPORT_DIAGNOSTIC_STAGES.slice(0, 7);
+  firstRawFailure.diagnosticProgress.terminalStage =
+    FALLBACK_IMPORT_DIAGNOSTIC_STAGES[6];
+  const secondRawFailure = structuredClone(firstRawFailure);
+  secondRawFailure.runnerFailure = new Error(
+    "different private document text https://example.test/?secret=beta",
+  );
+  const firstFailureBytes = JSON.stringify(
+    buildFallbackImportDiagnosticReport(firstRawFailure),
+  );
+  const secondFailureBytes = JSON.stringify(
+    buildFallbackImportDiagnosticReport(secondRawFailure),
+  );
+  assert.equal(firstFailureBytes, secondFailureBytes);
+  assert.doesNotMatch(
+    firstFailureBytes,
+    /first-profile|secret|private document|example\.test/u,
+  );
+});
+
+test("uses executable async browser evaluation for private library snapshots", async () => {
+  const expression = asyncBrowserExpression(
+    "return await Promise.resolve({ available: true });",
+  );
+  const execute = new Function(`return ${expression};`);
+  assert.deepEqual(await execute(), { available: true });
+  const source = await readFile(
+    "scripts/run-pdf-sharpness-browser-regression.mjs",
+    "utf8",
+  );
+  assert.match(
+    source,
+    /readPrivateLibraryDiagnostic[\s\S]*asyncBrowserExpression\(`/u,
+  );
+});
+
+test("tracks exact fallback diagnostic stages and preserves partial setup facts", () => {
+  const progress = createFallbackImportDiagnosticProgress();
+  for (const stage of FALLBACK_IMPORT_DIAGNOSTIC_STAGES) {
+    assert.equal(markFallbackImportDiagnosticStage(progress, stage), stage);
+  }
+  assert.deepEqual(
+    summarizeFallbackDiagnosticProgress(progress, null),
+    {
+      errorCategory: "none",
+      history: [...FALLBACK_IMPORT_DIAGNOSTIC_STAGES],
+      sequenceComplete: true,
+      terminalStage: FALLBACK_IMPORT_DIAGNOSTIC_STAGES.at(-1),
+    },
+  );
+  assert.throws(
+    () => markFallbackImportDiagnosticStage(
+      createFallbackImportDiagnosticProgress(),
+      "baseline-started",
+    ),
+    /stage ordering is invalid/u,
+  );
+
+  const partial = summarizeFallbackDiagnosticSetup({
+    completeEventCount: 1,
+    documentIdentityHash: "d".repeat(64),
+    fileSelected: true,
+    library: {
+      activeDocumentIdentityHash: "private-local-id",
+      activeDocumentPresent: true,
+      available: true,
+      documentCount: 1,
+      entryCount: 1,
+      pageCount: 6,
+      pdfEntryCount: 1,
+      sourceCount: 1,
+    },
+    librarySnapshotCompleted: true,
+    navigationCompleted: true,
+    networkFixedPointReached: false,
+    pageEventCount: 6,
+    source: {
+      bytes: PUBLIC_PDF_FIXTURE_BYTES,
+      sha256: "e".repeat(64),
+    },
+    sourceSelectionCount: 1,
+  });
+  assert.equal(partial.bound, false);
+  assert.equal(partial.completeEventCount, 1);
+  assert.equal(partial.pageEventCount, 6);
+  assert.equal(partial.source.bytes, PUBLIC_PDF_FIXTURE_BYTES);
+  assert.equal(partial.source.sha256, "e".repeat(64));
+  assert.equal(partial.documentIdentityHash, "d".repeat(64));
+  assert.equal(partial.library.activeDocumentIdentityHash, null);
+  assert.deepEqual(partial.conditions, {
+    fileSelected: true,
+    libraryBound: false,
+    librarySnapshotCompleted: true,
+    modelBound: true,
+    navigationCompleted: true,
+    networkFixedPointReached: false,
+    sourceBound: false,
+  });
+});
+
+function passingCanonicalReference(configuration, targetPage, index) {
+  const width = configuration.width * configuration.baseDevicePixelRatio;
+  const height = configuration.height * configuration.baseDevicePixelRatio;
+  const pageWidth = Math.floor(width * 0.6);
+  const pageHeight = Math.floor(height * 0.7);
+  const pageBounds = { height: pageHeight, width: pageWidth, x: 10, y: 10 };
+  const winnerWhiteArea = Math.floor(pageWidth * pageHeight * 0.9);
+  const insetX = Math.max(2, Math.floor(pageWidth * 0.01));
+  const insetY = Math.max(2, Math.floor(pageHeight * 0.01));
+  const pagePixels = (pageWidth - insetX * 2) * (pageHeight - insetY * 2);
+  const pageWhitePixels = Math.floor(pagePixels * 0.9);
+  const inkPixels = Math.max(100, Math.floor(pagePixels * 0.01));
+  const interiorWidth = pageWidth - insetX * 2;
+  const component = { pageBounds, whiteArea: winnerWhiteArea };
+  const readiness = {
+    attempts: 2,
+    height,
+    inkPixels,
+    inkRatio: inkPixels / pagePixels,
+    inkRowBands: 4,
+    inkSpanRatio: Math.round(interiorWidth * 0.65) / interiorWidth,
+    pageBounds,
+    pagePixels,
+    pageWhitePixels,
+    pageWhiteRatio: pageWhitePixels / pagePixels,
+    proof: "white-page-with-rendered-ink",
+    renderedPage: true,
+    runnerUpWhiteArea: 1_000,
+    segmentationVersion: 2,
+    substantialComponents: [component],
+    substantialComponentCount: 1,
+    width,
+    winnerDominanceRatio: winnerWhiteArea / 1_000,
+    winnerWhiteArea,
+  };
+  const layoutWidth = Math.round(
+    configuration.width / configuration.browserZoom,
+  );
+  const layoutHeight = Math.round(
+    configuration.height / configuration.browserZoom,
+  );
+  const dpr = configuration.baseDevicePixelRatio * configuration.browserZoom;
+  const innerWidth = configuration.kind === "mobile" ? 980 : layoutWidth;
+  const innerHeight = configuration.kind === "mobile"
+    ? Math.round(innerWidth * layoutHeight / layoutWidth)
+    : layoutHeight;
+  const configuredScale = configuration.pinchZoom;
+  const viewerScale = configuredScale * layoutWidth / innerWidth;
+  const viewport = (scale) => ({
+    devicePixelRatio: dpr,
+    innerHeight,
+    innerWidth,
+    screenHeight: layoutHeight,
+    screenWidth: layoutWidth,
+    visualViewportHeight: layoutHeight / scale,
+    visualViewportScale: scale,
+    visualViewportWidth: layoutWidth / scale,
+  });
+  const sessionIdentityHash = diagnosticIdentity(
+    configuration.id,
+    "reference-session",
+    index,
+  );
+  const frameIdentityHash = diagnosticIdentity(configuration.id, "frame");
+  const loaderIdentityHash = diagnosticIdentity(configuration.id, "loader");
+  readiness.captureLifecycle = {
+    baseline: {
+      checked: true,
+      frameIdentityHash,
+      frameTreeMainOnly: true,
+      frameUrlClass: "about-blank",
+      locationClass: "about-blank",
+      pageCount: 1,
+      pageUrlClass: "about",
+      readyStateComplete: true,
+      targetCount: 1,
+      workerCount: 0,
+    },
+    configurationId: configuration.id,
+    configuredViewport: viewport(configuredScale),
+    navigation: {
+      dispatchSequence: 1,
+      finalSequence: 4,
+      frameIdentityHash,
+      isDownload: false,
+      lifecycleFrameIdentityHash: frameIdentityHash,
+      lifecycleLoadSequence: 3,
+      lifecycleLoaderIdentityHash: loaderIdentityHash,
+      lifecycleName: "load",
+      loaderIdentityHash,
+      loadEventFiredSequence: 4,
+      newDocument: true,
+      responseSequence: 2,
+    },
+    proof: "fresh-owned-reference-loader",
+    requestedPage: targetPage,
+    sessionIdentityHash,
+    viewer: {
+      contentTypeClass: "html",
+      pdfEmbedPresent: false,
+      protocolClass: "extension",
+      readyStateComplete: true,
+      viewport: viewport(viewerScale),
+    },
+    viewportProof: "native-viewer-relational-v1",
+  };
+  const targetReadiness = {
+    ...readiness,
+    attempts: undefined,
+    captureLifecycle: undefined,
+    height: pageHeight,
+    pageBounds: { height: pageHeight, width: pageWidth, x: 0, y: 0 },
+    runnerUpWhiteArea: 0,
+    substantialComponents: [{
+      pageBounds: { height: pageHeight, width: pageWidth, x: 0, y: 0 },
+      whiteArea: winnerWhiteArea,
+    }],
+    width: pageWidth,
+    winnerDominanceRatio: null,
+  };
+  return {
+    readiness,
+    referenceTarget: {
+      anchorLimit: Math.max(80, Math.ceil(height * 0.25)),
+      components: [{ bounds: pageBounds, whiteArea: winnerWhiteArea }],
+      cropBounds: pageBounds,
+      policy: "unique-top-anchored-substantial-component",
+      readiness: targetReadiness,
+      requestedPage: targetPage,
+      selectedComponentIndex: 0,
+      selectionVersion: 1,
+      sourceHeight: height,
+      sourceWidth: width,
+    },
+    sessionIdentityHash,
+  };
+}
+
+function passingEvidence() {
+  const fixture = {
+    bytes: 4096,
+    path: "tests/fixtures/pdf-highlights/issue-60-geometry.pdf",
+    sha256: SHA,
+  };
+  const matrix = PDF_SHARPNESS_MATRIX.map((configuration, index) => {
+    const referenceScreenshot = artifact(
+      `reference-${configuration.id}.png`,
+      index + 1,
+    );
+    const lineLightScreenshot = artifact(
+      `linelight-${configuration.id}.png`,
+      index + 2,
+    );
+    const pageWidth = 600;
+    const pageHeight = 800;
+    const cssWidth = configuration.id === "desktop-dpr1-zoom100"
+      ? 720
+      : configuration.kind === "mobile"
+        ? 300
+        : 600;
+    const cssHeight = (cssWidth * pageHeight) / pageWidth;
+    const physicalRatio =
+      configuration.baseDevicePixelRatio *
+      configuration.browserZoom *
+      configuration.pinchZoom;
+    const targetScale = Math.ceil(
+      Math.max(
+        1,
+        Math.max(cssWidth / pageWidth, cssHeight / pageHeight) * physicalRatio,
+      ) / 0.25,
+    ) * 0.25;
+    const targetWidth = Math.ceil(pageWidth * targetScale);
+    const targetHeight = Math.ceil(pageHeight * targetScale);
+    const previewScale = Math.min(targetScale, 1.25);
+    const previewWidth = Math.ceil(pageWidth * previewScale);
+    const previewHeight = Math.ceil(pageHeight * previewScale);
+    const previewSatisfiedTarget = previewScale === targetScale;
+    const sharpCompositionId = previewSatisfiedTarget ? 1 : 2;
+    const sharpComposedAt = previewSatisfiedTarget ? 10 : 20;
+    const composedPageIds = configuration.kind === "mobile"
+      ? [2, 3, 4]
+      : [1, 2];
+    const composedPages = composedPageIds.map((page, index) => ({
+      geometry: {
+        bottom: 180 + index * 120,
+        left: 20,
+        right: 620,
+        top: 80 + index * 120,
+      },
+      geometryVisible: true,
+      height: targetHeight,
+      page,
+      pixels: targetWidth * targetHeight,
+      visible: true,
+      width: targetWidth,
+    }));
+    const composedPixels = composedPages.reduce(
+      (sum, page) => sum + page.pixels,
+      0,
+    );
+    const canvasFrame = {
+      at: 50,
+      composedCount: composedPages.length,
+      composedPages,
+      composedPixels,
+      geometryVisiblePages: [...composedPageIds],
+      readerViewport: { bottom: 700, left: 0, right: 700, top: 0 },
+      visiblePages: [...composedPageIds],
+    };
+    const priorityTarget = 4;
+    const priorityCached = previewSatisfiedTarget;
+    const priorityBitmapEventId = priorityCached ? 80 : 102;
+    const reference = passingCanonicalReference(configuration, 2, index);
+    const priorityRequest = priorityCached
+      ? null
+      : {
+          activityId: 110,
+          distance: 0,
+          enabled: true,
+          eventId: 101,
+          height: null,
+          identityHash: diagnosticIdentity(configuration.id, "render", 101),
+          pageNumber: priorityTarget,
+          scale: targetScale,
+          type: "render",
+          visible: true,
+          width: null,
+        };
+    const priorityBitmap = priorityCached
+      ? null
+      : {
+          activityId: 120,
+          distance: null,
+          enabled: null,
+          eventId: 102,
+          height: targetHeight,
+          identityHash: diagnosticIdentity(configuration.id, "bitmap", 102),
+          pageNumber: priorityTarget,
+          scale: targetScale,
+          type: "bitmap",
+          visible: null,
+          width: targetWidth,
+        };
+    return {
+      alignment: {
+        activeWordAfter: 2,
+        activeWordBefore: 1,
+        activeWordInsideHighlight: true,
+        configurationId: configuration.id,
+        highlightRectangles: 1,
+        narrationAdvanced: true,
+        passed: true,
+        spoken: [{ characters: 23 }],
+      },
+      canvasBudget: {
+        maximumCount: composedPages.length,
+        maximumCountFrame: structuredClone(canvasFrame),
+        maximumPixels: composedPixels,
+        maximumPixelsFrame: structuredClone(canvasFrame),
+      },
+      comparison: {
+        lineLightScreenshot,
+        paired: true,
+        referenceReadiness: reference.readiness,
+        referenceScreenshot,
+        referenceTarget: reference.referenceTarget,
+        sourceSha256: SHA,
+        targetPage: 2,
+      },
+      id: configuration.id,
+      importedSource: { sha256: SHA, size: fixture.bytes },
+      longTasks: [{ duration: 50, name: "self", startTime: 1 }],
+      raster: {
+        noLateLowOverwrite: true,
+        noResolutionRegression: true,
+        preview: {
+          actualHeight: previewHeight,
+          actualWidth: previewWidth,
+          bitmapEventId: 1,
+          composedAt: 10,
+          compositionId: 1,
+          connectedCanvas: true,
+          distance: 1,
+          observed: true,
+          scale: previewScale,
+          workerObserved: true,
+        },
+        previewBeforeSharp: !previewSatisfiedTarget,
+        sharp: {
+          actualHeight: targetHeight,
+          actualWidth: targetWidth,
+          bitmapEventId: sharpCompositionId,
+          composedAt: sharpComposedAt,
+          compositionId: sharpCompositionId,
+          cssHeight,
+          cssWidth,
+          pageHeight,
+          pageWidth,
+          source: "worker-bitmap",
+          targetCapped: false,
+          targetHeight,
+          targetScale,
+          targetWidth,
+        },
+        transition: previewSatisfiedTarget
+          ? "preview-satisfied-target"
+          : "preview-to-sharp-upgrade",
+      },
+      release: {
+        canvasHeight: 0,
+        canvasWidth: 0,
+        renderSource: null,
+        shellRetained: true,
+        textOverlayRetained: true,
+      },
+      runtimeErrors: [],
+      viewport: {
+        beforeDevicePixelRatio: configuration.baseDevicePixelRatio,
+        beforeLayoutHeight: configuration.height,
+        beforeLayoutWidth: configuration.width,
+        beforeVisualViewportScale: 1,
+        devicePixelRatio:
+          configuration.baseDevicePixelRatio * configuration.browserZoom,
+        mobile: configuration.kind === "mobile",
+        layoutHeight: Math.round(configuration.height / configuration.browserZoom),
+        layoutWidth: Math.round(configuration.width / configuration.browserZoom),
+        transition: configuration.browserZoom > 1
+          ? "browser-zoom"
+          : configuration.pinchZoom > 1
+            ? "visual-viewport-pinch"
+            : "normal",
+        visualViewportScale: configuration.pinchZoom,
+      },
+      visibleFirst: {
+        firstComposedPage: priorityTarget,
+        firstPostScrollBitmapPage: priorityCached ? 5 : priorityTarget,
+        firstPostScrollCompositionPage: priorityTarget,
+        firstPostScrollVisibleRequestPage:
+          priorityCached ? null : priorityTarget,
+        firstWorkerBitmapPage: priorityTarget,
+        scrollAction: {
+          activityId: 100,
+          at: 100,
+          drawBoundary: 89,
+          drawInvocationBoundary: 89,
+          eventId: 100,
+          readerViewportAfter: { bottom: 700, left: 0, right: 700, top: 0 },
+          readerViewportBefore: { bottom: 700, left: 0, right: 700, top: 0 },
+          scrollTopAfter: 2_000,
+          scrollTopBefore: 1_000,
+          targetGeometryAfter: { bottom: 650, left: 20, right: 620, top: 50 },
+          targetGeometryBefore: {
+            bottom: 1_600,
+            left: 20,
+            right: 620,
+            top: 800,
+          },
+          targetPage: priorityTarget,
+          type: "rapid-scroll-action",
+        },
+        nonTargetBitmaps: [{
+          activityId: priorityCached ? 120 : 140,
+          distance: null,
+          enabled: null,
+          eventId: 103,
+          height: previewHeight,
+          identityHash: diagnosticIdentity(configuration.id, "bitmap", 103),
+          pageNumber: 5,
+          scale: previewScale,
+          type: "bitmap",
+          visible: null,
+          width: previewWidth,
+        }],
+        staleNonVisibleCompositions: [],
+        staleWorkerBitmaps: [],
+        targetAfter: {
+          canvasHeight: targetHeight,
+          canvasWidth: targetWidth,
+          distance: 0,
+          renderSource: "worker-bitmap",
+          scale: targetScale,
+          targetHeight,
+          targetScale,
+          targetWidth,
+          visible: true,
+        },
+        targetBefore: {
+          canvasHeight: 0,
+          canvasWidth: 0,
+          distance: 1,
+          latestBitmapActivityId: 80,
+          latestBitmapEventId: 80,
+          latestBitmapHeight: priorityCached ? targetHeight : previewHeight,
+          latestBitmapScale: priorityCached ? targetScale : previewScale,
+          latestBitmapWidth: priorityCached ? targetWidth : previewWidth,
+          targetHeight: null,
+          targetScale: null,
+          targetWidth: null,
+          visible: false,
+        },
+        targetBitmapAfterVisibleRequest: priorityBitmap,
+        targetBitmapCount: priorityCached ? 0 : 1,
+        targetBitmaps: priorityCached ? [] : [structuredClone(priorityBitmap)],
+        targetComposition: {
+          activityId: priorityCached ? 110 : 130,
+          at: 110,
+          bitmapEventId: priorityBitmapEventId,
+          compositionId: 90,
+          drawInvocationId: 90,
+          geometry: { bottom: 650, left: 20, right: 620, top: 50 },
+          geometryVisible: true,
+          height: targetHeight,
+          page: priorityTarget,
+          readerViewport: { bottom: 700, left: 0, right: 700, top: 0 },
+          scale: targetScale,
+          source: "worker-bitmap",
+          visible: true,
+          visiblePages: [priorityTarget],
+          width: targetWidth,
+        },
+        targetPage: priorityTarget,
+        targetPath: priorityCached ? "cached-target" : "render-required",
+        targetRenderRequestCount: priorityCached ? 0 : 1,
+        targetRenderRequests:
+          priorityCached ? [] : [structuredClone(priorityRequest)],
+        targetVisibleRequest: priorityRequest,
+      },
+    };
+  });
+  const fallbackArtifact = artifact("fallback-visible-retry.png", 9);
+  const cancellationTerminal = {
+    abortSignalId: CANCELLATION_ABORT_SIGNAL_ID,
+    at: 145,
+    cancelRequestedAt: 140,
+    documentKey: DOCUMENT_KEY,
+    outcome: "cancelled",
+    page: 3,
+    pageDerivation: "sole-visible-unsatisfied-page",
+    renderAttemptId: 7,
+    revision: REVISION,
+    targetHeight: 800,
+    targetKey: "600x800",
+    targetWidth: 600,
+    type: "staging-finish",
+  };
+  return {
+    artifacts: {
+      deploymentId: DEPLOYMENT,
+      screenshots: [
+        ...matrix.flatMap((run) => [
+          run.comparison.referenceScreenshot,
+          run.comparison.lineLightScreenshot,
+        ]),
+        fallbackArtifact,
+      ],
+      sourceCommit: COMMIT,
+      sourceTree: TREE,
+    },
+    bitmapBudget: {
+      afterUnpin: { count: 8, pixels: 32_000_000 },
+      closedBitmaps: 10,
+      limits: {
+        count: PDF_SHARPNESS_MAX_BITMAP_COUNT,
+        pixels: PDF_SHARPNESS_MAX_BITMAP_PIXELS,
+      },
+      passed: true,
+      peak: { count: 8, pixels: 32_000_000 },
+      pinnedOverflowObserved: true,
+      pinnedPeak: { count: 9, pixels: 37_000_000 },
+      mixedSizes: Array.from({ length: 10 }, (_, index) => ({
+        height: 1000 + index,
+        width: 1000 + index,
+      })),
+      steadyState: { count: 8, pixels: 32_000_000 },
+    },
+    build: {
+      fresh: true,
+      localManifest: { deploymentId: DEPLOYMENT, sha256: SHA },
+      servedManifest: { deploymentId: DEPLOYMENT, sha256: SHA },
+      sourceCommit: COMMIT,
+      sourceTree: TREE,
+    },
+    fallback: {
+      artifact: fallbackArtifact,
+      importedSource: { sha256: SHA, size: fixture.bytes },
+      injectedFailures: 1,
+      invisibleCancellation: {
+        abortSignalId: CANCELLATION_ABORT_SIGNAL_ID,
+        canvasHeightAfterExit: 0,
+        canvasPresentAfterExit: true,
+        canvasWidthAfterExit: 0,
+        cancellationTerminal,
+        completedAfterExit: false,
+        continuationArmedAt: 80,
+        continuationArmPageDerivation: "next-page-from-sole-visible-page",
+        continuationDelayAt: 100,
+        continuationDelayObserved: true,
+        continuationMinimumElapsedAt: 1100,
+        continuationMinimumElapsedObserved: true,
+        continuationResumeAt: 1100,
+        continuationResumeObserved: true,
+        continuationResumedAfterMs: 1000,
+        continuationReleaseRequestedAt: 150,
+        documentKey: DOCUMENT_KEY,
+        exitRequestedAt: 130,
+        exitedAt: 150,
+        lateComposes: [],
+        page: 3,
+        pageDerivation: "sole-visible-unsatisfied-page",
+        renderAttemptId: 7,
+        revision: REVISION,
+        textOverlayRetainedAfterExit: true,
+        viewportExit: {
+          abortSignalId: CANCELLATION_ABORT_SIGNAL_ID,
+          at: 150,
+          cancelRequestedAt: 140,
+          canvasHeight: 0,
+          canvasPresent: true,
+          canvasWidth: 0,
+          documentKey: DOCUMENT_KEY,
+          page: 3,
+          pageDerivation: "sole-visible-unsatisfied-page",
+          renderAttemptId: 7,
+          revision: REVISION,
+          textOverlayCount: 12,
+          type: "viewport-exit",
+          visible: false,
+        },
+        viewportExitRequest: {
+          abortSignalId: CANCELLATION_ABORT_SIGNAL_ID,
+          at: 130,
+          destinationPage: 5,
+          documentKey: DOCUMENT_KEY,
+          page: 3,
+          pageDerivation: "sole-visible-unsatisfied-page",
+          renderAttemptId: 7,
+          revision: REVISION,
+          type: "viewport-exit-request",
+          visibleBeforeRequest: true,
+        },
+      },
+      longTasks: [{ duration: 50, name: "self", startTime: 1 }],
+      maximumConcurrentStaging: 1,
+      noLateLowOverwrite: true,
+      retry: {
+        composedAt: 20,
+        documentKey: DOCUMENT_KEY,
+        failedAbortSignalId: FAILED_ABORT_SIGNAL_ID,
+        failedAttemptId: 1,
+        failedAt: 11,
+        injectionArmedAt: 8,
+        injectionPageDerivation: "validated-adjacent-unsatisfied-page",
+        page: 2,
+        pageDerivation: "sole-visible-unsatisfied-page",
+        retryAttemptId: 2,
+        retryAbortSignalId: RETRY_ABORT_SIGNAL_ID,
+        retryStartedAt: 12,
+        revision: REVISION,
+        targetHeight: 800,
+        targetKey: "600x800",
+        targetWidth: 600,
+      },
+      retrySucceeded: true,
+      runtimeErrors: [],
+      signaledBeforeDocumentReady: true,
+      stagingEvents: [
+        {
+          at: 8,
+          documentKey: DOCUMENT_KEY,
+          page: 2,
+          pageDerivation: "validated-adjacent-unsatisfied-page",
+          revision: REVISION,
+          type: "injection-armed",
+        },
+        {
+          abortSignalId: FAILED_ABORT_SIGNAL_ID,
+          at: 9,
+          type: "abort-signal-registered",
+        },
+        {
+          abortSignalCandidateCount: 1,
+          abortSignalId: FAILED_ABORT_SIGNAL_ID,
+          abortSignalRegisteredAt: 9,
+          at: 10,
+          candidatePages: [2],
+          documentKey: DOCUMENT_KEY,
+          page: 2,
+          pageDerivation: "sole-visible-unsatisfied-page",
+          renderAttemptId: 1,
+          revision: REVISION,
+          targetHeight: 800,
+          targetKey: "600x800",
+          targetWidth: 600,
+          type: "staging-start",
+        },
+        {
+          abortSignalId: FAILED_ABORT_SIGNAL_ID,
+          at: 11,
+          cancelRequestedAt: null,
+          documentKey: DOCUMENT_KEY,
+          outcome: "injected-failure",
+          page: 2,
+          pageDerivation: "sole-visible-unsatisfied-page",
+          renderAttemptId: 1,
+          revision: REVISION,
+          targetHeight: 800,
+          targetKey: "600x800",
+          targetWidth: 600,
+          type: "staging-finish",
+        },
+        {
+          abortSignalId: RETRY_ABORT_SIGNAL_ID,
+          at: 11.5,
+          type: "abort-signal-registered",
+        },
+        {
+          abortSignalCandidateCount: 1,
+          abortSignalId: RETRY_ABORT_SIGNAL_ID,
+          abortSignalRegisteredAt: 11.5,
+          at: 12,
+          candidatePages: [2],
+          documentKey: DOCUMENT_KEY,
+          page: 2,
+          pageDerivation: "sole-visible-unsatisfied-page",
+          renderAttemptId: 2,
+          revision: REVISION,
+          targetHeight: 800,
+          targetKey: "600x800",
+          targetWidth: 600,
+          type: "staging-start",
+        },
+        {
+          abortSignalId: RETRY_ABORT_SIGNAL_ID,
+          at: 20,
+          documentKey: DOCUMENT_KEY,
+          page: 2,
+          pageDerivation: "sole-visible-unsatisfied-page",
+          pageMatchesAttempt: true,
+          renderAttemptId: 2,
+          revision: REVISION,
+          sourcePage: 2,
+          targetHeight: 800,
+          targetKey: "600x800",
+          targetWidth: 600,
+          type: "visible-compose",
+        },
+        {
+          armedAt: 80,
+          at: 80,
+          candidatePages: [3],
+          documentKey: DOCUMENT_KEY,
+          page: 3,
+          pageDerivation: "next-page-from-sole-visible-page",
+          revision: REVISION,
+          type: "continuation-armed",
+        },
+        {
+          abortSignalId: CANCELLATION_ABORT_SIGNAL_ID,
+          at: 89,
+          type: "abort-signal-registered",
+        },
+        {
+          abortSignalCandidateCount: 1,
+          abortSignalId: CANCELLATION_ABORT_SIGNAL_ID,
+          abortSignalRegisteredAt: 89,
+          at: 90,
+          candidatePages: [3],
+          documentKey: DOCUMENT_KEY,
+          page: 3,
+          pageDerivation: "sole-visible-unsatisfied-page",
+          renderAttemptId: 7,
+          revision: REVISION,
+          targetHeight: 800,
+          targetKey: "600x800",
+          targetWidth: 600,
+          type: "staging-start",
+        },
+        {
+          abortSignalId: CANCELLATION_ABORT_SIGNAL_ID,
+          at: 100,
+          armedAt: 80,
+          callbackName: "bound _scheduleNext",
+          delay: 1000,
+          documentKey: DOCUMENT_KEY,
+          page: 3,
+          pageDerivation: "sole-visible-unsatisfied-page",
+          renderAttemptId: 7,
+          revision: REVISION,
+          type: "continuation-delay",
+        },
+        {
+          abortSignalId: CANCELLATION_ABORT_SIGNAL_ID,
+          at: 130,
+          destinationPage: 5,
+          documentKey: DOCUMENT_KEY,
+          page: 3,
+          pageDerivation: "sole-visible-unsatisfied-page",
+          renderAttemptId: 7,
+          revision: REVISION,
+          type: "viewport-exit-request",
+          visibleBeforeRequest: true,
+        },
+        {
+          abortSignalId: CANCELLATION_ABORT_SIGNAL_ID,
+          at: 140,
+          documentKey: DOCUMENT_KEY,
+          page: 3,
+          pageDerivation: "sole-visible-unsatisfied-page",
+          renderAttemptId: 7,
+          revision: REVISION,
+          type: "cancel-request",
+        },
+        cancellationTerminal,
+        {
+          abortSignalId: CANCELLATION_ABORT_SIGNAL_ID,
+          at: 150,
+          cancelRequestedAt: 140,
+          canvasHeight: 0,
+          canvasPresent: true,
+          canvasWidth: 0,
+          documentKey: DOCUMENT_KEY,
+          page: 3,
+          pageDerivation: "sole-visible-unsatisfied-page",
+          renderAttemptId: 7,
+          revision: REVISION,
+          textOverlayCount: 12,
+          type: "viewport-exit",
+          visible: false,
+        },
+        {
+          abortSignalId: CANCELLATION_ABORT_SIGNAL_ID,
+          afterMs: 1000,
+          at: 1100,
+          documentKey: DOCUMENT_KEY,
+          page: 3,
+          pageDerivation: "sole-visible-unsatisfied-page",
+          renderAttemptId: 7,
+          revision: REVISION,
+          type: "continuation-minimum-elapsed",
+        },
+        {
+          abortSignalId: CANCELLATION_ABORT_SIGNAL_ID,
+          afterMs: 1000,
+          at: 1100,
+          documentKey: DOCUMENT_KEY,
+          page: 3,
+          pageDerivation: "sole-visible-unsatisfied-page",
+          releaseRequestedAt: 150,
+          renderAttemptId: 7,
+          revision: REVISION,
+          type: "continuation-resume",
+        },
+      ],
+      workerFallbackEvent: { type: "render-fallback" },
+      workerQueueClosed: true,
+    },
+    fixture,
+    issue: 68,
+    matrix,
+    network: (() => {
+      let nextCdpId = 1;
+      const completedTargetSetup = (type, startedAt) => {
+        const serviceWorker = type === "service_worker";
+        const dispatchTimes = serviceWorker
+          ? [startedAt, startedAt + 1, startedAt + 2, startedAt + 3,
+            startedAt + 4]
+          : [startedAt, startedAt + 1, startedAt + 4, startedAt + 6,
+            startedAt + 8];
+        const resultTimes = serviceWorker
+          ? [startedAt + 6, startedAt + 7, startedAt + 8, startedAt + 9,
+            startedAt + 5]
+          : [startedAt + 2, startedAt + 3, startedAt + 5, startedAt + 7,
+            startedAt + 9];
+        const resultOrder = serviceWorker ? [2, 3, 4, 5, 1] : [1, 2, 3, 4, 5];
+        const deadlineAt = serviceWorker ? startedAt + 100 : null;
+        const definitions = [
+          ["network-enable", "Network.enable"],
+          ["runtime-enable", "Runtime.enable"],
+          ["cache-disable", "Network.setCacheDisabled"],
+          ["auto-attach", "Target.setAutoAttach"],
+          ["resume", "Runtime.runIfWaitingForDebugger"],
+        ];
+        return {
+          commandDeadlineAt: deadlineAt,
+          commands: definitions.map(([name, method], index) => ({
+            cdpId: nextCdpId++,
+            deadlineAt,
+            dispatchedAt: dispatchTimes[index],
+            dispatchSequence: index + 1,
+            method,
+            name,
+            resultAt: resultTimes[index],
+            resultSequence: resultOrder[index],
+            status: "completed",
+          })),
+          lifecycleStrategy: serviceWorker
+            ? "setup-dispatched-before-resume"
+            : "setup-completed-before-resume",
+          resumeDispatchedAt: dispatchTimes[4],
+        };
+      };
+      const normalPair = (id, index, role, offset) => {
+        const documentTarget = {
+          ancestry: [],
+          attachComplete: true,
+          bootstrapRequestKey: null,
+          detached: false,
+          ...completedTargetSetup("worker", 1_000 + index * 200 + offset),
+          parentSessionId: null,
+          phase: id,
+          resumed: true,
+          sessionId: `normal-${role}-document-session-${index}`,
+          targetId: `normal-${role}-document-target-${index}`,
+          type: "worker",
+          url: "http://127.0.0.1/assets/pdf-document.worker-test.js",
+          waitingForDebugger: true,
+        };
+        const parserTarget = {
+          ancestry: [documentTarget],
+          attachComplete: true,
+          bootstrapRequestKey: null,
+          detached: false,
+          ...completedTargetSetup(
+            "worker",
+            1_050 + index * 200 + offset,
+          ),
+          parentSessionId: documentTarget.sessionId,
+          phase: id,
+          resumed: true,
+          sessionId: `normal-${role}-parser-session-${index}`,
+          targetId: `normal-${role}-parser-target-${index}`,
+          type: "worker",
+          url: "http://127.0.0.1/assets/pdf-parser.worker-test.js",
+          waitingForDebugger: true,
+        };
+        return { documentTarget, parserTarget, role };
+      };
+      const normalPairs = PDF_SHARPNESS_MATRIX.map(({ id }, index) => {
+        const restored = index === 0
+          ? null
+          : normalPair(id, index, "restore", 0);
+        const imported = normalPair(id, index, "import", 100);
+        return { id, imported, restored };
+      });
+      const forcedWrapper = {
+        ancestry: [],
+        attachComplete: true,
+        bootstrapRequestKey: null,
+        detached: false,
+        ...completedTargetSetup("worker", 2_000),
+        parentSessionId: null,
+        phase: "forced-main-fallback",
+        resumed: true,
+        sessionId: "forced-wrapper-session",
+        targetId: "forced-wrapper-target",
+        type: "worker",
+        url: "blob:http://127.0.0.1/forced-wrapper",
+        waitingForDebugger: true,
+      };
+      const forcedParser = {
+        ancestry: [forcedWrapper],
+        attachComplete: true,
+        bootstrapRequestKey: null,
+        detached: false,
+        ...completedTargetSetup("worker", 2_050),
+        parentSessionId: forcedWrapper.sessionId,
+        phase: "forced-main-fallback",
+        resumed: true,
+        sessionId: "forced-parser-session",
+        targetId: "forced-parser-target",
+        type: "worker",
+        url: "http://127.0.0.1/assets/pdf-parser.worker-test.js",
+        waitingForDebugger: true,
+      };
+      const serviceWorker = {
+        ancestry: [],
+        attachComplete: true,
+        bootstrapRequestKey: null,
+        detached: false,
+        ...completedTargetSetup("service_worker", 900),
+        parentSessionId: null,
+        phase: PDF_SHARPNESS_MATRIX[0].id,
+        resumed: true,
+        serviceWorkerBootstrapRequestKey: null,
+        sessionId: "service-worker-session",
+        targetId: "service-worker-target",
+        type: "service_worker",
+        url: "http://127.0.0.1/sw.js",
+        waitingForDebugger: true,
+      };
+      const targets = [serviceWorker];
+      const targetBootstrapSettlements = [];
+      const serviceWorkerRequest = {
+        method: "GET",
+        phase: serviceWorker.phase,
+        requestId: "service-worker-bootstrap-request",
+        serviceWorkerTargetSessionId: serviceWorker.sessionId,
+        sessionId: serviceWorker.sessionId,
+        startedAt: 905,
+        terminalAt: 910,
+        terminalReason: "loading-finished",
+        type: "Script",
+        url: serviceWorker.url,
+      };
+      serviceWorker.serviceWorkerBootstrapRequestKey =
+        `${serviceWorker.sessionId}:${serviceWorkerRequest.requestId}`;
+      const requests = [serviceWorkerRequest];
+      const appendPair = (pair, id, index) => {
+          const { documentTarget, parserTarget, role } = pair;
+          targets.push(documentTarget, parserTarget);
+          const documentRequest = {
+            bootstrapTargetSessionId: documentTarget.sessionId,
+            method: "GET",
+            phase: id,
+            requestId: `normal-${role}-document-request-${index}`,
+            sessionId: null,
+            type: "Script",
+            url: documentTarget.url,
+          };
+          const parserRequest = {
+            bootstrapTargetSessionId: parserTarget.sessionId,
+            method: "GET",
+            phase: id,
+            requestId: `normal-${role}-parser-request-${index}`,
+            sessionId: documentTarget.sessionId,
+            type: "Script",
+            url: parserTarget.url,
+          };
+          for (const [request, target] of [
+            [documentRequest, documentTarget],
+            [parserRequest, parserTarget],
+          ]) {
+            target.bootstrapRequestKey =
+              `${request.sessionId ?? "page"}:${request.requestId}`;
+            targetBootstrapSettlements.push({
+              method: request.method,
+              phase: request.phase,
+              requestId: request.requestId,
+              requestSessionId: request.sessionId,
+              resourceType: request.type,
+              targetDetachedAtSettlement: false,
+              targetId: target.targetId,
+              targetParentSessionId: target.parentSessionId,
+              targetSessionId: target.sessionId,
+              targetType: target.type,
+              terminalReason: "target-attached",
+              url: request.url,
+            });
+          }
+          requests.push(documentRequest, parserRequest);
+          if (role === "import") {
+            requests.push({
+              method: "GET",
+              phase: id,
+              requestId: `normal-import-runtime-request-${index}`,
+              sessionId: parserTarget.sessionId,
+              type: "Fetch",
+              url: `http://127.0.0.1/assets/worker-request-${index}.bin`,
+            });
+          }
+      };
+      const matrixFixedPoints = normalPairs.map(
+        ({ id, imported, restored }, index) => {
+          if (restored) appendPair(restored, id, index);
+          const importBoundary = {
+            attachPromiseCount: targets.length,
+            requestCount: requests.length,
+            settlementCount: targetBootstrapSettlements.length,
+            targetCount: targets.length,
+          };
+          appendPair(imported, id, index);
+          const restoreCount = restored ? 1 : 0;
+          return {
+            attachErrorCount: 0,
+            attachmentReady: true,
+            attachPromiseCount: targets.length,
+            completedRequestCount: requests.length,
+            documentBootstrapSettlementCount: 1,
+            importBoundary,
+            inflightRequestCount: 0,
+            label: id,
+            parserBootstrapSettlementCount: 1,
+            pendingAttachCount: 0,
+            requestCount: requests.length,
+            restore: {
+              fixedPoint: {
+                attachPromiseCount: importBoundary.attachPromiseCount,
+                completedRequestCount: importBoundary.requestCount,
+                documentBootstrapSettlementCount: restoreCount,
+                parserBootstrapSettlementCount: restoreCount,
+                requestCount: importBoundary.requestCount,
+                targetBootstrapSettlementCount:
+                  importBoundary.settlementCount,
+                targetCount: importBoundary.targetCount,
+              },
+              readiness: {
+                activeDocumentCount: restoreCount,
+                activeDocumentMatchesOpen: index > 0,
+                activeDocumentStateAvailable: true,
+                activePdfCount: restoreCount,
+                expectedPersisted: index > 0,
+                firstPageCount: restoreCount,
+                importRequestCount: 0,
+                libraryPending: false,
+                openRequestCount: restoreCount,
+                ready: true,
+                sourceSelectionCount: 0,
+              },
+            },
+            serviceWorkerBootstrapObservationCount: 1,
+            serviceWorkerBypassed: true,
+            targetBootstrapSettlementCount:
+              targetBootstrapSettlements.length,
+            targetCount: targets.length,
+          };
+        },
+      );
+      targets.push(forcedWrapper, forcedParser);
+      const forcedBootstrapRequests = [
+        {
+          bootstrapTargetSessionId: forcedWrapper.sessionId,
+          method: "GET",
+          phase: forcedWrapper.phase,
+          requestId: "forced-wrapper-bootstrap-request",
+          sessionId: null,
+          type: "Script",
+          url: forcedWrapper.url,
+        },
+        {
+          bootstrapTargetSessionId: forcedParser.sessionId,
+          method: "GET",
+          phase: forcedParser.phase,
+          requestId: "forced-parser-bootstrap-request",
+          sessionId: forcedWrapper.sessionId,
+          type: "Script",
+          url: forcedParser.url,
+        },
+      ];
+      for (const [request, target] of [
+        [forcedBootstrapRequests[0], forcedWrapper],
+        [forcedBootstrapRequests[1], forcedParser],
+      ]) {
+        target.bootstrapRequestKey =
+          `${request.sessionId ?? "page"}:${request.requestId}`;
+        targetBootstrapSettlements.push({
+          method: request.method,
+          phase: request.phase,
+          requestId: request.requestId,
+          requestSessionId: request.sessionId,
+          resourceType: request.type,
+          targetDetachedAtSettlement: false,
+          targetId: target.targetId,
+          targetParentSessionId: target.parentSessionId,
+          targetSessionId: target.sessionId,
+          targetType: target.type,
+          terminalReason: "target-attached",
+          url: request.url,
+        });
+      }
+      requests.push(
+        ...forcedBootstrapRequests,
+        ...[forcedWrapper, forcedParser].map((target, index) => ({
+          method: "GET",
+          phase: target.phase,
+          requestId: `forced-runtime-request-${index}`,
+          sessionId: target.sessionId,
+          type: "Fetch",
+          url: `http://127.0.0.1/assets/forced-request-${index}.bin`,
+        })),
+      );
+      requests.forEach((request, index) => {
+        request.sequence = index + 1;
+        request.startedAt ??= 3_000 + index * 2;
+        request.terminalAt ??= request.startedAt + 1;
+        request.terminalReason ??= request.bootstrapTargetSessionId
+          ? "target-attached"
+          : "loading-finished";
+      });
+      const serviceWorkerBootstrapObservations = [{
+        method: serviceWorkerRequest.method,
+        phase: serviceWorkerRequest.phase,
+        requestId: serviceWorkerRequest.requestId,
+        requestSequence: serviceWorkerRequest.sequence,
+        requestSessionId: serviceWorkerRequest.sessionId,
+        requestStartedAt: serviceWorkerRequest.startedAt,
+        resourceType: serviceWorkerRequest.type,
+        resumeDispatchedAt: serviceWorker.resumeDispatchedAt,
+        targetId: serviceWorker.targetId,
+        targetDetachedAtObservation: false,
+        targetSessionId: serviceWorker.sessionId,
+        targetType: serviceWorker.type,
+        terminalAt: serviceWorkerRequest.terminalAt,
+        terminalReason: serviceWorkerRequest.terminalReason,
+        url: serviceWorkerRequest.url,
+      }];
+      const nonPageRequests = requests.filter(
+        (request) => request.sessionId !== null,
+      );
+      const requestCount = requests.length;
+      return {
+        attachErrors: [],
+        networkFixedPoints: [
+          ...matrixFixedPoints,
+          ...["forced-main-fallback", "final-network-privacy"].map((label) => ({
+          attachErrorCount: 0,
+          attachmentReady: true,
+          attachPromiseCount: targets.length,
+          completedRequestCount: requestCount,
+          documentBootstrapSettlementCount:
+            PDF_SHARPNESS_MATRIX.some(({ id }) => id === label) ? 1 : 0,
+          inflightRequestCount: 0,
+          label,
+          pendingAttachCount: 0,
+          parserBootstrapSettlementCount:
+            label === "forced-main-fallback" ? 1 : 0,
+          requestCount,
+          serviceWorkerBypassed: true,
+          serviceWorkerBootstrapObservationCount: 1,
+          targetBootstrapSettlementCount:
+            targetBootstrapSettlements.length,
+          targetCount: targets.length,
+          })),
+        ],
+        completedRequestCount: requestCount,
+        coverageTargets: {
+          forcedBlobWrapper: [forcedWrapper],
+          forcedParserWorker: [forcedParser],
+          normalDocumentWorker: normalPairs.flatMap(({ imported, restored }) =>
+            [restored?.documentTarget, imported.documentTarget].filter(Boolean)
+          ),
+          normalParserWorker: normalPairs.flatMap(({ imported, restored }) =>
+            [restored?.parserTarget, imported.parserTarget].filter(Boolean)
+          ),
+        },
+        externalRequests: [],
+        failures: [],
+        initialTargetBaseline: {
+          checked: true,
+          pageCount: 1,
+          pageUrlClass: "about",
+          targetCount: 1,
+          workerCount: 0,
+        },
+        inflightRequestCount: 0,
+        localRequestCount: requestCount,
+        matrixCoverage: Object.fromEntries(
+          normalPairs.map(({ id, imported }) => [
+            id,
+            {
+              documentBootstrapSettlementCount: 1,
+              documentRequestCount: 2,
+              documentTargets: [imported.documentTarget],
+              parserBootstrapSettlementCount: 1,
+              parserRequestCount: 1,
+              parserTargets: [imported.parserTarget],
+            },
+          ]),
+        ),
+        nonPageRequestCounts: {
+          forcedBlobWrapper: 3,
+          forcedParserWorker: 1,
+          normalDocumentWorker: nonPageRequests.filter((request) =>
+            normalPairs.some(({ imported, restored }) =>
+              [restored, imported].filter(Boolean).some(({ documentTarget }) =>
+                request.sessionId === documentTarget.sessionId
+              )
+            ) || normalPairs.some(({ imported, restored }) =>
+              [restored, imported].filter(Boolean).some(({ parserTarget }) =>
+                request.sessionId === parserTarget.sessionId
+              )
+            )
+          ).length,
+          normalParserWorker: nonPageRequests.filter((request) =>
+            normalPairs.some(({ imported, restored }) =>
+              [restored, imported].filter(Boolean).some(({ parserTarget }) =>
+                request.sessionId === parserTarget.sessionId
+              )
+            )
+          ).length,
+          total: nonPageRequests.length,
+        },
+        nonPageRequests,
+        referenceScheme: "file:",
+        requests,
+        serviceWorkerBypassed: true,
+        serviceWorkerBootstrapObservations,
+        sourceRequest: null,
+        sourceSha256: SHA,
+        sourceStayedLocal: true,
+        targetBootstrapSettlements,
+        targets,
+      };
+    })(),
+    schemaVersion: PDF_SHARPNESS_SCHEMA_VERSION,
+    source: {
+      commit: COMMIT,
+      files: Object.fromEntries(
+        PDF_SHARPNESS_SOURCE_FILES.map((file) => [file, SHA]),
+      ),
+      postBuildCommit: COMMIT,
+      postBuildStatus: [],
+      postBuildTree: TREE,
+      preflightStatus: [],
+      tree: TREE,
+    },
+    teardown: {
+      app: {
+        cdpClosed: true,
+        cdpPresent: true,
+        error: null,
+        present: true,
+        processClosed: true,
+        profileRemoved: true,
+      },
+      browserClosed: true,
+      cdpClosed: true,
+      errors: [],
+      profilesRemoved: true,
+      reference: {
+        cdpClosed: true,
+        cdpPresent: true,
+        error: null,
+        present: true,
+        processClosed: true,
+        profileRemoved: true,
+      },
+      referenceBrowserClosed: true,
+      referenceBrowsersClosed: true,
+      referenceSessions: matrix.map((run) => ({
+        cdpClosed: true,
+        cdpPresent: true,
+        configurationId: run.id,
+        errorPresent: false,
+        present: true,
+        processClosed: true,
+        profileRemoved: true,
+        sessionIdentityHash:
+          run.comparison.referenceReadiness.captureLifecycle
+            .sessionIdentityHash,
+      })),
+      server: { error: null, present: true, processClosed: true },
+      serverClosed: true,
+    },
+  };
+}
+
+function makeAdjacentReferenceComponentTheGlobalWinner(run) {
+  const readiness = run.comparison.referenceReadiness;
+  const referenceTarget = run.comparison.referenceTarget;
+  const selected = readiness.substantialComponents[0];
+  const adjacentBounds = {
+    ...selected.pageBounds,
+    y: referenceTarget.anchorLimit + 1,
+  };
+  const adjacent = {
+    pageBounds: adjacentBounds,
+    whiteArea: selected.whiteArea + 1,
+  };
+  readiness.pageBounds = adjacentBounds;
+  readiness.runnerUpWhiteArea = selected.whiteArea;
+  readiness.substantialComponents = [selected, adjacent];
+  readiness.substantialComponentCount = 2;
+  readiness.winnerDominanceRatio = adjacent.whiteArea / selected.whiteArea;
+  readiness.winnerWhiteArea = adjacent.whiteArea;
+  referenceTarget.components = [
+    referenceTarget.components[0],
+    { bounds: adjacentBounds, whiteArea: adjacent.whiteArea },
+  ];
+}
+
+function forgeCorrelatedReferenceComponentAreaOverflow(run) {
+  const readiness = run.comparison.referenceReadiness;
+  const target = run.comparison.referenceTarget;
+  const winner = readiness.substantialComponents[0];
+  const additional = [1, 2].map((offset) => ({
+    pageBounds: {
+      ...winner.pageBounds,
+      x: winner.pageBounds.x + offset,
+      y: target.anchorLimit + offset,
+    },
+    whiteArea: winner.whiteArea - offset,
+  }));
+  readiness.substantialComponents.push(...additional);
+  readiness.substantialComponentCount = 3;
+  readiness.runnerUpWhiteArea = additional[0].whiteArea;
+  readiness.winnerDominanceRatio =
+    readiness.winnerWhiteArea / readiness.runnerUpWhiteArea;
+  target.components.push(...additional.map((component) => ({
+    bounds: { ...component.pageBounds },
+    whiteArea: component.whiteArea,
+  })));
+}
+
+function forgeImpossibleConnectedReferenceComponent(run) {
+  const readiness = run.comparison.referenceReadiness;
+  const target = run.comparison.referenceTarget;
+  const impossible = {
+    pageBounds: {
+      ...readiness.substantialComponents[0].pageBounds,
+      x: 20,
+      y: target.anchorLimit + 1,
+    },
+    whiteArea: 1,
+  };
+  readiness.substantialComponents.push(impossible);
+  readiness.substantialComponentCount = 2;
+  readiness.runnerUpWhiteArea = impossible.whiteArea;
+  readiness.winnerDominanceRatio =
+    readiness.winnerWhiteArea / readiness.runnerUpWhiteArea;
+  target.components.push({
+    bounds: { ...impossible.pageBounds },
+    whiteArea: impossible.whiteArea,
+  });
+}
+
+function forgeListedReferenceRunner(run, { tied = false } = {}) {
+  const readiness = run.comparison.referenceReadiness;
+  const target = run.comparison.referenceTarget;
+  const winner = readiness.substantialComponents[0];
+  const listed = {
+    pageBounds: {
+      ...winner.pageBounds,
+      x: 20,
+      y: target.anchorLimit + 1,
+    },
+    whiteArea: tied ? winner.whiteArea : winner.whiteArea - 1,
+  };
+  readiness.substantialComponents.push(listed);
+  readiness.substantialComponentCount = 2;
+  readiness.runnerUpWhiteArea = 1;
+  readiness.winnerDominanceRatio = readiness.winnerWhiteArea;
+  target.components.push({
+    bounds: { ...listed.pageBounds },
+    whiteArea: listed.whiteArea,
+  });
+}
+
+test("accepts complete Issue 68 sharpness evidence", () => {
+  const evidence = passingEvidence();
+  assert.deepEqual(
+    evidence.matrix.map((run) => run.raster.transition),
+    [
+      "preview-satisfied-target",
+      "preview-satisfied-target",
+      "preview-to-sharp-upgrade",
+      "preview-to-sharp-upgrade",
+      "preview-to-sharp-upgrade",
+      "preview-to-sharp-upgrade",
+    ],
+  );
+  assert.deepEqual(validatePdfSharpnessEvidence(evidence), []);
+});
+
+test("accepts fresh row one and same-phase restore/import intervals", () => {
+  const evidence = passingEvidence();
+  const points = evidence.network.networkFixedPoints;
+  assert.deepEqual(
+    {
+      document: points.at(-2).documentBootstrapSettlementCount,
+      parser: points.at(-2).parserBootstrapSettlementCount,
+    },
+    { document: 0, parser: 1 },
+  );
+  assert.deepEqual(
+    {
+      document: points.at(-1).documentBootstrapSettlementCount,
+      parser: points.at(-1).parserBootstrapSettlementCount,
+    },
+    { document: 0, parser: 0 },
+  );
+  assert.deepEqual(
+    {
+      attachPromiseCount: points.at(-1).attachPromiseCount,
+      completedRequestCount: points.at(-1).completedRequestCount,
+      requestCount: points.at(-1).requestCount,
+      targetBootstrapSettlementCount:
+        points.at(-1).targetBootstrapSettlementCount,
+      targetCount: points.at(-1).targetCount,
+    },
+    {
+      attachPromiseCount: points.at(-2).attachPromiseCount,
+      completedRequestCount: points.at(-2).completedRequestCount,
+      requestCount: points.at(-2).requestCount,
+      targetBootstrapSettlementCount:
+        points.at(-2).targetBootstrapSettlementCount,
+      targetCount: points.at(-2).targetCount,
+    },
+  );
+  PDF_SHARPNESS_MATRIX.forEach(({ id }, index) => {
+    const point = points[index];
+    const previous = points[index - 1] ?? {
+      targetCount: 0,
+    };
+    const restoreTargets = evidence.network.targets.slice(
+      previous.targetCount,
+      point.importBoundary.targetCount,
+    ).filter((target) => /pdf-(?:document|parser)\.worker-/u.test(target.url));
+    const importTargets = evidence.network.targets.slice(
+      point.importBoundary.targetCount,
+      point.targetCount,
+    ).filter((target) => /pdf-(?:document|parser)\.worker-/u.test(target.url));
+    assert.equal(restoreTargets.length, index === 0 ? 0 : 2);
+    assert.equal(importTargets.length, 2);
+    assert.equal(restoreTargets.every((target) => target.phase === id), true);
+    assert.equal(importTargets.every((target) => target.phase === id), true);
+    assert.equal(
+      point.restore.readiness.activeDocumentMatchesOpen,
+      index > 0,
+    );
+  });
+  assert.deepEqual(validatePdfSharpnessEvidence(evidence), []);
+});
+
+test("binds the requested top page when an adjacent page is the global winner", () => {
+  const evidence = passingEvidence();
+  makeAdjacentReferenceComponentTheGlobalWinner(evidence.matrix[0]);
+  assert.notDeepEqual(
+    evidence.matrix[0].comparison.referenceReadiness.pageBounds,
+    evidence.matrix[0].comparison.referenceTarget.cropBounds,
+  );
+  assert.deepEqual(validatePdfSharpnessEvidence(evidence), []);
+});
+
+test("classifies target-satisfying previews without manufacturing an upgrade", () => {
+  const sharp = { targetHeight: 990, targetScale: 1.25, targetWidth: 765 };
+  assert.equal(
+    classifyPdfRasterTransition(
+      { height: 990, scale: 1.25, width: 765 },
+      sharp,
+    ),
+    "preview-satisfied-target",
+  );
+  assert.equal(
+    classifyPdfRasterTransition(
+      { height: 792, scale: 1, width: 612 },
+      sharp,
+    ),
+    "preview-to-sharp-upgrade",
+  );
+});
+
+test("binds raster transitions to import and monotonic event identities", async () => {
+  const source = await readFile(
+    "scripts/run-pdf-sharpness-browser-regression.mjs",
+    "utf8",
+  );
+  assert.match(source, /compositionId: state\.draws\.length \+ 1/u);
+  assert.equal(source.match(/eventId: workerEvents\.length \+ 1/gu)?.length, 3);
+  assert.match(
+    source,
+    /event\.jobId === \$\{modelCompletion\.importJobId\}/u,
+  );
+  assert.match(
+    source,
+    /event\.revision === \$\{JSON\.stringify\(modelCompletion\.revision\)\}/u,
+  );
+  assert.match(source, /readRasterTransitionDiagnostic/u);
+  assert.match(
+    source,
+    /draw\.compositionId > \$\{previewComposition\.compositionId\}/u,
+  );
+  assert.doesNotMatch(
+    source,
+    /draw\.at > \$\{previewComposition\.at\}/u,
+  );
+});
+
+test("filters fallback proof to the current imported document and signals", () => {
+  const stale = {
+    abortSignalId: 1,
+    documentKey: "restored:revision",
+    revision: "restored-revision",
+  };
+  const current = {
+    abortSignalId: 2,
+    documentKey: DOCUMENT_KEY,
+    revision: REVISION,
+  };
+  const { events, maximumConcurrentStaging } = selectPdfFallbackScenarioEvents(
+    [
+      { ...stale, at: 90, type: "staging-start" },
+      { abortSignalId: 1, at: 101, type: "abort-signal-registered" },
+      { ...stale, at: 102, type: "staging-start" },
+      { abortSignalId: 2, at: 103, type: "abort-signal-registered" },
+      { ...current, at: 104, type: "staging-start" },
+      { ...current, at: 105, type: "staging-finish" },
+    ],
+    { documentKey: DOCUMENT_KEY, revision: REVISION, startedAt: 100 },
+  );
+  assert.deepEqual(
+    events.map((event) => [event.abortSignalId, event.type]),
+    [
+      [2, "abort-signal-registered"],
+      [2, "staging-start"],
+      [2, "staging-finish"],
+    ],
+  );
+  assert.equal(maximumConcurrentStaging, 1);
+});
+
+test("records fixed-point diagnostics without private URL or payload data", () => {
+  const appUrl = "http://127.0.0.1:4173/";
+  const privateText = "private-reader-sentence";
+  const privateProfile = "/tmp/linelight-private-profile/Default";
+  const diagnosticCapturedAt = Date.now();
+  const pendingPromise = Promise.resolve();
+  const requestKey = "worker-session:private-request-id";
+  const workerUrl =
+    `${appUrl}assets/pdf-document.worker-test.js?text=${privateText}`;
+  const parserUrl =
+    `${appUrl}assets/pdf-parser.worker-test.js?profile=${privateProfile}`;
+  const networkState = {
+    attachErrors: [{
+      command: "resume",
+      error: `Could not resume target: ${privateProfile}?text=${privateText}`,
+      sessionId: "worker-session",
+      targetId: "worker-target",
+      type: "worker",
+      url: parserUrl,
+    }],
+    attachPromises: [pendingPromise],
+    byId: new Map([[requestKey, {
+      method: "GET",
+      phase: "desktop-dpr1-zoom100",
+      requestId: "private-request-id",
+      sessionId: "worker-session",
+      type: "Script",
+      url: parserUrl,
+    }]]),
+    completedRequestCount: 4,
+    inflightRequests: new Set([requestKey]),
+    pendingAttachMetadata: new Map([[pendingPromise, {
+      commands: [
+        { name: "network-enable", status: "completed" },
+        { name: "runtime-enable", status: "pending" },
+      ],
+      parentSessionId: null,
+      phase: "desktop-dpr1-zoom100",
+      sessionId: "worker-session",
+      targetId: "worker-target",
+      type: "worker",
+      url: parserUrl,
+    }]]),
+    pendingAttachPromises: new Set([pendingPromise]),
+    recentActivity: [{
+      at: diagnosticCapturedAt - 20,
+      command: "runtime-enable",
+      kind: "attach-command-start",
+      phase: "desktop-dpr1-zoom100",
+      sessionId: "worker-session",
+      targetId: "worker-target",
+      type: "worker",
+      url: parserUrl,
+    }],
+    requests: [{ method: "GET", url: workerUrl }],
+    serviceWorkerBypassed: false,
+    targetBootstrapSettlements: [{
+      method: "GET",
+      phase: "desktop-dpr1-zoom100",
+      requestId: "document-bootstrap-request",
+      requestSessionId: null,
+      resourceType: "Script",
+      targetDetachedAtSettlement: false,
+      targetId: "document-target",
+      targetParentSessionId: null,
+      targetSessionId: "document-session",
+      targetType: "worker",
+      terminalReason: "target-attached",
+      url: workerUrl,
+    }],
+    targets: [
+      {
+        detached: false,
+        parentSessionId: null,
+        phase: "desktop-dpr1-zoom100",
+        sessionId: "document-session",
+        targetId: "document-target",
+        type: "worker",
+        url: workerUrl,
+        waitingForDebugger: false,
+      },
+      {
+        detached: true,
+        parentSessionId: "document-session",
+        phase: "desktop-dpr1-zoom100",
+        sessionId: "worker-session",
+        targetId: "worker-target",
+        type: "worker",
+        url: parserUrl,
+        waitingForDebugger: true,
+      },
+    ],
+  };
+  const diagnosticWaitState = {
+    capturedAtMs: diagnosticCapturedAt,
+    elapsedMs: 10_001,
+    recentSamples: [{
+      attachErrorCount: 1,
+      attachmentReady: false,
+      elapsedMs: 9_950,
+      incompleteTargetCount: 2,
+      inflightRequestCount: 1,
+      pendingAttachCount: 1,
+      requestCount: 1,
+      serviceWorkerBypassed: false,
+      stableSamples: 0,
+      targetCount: 2,
+    }],
+    stableSamples: 0,
+    timeoutMs: 10_000,
+  };
+  const diagnostic = buildCdpNetworkFixedPointDiagnostic(
+    networkState,
+    appUrl,
+    "desktop-dpr1-zoom100",
+    "timeout",
+    diagnosticWaitState,
+  );
+  assert.deepEqual(Object.keys(diagnostic).sort(), [
+    "attachErrors",
+    "counts",
+    "importBoundary",
+    "inflightRequests",
+    "initialTargetBaseline",
+    "label",
+    "matrixRestoreProof",
+    "outcome",
+    "pendingAttaches",
+    "recentActivity",
+    "serviceWorkerBootstrapObservations",
+    "serviceWorkerBypassed",
+    "targetBootstrapSettlements",
+    "targets",
+    "wait",
+  ]);
+  assert.equal(diagnostic.importBoundary, null);
+  assert.equal(diagnostic.matrixRestoreProof, null);
+  assert.equal(diagnostic.inflightRequests[0].urlClass,
+    "pdf-parser-worker");
+  assert.equal(diagnostic.pendingAttaches[0].urlClass,
+    "pdf-parser-worker");
+  assert.deepEqual(
+    diagnostic.pendingAttaches[0].commands.map(
+      ({ name, status }) => ({ name, status }),
+    ),
+    [
+      { name: "network-enable", status: "completed" },
+      { name: "runtime-enable", status: "pending" },
+    ],
+  );
+  assert.equal(diagnostic.targets[0].urlClass,
+    "pdf-document-worker");
+  assert.equal(diagnostic.targets[1].urlClass,
+    "pdf-parser-worker");
+  assert.equal(diagnostic.targets[1].detached, true);
+  assert.equal(diagnostic.targets[1].ancestry[0].urlClass,
+    "pdf-document-worker");
+  assert.equal(diagnostic.recentActivity[0].command, "runtime-enable");
+  assert.equal(
+    diagnostic.targetBootstrapSettlements[0].urlClass,
+    "pdf-document-worker",
+  );
+  assert.equal(diagnostic.wait.elapsedMs, 10_001);
+  assert.equal(diagnostic.serviceWorkerBypassed, false);
+  assert.equal(diagnostic.initialTargetBaseline, null);
+  assert.deepEqual(diagnostic.serviceWorkerBootstrapObservations, []);
+  assert.equal(diagnostic.wait.recentSamples[0].inflightRequestCount, 1);
+  assert.match(diagnostic.inflightRequests[0].identityHash, /^[a-f0-9]{64}$/u);
+  assert.deepEqual(diagnostic.counts, {
+    attachErrorCount: 1,
+    attachPromiseCount: 1,
+    completedRequestCount: 4,
+    externalRequestCount: 0,
+    inflightRequestCount: 1,
+    networkFailureCount: 0,
+    pendingAttachCount: 1,
+    requestCount: 1,
+    serviceWorkerBootstrapObservationCount: 0,
+    targetBootstrapSettlementCount: 1,
+    targetCount: 2,
+  });
+  const serialized = JSON.stringify(diagnostic);
+  assert.doesNotMatch(serialized, /private-reader-sentence/u);
+  assert.doesNotMatch(serialized, /linelight-private-profile/u);
+  assert.doesNotMatch(serialized, /\?/u);
+  assert.doesNotMatch(serialized, /"url":|"path":|"error":|body|documentText/u);
+
+  networkState.attachErrors[0].error =
+    "Could not resume target: entirely-different-private-error";
+  networkState.attachErrors[0].url = `${appUrl}assets/pdf-parser.worker-next.js?new=secret`;
+  networkState.byId.get(requestKey).url =
+    `${appUrl}assets/pdf-parser.worker-next.js?new=secret`;
+  networkState.pendingAttachMetadata.get(pendingPromise).url =
+    `${appUrl}assets/pdf-parser.worker-next.js?new=secret`;
+  networkState.recentActivity[0].url =
+    `${appUrl}assets/pdf-parser.worker-next.js?new=secret`;
+  networkState.requests[0].url =
+    `${appUrl}assets/pdf-document.worker-next.js?new=secret`;
+  networkState.targets[0].url =
+    `${appUrl}assets/pdf-document.worker-next.js?new=secret`;
+  networkState.targetBootstrapSettlements[0].url =
+    `${appUrl}assets/pdf-document.worker-next.js?new=secret`;
+  networkState.targets[1].url =
+    `${appUrl}assets/pdf-parser.worker-next.js?new=secret`;
+  const changedPrivateInputs = buildCdpNetworkFixedPointDiagnostic(
+    networkState,
+    appUrl,
+    "desktop-dpr1-zoom100",
+    "timeout",
+    diagnosticWaitState,
+  );
+  assert.deepEqual(changedPrivateInputs, diagnostic);
+
+  assert.deepEqual(
+    [
+      `${appUrl}`,
+      `${appUrl}assets/app.js`,
+      workerUrl,
+      parserUrl,
+      `blob:${appUrl}private-id`,
+      "about:blank",
+      "data:text/plain,private",
+      "https://example.test/private?token=secret",
+      "http://127.0.0.1:9999/internal?secret=true",
+    ].map((url) => classifyCdpDiagnosticUrl(url, appUrl)),
+    [
+      "page",
+      "app-asset",
+      "pdf-document-worker",
+      "pdf-parser-worker",
+      "blob",
+      "about",
+      "data",
+      "external",
+      "other-local",
+    ],
+  );
+
+  const outputDirectory = path.join(
+    os.tmpdir(),
+    "issue-68-network-diagnostic",
+  );
+  const screenshot = {
+    ...artifact("linelight-desktop-dpr1-zoom100.png", 9),
+    path: path.relative(
+      path.resolve("."),
+      path.join(outputDirectory, "linelight-desktop-dpr1-zoom100.png"),
+    ),
+  };
+  const cleanDiagnosticTeardown = {
+    app: {
+      cdpClosed: true,
+      error: null,
+      present: true,
+      processClosed: true,
+      profileRemoved: true,
+    },
+    browserClosed: true,
+    cdpClosed: true,
+    errors: [],
+    profilesRemoved: true,
+    reference: {
+      cdpClosed: true,
+      error: null,
+      present: false,
+      processClosed: true,
+      profileRemoved: true,
+    },
+    referenceBrowserClosed: true,
+    server: {
+      error: null,
+      present: true,
+      processClosed: true,
+    },
+    serverClosed: true,
+  };
+  const healthyDiagnostic = structuredClone(diagnostic);
+  healthyDiagnostic.attachErrors = [];
+  healthyDiagnostic.counts.attachErrorCount = 0;
+  healthyDiagnostic.counts.attachPromiseCount = 3;
+  healthyDiagnostic.counts.completedRequestCount = 3;
+  healthyDiagnostic.counts.externalRequestCount = 0;
+  healthyDiagnostic.counts.inflightRequestCount = 0;
+  healthyDiagnostic.counts.networkFailureCount = 0;
+  healthyDiagnostic.counts.pendingAttachCount = 0;
+  healthyDiagnostic.counts.requestCount = 3;
+  healthyDiagnostic.inflightRequests = [];
+  healthyDiagnostic.initialTargetBaseline = {
+    checked: true,
+    pageCount: 1,
+    pageUrlClass: "about",
+    targetCount: 1,
+    workerCount: 0,
+  };
+  healthyDiagnostic.outcome = "fixed-point-reached";
+  healthyDiagnostic.pendingAttaches = [];
+  healthyDiagnostic.serviceWorkerBypassed = true;
+  healthyDiagnostic.targets = healthyDiagnostic.targets.map(
+    (target, index) => ({
+      ...target,
+      attachComplete: true,
+      ...completedCdpTargetSetup({
+        cdpIdStart: 100 + index * 10,
+        startedAt: 100 + index * 20,
+      }),
+      resumed: true,
+      waitingForDebugger: true,
+    }),
+  );
+  const serviceWorkerSetup = completedCdpTargetSetup({
+    cdpIdStart: 200,
+    serviceWorker: true,
+    startedAt: 500,
+  });
+  const serviceWorkerTarget = {
+    ancestry: [],
+    attachComplete: true,
+    ...serviceWorkerSetup,
+    detached: false,
+    identityHash: diagnosticIdentity("service-worker-session", "service-worker-target"),
+    parentSessionId: null,
+    phase: "desktop-dpr1-zoom100",
+    resumed: true,
+    sessionId: "service-worker-session",
+    targetId: "service-worker-target",
+    type: "service_worker",
+    urlClass: "app-asset",
+    waitingForDebugger: true,
+  };
+  healthyDiagnostic.targets.push(serviceWorkerTarget);
+  healthyDiagnostic.targetBootstrapSettlements = [
+    healthyDiagnostic.targetBootstrapSettlements[0],
+    {
+      identityHash: diagnosticIdentity(
+        "document-session",
+        "parser-bootstrap-request",
+        "worker-session",
+        "worker-target",
+      ),
+      method: "GET",
+      phase: "desktop-dpr1-zoom100",
+      requestId: "parser-bootstrap-request",
+      requestSessionId: "document-session",
+      resourceType: "Script",
+      targetDetachedAtSettlement: false,
+      targetId: "worker-target",
+      targetParentSessionId: "document-session",
+      targetSessionId: "worker-session",
+      targetType: "worker",
+      terminalReason: "target-attached",
+      urlClass: "pdf-parser-worker",
+    },
+  ];
+  healthyDiagnostic.counts.targetBootstrapSettlementCount = 2;
+  healthyDiagnostic.serviceWorkerBootstrapObservations = [{
+    earlierRequestCount: 0,
+    identityHash: diagnosticIdentity(
+      "service-worker-session",
+      "service-worker-bootstrap-request",
+      "service-worker-session",
+      "service-worker-target",
+    ),
+    method: "GET",
+    phase: "desktop-dpr1-zoom100",
+    requestId: "service-worker-bootstrap-request",
+    requestIsFirst: true,
+    requestSequence: 3,
+    requestSessionId: "service-worker-session",
+    requestStartedAt: serviceWorkerSetup.resumeDispatchedAt + 1,
+    resourceType: "Script",
+    resumeDispatchedAt: serviceWorkerSetup.resumeDispatchedAt,
+    sessionFailureCount: 0,
+    sessionRequestCount: 1,
+    targetId: "service-worker-target",
+    targetDetachedAtObservation: false,
+    targetSessionId: "service-worker-session",
+    targetType: "service_worker",
+    targetUrlMatched: true,
+    terminalAt: serviceWorkerSetup.resumeDispatchedAt + 2,
+    terminalReason: "loading-finished",
+    urlClass: "app-asset",
+  }];
+  healthyDiagnostic.counts.serviceWorkerBootstrapObservationCount = 1;
+  healthyDiagnostic.counts.targetCount = 3;
+  healthyDiagnostic.wait.recentSamples = [1, 2, 3].map(
+    (stableSamples) => ({
+      attachErrorCount: 0,
+      attachmentReady: true,
+      elapsedMs: 9_700 + stableSamples * 75,
+      incompleteTargetCount: 0,
+      inflightRequestCount: 0,
+      pendingAttachCount: 0,
+      requestCount: healthyDiagnostic.counts.requestCount,
+      serviceWorkerBypassed: true,
+      stableSamples,
+      targetCount: healthyDiagnostic.counts.targetCount,
+    }),
+  );
+  healthyDiagnostic.wait.stableSamples = 3;
+  healthyDiagnostic.targets = [
+    serviceWorkerTarget,
+    ...healthyDiagnostic.targets.filter(
+      (target) => target.sessionId !== serviceWorkerTarget.sessionId,
+    ),
+  ];
+  const restoreDiagnostic = structuredClone(healthyDiagnostic);
+  restoreDiagnostic.counts = {
+    ...restoreDiagnostic.counts,
+    attachPromiseCount: 1,
+    completedRequestCount: 1,
+    requestCount: 1,
+    targetBootstrapSettlementCount: 0,
+    targetCount: 1,
+  };
+  restoreDiagnostic.importBoundary = null;
+  restoreDiagnostic.matrixRestoreProof = null;
+  restoreDiagnostic.targetBootstrapSettlements = [];
+  restoreDiagnostic.targets = [structuredClone(serviceWorkerTarget)];
+  restoreDiagnostic.wait.recentSamples.forEach((sample) => {
+    sample.requestCount = 1;
+    sample.targetCount = 1;
+  });
+  healthyDiagnostic.importBoundary = {
+    attachPromiseCount: 1,
+    requestCount: 1,
+    settlementCount: 0,
+    targetCount: 1,
+  };
+  healthyDiagnostic.matrixRestoreProof = {
+    documentBootstrapSettlementCount: 0,
+    networkDiagnostic: restoreDiagnostic,
+    parserBootstrapSettlementCount: 0,
+    readiness: {
+      activeDocumentCount: 0,
+      activeDocumentMatchesOpen: false,
+      activeDocumentStateAvailable: true,
+      activePdfCount: 0,
+      expectedPersisted: false,
+      firstPageCount: 0,
+      importRequestCount: 0,
+      libraryPending: false,
+      openRequestCount: 0,
+      ready: true,
+      sourceSelectionCount: 0,
+    },
+  };
+  Object.assign(
+    healthyDiagnostic,
+    passingCumulativeAppMatrixNetworkDiagnostics()[0],
+  );
+  assert.equal(isCdpFixedPointDiagnosticHealthy(healthyDiagnostic), true);
+  const naturallyDetachedServiceWorker = structuredClone(healthyDiagnostic);
+  naturallyDetachedServiceWorker.targets.find(
+    (target) => target.type === "service_worker",
+  ).detached = true;
+  assert.equal(
+    isCdpFixedPointDiagnosticHealthy(naturallyDetachedServiceWorker),
+    true,
+  );
+  const report = buildFirstNetworkDiagnosticReport({
+    build: { localManifest: { deploymentId: DEPLOYMENT } },
+    fixture: {
+      bytes: PUBLIC_PDF_FIXTURE_BYTES,
+      path: PUBLIC_PDF_FIXTURE,
+      sha256: PUBLIC_PDF_FIXTURE_SHA256,
+    },
+    networkDiagnostic: healthyDiagnostic,
+    outputDirectory,
+    runnerFailure: null,
+    scenario: {
+      comparison: { lineLightScreenshot: screenshot },
+      id: "desktop-dpr1-zoom100",
+    },
+    source: { commit: COMMIT, tree: TREE },
+    teardown: cleanDiagnosticTeardown,
+  });
+  assert.equal(report.diagnostic, true);
+  assert.equal(report.diagnosticSchemaVersion, 2);
+  assert.equal(report.completed, true);
+  assert.equal(report.fixedPointReached, true);
+  assert.deepEqual(Object.keys(report).sort(), [
+    "artifacts",
+    "build",
+    "completed",
+    "diagnostic",
+    "diagnosticSchemaVersion",
+    "failures",
+    "fixedPointReached",
+    "fixture",
+    "mode",
+    "network",
+    "recordedAt",
+    "scenario",
+    "source",
+    "teardown",
+  ]);
+  assert.deepEqual(report.artifacts.screenshots, [screenshot]);
+  assert.equal("passed" in report, false);
+  assert.equal("schemaVersion" in report, false);
+  assert.deepEqual(report.failures, []);
+
+  for (const [name, mutate] of [
+    ["attach error", (value) => {
+      value.attachErrors.push({
+        category: "setup",
+        command: "network-enable",
+        identityHash: SHA,
+        sessionId: "worker-session",
+        targetId: "worker-target",
+        type: "service_worker",
+        urlClass: "app-asset",
+      });
+      value.counts.attachErrorCount = 1;
+    }],
+    ["incomplete target", (value) => {
+      value.targets[0].attachComplete = false;
+    }],
+    ["timed-out target command", (value) => {
+      value.targets[0].commands[0].status = "failed";
+    }],
+    ["service worker bypass disabled", (value) => {
+      value.serviceWorkerBypassed = false;
+    }],
+    ["dirty initial target baseline", (value) => {
+      value.initialTargetBaseline.workerCount = 1;
+      value.initialTargetBaseline.targetCount = 2;
+    }],
+    ["service worker resumed before setup dispatch", (value) => {
+      const target = value.targets.find(
+        (entry) => entry.type === "service_worker",
+      );
+      target.resumeDispatchedAt = target.commands[0].dispatchedAt - 1;
+      target.commands.at(-1).dispatchedAt = target.resumeDispatchedAt;
+      value.serviceWorkerBootstrapObservations[0].resumeDispatchedAt =
+        target.resumeDispatchedAt;
+    }],
+    ["missing service worker command", (value) => {
+      value.targets.find(
+        (entry) => entry.type === "service_worker",
+      ).commands.pop();
+    }],
+    ["failed service worker command", (value) => {
+      value.targets.find(
+        (entry) => entry.type === "service_worker",
+      ).commands[0].status = "failed";
+    }],
+    ["late service worker command", (value) => {
+      const target = value.targets.find(
+        (entry) => entry.type === "service_worker",
+      );
+      target.commands[0].resultAt = target.commandDeadlineAt + 1;
+    }],
+    ["service worker command completed before resume", (value) => {
+      const target = value.targets.find(
+        (entry) => entry.type === "service_worker",
+      );
+      target.commands[0].resultAt = target.resumeDispatchedAt - 1;
+    }],
+    ["nonconsecutive service worker command IDs", (value) => {
+      const target = value.targets.find(
+        (entry) => entry.type === "service_worker",
+      );
+      target.commands[2].cdpId += 10;
+    }],
+    ["duplicate global target command ID", (value) => {
+      const firstId = value.targets.find(
+        (entry) => entry.type === "worker",
+      ).commands[0].cdpId;
+      const serviceWorker = value.targets.find(
+        (entry) => entry.type === "service_worker",
+      );
+      serviceWorker.commands.forEach((command, index) => {
+        command.cdpId = firstId + index;
+      });
+    }],
+    ["reversed command dispatch timestamp", (value) => {
+      const target = value.targets.find((entry) => entry.type === "worker");
+      target.commands[1].dispatchedAt = target.commands[0].dispatchedAt - 1;
+    }],
+    ["reversed command result timestamp", (value) => {
+      const target = value.targets.find((entry) => entry.type === "worker");
+      const firstResultAt = target.commands[0].resultAt;
+      target.commands[0].resultAt = target.commands[1].resultAt;
+      target.commands[1].resultAt = firstResultAt;
+    }],
+    ["missing service worker bootstrap request", (value) => {
+      value.serviceWorkerBootstrapObservations[0].requestId = null;
+    }],
+    ["wrong service worker bootstrap target", (value) => {
+      value.serviceWorkerBootstrapObservations[0].targetUrlMatched = false;
+    }],
+    ["nonterminal service worker bootstrap", (value) => {
+      value.serviceWorkerBootstrapObservations[0].terminalReason =
+        "loading-failed";
+    }],
+    ["service worker event before resume barrier", (value) => {
+      const observation = value.serviceWorkerBootstrapObservations[0];
+      observation.requestStartedAt = observation.resumeDispatchedAt - 1;
+      observation.earlierRequestCount = 1;
+    }],
+    ["detached service worker target", (value) => {
+      value.serviceWorkerBootstrapObservations[0]
+        .targetDetachedAtObservation = true;
+    }],
+    ["external request counted", (value) => {
+      value.counts.externalRequestCount = 1;
+    }],
+    ["service worker network failure", (value) => {
+      value.counts.networkFailureCount = 1;
+      value.serviceWorkerBootstrapObservations[0].sessionFailureCount = 1;
+    }],
+    ["service worker cannot settle PDF coverage", (value) => {
+      const serviceWorker = value.targets.find(
+        (entry) => entry.type === "service_worker",
+      );
+      const parserSettlement = value.targetBootstrapSettlements.find(
+        (entry) => entry.urlClass === "pdf-parser-worker",
+      );
+      parserSettlement.targetId = serviceWorker.targetId;
+      parserSettlement.targetSessionId = serviceWorker.sessionId;
+      parserSettlement.targetType = serviceWorker.type;
+      parserSettlement.identityHash = diagnosticIdentity(
+        parserSettlement.requestSessionId,
+        parserSettlement.requestId,
+        parserSettlement.targetSessionId,
+        parserSettlement.targetId,
+      );
+    }],
+    ["missing parser bootstrap settlement", (value) => {
+      value.targetBootstrapSettlements.pop();
+      value.counts.targetBootstrapSettlementCount -= 1;
+    }],
+    ["unhealthy stable sample", (value) => {
+      value.wait.recentSamples.at(-1).attachmentReady = false;
+    }],
+    ["wrong first-scenario phase", (value) => {
+      const laterPhase = "mobile-dpr3-zoom100";
+      value.label = laterPhase;
+      for (const target of value.targets) {
+        target.phase = laterPhase;
+        for (const ancestor of target.ancestry) {
+          ancestor.phase = laterPhase;
+        }
+      }
+      for (const settlement of value.targetBootstrapSettlements) {
+        settlement.phase = laterPhase;
+      }
+      for (const observation of value.serviceWorkerBootstrapObservations) {
+        observation.phase = laterPhase;
+      }
+    }],
+    ["missing bootstrap request ID", (value) => {
+      const settlement = value.targetBootstrapSettlements[0];
+      settlement.requestId = null;
+      settlement.identityHash = diagnosticIdentity(
+        settlement.requestSessionId,
+        settlement.requestId,
+        settlement.targetSessionId,
+        settlement.targetId,
+      );
+    }],
+    ["missing target ID", (value) => {
+      const target = value.targets[0];
+      const settlement = value.targetBootstrapSettlements[0];
+      target.targetId = null;
+      target.identityHash = diagnosticIdentity(target.sessionId, target.targetId);
+      settlement.targetId = null;
+      settlement.identityHash = diagnosticIdentity(
+        settlement.requestSessionId,
+        settlement.requestId,
+        settlement.targetSessionId,
+        settlement.targetId,
+      );
+    }],
+    ["missing target session ID", (value) => {
+      const target = value.targets[1];
+      const settlement = value.targetBootstrapSettlements[1];
+      target.sessionId = null;
+      target.identityHash = diagnosticIdentity(target.sessionId, target.targetId);
+      settlement.targetSessionId = null;
+      settlement.identityHash = diagnosticIdentity(
+        settlement.requestSessionId,
+        settlement.requestId,
+        settlement.targetSessionId,
+        settlement.targetId,
+      );
+    }],
+    ["duplicate target ID", (value) => {
+      const target = value.targets[1];
+      const settlement = value.targetBootstrapSettlements[1];
+      target.targetId = value.targets[0].targetId;
+      target.identityHash = diagnosticIdentity(target.sessionId, target.targetId);
+      settlement.targetId = target.targetId;
+      settlement.identityHash = diagnosticIdentity(
+        settlement.requestSessionId,
+        settlement.requestId,
+        settlement.targetSessionId,
+        settlement.targetId,
+      );
+    }],
+    ["substituted target identity hash", (value) => {
+      value.targets[0].identityHash = SHA;
+    }],
+    ["duplicate bootstrap settlement", (value) => {
+      value.targetBootstrapSettlements.push({
+        ...value.targetBootstrapSettlements[0],
+      });
+      value.counts.targetBootstrapSettlementCount += 1;
+    }],
+    ["unbound parser parent", (value) => {
+      const parser = value.targets.find(
+        (target) => target.urlClass === "pdf-parser-worker",
+      );
+      const settlement = value.targetBootstrapSettlements.find(
+        (entry) => entry.urlClass === "pdf-parser-worker",
+      );
+      parser.ancestry = [];
+      parser.parentSessionId = null;
+      settlement.requestSessionId = null;
+      settlement.targetParentSessionId = null;
+      settlement.identityHash = diagnosticIdentity(
+        settlement.requestSessionId,
+        settlement.requestId,
+        settlement.targetSessionId,
+        settlement.targetId,
+      );
+    }],
+    ["extra attach promise", (value) => {
+      value.counts.attachPromiseCount += 1;
+    }],
+    ["excessive stability counter", (value) => {
+      value.wait.stableSamples = 100;
+      value.wait.recentSamples.forEach((sample, index) => {
+        sample.stableSamples = 98 + index;
+      });
+    }],
+  ]) {
+    const unhealthyDiagnostic = structuredClone(healthyDiagnostic);
+    mutate(unhealthyDiagnostic);
+    assert.equal(
+      isCdpFixedPointDiagnosticHealthy(unhealthyDiagnostic),
+      false,
+      `${name} helper result was unexpected`,
+    );
+    const unhealthyReport = buildFirstNetworkDiagnosticReport({
+      build: report.build,
+      fixture: report.fixture,
+      networkDiagnostic: unhealthyDiagnostic,
+      outputDirectory,
+      runnerFailure: null,
+      scenario: {
+        comparison: { lineLightScreenshot: screenshot },
+        id: "desktop-dpr1-zoom100",
+      },
+      source: report.source,
+      teardown: cleanDiagnosticTeardown,
+    });
+    assert.equal(
+      unhealthyReport.fixedPointReached,
+      false,
+      `${name} snapshot passed`,
+    );
+    assert.ok(unhealthyReport.failures.length > 0, `${name} exited green`);
+    assert.match(
+      unhealthyReport.failures.join("\n"),
+      /did not reach a fixed point/u,
+    );
+  }
+
+  const missingScreenshot = buildFirstNetworkDiagnosticReport({
+    build: report.build,
+    fixture: report.fixture,
+    networkDiagnostic: report.network,
+    outputDirectory,
+    runnerFailure: null,
+    scenario: {
+      comparison: {},
+      id: "desktop-dpr1-zoom100",
+    },
+    source: report.source,
+    teardown: cleanDiagnosticTeardown,
+  });
+  assert.equal(missingScreenshot.completed, false);
+  assert.match(
+    missingScreenshot.failures.join("\n"),
+    /screenshot manifest is not exact/u,
+  );
+  const substitutedScreenshot = buildFirstNetworkDiagnosticReport({
+    build: report.build,
+    fixture: report.fixture,
+    networkDiagnostic: report.network,
+    outputDirectory,
+    runnerFailure: null,
+    scenario: {
+      comparison: {
+        lineLightScreenshot: {
+          ...screenshot,
+          path: path.relative(
+            path.resolve("."),
+            path.join(
+              os.tmpdir(),
+              "other-output",
+              path.basename(screenshot.path),
+            ),
+          ),
+        },
+      },
+      id: "desktop-dpr1-zoom100",
+    },
+    source: report.source,
+    teardown: cleanDiagnosticTeardown,
+  });
+  assert.equal(substitutedScreenshot.completed, false);
+  assert.match(
+    substitutedScreenshot.failures.join("\n"),
+    /screenshot manifest is not exact/u,
+  );
+
+  const wrongScenario = buildFirstNetworkDiagnosticReport({
+    build: report.build,
+    fixture: report.fixture,
+    networkDiagnostic: report.network,
+    outputDirectory,
+    runnerFailure: null,
+    scenario: {
+      comparison: { lineLightScreenshot: screenshot },
+      id: "desktop-dpr2-zoom100",
+    },
+    source: report.source,
+    teardown: cleanDiagnosticTeardown,
+  });
+  assert.equal(wrongScenario.completed, false);
+  assert.equal(wrongScenario.fixedPointReached, false);
+  assert.equal(wrongScenario.scenario.screenshot, null);
+
+  const repositoryOutput = buildFirstNetworkDiagnosticReport({
+    build: report.build,
+    fixture: report.fixture,
+    networkDiagnostic: report.network,
+    outputDirectory: path.join(path.resolve("."), "outputs", "diagnostic"),
+    runnerFailure: null,
+    scenario: {
+      comparison: { lineLightScreenshot: screenshot },
+      id: "desktop-dpr1-zoom100",
+    },
+    source: report.source,
+    teardown: cleanDiagnosticTeardown,
+  });
+  assert.equal(repositoryOutput.completed, false);
+  assert.equal(repositoryOutput.artifacts.screenshots.length, 0);
+
+  const privateFixturePath = "/tmp/private-reader-document.pdf";
+  const privateFixtureReport = buildFirstNetworkDiagnosticReport({
+    build: report.build,
+    fixture: {
+      bytes: 4096,
+      path: privateFixturePath,
+      sha256: SHA,
+    },
+    networkDiagnostic: report.network,
+    outputDirectory,
+    runnerFailure: null,
+    scenario: {
+      comparison: { lineLightScreenshot: screenshot },
+      id: "desktop-dpr1-zoom100",
+    },
+    source: report.source,
+    teardown: cleanDiagnosticTeardown,
+  });
+  assert.equal(privateFixtureReport.completed, false);
+  assert.equal(privateFixtureReport.fixture, null);
+  assert.match(
+    privateFixtureReport.failures.join("\n"),
+    /fixture is not the exact public fixture/u,
+  );
+  assert.doesNotMatch(
+    JSON.stringify(privateFixtureReport),
+    /private-reader-document/u,
+  );
+  for (const [name, fixture] of [
+    ["size", { ...report.fixture, bytes: PUBLIC_PDF_FIXTURE_BYTES + 1 }],
+    ["hash", { ...report.fixture, sha256: SHA }],
+  ]) {
+    const substitutedFixtureReport = buildFirstNetworkDiagnosticReport({
+      build: report.build,
+      fixture,
+      networkDiagnostic: report.network,
+      outputDirectory,
+      runnerFailure: null,
+      scenario: {
+        comparison: { lineLightScreenshot: screenshot },
+        id: "desktop-dpr1-zoom100",
+      },
+      source: report.source,
+      teardown: cleanDiagnosticTeardown,
+    });
+    assert.equal(
+      substitutedFixtureReport.completed,
+      false,
+      `${name} substitution passed`,
+    );
+    assert.equal(substitutedFixtureReport.fixture, null);
+  }
+
+  const privateTeardown = structuredClone(cleanDiagnosticTeardown);
+  privateTeardown.app.error =
+    `Could not remove ${privateProfile}?text=${privateText}`;
+  privateTeardown.errors = [
+    `Browser cleanup failed for ${privateProfile}?text=${privateText}`,
+  ];
+  const privateFailureReport = buildFirstNetworkDiagnosticReport({
+    build: report.build,
+    fixture: report.fixture,
+    networkDiagnostic: report.network,
+    outputDirectory,
+    runnerFailure: new Error(
+      `Fixed point failed for ${privateProfile}?text=${privateText}`,
+    ),
+    scenario: {
+      comparison: { lineLightScreenshot: screenshot },
+      id: "desktop-dpr1-zoom100",
+    },
+    source: report.source,
+    teardown: privateTeardown,
+  });
+  const serializedPrivateFailure = JSON.stringify(privateFailureReport);
+  assert.equal(privateFailureReport.completed, false);
+  assert.equal(privateFailureReport.teardown.app.errorPresent, true);
+  assert.equal(privateFailureReport.teardown.errorCount, 1);
+  assert.doesNotMatch(serializedPrivateFailure, /private-reader-sentence/u);
+  assert.doesNotMatch(serializedPrivateFailure, /linelight-private-profile/u);
+  assert.doesNotMatch(serializedPrivateFailure, /Could not remove/u);
+  assert.doesNotMatch(serializedPrivateFailure, /Fixed point failed/u);
+
+  const timeoutReport = buildFirstNetworkDiagnosticReport({
+    build: report.build,
+    fixture: report.fixture,
+    networkDiagnostic: diagnostic,
+    outputDirectory,
+    runnerFailure: new Error(
+      `Timed out at ${privateProfile}?text=${privateText}`,
+    ),
+    scenario: {
+      comparison: { lineLightScreenshot: screenshot },
+      id: "desktop-dpr1-zoom100",
+    },
+    source: report.source,
+    teardown: cleanDiagnosticTeardown,
+  });
+  assert.equal(timeoutReport.completed, true);
+  assert.equal(timeoutReport.fixedPointReached, false);
+  assert.equal(timeoutReport.network, diagnostic);
+  assert.equal("passed" in timeoutReport, false);
+  assert.match(
+    timeoutReport.failures.join("\n"),
+    /did not reach a fixed point/u,
+  );
+  assert.doesNotMatch(
+    JSON.stringify(timeoutReport),
+    /linelight-private-profile/u,
+  );
+});
+
+test("keeps CDP requests bound to the exact flattened session", () => {
+  const appUrl = "http://127.0.0.1:4173/";
+  const networkState = {
+    attachErrors: [],
+    attachPromises: [],
+    byId: new Map(),
+    completedRequestCount: 0,
+    inflightRequests: new Set(),
+    pendingAttachMetadata: new Map(),
+    pendingAttachPromises: new Set(),
+    phase: "desktop-dpr1-zoom100",
+    recentActivity: [],
+    requests: [],
+    targets: [{
+      detached: true,
+      parentSessionId: null,
+      phase: "desktop-dpr1-zoom100",
+      sessionId: "current-session",
+      targetId: "current-target",
+      type: "worker",
+      url: `${appUrl}assets/pdf-parser.worker-test.js?secret=true`,
+      waitingForDebugger: false,
+    }],
+  };
+  const event = {
+    request: {
+      method: "GET",
+      url: `${appUrl}assets/pdf-parser.worker-test.js?secret=true`,
+    },
+    requestId: "shared-request-id",
+    type: "Script",
+  };
+  recordCdpNetworkRequest(networkState, event, "current-session");
+  const wrongSession = completeCdpNetworkRequest(
+    networkState,
+    { requestId: event.requestId },
+    "restored-session",
+  );
+  assert.equal(wrongSession, null);
+  assert.equal(networkState.completedRequestCount, 0);
+  assert.deepEqual(
+    [...networkState.inflightRequests],
+    ["current-session:shared-request-id"],
+  );
+
+  const detachedDiagnostic = buildCdpNetworkFixedPointDiagnostic(
+    networkState,
+    appUrl,
+    "desktop-dpr1-zoom100",
+    "timeout",
+  );
+  assert.equal(detachedDiagnostic.counts.inflightRequestCount, 1);
+  assert.equal(detachedDiagnostic.inflightRequests[0].requestId,
+    "shared-request-id");
+  assert.equal(detachedDiagnostic.inflightRequests[0].sessionId,
+    "current-session");
+  assert.equal(detachedDiagnostic.targets[0].targetId, "current-target");
+  assert.equal(detachedDiagnostic.targets[0].detached, true);
+
+  const exactSession = completeCdpNetworkRequest(
+    networkState,
+    { requestId: event.requestId },
+    "current-session",
+  );
+  assert.equal(exactSession?.requestId, "shared-request-id");
+  assert.equal(networkState.inflightRequests.size, 0);
+  assert.equal(networkState.completedRequestCount, 1);
+});
+
+test("settles exact worker bootstraps one-to-one in either event order", () => {
+  const requestEvent = {
+    request: {
+      method: "GET",
+      url: "http://127.0.0.1/assets/pdf-parser.worker-test.js",
+    },
+    requestId: "bootstrap-request",
+    type: "Script",
+  };
+  const target = {
+    attachComplete: true,
+    bootstrapRequestKey: null,
+    ...completedCdpTargetSetup({ cdpIdStart: 100, startedAt: 100 }),
+    detached: false,
+    parentSessionId: "document-session",
+    phase: "desktop-dpr1-zoom100",
+    resumed: true,
+    sessionId: "parser-session",
+    targetId: "parser-target",
+    type: "worker",
+    url: requestEvent.request.url,
+    waitingForDebugger: true,
+  };
+  const createState = () => ({
+    byId: new Map(),
+    completedRequestCount: 0,
+    inflightRequests: new Set(),
+    phase: "desktop-dpr1-zoom100",
+    requests: [],
+    targetBootstrapSettlements: [],
+    targets: [],
+  });
+
+  const requestFirst = createState();
+  recordCdpNetworkRequest(requestFirst, requestEvent, "document-session");
+  assert.deepEqual(reconcileCdpTargetBootstrapRequests(requestFirst), []);
+  requestFirst.targets.push(structuredClone(target));
+  const requestFirstSettlements =
+    reconcileCdpTargetBootstrapRequests(requestFirst);
+  assert.equal(requestFirstSettlements.length, 1);
+  assert.equal(requestFirst.inflightRequests.size, 0);
+  assert.equal(requestFirst.completedRequestCount, 1);
+  assert.equal(requestFirst.requests.length, 1);
+  assert.equal(requestFirstSettlements[0].terminalReason, "target-attached");
+  assert.equal(
+    requestFirst.requests[0].bootstrapTargetSessionId,
+    target.sessionId,
+  );
+  const lateNetworkTerminal = completeCdpNetworkRequest(
+    requestFirst,
+    { requestId: requestEvent.requestId },
+    "document-session",
+  );
+  assert.equal(lateNetworkTerminal, null);
+  assert.equal(requestFirst.completedRequestCount, 1);
+  assert.equal(requestFirst.targetBootstrapSettlements.length, 1);
+
+  const attachFirst = createState();
+  attachFirst.targets.push(structuredClone(target));
+  assert.deepEqual(reconcileCdpTargetBootstrapRequests(attachFirst), []);
+  recordCdpNetworkRequest(attachFirst, requestEvent, "document-session");
+  assert.equal(reconcileCdpTargetBootstrapRequests(attachFirst).length, 1);
+  assert.equal(attachFirst.inflightRequests.size, 0);
+
+  const matchingRequest = {
+    method: "GET",
+    phase: target.phase,
+    sessionId: target.parentSessionId,
+    type: "Script",
+    url: target.url,
+  };
+  assert.equal(isCdpTargetBootstrapRequest(matchingRequest, target), true);
+  assert.equal(isCdpTargetSetupComplete(target), true);
+  assert.equal(isCdpAttachmentStateHealthy({
+    attachErrors: [],
+    serviceWorkerBypassed: true,
+    targets: [target],
+  }), false);
+  for (const [name, request, changedTarget] of [
+    ["URL", { ...matchingRequest, url: `${target.url}?wrong=1` }, target],
+    ["session", { ...matchingRequest, sessionId: "wrong-session" }, target],
+    ["method", { ...matchingRequest, method: "POST" }, target],
+    ["resource type", { ...matchingRequest, type: "Fetch" }, target],
+    ["target type", matchingRequest, { ...target, type: "service_worker" }],
+    ["unattached", matchingRequest, { ...target, attachComplete: false }],
+    ["failed resume", matchingRequest, { ...target, resumed: false }],
+  ]) {
+    assert.equal(
+      isCdpTargetBootstrapRequest(request, changedTarget),
+      false,
+      `${name} mismatch settled`,
+    );
+  }
+});
+
+test("requires a clean pre-navigation CDP target baseline", () => {
+  assert.deepEqual(
+    validateCdpInitialTargetBaseline([
+      { targetId: "initial-page", type: "page", url: "about:blank" },
+    ]),
+    {
+      checked: true,
+      pageCount: 1,
+      pageUrlClass: "about",
+      targetCount: 1,
+      workerCount: 0,
+    },
+  );
+  for (const [name, targets] of [
+    ["missing page", []],
+    ["nonblank page", [
+      { targetId: "initial-page", type: "page", url: "http://127.0.0.1/" },
+    ]],
+    ["extra page", [
+      { targetId: "initial-page", type: "page", url: "about:blank" },
+      { targetId: "second-page", type: "page", url: "about:blank" },
+    ]],
+    ["unexpected target type", [
+      { targetId: "initial-page", type: "page", url: "about:blank" },
+      { targetId: "unexpected", type: "other", url: "about:blank" },
+    ]],
+    ...["worker", "shared_worker", "service_worker"].map((type) => [
+      `preexisting ${type}`,
+      [
+        { targetId: "initial-page", type: "page", url: "about:blank" },
+        { targetId: `${type}-target`, type, url: "http://127.0.0.1/worker.js" },
+      ],
+    ]),
+  ]) {
+    assert.throws(
+      () => validateCdpInitialTargetBaseline(targets),
+      /one clean about:blank page and no preexisting worker targets/u,
+      name,
+    );
+  }
+});
+
+test("requires exact current-phase PDF bootstrap settlements", () => {
+  const appUrl = "http://127.0.0.1/";
+  const phase = "desktop-dpr1-zoom100";
+  const documentTarget = {
+    phase,
+    sessionId: "document-session",
+    url: `${appUrl}assets/pdf-document.worker-test.js`,
+  };
+  const parserTarget = {
+    phase,
+    sessionId: "parser-session",
+    url: `${appUrl}assets/pdf-parser.worker-test.js`,
+  };
+  const state = {
+    targetBootstrapSettlements: [documentTarget, parserTarget].map(
+      (target) => ({ phase, targetSessionId: target.sessionId }),
+    ),
+    targets: [documentTarget, parserTarget],
+  };
+  assert.equal(
+    hasCdpPhasePdfBootstrapCoverage(state, appUrl, phase),
+    true,
+  );
+  state.targetBootstrapSettlements.pop();
+  assert.equal(
+    hasCdpPhasePdfBootstrapCoverage(state, appUrl, phase),
+    false,
+  );
+  assert.equal(
+    hasCdpPhasePdfBootstrapCoverage(state, appUrl, "forced-main-fallback"),
+    true,
+  );
+});
+
+test("dispatches paused service-worker setup before one shared deadline", async () => {
+  const sent = [];
+  const cdp = {
+    nextId: 1,
+    pending: new Map(),
+    webSocket: {
+      send(payload) {
+        sent.push(JSON.parse(payload));
+      },
+    },
+  };
+  const commands = [];
+  let settlementStarted = false;
+  const result = await dispatchPausedServiceWorkerCommands(
+    (name, method, params) => {
+      assert.equal(settlementStarted, false);
+      const command = {
+        cdpId: null,
+        deadlineAt: null,
+        dispatchedAt: Date.now(),
+        dispatchSequence: commands.length + 1,
+        method,
+        name,
+      };
+      commands.push(command);
+      const dispatch = dispatchToCdpSession(
+        cdp,
+        method,
+        params,
+        "service-worker-session",
+      );
+      command.cdpId = dispatch.id;
+      return { ...dispatch, command };
+    },
+    async (dispatches, deadlineAt) => {
+      settlementStarted = true;
+      assert.equal(sent.length, 5);
+      assert.deepEqual(
+        sent.map(({ id, method }) => [id, method]),
+        [
+          [1, "Network.enable"],
+          [2, "Runtime.enable"],
+          [3, "Network.setCacheDisabled"],
+          [4, "Target.setAutoAttach"],
+          [5, "Runtime.runIfWaitingForDebugger"],
+        ],
+      );
+      assert.ok(dispatches.every(
+        (dispatch) => dispatch.command.deadlineAt === deadlineAt,
+      ));
+      for (const id of [5, 1, 2, 3, 4]) {
+        const pending = cdp.pending.get(id);
+        cdp.pending.delete(id);
+        pending.resolve({ id });
+      }
+      return settleCdpCommandDispatches(cdp, dispatches, deadlineAt);
+    },
+    1_000,
+  );
+  assert.equal(cdp.pending.size, 0);
+  assert.equal(result.dispatches.length, 5);
+  assert.equal(result.resumeDispatchedAt, commands[4].dispatchedAt);
+  assert.ok(result.deadlineAt > result.resumeDispatchedAt);
+  assert.ok(commands.slice(0, 4).every(
+    (command) => command.dispatchedAt <= commands[4].dispatchedAt,
+  ));
+
+  const partialCdp = {
+    nextId: 1,
+    pending: new Map(),
+    webSocket: { send() {} },
+  };
+  const partialCommands = [];
+  let partialDispatches = [];
+  await assert.rejects(
+    dispatchPausedServiceWorkerCommands(
+      (name, method, params) => {
+        const command = {
+          cdpId: null,
+          deadlineAt: null,
+          dispatchedAt: Date.now(),
+          dispatchSequence: partialCommands.length + 1,
+          method,
+          name,
+        };
+        partialCommands.push(command);
+        const dispatch = dispatchToCdpSession(
+          partialCdp,
+          method,
+          params,
+          "partial-service-worker-session",
+        );
+        command.cdpId = dispatch.id;
+        return { ...dispatch, command };
+      },
+      (dispatches, deadlineAt) => {
+        partialDispatches = dispatches;
+        for (const id of [1, 5]) {
+          const pending = partialCdp.pending.get(id);
+          partialCdp.pending.delete(id);
+          pending.resolve({ id });
+        }
+        return settleCdpCommandDispatches(
+          partialCdp,
+          dispatches,
+          deadlineAt,
+        );
+      },
+      5,
+    ),
+    /Timed out waiting for CDP/u,
+  );
+  assert.equal(partialCdp.pending.size, 0);
+  const partialOutcomes = await Promise.allSettled(
+    partialDispatches.map((dispatch) => dispatch.promise),
+  );
+  assert.equal(
+    partialOutcomes.filter(({ status }) => status === "fulfilled").length,
+    2,
+  );
+  assert.equal(
+    partialOutcomes.filter(({ status }) => status === "rejected").length,
+    3,
+  );
+});
+
+test("observes the exact first terminal service-worker bootstrap", () => {
+  const setup = completedCdpTargetSetup({
+    cdpIdStart: 300,
+    serviceWorker: true,
+    startedAt: 1_000,
+  });
+  const target = {
+    attachComplete: true,
+    ...setup,
+    detached: false,
+    phase: "desktop-dpr1-zoom100",
+    resumed: true,
+    serviceWorkerBootstrapRequestKey: null,
+    sessionId: "service-worker-session",
+    targetId: "service-worker-target",
+    type: "service_worker",
+    url: "http://127.0.0.1/assets/service-worker.js",
+    waitingForDebugger: true,
+  };
+  const request = {
+    method: "GET",
+    phase: target.phase,
+    requestId: "service-worker-request",
+    sequence: 1,
+    sessionId: target.sessionId,
+    startedAt: target.resumeDispatchedAt + 1,
+    terminalAt: target.resumeDispatchedAt + 2,
+    terminalReason: "loading-finished",
+    type: "Script",
+    url: target.url,
+  };
+  assert.equal(isCdpServiceWorkerBootstrapRequest(request, target), true);
+  const state = {
+    attachErrors: [],
+    failures: [],
+    requests: [request],
+    responseFailures: [],
+    serviceWorkerBypassed: true,
+    serviceWorkerBootstrapObservations: [],
+    targets: [target],
+  };
+  const observations = reconcileCdpServiceWorkerBootstraps(state);
+  assert.equal(observations.length, 1);
+  assert.equal(observations[0].requestId, request.requestId);
+  assert.equal(target.serviceWorkerBootstrapRequestKey,
+    `${target.sessionId}:${request.requestId}`);
+  assert.equal(request.serviceWorkerTargetSessionId, target.sessionId);
+  assert.equal(isCdpAttachmentStateHealthy(state), true);
+  target.detached = true;
+  assert.equal(isCdpAttachmentStateHealthy(state), true);
+  target.detached = false;
+  assert.deepEqual(reconcileCdpServiceWorkerBootstraps(state), []);
+
+  for (const [name, changedRequest, changedTarget] of [
+    ["URL", { ...request, url: `${request.url}?wrong=1` }, target],
+    ["session", { ...request, sessionId: "wrong-session" }, target],
+    ["method", { ...request, method: "POST" }, target],
+    ["resource type", { ...request, type: "Fetch" }, target],
+    ["target type", request, { ...target, type: "worker" }],
+    ["detached target", request, { ...target, detached: true }],
+    ["unattached target", request, { ...target, attachComplete: false }],
+    ["failed target", request, {
+      ...target,
+      commands: target.commands.map((command, index) => index === 0
+        ? { ...command, status: "failed" }
+        : command),
+    }],
+    ["pre-resume event", {
+      ...request,
+      startedAt: target.resumeDispatchedAt - 1,
+    }, target],
+    ["nonterminal request", {
+      ...request,
+      terminalAt: null,
+      terminalReason: null,
+    }, target],
+  ]) {
+    assert.equal(
+      isCdpServiceWorkerBootstrapRequest(changedRequest, changedTarget),
+      false,
+      `${name} mismatch qualified`,
+    );
+  }
+
+  const earlierRequest = {
+    ...request,
+    requestId: "earlier-service-worker-request",
+    sequence: 0,
+    startedAt: target.resumeDispatchedAt - 1,
+  };
+  assert.deepEqual(reconcileCdpServiceWorkerBootstraps({
+    requests: [earlierRequest, { ...request }],
+    serviceWorkerBootstrapObservations: [],
+    targets: [{ ...target, serviceWorkerBootstrapRequestKey: null }],
+  }), []);
+});
+
+test("bounds every flattened child-target CDP command", async () => {
+  const cdp = {
+    nextId: 1,
+    pending: new Map(),
+    webSocket: { send() {} },
+  };
+  await assert.rejects(
+    sendToCdpSession(
+      cdp,
+      "Network.enable",
+      {},
+      "service-worker-session",
+      1,
+    ),
+    /Timed out waiting for CDP Network\.enable/u,
+  );
+  assert.equal(cdp.pending.size, 0);
+  assert.equal(cdp.nextId, 2);
+});
+
+test("requires three unchanged quiet CDP samples for a fixed point", () => {
+  const quiet = {
+    attachmentReady: true,
+    inflightRequestCount: 0,
+    pendingAttachCount: 0,
+    requestCount: 4,
+    targetCount: 2,
+  };
+  let stability = {
+    requestCount: -1,
+    stableSamples: 0,
+    targetCount: -1,
+  };
+  stability = advanceCdpFixedPointStability(stability, quiet);
+  assert.deepEqual(stability, {
+    fixedPointReached: false,
+    requestCount: 4,
+    stableSamples: 0,
+    targetCount: 2,
+  });
+  stability = advanceCdpFixedPointStability(stability, quiet);
+  assert.equal(stability.stableSamples, 1);
+  stability = advanceCdpFixedPointStability(stability, quiet);
+  assert.equal(stability.stableSamples, 2);
+  stability = advanceCdpFixedPointStability(stability, quiet);
+  assert.equal(stability.stableSamples, 3);
+  assert.equal(stability.fixedPointReached, true);
+
+  const almostStable = { ...stability, stableSamples: 2 };
+  assert.equal(advanceCdpFixedPointStability(almostStable, {
+    ...quiet,
+    attachmentReady: false,
+  }).stableSamples, 0);
+  assert.equal(advanceCdpFixedPointStability(almostStable, {
+    ...quiet,
+    pendingAttachCount: 1,
+  }).stableSamples, 0);
+  assert.equal(advanceCdpFixedPointStability(almostStable, {
+    ...quiet,
+    inflightRequestCount: 1,
+  }).stableSamples, 0);
+  assert.equal(advanceCdpFixedPointStability(almostStable, {
+    ...quiet,
+    requestCount: 5,
+  }).stableSamples, 0);
+  assert.equal(advanceCdpFixedPointStability(almostStable, {
+    ...quiet,
+    targetCount: 3,
+  }).stableSamples, 0);
+});
+
+test("keeps fallback probes armed through restored and wrong-page staging", async () => {
+  const armed = {
+    documentKey: DOCUMENT_KEY,
+    page: 2,
+    revision: REVISION,
+  };
+  const attempts = [
+    {
+      documentKey: "restored-document:restored-revision",
+      page: 2,
+      revision: "restored-revision",
+    },
+    {
+      documentKey: DOCUMENT_KEY,
+      page: 1,
+      revision: REVISION,
+    },
+    {
+      documentKey: DOCUMENT_KEY,
+      page: 2,
+      revision: REVISION,
+    },
+  ];
+  assert.deepEqual(
+    attempts.map((attempt) => matchesPdfFallbackInjection(armed, attempt)),
+    [false, false, true],
+  );
+
+  const source = await readFile(
+    "scripts/run-pdf-sharpness-browser-regression.mjs",
+    "utf8",
+  );
+  assert.match(
+    source,
+    /if \(matchesArmedFallbackInjection\(failNextFallback, attempt\)\) \{\s*failNextFallback = null;/u,
+  );
+  assert.match(
+    source,
+    /latestImport\?\.documentKey !== documentKey/u,
+  );
+  assert.match(
+    source,
+    /latestImport\?\.jobId !== fallbackProofIdentity\.importJobId/u,
+  );
+});
+
+test("retires restored fallback signals before binding current staging", async () => {
+  const restoredController = new AbortController();
+  const currentController = new AbortController();
+  const restored = {
+    bound: false,
+    retired: false,
+    signal: restoredController.signal,
+    signalId: 1,
+  };
+  const current = {
+    bound: false,
+    retired: false,
+    signal: currentController.signal,
+    signalId: 2,
+  };
+  restoredController.abort();
+  const afterRestoreAbort = selectPdfFallbackAbortCandidate([
+    restored,
+    current,
+  ]);
+  assert.equal(afterRestoreAbort.candidateCount, 1);
+  assert.equal(afterRestoreAbort.candidate, current);
+
+  const alreadyAborted = new AbortController();
+  alreadyAborted.abort();
+  assert.deepEqual(
+    selectPdfFallbackAbortCandidate([{
+      bound: false,
+      retired: false,
+      signal: alreadyAborted.signal,
+      signalId: 3,
+    }]),
+    { candidate: null, candidateCount: 0 },
+  );
+
+  const multipleLive = selectPdfFallbackAbortCandidate([
+    current,
+    {
+      bound: false,
+      retired: false,
+      signal: new AbortController().signal,
+      signalId: 4,
+    },
+  ]);
+  assert.equal(multipleLive.candidate, null);
+  assert.equal(multipleLive.candidateCount, 2);
+
+  const source = await readFile(
+    "scripts/run-pdf-sharpness-browser-regression.mjs",
+    "utf8",
+  );
+  assert.match(source, /typeof listener === "function" &&\s*!this\.aborted/u);
+  assert.match(source, /reason: 'aborted-before-staging'/u);
+  assert.match(
+    source,
+    /selectFallbackAbortCandidate\(fallbackAbortCandidates\)/u,
+  );
+});
+
+test("holds the exact cancelled continuation through release and one second", async () => {
+  const evidence = passingEvidence();
+  const cancellation = evidence.fallback.invisibleCancellation;
+  assert.ok(
+    cancellation.cancellationTerminal.at < cancellation.exitedAt &&
+    cancellation.exitedAt <= cancellation.continuationResumeAt,
+  );
+  assert.deepEqual(validatePdfSharpnessEvidence(evidence), []);
+
+  const source = await readFile(
+    "scripts/run-pdf-sharpness-browser-regression.mjs",
+    "utf8",
+  );
+  assert.match(source, /type: "continuation-minimum-elapsed"/u);
+  assert.match(
+    source,
+    /held\.minimumElapsed[\s\S]*held\.releaseRequestedAt[\s\S]*nativeRequestAnimationFrame\(held\.callback\)/u,
+  );
+  assert.match(
+    source,
+    /markFallbackViewportExit[\s\S]*matchingCancelRequests\.length !== 1[\s\S]*matchingTerminals\.length !== 1/u,
+  );
+});
+
+test("sanitizes partial fallback cancellation timeout state", () => {
+  const privateDocument = "private-document-name:private-revision";
+  const privateRevision = "private-revision";
+  const expected = {
+    abortSignalId: 3,
+    documentKey: privateDocument,
+    page: 3,
+    renderAttemptId: 7,
+    revision: privateRevision,
+    stage: "minimum-elapsed",
+  };
+  const raw = {
+    dom: {
+      blockPresent: true,
+      canvasHeight: 0,
+      canvasPresent: true,
+      canvasWidth: 0,
+      textOverlayCount: 12,
+      visible: false,
+    },
+    events: [
+      {
+        abortSignalId: 3,
+        at: 100,
+        documentKey: privateDocument,
+        page: 3,
+        renderAttemptId: 7,
+        revision: privateRevision,
+        type: "continuation-delay",
+      },
+      {
+        at: 101,
+        documentKey: "different-private-document",
+        page: 4,
+        revision: "different-private-revision",
+        type: "continuation-armed",
+      },
+    ],
+    held: {
+      abortSignalId: 3,
+      minimumElapsed: true,
+      releaseRequestedAt: null,
+      renderAttemptId: 7,
+      resumed: false,
+    },
+    rawError: "secret local path /tmp/private-reader-profile",
+  };
+  const diagnostic = summarizePdfFallbackCancellationDiagnostic(raw, expected);
+  assert.equal(diagnostic.counts["continuation-delay"], 1);
+  assert.equal(diagnostic.events[0].documentMatches, true);
+  assert.equal(diagnostic.events[0].revisionMatches, true);
+  assert.equal(diagnostic.held.minimumElapsed, true);
+  assert.equal(diagnostic.stage, "minimum-elapsed");
+  const serialized = JSON.stringify(diagnostic);
+  assert.doesNotMatch(serialized, /private|secret|\/tmp\//u);
+  assert.equal(
+    JSON.stringify(summarizePdfFallbackCancellationDiagnostic(
+      { ...raw, rawError: "a wholly different private failure" },
+      expected,
+    )),
+    serialized,
+  );
+});
+
+test("sanitizes every held fallback lifecycle failure stage", async () => {
+  const source = await readFile(
+    "scripts/run-pdf-sharpness-browser-regression.mjs",
+    "utf8",
+  );
+  for (const stage of [
+    "viewport-exit-request",
+    "page-traversal",
+    "cancellation-ready",
+    "viewport-exit-confirmation",
+    "minimum-elapsed",
+    "continuation-resume",
+  ]) {
+    assert.match(source, new RegExp(`cancellationStage = "${stage}"`, "u"));
+  }
+  assert.match(
+    source,
+    /cancellationStage = "viewport-exit-request";[\s\S]*try \{[\s\S]*markFallbackViewportExitRequest[\s\S]*scrollPageIntoView\(cdp, 5\)[\s\S]*markFallbackViewportExit[\s\S]*continuation-minimum-elapsed[\s\S]*continuation-resume[\s\S]*catch \{[\s\S]*readFallbackCancellationTimeoutDiagnostic/u,
+  );
+});
+
+test("marks priority in the same task as the final mounted target scroll", async () => {
+  const source = await readFile(
+    "scripts/run-pdf-sharpness-browser-regression.mjs",
+    "utf8",
+  );
+  assert.match(
+    source,
+    /scrollPageIntoView\(cdp, intermediatePage\);[\s\S]*waitForPageShell\(cdp, priorityTarget\);[\s\S]*beginPriorityScroll\([^)]*priorityTarget[^)]*\)/u,
+  );
+  assert.match(source, /adjacent preview to settle before priority action/u);
+  assert.doesNotMatch(
+    source,
+    /mountPdfPageByTraversal\(cdp, priorityTarget\)|beginPriorityProbe|markPriorityScrollAction/u,
+  );
+  assert.match(
+    source,
+    /bitmapEventByObject\.set\(message\.bitmap, workerEvent\.eventId\)[\s\S]*bitmapEventByObject\.get\(args\[0\]\)/u,
+  );
+  assert.match(
+    source,
+    /activityId: \+\+activitySequence[\s\S]*drawInvocationId: \+\+drawInvocationSequence[\s\S]*priorityProbe: currentPriorityProbe[\s\S]*queueMicrotask/u,
+  );
+  assert.match(
+    source,
+    /drawInvocationBoundary: drawInvocationSequence[\s\S]*currentPriorityProbe = \{[\s\S]*block\.scrollIntoView\(\{ behavior: 'instant', block: 'center' \}\);[\s\S]*action\.readerViewportAfter = rectangle\(reader\);[\s\S]*action\.scrollTopAfter = Number\(reader\?\.scrollTop\);[\s\S]*action\.targetGeometryAfter = rectangle\(block\)/u,
+  );
+  assert.doesNotMatch(
+    source,
+    /beginPriorityScroll[\s\S]*scrollIntoView\(\{ behavior: 'auto'/u,
+  );
+  assert.match(
+    source,
+    /invocation\.priorityProbe[\s\S]*invocation\.drawInvocationId >[\s\S]*scrollAction\.drawInvocationBoundary/u,
+  );
+  assert.match(
+    source,
+    /staleBitmapCutoffActivityId = cachedTargetSatisfied[\s\S]*targetComposition\?\.activityId[\s\S]*targetBitmapAfterVisibleRequest\?\.activityId/u,
+  );
+});
+
+test("owns and tears down one fresh reference session per matrix configuration", async () => {
+  const source = await readFile(
+    "scripts/run-pdf-sharpness-browser-regression.mjs",
+    "utf8",
+  );
+  const captureSource = source.slice(
+    source.indexOf("async function captureReferenceScreenshots("),
+    source.indexOf("function samplesForPage("),
+  );
+  assert.match(
+    captureSource,
+    /for \(const configuration of PDF_SHARPNESS_MATRIX\)[\s\S]*startBrowser\(browserExecutable, true\)[\s\S]*readReferenceCaptureDiagnosticBaseline\(cdp\)[\s\S]*Page\.setLifecycleEventsEnabled[\s\S]*applyMatrixConfiguration\(cdp, configuration, true\)[\s\S]*readReferenceCaptureDiagnosticViewport\(cdp\)[\s\S]*navigateReferenceCaptureDiagnosticPage[\s\S]*waitForReferenceCaptureDiagnosticViewer[\s\S]*waitForRenderedReferenceScreenshot/u,
+  );
+  assert.match(
+    captureSource,
+    /finally \{[\s\S]*closeOwnedBrowser\(cdp, browser\)[\s\S]*referenceShutdowns\.push/u,
+  );
+  assert.match(
+    captureSource,
+    /screenshots\.set\(configuration\.id, \{[\s\S]*captureLifecycle: lifecycle[\s\S]*terminalError = operationError/u,
+  );
+  assert.doesNotMatch(
+    captureSource,
+    /requestedUrl\.hash[\s\S]*startBrowser\(browserExecutable, true\)/u,
+  );
+});
+
+test("uses composition and bitmap sequence when timer samples tie", () => {
+  const evidence = passingEvidence();
+  const upgraded = evidence.matrix[2].raster;
+  upgraded.sharp.composedAt = upgraded.preview.composedAt;
+  assert.deepEqual(validatePdfSharpnessEvidence(evidence), []);
+});
+
+test("selects drained Long Tasks by entry start time", () => {
+  const malformed = { duration: 1, name: "self", startTime: null };
+  assert.deepEqual(
+    selectPdfLongTasksForWindow([
+      { duration: 1, name: "self", startTime: 9.99 },
+      { duration: 1, name: "self", startTime: 10 },
+      { duration: 1, name: "self", startTime: 19.99 },
+      { duration: 1, name: "self", startTime: 20 },
+      malformed,
+    ], { finishedAt: 20, startedAt: 10 }),
+    [
+      { duration: 1, name: "self", startTime: 10 },
+      { duration: 1, name: "self", startTime: 19.99 },
+      malformed,
+    ],
+  );
+});
+
+test("drains runtime observers before scenario snapshots", async () => {
+  const source = await readFile(
+    "scripts/run-pdf-sharpness-browser-regression.mjs",
+    "utf8",
+  );
+  assert.match(source, /longTaskObserver\.takeRecords\(\)/u);
+  assert.match(source, /longAnimationFrameObserver\.takeRecords\(\)/u);
+  assert.match(
+    source,
+    /recordLongAnimationFrameEntries\(longAnimationFrameObserver\.takeRecords\(\)\)/u,
+  );
+  assert.match(
+    source,
+    /PerformanceObserver\(\(list\) => \{\s*recordLongAnimationFrameEntries\(list\.getEntries\(\)\)/u,
+  );
+  assert.doesNotMatch(
+    source,
+    /longAnimationFrameObserver\.observe\([\s\S]{0,100}buffered:\s*true/u,
+  );
+  assert.match(
+    source,
+    /finalizeCurrentScenario[\s\S]*drainLongAnimationFrames\(\);[\s\S]*drainLongTasks\(\);\s*currentScenario\.finishedAt = performance\.now\(\)/u,
+  );
+  assert.match(
+    source,
+    /captureSnapshot = \(drainObservers = true\)[\s\S]*drainLongAnimationFrames\(\);\s*drainLongTasks\(\)/u,
+  );
+  assert.doesNotMatch(source, /longTaskStart|longTaskEnd/u);
+});
+
+test("caches one atomic scenario finalization bundle and fails closed", async () => {
+  const cache = createAppMatrixScenarioFinalizationCache();
+  cache.begin();
+  const scenario = {
+    finishedAt: 100,
+    id: "first",
+    maximumCanvasCount: 1,
+    maximumCanvasPixels: 200,
+    maximumCountFrame: { composedCount: 1, composedPixels: 200 },
+    maximumPixelsFrame: { composedCount: 1, composedPixels: 200 },
+  };
+  let finalizeCount = 0;
+  let snapshotCount = 0;
+  const finalized = cache.finishSnapshot(
+    () => {
+      finalizeCount += 1;
+      return scenario;
+    },
+    () => {
+      snapshotCount += 1;
+      return {
+        draws: [1],
+        phaseMarkers: ["scenario-finish-started"],
+      };
+    },
+  );
+  assert.equal(finalized.scenario.finishedAt, 100);
+  assert.equal(finalized.scenario.maximumCanvasPixels, 200);
+  scenario.finishedAt = 999;
+  const retryAfterMarkerFailure = cache.finishSnapshot(
+    () => {
+      throw new Error("the cached pair must bypass later finalization");
+    },
+    () => {
+      throw new Error("the cached pair must bypass a later snapshot");
+    },
+  );
+  assert.deepEqual(retryAfterMarkerFailure, finalized);
+  assert.equal(finalizeCount, 1);
+  assert.equal(snapshotCount, 1);
+  retryAfterMarkerFailure.snapshot.phaseMarkers.push("private-late-marker");
+  assert.deepEqual(cache.finishSnapshot(() => null, () => null), finalized);
+
+  cache.begin();
+  assert.equal(cache.finishSnapshot(() => null, () => ({ stale: true })), null);
+  assert.throws(
+    () => cache.finishSnapshot(
+      () => ({ finishedAt: 200, id: "second" }),
+      () => {
+        throw new Error("snapshot capture failed");
+      },
+    ),
+    /snapshot capture failed/u,
+  );
+  assert.throws(
+    () => cache.finishSnapshot(
+      () => ({ finishedAt: 300, id: "forged-retry" }),
+      () => ({ draws: [2] }),
+    ),
+    /finalization bundle is unavailable/u,
+  );
+
+  cache.begin();
+  assert.deepEqual(cache.finishSnapshot(
+    () => ({ finishedAt: 300, id: "third" }),
+    () => ({ draws: [3] }),
+  ), {
+    scenario: { finishedAt: 300, id: "third" },
+    snapshot: { draws: [3] },
+  });
+
+  const source = await readFile(
+    "scripts/run-pdf-sharpness-browser-regression.mjs",
+    "utf8",
+  );
+  assert.match(source, /scenarioFinalizationCache\.begin\(\)/u);
+  assert.match(
+    source,
+    /scenarioFinalizationCache\.finishSnapshot\([\s\S]*captureSnapshot\(false\)[\s\S]*if \(finalization\) currentScenario = null/u,
+  );
+  assert.equal(
+    source.match(/__lineLightIssue68\.finishScenarioSnapshot\(\)/gu)?.length,
+    2,
+  );
+});
+
+test("binds LoAF batches to exact scenario intervals before the ring", () => {
+  const frames = [
+    { deliverySequence: 1, duration: 50, startTime: 120 },
+    { deliverySequence: 2, duration: 50, startTime: 220 },
+    { deliverySequence: 3, duration: 50, startTime: 90 },
+    { deliverySequence: 4, duration: 50, startTime: 50 },
+    { deliverySequence: 5, duration: 50, startTime: 300 },
+    { deliverySequence: 6, duration: 50, startTime: 290 },
+  ];
+  const callbackBatch = collectAppMatrixRuntimeLongAnimationFrameBatch(
+    { items: [], total: 0 },
+    frames.slice(0, 2),
+    { finishedAt: 300, startedAt: 100 },
+    32,
+  );
+  const first = collectAppMatrixRuntimeLongAnimationFrameBatch(
+    callbackBatch,
+    frames.slice(2),
+    { finishedAt: 300, startedAt: 100 },
+    32,
+  );
+  assert.deepEqual(
+    first.items.map((frame) => frame.deliverySequence),
+    [3, 1, 2, 6],
+  );
+  assert.equal(first.total, 4);
+  assert.equal(first.truncated, false);
+
+  const second = collectAppMatrixRuntimeLongAnimationFrameBatch(
+    { items: [], total: 0 },
+    [
+      { deliverySequence: 4, duration: 50, startTime: 250 },
+      frames[4],
+    ],
+    { finishedAt: 400, startedAt: 300 },
+    32,
+  );
+  assert.deepEqual(
+    second.items.map((frame) => frame.deliverySequence),
+    [5],
+  );
+  assert.equal(second.total, 1);
+
+  const sameTimeFirst = collectAppMatrixRuntimeLongAnimationFrameBatch(
+    { items: [], total: 0 },
+    [{ deliverySequence: 1, duration: 60, startTime: 120 }],
+    { finishedAt: 200, startedAt: 100 },
+    32,
+  );
+  const sameTime = collectAppMatrixRuntimeLongAnimationFrameBatch(
+    sameTimeFirst,
+    [{ deliverySequence: 2, duration: 60, startTime: 120 }],
+    { finishedAt: 200, startedAt: 100 },
+    32,
+  );
+  assert.deepEqual(
+    sameTime.items.map((frame) => frame.deliverySequence),
+    [1, 2],
+  );
+
+  const bounded = collectAppMatrixRuntimeLongAnimationFrameBatch(
+    { items: [], total: 0 },
+    Array.from({ length: 34 }, (_, index) => ({
+      deliverySequence: index + 1,
+      duration: 50,
+      startTime: 100 + index,
+    })),
+    { finishedAt: 300, startedAt: 100 },
+    32,
+  );
+  assert.equal(bounded.total, 34);
+  assert.equal(bounded.items.length, 32);
+  assert.equal(bounded.truncated, true);
+
+  const malformed = { duration: "private", startTime: null };
+  const retainedMalformed = collectAppMatrixRuntimeLongAnimationFrameBatch(
+    { items: [], total: 0 },
+    [malformed],
+    { finishedAt: 300, startedAt: 100 },
+    32,
+  );
+  assert.deepEqual(retainedMalformed, {
+    items: [malformed],
+    total: 1,
+    truncated: false,
+  });
+  const boundedMalformed = collectAppMatrixRuntimeLongAnimationFrameBatch(
+    { items: [], total: 0 },
+    [
+      malformed,
+      ...Array.from({ length: 32 }, (_, index) => ({
+        duration: 50,
+        startTime: 100 + index,
+      })),
+    ],
+    { finishedAt: 300, startedAt: 100 },
+    32,
+  );
+  assert.equal(boundedMalformed.total, 33);
+  assert.equal(boundedMalformed.items.includes(malformed), true);
+  const shortOutside = { duration: 49, startTime: 0 };
+  assert.deepEqual(
+    collectAppMatrixRuntimeLongAnimationFrameBatch(
+      { items: [], total: 0 },
+      [shortOutside],
+      { finishedAt: 300, startedAt: 100 },
+      32,
+    ).items,
+    [shortOutside],
+  );
+});
+
+test("independently validates a safety-capped physical-pixel target", () => {
+  const evidence = passingEvidence();
+  const run = evidence.matrix.at(-1);
+  Object.assign(run.raster.sharp, {
+    actualHeight: 4096,
+    actualWidth: 4096,
+    cssHeight: 10_000,
+    cssWidth: 10_000,
+    pageHeight: 10_000,
+    pageWidth: 10_000,
+    targetCapped: true,
+    targetHeight: 4096,
+    targetScale: 0.4096,
+    targetWidth: 4096,
+  });
+  Object.assign(run.raster.preview, {
+    actualHeight: 4096,
+    actualWidth: 4096,
+    composedAt: 10,
+    compositionId: 1,
+    scale: 0.4096,
+  });
+  run.raster.previewBeforeSharp = false;
+  run.raster.sharp.bitmapEventId = 1;
+  run.raster.sharp.composedAt = 10;
+  run.raster.sharp.compositionId = 1;
+  run.raster.transition = "preview-satisfied-target";
+  const cappedFrame = {
+    at: 50,
+    composedCount: 1,
+    composedPages: [{
+      geometry: { bottom: 200, left: 20, right: 620, top: 80 },
+      geometryVisible: true,
+      height: 4096,
+      page: 1,
+      pixels: PDF_SHARPNESS_MAX_RASTER_PIXELS,
+      visible: true,
+      width: 4096,
+    }],
+    composedPixels: PDF_SHARPNESS_MAX_RASTER_PIXELS,
+    geometryVisiblePages: [1],
+    readerViewport: { bottom: 700, left: 0, right: 700, top: 0 },
+    visiblePages: [1],
+  };
+  run.canvasBudget.maximumCount = 1;
+  run.canvasBudget.maximumCountFrame = structuredClone(cappedFrame);
+  run.canvasBudget.maximumPixels = PDF_SHARPNESS_MAX_RASTER_PIXELS;
+  run.canvasBudget.maximumPixelsFrame = structuredClone(cappedFrame);
+  assert.deepEqual(validatePdfSharpnessEvidence(evidence), []);
+
+  run.raster.sharp.targetCapped = false;
+  assert.match(
+    validatePdfSharpnessEvidence(evidence).join("\n"),
+    /computed capped target/u,
+  );
+});
+
+test("requires at least one strict preview-to-sharp upgrade in the matrix", () => {
+  const evidence = passingEvidence();
+  for (const run of evidence.matrix) {
+    if (run.raster.transition !== "preview-to-sharp-upgrade") continue;
+    const physicalRatio =
+      run.viewport.devicePixelRatio * run.viewport.visualViewportScale;
+    Object.assign(run.raster.sharp, {
+      actualHeight: 800,
+      actualWidth: 600,
+      bitmapEventId: 1,
+      composedAt: 10,
+      compositionId: 1,
+      cssHeight: 400 / physicalRatio,
+      cssWidth: 300 / physicalRatio,
+      pageHeight: 800,
+      pageWidth: 600,
+      targetCapped: false,
+      targetHeight: 800,
+      targetScale: 1,
+      targetWidth: 600,
+    });
+    Object.assign(run.raster.preview, {
+      actualHeight: 800,
+      actualWidth: 600,
+      bitmapEventId: 1,
+      composedAt: 10,
+      compositionId: 1,
+      scale: 1,
+    });
+    run.raster.previewBeforeSharp = false;
+    run.raster.transition = "preview-satisfied-target";
+  }
+  assert.match(
+    validatePdfSharpnessEvidence(evidence).join("\n"),
+    /did not prove any strict preview-to-sharp raster upgrade/u,
+  );
+});
+
+function appendShadowPdfPairToFinalNetworkInterval(evidence) {
+  const network = evidence.network;
+  const firstPoint = network.networkFixedPoints[0];
+  const sourceTargets = network.targets.slice(
+    firstPoint.importBoundary.targetCount,
+    firstPoint.targetCount,
+  );
+  const sourceDocument = sourceTargets.find((target) =>
+    /pdf-document\.worker-/u.test(target.url)
+  );
+  const sourceParser = sourceTargets.find((target) =>
+    /pdf-parser\.worker-/u.test(target.url)
+  );
+  const documentTarget = structuredClone(sourceDocument);
+  const parserTarget = structuredClone(sourceParser);
+  const phase = "shadow-final-phase";
+  documentTarget.ancestry = [];
+  documentTarget.parentSessionId = null;
+  documentTarget.phase = phase;
+  documentTarget.sessionId = "shadow-final-document-session";
+  documentTarget.targetId = "shadow-final-document-target";
+  parserTarget.ancestry = [{
+    phase,
+    sessionId: documentTarget.sessionId,
+    type: documentTarget.type,
+    url: documentTarget.url,
+  }];
+  parserTarget.parentSessionId = documentTarget.sessionId;
+  parserTarget.phase = phase;
+  parserTarget.sessionId = "shadow-final-parser-session";
+  parserTarget.targetId = "shadow-final-parser-target";
+  let nextCdpId = Math.max(
+    ...network.targets.flatMap((target) =>
+      target.commands.map((command) => command.cdpId)
+    ),
+  ) + 1;
+  for (const target of [documentTarget, parserTarget]) {
+    for (const command of target.commands) {
+      command.cdpId = nextCdpId++;
+    }
+  }
+  const requests = [
+    {
+      bootstrapTargetSessionId: documentTarget.sessionId,
+      method: "GET",
+      phase,
+      requestId: "shadow-final-document-request",
+      sessionId: null,
+      startedAt: 9_000,
+      terminalAt: 9_001,
+      terminalReason: "target-attached",
+      type: "Script",
+      url: documentTarget.url,
+    },
+    {
+      bootstrapTargetSessionId: parserTarget.sessionId,
+      method: "GET",
+      phase,
+      requestId: "shadow-final-parser-request",
+      sessionId: documentTarget.sessionId,
+      startedAt: 9_002,
+      terminalAt: 9_003,
+      terminalReason: "target-attached",
+      type: "Script",
+      url: parserTarget.url,
+    },
+  ];
+  for (const [request, target] of [
+    [requests[0], documentTarget],
+    [requests[1], parserTarget],
+  ]) {
+    target.bootstrapRequestKey =
+      `${request.sessionId ?? "page"}:${request.requestId}`;
+    network.targetBootstrapSettlements.push({
+      method: request.method,
+      phase: request.phase,
+      requestId: request.requestId,
+      requestSessionId: request.sessionId,
+      resourceType: request.type,
+      targetDetachedAtSettlement: false,
+      targetId: target.targetId,
+      targetParentSessionId: target.parentSessionId,
+      targetSessionId: target.sessionId,
+      targetType: target.type,
+      terminalReason: "target-attached",
+      url: request.url,
+    });
+  }
+  network.targets.push(documentTarget, parserTarget);
+  network.requests.push(...requests);
+  network.requests.forEach((request, index) => {
+    request.sequence = index + 1;
+  });
+  network.nonPageRequests = network.requests.filter(
+    (request) => request.sessionId !== null,
+  );
+  network.nonPageRequestCounts.total = network.nonPageRequests.length;
+  network.completedRequestCount = network.requests.length;
+  network.localRequestCount = network.requests.length;
+  const finalPoint = network.networkFixedPoints.at(-1);
+  finalPoint.attachPromiseCount = network.targets.length;
+  finalPoint.completedRequestCount = network.requests.length;
+  finalPoint.requestCount = network.requests.length;
+  finalPoint.targetBootstrapSettlementCount =
+    network.targetBootstrapSettlements.length;
+  finalPoint.targetCount = network.targets.length;
+}
+
+test("rejects each material Issue 68 acceptance regression", async (t) => {
+  const cases = [
+    ["legacy evidence schema", (value) => {
+      value.schemaVersion = 2;
+    }, /schemaVersion must be 3/u],
+    ["live zoom transition", (value) => {
+      value.matrix[1].viewport.transition = "normal";
+    }, /live zoom transition/u],
+    ["undersampled backing", (value) => {
+      value.matrix[0].raster.sharp.actualWidth =
+        value.matrix[0].raster.sharp.targetWidth - 1;
+    }, /computed capped target/u],
+    ["oversized backing", (value) => {
+      value.matrix[0].raster.sharp.actualWidth += 1;
+    }, /computed capped target/u],
+    ["incorrect capped target", (value) => {
+      value.matrix[0].raster.sharp.targetCapped = true;
+    }, /computed capped target/u],
+    ["non-quarter-step target", (value) => {
+      value.matrix[2].raster.sharp.targetScale += 0.125;
+    }, /computed capped target/u],
+    ["self-reported raster target", (value) => {
+      value.matrix[5].raster.sharp.targetWidth = 600;
+    }, /computed capped target/u],
+    ["independent CSS raster dimensions", (value) => {
+      value.matrix[2].raster.sharp.cssWidth = 300;
+      value.matrix[2].raster.sharp.cssHeight = 400;
+    }, /computed capped target/u],
+    ["preview policy", (value) => {
+      value.matrix[0].raster.preview.scale = 1.5;
+    }, /adjacent 1\.25x preview/u],
+    ["connected preview composition", (value) => {
+      value.matrix[0].raster.preview.connectedCanvas = false;
+    }, /adjacent 1\.25x preview/u],
+    ["independent preview scale", (value) => {
+      value.matrix[0].raster.preview.scale = 1;
+    }, /preview backing/u],
+    ["independent preview dimensions", (value) => {
+      value.matrix[0].raster.preview.actualWidth -= 1;
+    }, /preview backing|transition proof/u],
+    ["satisfied target reuses composition", (value) => {
+      value.matrix[0].raster.sharp.composedAt = 20;
+      value.matrix[0].raster.sharp.compositionId = 2;
+      value.matrix[0].raster.sharp.bitmapEventId = 2;
+    }, /transition proof/u],
+    ["larger target cannot collapse into preview", (value) => {
+      const raster = value.matrix[2].raster;
+      raster.transition = "preview-satisfied-target";
+      raster.previewBeforeSharp = false;
+      raster.sharp.composedAt = raster.preview.composedAt;
+      raster.sharp.compositionId = raster.preview.compositionId;
+      raster.sharp.bitmapEventId = raster.preview.bitmapEventId;
+    }, /transition proof/u],
+    ["upgrade composition sequence", (value) => {
+      value.matrix[2].raster.sharp.compositionId =
+        value.matrix[2].raster.preview.compositionId;
+    }, /transition proof/u],
+    ["upgrade bitmap sequence", (value) => {
+      value.matrix[2].raster.sharp.bitmapEventId =
+        value.matrix[2].raster.preview.bitmapEventId;
+    }, /transition proof/u],
+    ["preview composition order", (value) => {
+      value.matrix[0].raster.preview.composedAt = 25;
+    }, /transition proof/u],
+    ["blank reference viewer", (value) => {
+      value.matrix[0].comparison.referenceReadiness.renderedPage = false;
+      value.matrix[0].comparison.referenceReadiness.inkPixels = 0;
+      value.matrix[0].comparison.referenceReadiness.inkRatio = 0;
+    }, /rendered-page pixel proof/u],
+    ["missing reference segmentation version", (value) => {
+      delete value.matrix[0].comparison.referenceReadiness.segmentationVersion;
+    }, /rendered-page pixel proof/u],
+    ["forged reference proof", (value) => {
+      value.matrix[0].comparison.referenceReadiness.proof =
+        "white-page-with-any-ink";
+    }, /rendered-page pixel proof/u],
+    ["missing reference winner area", (value) => {
+      delete value.matrix[0].comparison.referenceReadiness.winnerWhiteArea;
+    }, /rendered-page pixel proof/u],
+    ["missing reference runner-up area", (value) => {
+      delete value.matrix[0].comparison.referenceReadiness.runnerUpWhiteArea;
+    }, /rendered-page pixel proof/u],
+    ["missing reference substantial count", (value) => {
+      delete value.matrix[0].comparison.referenceReadiness
+        .substantialComponentCount;
+    }, /rendered-page pixel proof/u],
+    ["missing reference dominance", (value) => {
+      delete value.matrix[0].comparison.referenceReadiness
+        .winnerDominanceRatio;
+    }, /rendered-page pixel proof/u],
+    ["forged reference substantial count", (value) => {
+      value.matrix[0].comparison.referenceReadiness.substantialComponentCount = 0;
+    }, /rendered-page pixel proof/u],
+    ["forged reference winner area", (value) => {
+      const readiness = value.matrix[0].comparison.referenceReadiness;
+      readiness.winnerWhiteArea = readiness.runnerUpWhiteArea;
+      readiness.winnerDominanceRatio = 1;
+    }, /rendered-page pixel proof/u],
+    ["forged reference dominance", (value) => {
+      value.matrix[0].comparison.referenceReadiness.winnerDominanceRatio += 1;
+    }, /rendered-page pixel proof/u],
+    ["reference full inset page pixels", (value) => {
+      const readiness = value.matrix[0].comparison.referenceReadiness;
+      readiness.pagePixels -= 1;
+      readiness.pageWhiteRatio =
+        readiness.pageWhitePixels / readiness.pagePixels;
+      readiness.inkRatio = readiness.inkPixels / readiness.pagePixels;
+    }, /rendered-page pixel proof/u],
+    ["reference full interior white capacity", (value) => {
+      const readiness = value.matrix[0].comparison.referenceReadiness;
+      readiness.pageWhitePixels =
+        readiness.winnerWhiteArea -
+          (readiness.pageBounds.width * readiness.pageBounds.height -
+            readiness.pagePixels) - 1;
+      readiness.pageWhiteRatio =
+        readiness.pageWhitePixels / readiness.pagePixels;
+    }, /rendered-page pixel proof/u],
+    ["reference full exact white ratio", (value) => {
+      value.matrix[0].comparison.referenceReadiness.pageWhiteRatio += 9e-7;
+    }, /rendered-page pixel proof/u],
+    ["reference full exact ink ratio", (value) => {
+      value.matrix[0].comparison.referenceReadiness.inkRatio += 9e-7;
+    }, /rendered-page pixel proof/u],
+    ["reference full exact dominance ratio", (value) => {
+      value.matrix[0].comparison.referenceReadiness.winnerDominanceRatio +=
+        5e-10;
+    }, /rendered-page pixel proof/u],
+    ["reference full physical ink band capacity", (value) => {
+      const readiness = value.matrix[0].comparison.referenceReadiness;
+      const insetX = Math.max(2, Math.floor(readiness.pageBounds.width * 0.01));
+      const interiorWidth = readiness.pageBounds.width - insetX * 2;
+      readiness.inkPixels = 28_860;
+      readiness.inkRatio = readiness.inkPixels / readiness.pagePixels;
+      readiness.inkRowBands = 206;
+      readiness.inkSpanRatio = 130 / interiorWidth;
+    }, /rendered-page pixel proof/u],
+    ["missing requested reference target", (value) => {
+      delete value.matrix[0].comparison.referenceTarget;
+    }, /requested top page/u],
+    ["adjacent reference winner substituted for target", (value) => {
+      makeAdjacentReferenceComponentTheGlobalWinner(value.matrix[0]);
+      const target = value.matrix[0].comparison.referenceTarget;
+      target.selectedComponentIndex = 1;
+      target.cropBounds = { ...target.components[1].bounds };
+    }, /requested top page/u],
+    ["reference target component order", (value) => {
+      makeAdjacentReferenceComponentTheGlobalWinner(value.matrix[0]);
+      value.matrix[0].comparison.referenceTarget.components.reverse();
+    }, /requested top page/u],
+    ["reference target phantom component", (value) => {
+      const target = value.matrix[0].comparison.referenceTarget;
+      target.components.push(structuredClone(target.components[0]));
+    }, /requested top page/u],
+    ["reference correlated component area overflow", (value) => {
+      forgeCorrelatedReferenceComponentAreaOverflow(value.matrix[0]);
+    }, /requested top page/u],
+    ["reference impossible connected component area", (value) => {
+      forgeImpossibleConnectedReferenceComponent(value.matrix[0]);
+    }, /requested top page/u],
+    ["reference full runner exceeds omitted-component maximum", (value) => {
+      const readiness = value.matrix[0].comparison.referenceReadiness;
+      const minimumWidth = Math.max(120, Math.ceil(readiness.width * 0.25));
+      const minimumHeight = Math.max(80, Math.ceil(readiness.height * 0.25));
+      readiness.runnerUpWhiteArea = Math.max(
+        (minimumWidth - 1) * readiness.height,
+        readiness.width * (minimumHeight - 1),
+      ) + 1;
+      readiness.winnerDominanceRatio =
+        readiness.winnerWhiteArea / readiness.runnerUpWhiteArea;
+    }, /requested top page/u],
+    ["reference target runner exceeds omitted-component maximum", (value) => {
+      const readiness = value.matrix[0].comparison.referenceTarget.readiness;
+      const minimumWidth = Math.max(120, Math.ceil(readiness.width * 0.25));
+      const minimumHeight = Math.max(80, Math.ceil(readiness.height * 0.25));
+      readiness.runnerUpWhiteArea = Math.max(
+        (minimumWidth - 1) * readiness.height,
+        readiness.width * (minimumHeight - 1),
+      ) + 1;
+      readiness.winnerDominanceRatio =
+        readiness.winnerWhiteArea / readiness.runnerUpWhiteArea;
+    }, /requested top page/u],
+    ["reference listed runner exceeds reported runner", (value) => {
+      forgeListedReferenceRunner(value.matrix[0]);
+    }, /requested top page/u],
+    ["reference listed winner tie is hidden by runner", (value) => {
+      forgeListedReferenceRunner(value.matrix[0], { tied: true });
+    }, /requested top page/u],
+    ["reference target anchor ambiguity", (value) => {
+      makeAdjacentReferenceComponentTheGlobalWinner(value.matrix[0]);
+      const run = value.matrix[0];
+      const target = run.comparison.referenceTarget;
+      target.components[1].bounds.y = target.components[0].bounds.y + 1;
+      run.comparison.referenceReadiness.substantialComponents[1]
+        .pageBounds.y = target.components[1].bounds.y;
+      run.comparison.referenceReadiness.pageBounds.y =
+        target.components[1].bounds.y;
+    }, /requested top page/u],
+    ["reference target crop metrics", (value) => {
+      value.matrix[0].comparison.referenceTarget.readiness.renderedPage = false;
+    }, /requested top page/u],
+    ["reference target crop inset pixels", (value) => {
+      value.matrix[0].comparison.referenceTarget.readiness.pagePixels += 1;
+    }, /requested top page/u],
+    ["reference target crop white ratio", (value) => {
+      value.matrix[0].comparison.referenceTarget.readiness.pageWhiteRatio +=
+        0.01;
+    }, /requested top page/u],
+    ["reference target interior white capacity", (value) => {
+      const readiness = value.matrix[0].comparison.referenceTarget.readiness;
+      readiness.pageWhitePixels =
+        readiness.winnerWhiteArea -
+          (readiness.pageBounds.width * readiness.pageBounds.height -
+            readiness.pagePixels) - 1;
+      readiness.pageWhiteRatio =
+        readiness.pageWhitePixels / readiness.pagePixels;
+    }, /requested top page/u],
+    ["reference target crop ink gates", (value) => {
+      value.matrix[0].comparison.referenceTarget.readiness.inkRowBands = 1;
+    }, /requested top page/u],
+    ["reference target impossible ink bands", (value) => {
+      const readiness = value.matrix[0].comparison.referenceTarget.readiness;
+      const insetY = Math.max(2, Math.floor(readiness.pageBounds.height * 0.01));
+      readiness.inkRowBands =
+        Math.ceil((readiness.pageBounds.height - insetY * 2) / 3) + 1;
+    }, /requested top page/u],
+    ["reference target disjoint white and ink pixels", (value) => {
+      const readiness = value.matrix[0].comparison.referenceTarget.readiness;
+      readiness.inkPixels =
+        readiness.pagePixels - readiness.pageWhitePixels + 1;
+      readiness.inkRatio = readiness.inkPixels / readiness.pagePixels;
+    }, /requested top page/u],
+    ["reference target fractional ink span", (value) => {
+      value.matrix[0].comparison.referenceTarget.readiness.inkSpanRatio =
+        0.6500001;
+    }, /requested top page/u],
+    ["reference target exact ink span quotient", (value) => {
+      const readiness = value.matrix[0].comparison.referenceTarget.readiness;
+      const insetX = Math.max(2, Math.floor(readiness.pageBounds.width * 0.01));
+      const interiorWidth = readiness.pageBounds.width - insetX * 2;
+      const spanPixels = Math.round(readiness.inkSpanRatio * interiorWidth);
+      readiness.inkSpanRatio = (spanPixels + 5e-8) / interiorWidth;
+    }, /requested top page/u],
+    ["reference target physical ink band capacity", (value) => {
+      const readiness = value.matrix[0].comparison.referenceTarget.readiness;
+      const insetX = Math.max(2, Math.floor(readiness.pageBounds.width * 0.01));
+      const interiorWidth = readiness.pageBounds.width - insetX * 2;
+      readiness.inkPixels = 28_860;
+      readiness.inkRatio = readiness.inkPixels / readiness.pagePixels;
+      readiness.inkRowBands = 206;
+      readiness.inkSpanRatio = 130 / interiorWidth;
+    }, /requested top page/u],
+    ["reference target crop winner", (value) => {
+      value.matrix[0].comparison.referenceTarget.readiness.winnerWhiteArea -= 1;
+    }, /requested top page/u],
+    ["reference target requested page", (value) => {
+      value.matrix[0].comparison.referenceTarget.requestedPage = 3;
+    }, /requested top page/u],
+    ["reference lifecycle missing", (value) => {
+      delete value.matrix[0].comparison.referenceReadiness.captureLifecycle;
+    }, /isolated loader lifecycle/u],
+    ["reference lifecycle configuration", (value) => {
+      value.matrix[0].comparison.referenceReadiness.captureLifecycle
+        .configurationId = value.matrix[1].id;
+    }, /isolated loader lifecycle/u],
+    ["reference lifecycle baseline", (value) => {
+      value.matrix[0].comparison.referenceReadiness.captureLifecycle
+        .baseline.workerCount = 1;
+    }, /isolated loader lifecycle/u],
+    ["reference lifecycle stale loader", (value) => {
+      value.matrix[0].comparison.referenceReadiness.captureLifecycle
+        .navigation.lifecycleLoaderIdentityHash = "f".repeat(64);
+    }, /isolated loader lifecycle/u],
+    ["reference lifecycle stale frame", (value) => {
+      value.matrix[0].comparison.referenceReadiness.captureLifecycle
+        .navigation.frameIdentityHash = "f".repeat(64);
+    }, /isolated loader lifecycle/u],
+    ["reference lifecycle viewport relation", (value) => {
+      value.matrix[4].comparison.referenceReadiness.captureLifecycle
+        .viewer.viewport.visualViewportWidth += 1;
+    }, /isolated loader lifecycle/u],
+    ["reference lifecycle DPR", (value) => {
+      value.matrix[4].comparison.referenceReadiness.captureLifecycle
+        .viewer.viewport.devicePixelRatio += 0.01;
+    }, /isolated loader lifecycle/u],
+    ["reference lifecycle screen", (value) => {
+      value.matrix[4].comparison.referenceReadiness.captureLifecycle
+        .configuredViewport.screenWidth += 1;
+    }, /isolated loader lifecycle/u],
+    ["reference lifecycle pinch", (value) => {
+      value.matrix[5].comparison.referenceReadiness.captureLifecycle
+        .configuredViewport.visualViewportScale = 1;
+    }, /isolated loader lifecycle/u],
+    ["reference lifecycle layout stability", (value) => {
+      value.matrix[4].comparison.referenceReadiness.captureLifecycle
+        .viewer.viewport.innerWidth += 2;
+    }, /isolated loader lifecycle/u],
+    ["reference lifecycle native mobile layout width", (value) => {
+      const lifecycle = value.matrix[4].comparison.referenceReadiness
+        .captureLifecycle;
+      const innerWidth = 10_000;
+      const innerHeight = innerWidth * 844 / 390;
+      Object.assign(lifecycle.configuredViewport, {
+        innerHeight,
+        innerWidth,
+      });
+      Object.assign(lifecycle.viewer.viewport, {
+        innerHeight,
+        innerWidth,
+        visualViewportHeight: innerHeight,
+        visualViewportScale: 390 / innerWidth,
+        visualViewportWidth: innerWidth,
+      });
+    }, /isolated loader lifecycle/u],
+    ["reference lifecycle fractional DOM layout height", (value) => {
+      const lifecycle = value.matrix[4].comparison.referenceReadiness
+        .captureLifecycle;
+      lifecycle.configuredViewport.innerHeight += 0.5;
+      lifecycle.viewer.viewport.innerHeight += 0.5;
+    }, /isolated loader lifecycle/u],
+    ["stale priority", (value) => {
+      value.matrix[0].visibleFirst.firstPostScrollCompositionPage = 3;
+    }, /current viewport first/u],
+    ["cached priority undersized bitmap", (value) => {
+      value.matrix[0].visibleFirst.targetBefore.latestBitmapWidth -= 1;
+    }, /current viewport first/u],
+    ["cached priority wrong bitmap identity", (value) => {
+      value.matrix[0].visibleFirst.targetComposition.bitmapEventId += 1;
+    }, /current viewport first/u],
+    ["cached priority manufactured render request", (value) => {
+      value.matrix[0].visibleFirst.targetVisibleRequest = structuredClone(
+        value.matrix[2].visibleFirst.targetVisibleRequest,
+      );
+    }, /current viewport first/u],
+    ["cached priority hidden redundant target chain", (value) => {
+      const cached = value.matrix[0].visibleFirst;
+      const rendered = value.matrix[2].visibleFirst;
+      const request = structuredClone(rendered.targetVisibleRequest);
+      request.visible = false;
+      cached.targetRenderRequestCount = 1;
+      cached.targetRenderRequests = [request];
+      cached.targetBitmapCount = 1;
+      cached.targetBitmaps = [structuredClone(
+        rendered.targetBitmapAfterVisibleRequest,
+      )];
+    }, /current viewport first/u],
+    ["cached priority missing request array", (value) => {
+      delete value.matrix[0].visibleFirst.targetRenderRequests;
+    }, /current viewport first/u],
+    ["cached priority missing bitmap array", (value) => {
+      delete value.matrix[0].visibleFirst.targetBitmaps;
+    }, /current viewport first/u],
+    ["render priority wrong first visible request", (value) => {
+      value.matrix[2].visibleFirst.firstPostScrollVisibleRequestPage = 5;
+    }, /current viewport first/u],
+    ["render priority wrong target bitmap", (value) => {
+      value.matrix[2].visibleFirst.targetBitmapAfterVisibleRequest.pageNumber = 5;
+    }, /current viewport first/u],
+    ["render priority duplicate target chain", (value) => {
+      const priority = value.matrix[2].visibleFirst;
+      priority.targetRenderRequestCount = 2;
+      priority.targetRenderRequests.push(structuredClone(
+        priority.targetRenderRequests[0],
+      ));
+      priority.targetBitmapCount = 2;
+      priority.targetBitmaps.push(structuredClone(priority.targetBitmaps[0]));
+    }, /current viewport first/u],
+    ["priority composition before scroll action", (value) => {
+      value.matrix[2].visibleFirst.targetComposition.at = 99;
+    }, /current viewport first/u],
+    ["priority equal-time pre-boundary composition", (value) => {
+      const priority = value.matrix[2].visibleFirst;
+      priority.targetComposition.at = priority.scrollAction.at;
+      priority.targetComposition.drawInvocationId =
+        priority.scrollAction.drawInvocationBoundary;
+    }, /current viewport first/u],
+    ["priority missing action activity identity", (value) => {
+      delete value.matrix[2].visibleFirst.scrollAction.activityId;
+    }, /current viewport first/u],
+    ["priority request activity before action", (value) => {
+      value.matrix[2].visibleFirst.targetVisibleRequest.activityId = 99;
+      value.matrix[2].visibleFirst.targetRenderRequests[0].activityId = 99;
+    }, /current viewport first/u],
+    ["priority bitmap activity before request", (value) => {
+      const priority = value.matrix[2].visibleFirst;
+      priority.targetBitmapAfterVisibleRequest.activityId = 109;
+      priority.targetBitmaps[0].activityId = 109;
+    }, /current viewport first/u],
+    ["priority composition geometry misses reader", (value) => {
+      value.matrix[2].visibleFirst.targetComposition.geometry = {
+        bottom: 900,
+        left: 20,
+        right: 620,
+        top: 800,
+      };
+    }, /current viewport first/u],
+    ["priority action did not move scroll position", (value) => {
+      const action = value.matrix[2].visibleFirst.scrollAction;
+      action.scrollTopAfter = action.scrollTopBefore;
+    }, /current viewport first/u],
+    ["priority target was already visible before instant scroll", (value) => {
+      const action = value.matrix[2].visibleFirst.scrollAction;
+      action.targetGeometryBefore = {
+        bottom: 650,
+        left: 20,
+        right: 620,
+        top: 50,
+      };
+    }, /current viewport first/u],
+    ["priority target remained offscreen after instant scroll", (value) => {
+      const action = value.matrix[2].visibleFirst.scrollAction;
+      action.targetGeometryAfter = {
+        bottom: 1_600,
+        left: 20,
+        right: 620,
+        top: 800,
+      };
+    }, /current viewport first/u],
+    ["priority composition activity stayed at action boundary", (value) => {
+      const priority = value.matrix[0].visibleFirst;
+      priority.targetComposition.activityId = priority.scrollAction.activityId;
+    }, /current viewport first/u],
+    ["priority draw invocation stayed at action boundary", (value) => {
+      const priority = value.matrix[0].visibleFirst;
+      priority.targetComposition.drawInvocationId =
+        priority.scrollAction.drawInvocationBoundary;
+    }, /current viewport first/u],
+    ["cached priority bitmap preempts target composition", (value) => {
+      value.matrix[0].visibleFirst.nonTargetBitmaps[0].activityId = 105;
+    }, /current viewport first/u],
+    ["render priority bitmap preempts target bitmap", (value) => {
+      value.matrix[2].visibleFirst.nonTargetBitmaps[0].activityId = 115;
+    }, /current viewport first/u],
+    ["priority missing non-target bitmap sequence", (value) => {
+      delete value.matrix[2].visibleFirst.nonTargetBitmaps;
+    }, /current viewport first/u],
+    ["priority non-visible composition", (value) => {
+      value.matrix[2].visibleFirst.staleNonVisibleCompositions.push({
+        page: 3,
+        visible: false,
+      });
+    }, /current viewport first/u],
+    ["priority lacks a cached path", (value) => {
+      for (const run of value.matrix) {
+        if (run.visibleFirst.targetPath !== "cached-target") continue;
+        run.visibleFirst.targetPath = "render-required";
+      }
+    }, /cached and render-required/u],
+    ["visible canvas duplicate page", (value) => {
+      value.matrix[0].canvasBudget.maximumCountFrame.composedPages[1].page = 1;
+    }, /visible composed-canvas budget/u],
+    ["visible canvas count mismatch", (value) => {
+      value.matrix[0].canvasBudget.maximumCountFrame.composedCount += 1;
+    }, /visible composed-canvas budget/u],
+    ["visible canvas pixel sum mismatch", (value) => {
+      value.matrix[0].canvasBudget.maximumPixelsFrame.composedPixels += 1;
+    }, /visible composed-canvas budget/u],
+    ["visible canvas marked offscreen", (value) => {
+      value.matrix[4].canvasBudget.maximumCountFrame.composedPages[2].visible = false;
+    }, /visible composed-canvas budget/u],
+    ["visible canvas membership mismatch", (value) => {
+      value.matrix[4].canvasBudget.maximumPixelsFrame.visiblePages.pop();
+    }, /visible composed-canvas budget/u],
+    ["visible canvas per-page pixel mismatch", (value) => {
+      value.matrix[0].canvasBudget.maximumCountFrame.composedPages[0].pixels += 1;
+    }, /visible composed-canvas budget/u],
+    ["visible canvas correlated false geometry", (value) => {
+      const frame = value.matrix[4].canvasBudget.maximumCountFrame;
+      frame.composedPages[2].geometry = {
+        bottom: 900,
+        left: 20,
+        right: 620,
+        top: 800,
+      };
+    }, /visible composed-canvas budget/u],
+    ["visible canvas count-peak contradicts pixel peak", (value) => {
+      const run = value.matrix[0];
+      const frame = run.canvasBudget.maximumCountFrame;
+      frame.composedPages[0].width += 1;
+      frame.composedPages[0].pixels =
+        frame.composedPages[0].width * frame.composedPages[0].height;
+      frame.composedPixels = frame.composedPages.reduce(
+        (sum, page) => sum + page.pixels,
+        0,
+      );
+    }, /visible composed-canvas budget/u],
+    ["visible canvas pixel-peak contradicts count peak", (value) => {
+      const run = value.matrix[0];
+      const frame = run.canvasBudget.maximumPixelsFrame;
+      const firstPixels = frame.composedPages[0].pixels;
+      Object.assign(frame.composedPages[0], {
+        height: 1,
+        pixels: firstPixels - 1,
+        width: firstPixels - 1,
+      });
+      frame.composedPages.push({
+        geometry: { bottom: 540, left: 20, right: 620, top: 440 },
+        geometryVisible: true,
+        height: 1,
+        page: 3,
+        pixels: 1,
+        visible: true,
+        width: 1,
+      });
+      frame.composedCount = 3;
+      frame.geometryVisiblePages.push(3);
+      frame.visiblePages.push(3);
+    }, /visible composed-canvas budget/u],
+    ["visible canvas pixel cap", (value) => {
+      const run = value.matrix[5];
+      run.canvasBudget.maximumPixels = PDF_SHARPNESS_MAX_BITMAP_PIXELS + 1;
+      run.canvasBudget.maximumPixelsFrame.composedPixels =
+        PDF_SHARPNESS_MAX_BITMAP_PIXELS + 1;
+    }, /visible composed-canvas budget/u],
+    ["offscreen shell", (value) => {
+      value.matrix[0].release.shellRetained = false;
+    }, /retain its offscreen text/u],
+    ["long task", (value) => {
+      value.matrix[0].longTasks[0].duration = 50.01;
+    }, /Long Task over 50ms/u],
+    ["missing matrix Long Task evidence", (value) => {
+      delete value.matrix[0].longTasks;
+    }, /Long Task evidence is missing/u],
+    ["malformed matrix Long Task evidence", (value) => {
+      value.matrix[0].longTasks[0].startTime = null;
+    }, /Long Task evidence is malformed/u],
+    ["per-scenario alignment", (value) => {
+      value.matrix[5].alignment.configurationId = value.matrix[0].id;
+    }, /highlight\/narration alignment/u],
+    ["pinned overflow probe", (value) => {
+      value.bitmapBudget.pinnedPeak = { count: 8, pixels: 32_000_000 };
+    }, /bitmap budget probe failed/u],
+    ["fallback serialization", (value) => {
+      value.fallback.maximumConcurrentStaging = 2;
+    }, /fallback cancellation\/retry/u],
+    ["fallback retry identity", (value) => {
+      value.fallback.retry.retryAttemptId = 3;
+    }, /fallback cancellation\/retry/u],
+    ["fallback retry revision", (value) => {
+      value.fallback.retry.revision = "substituted-revision";
+    }, /fallback cancellation\/retry/u],
+    ["fallback retry abort signal", (value) => {
+      value.fallback.stagingEvents.find(
+        (event) =>
+          event.type === "visible-compose" &&
+          event.renderAttemptId === value.fallback.retry.retryAttemptId,
+      ).abortSignalId = 99;
+    }, /fallback cancellation\/retry/u],
+    ["fallback retry ambiguous signal binding", (value) => {
+      value.fallback.stagingEvents.find(
+        (event) =>
+          event.type === "staging-start" && event.renderAttemptId === 2,
+      ).abortSignalCandidateCount = 2;
+    }, /fallback cancellation\/retry/u],
+    ["fallback missing injected outcome", (value) => {
+      value.fallback.stagingEvents = value.fallback.stagingEvents.filter(
+        (event) => event.outcome !== "injected-failure",
+      );
+    }, /fallback cancellation\/retry/u],
+    ["fallback missing injection arm", (value) => {
+      value.fallback.stagingEvents = value.fallback.stagingEvents.filter(
+        (event) => event.type !== "injection-armed",
+      );
+    }, /fallback cancellation\/retry/u],
+    ["fallback injection arm wrong document", (value) => {
+      value.fallback.stagingEvents.find(
+        (event) => event.type === "injection-armed",
+      ).documentKey = "restored-document:restored-revision";
+    }, /fallback cancellation\/retry/u],
+    ["fallback injection arm wrong page", (value) => {
+      value.fallback.stagingEvents.find(
+        (event) => event.type === "injection-armed",
+      ).page = 1;
+    }, /fallback cancellation\/retry/u],
+    ["fallback cancellation", (value) => {
+      value.fallback.invisibleCancellation.completedAfterExit = true;
+    }, /fallback cancellation\/retry/u],
+    ["fallback missing minimum elapsed", (value) => {
+      value.fallback.stagingEvents = value.fallback.stagingEvents.filter(
+        (event) => event.type !== "continuation-minimum-elapsed",
+      );
+    }, /fallback cancellation\/retry/u],
+    ["fallback early automatic resume order", (value) => {
+      const events = value.fallback.stagingEvents;
+      const resumeIndex = events.findIndex(
+        (event) => event.type === "continuation-resume",
+      );
+      const [resume] = events.splice(resumeIndex, 1);
+      const requestIndex = events.findIndex(
+        (event) => event.type === "viewport-exit-request",
+      );
+      events.splice(requestIndex, 0, resume);
+    }, /fallback cancellation\/retry/u],
+    ["fallback release before terminal order", (value) => {
+      const events = value.fallback.stagingEvents;
+      const exitIndex = events.findIndex((event) => event.type === "viewport-exit");
+      const [exit] = events.splice(exitIndex, 1);
+      const terminalIndex = events.findIndex(
+        (event) => event.outcome === "cancelled",
+      );
+      events.splice(terminalIndex, 0, exit);
+    }, /fallback cancellation\/retry/u],
+    ["fallback resume release identity", (value) => {
+      value.fallback.stagingEvents.find(
+        (event) => event.type === "continuation-resume",
+      ).releaseRequestedAt += 1;
+    }, /fallback cancellation\/retry/u],
+    ["fallback minimum hold duration", (value) => {
+      value.fallback.stagingEvents.find(
+        (event) => event.type === "continuation-minimum-elapsed",
+      ).afterMs = 999;
+    }, /fallback cancellation\/retry/u],
+    ["fallback minimum hold inconsistent clock", (value) => {
+      value.fallback.stagingEvents.find(
+        (event) => event.type === "continuation-minimum-elapsed",
+      ).at = 1099;
+      value.fallback.invisibleCancellation.continuationMinimumElapsedAt = 1099;
+    }, /fallback cancellation\/retry/u],
+    ["fallback cancellation signal mismatch", (value) => {
+      value.fallback.stagingEvents.find(
+        (event) => event.type === "cancel-request",
+      ).abortSignalId = 99;
+    }, /fallback cancellation\/retry/u],
+    ["fallback cancellation signal reuse", (value) => {
+      const replacement = value.fallback.retry.retryAbortSignalId;
+      const cancellation = value.fallback.invisibleCancellation;
+      cancellation.abortSignalId = replacement;
+      cancellation.viewportExit.abortSignalId = replacement;
+      cancellation.viewportExitRequest.abortSignalId = replacement;
+      for (const event of value.fallback.stagingEvents) {
+        if (event.abortSignalId === CANCELLATION_ABORT_SIGNAL_ID) {
+          event.abortSignalId = replacement;
+        }
+      }
+    }, /fallback cancellation\/retry/u],
+    ["fallback cancellation ambiguous signal binding", (value) => {
+      value.fallback.stagingEvents.find(
+        (event) =>
+          event.type === "staging-start" && event.renderAttemptId === 7,
+      ).abortSignalCandidateCount = 2;
+    }, /fallback cancellation\/retry/u],
+    ["fallback cancellation signal registration", (value) => {
+      value.fallback.stagingEvents = value.fallback.stagingEvents.filter(
+        (event) =>
+          event.type !== "abort-signal-registered" ||
+          event.abortSignalId !== CANCELLATION_ABORT_SIGNAL_ID,
+      );
+    }, /fallback cancellation\/retry/u],
+    ["missing cancellation terminal", (value) => {
+      value.fallback.stagingEvents = value.fallback.stagingEvents.filter(
+        (event) => event.outcome !== "cancelled",
+      );
+    }, /fallback cancellation\/retry/u],
+    ["wrong cancellation terminal attempt", (value) => {
+      value.fallback.invisibleCancellation.cancellationTerminal
+        .renderAttemptId = 8;
+    }, /fallback cancellation\/retry/u],
+    ["wrong cancellation terminal outcome", (value) => {
+      value.fallback.stagingEvents.find(
+        (event) => event.outcome === "cancelled",
+      ).outcome = "released";
+    }, /fallback cancellation\/retry/u],
+    ["cancellation terminal before cancel request", (value) => {
+      value.fallback.invisibleCancellation.cancellationTerminal.at = 139;
+    }, /fallback cancellation\/retry/u],
+    ["cancellation terminal after continuation resume", (value) => {
+      value.fallback.invisibleCancellation.cancellationTerminal.at = 1101;
+    }, /fallback cancellation\/retry/u],
+    ["fallback continuation delay", (value) => {
+      value.fallback.invisibleCancellation.continuationDelayObserved = false;
+    }, /fallback cancellation\/retry/u],
+    ["fallback missing continuation arm", (value) => {
+      value.fallback.stagingEvents = value.fallback.stagingEvents.filter(
+        (event) => event.type !== "continuation-armed",
+      );
+    }, /fallback cancellation\/retry/u],
+    ["fallback continuation arm wrong document", (value) => {
+      value.fallback.stagingEvents.find(
+        (event) => event.type === "continuation-armed",
+      ).documentKey = "restored-document:restored-revision";
+    }, /fallback cancellation\/retry/u],
+    ["fallback continuation arm wrong page", (value) => {
+      value.fallback.stagingEvents.find(
+        (event) => event.type === "continuation-armed",
+      ).page = 4;
+    }, /fallback cancellation\/retry/u],
+    ["fallback continuation callback", (value) => {
+      value.fallback.stagingEvents.find(
+        (event) => event.type === "continuation-delay",
+      ).callbackName = "unrelated animation";
+    }, /fallback cancellation\/retry/u],
+    ["fallback manufactured page mismatch", (value) => {
+      value.fallback.stagingEvents.find(
+        (event) => event.type === "continuation-delay",
+      ).page = 4;
+    }, /fallback cancellation\/retry/u],
+    ["fallback resume attempt mismatch", (value) => {
+      value.fallback.stagingEvents.find(
+        (event) => event.type === "continuation-resume",
+      ).renderAttemptId = 8;
+    }, /fallback cancellation\/retry/u],
+    ["fallback exit attempt mismatch", (value) => {
+      value.fallback.invisibleCancellation.viewportExit.renderAttemptId = 8;
+    }, /fallback cancellation\/retry/u],
+    ["fallback missing exit request", (value) => {
+      value.fallback.stagingEvents = value.fallback.stagingEvents.filter(
+        (event) => event.type !== "viewport-exit-request",
+      );
+    }, /fallback cancellation\/retry/u],
+    ["fallback duplicate continuation event", (value) => {
+      value.fallback.stagingEvents.push({
+        ...value.fallback.stagingEvents.find(
+          (event) => event.type === "continuation-resume",
+        ),
+      });
+    }, /fallback cancellation\/retry/u],
+    ["fallback abort before exit request", (value) => {
+      const request = value.fallback.stagingEvents.find(
+        (event) => event.type === "viewport-exit-request",
+      );
+      request.at = 141;
+      value.fallback.invisibleCancellation.viewportExitRequest.at = 141;
+      value.fallback.invisibleCancellation.exitRequestedAt = 141;
+    }, /fallback cancellation\/retry/u],
+    ["fallback compose after cancel before exit observation", (value) => {
+      const cancellation = value.fallback.invisibleCancellation;
+      const exitIndex = value.fallback.stagingEvents.findIndex(
+        (event) => event.type === "viewport-exit",
+      );
+      value.fallback.stagingEvents.splice(exitIndex, 0, {
+        abortSignalId: cancellation.abortSignalId,
+        at: 147,
+        documentKey: cancellation.documentKey,
+        page: cancellation.page,
+        pageDerivation: cancellation.pageDerivation,
+        pageMatchesAttempt: true,
+        renderAttemptId: cancellation.renderAttemptId,
+        revision: cancellation.revision,
+        sourcePage: cancellation.page,
+        type: "visible-compose",
+      });
+    }, /fallback cancellation\/retry/u],
+    ["fallback compose missing timestamp", (value) => {
+      const cancellation = value.fallback.invisibleCancellation;
+      const exitRequestIndex = value.fallback.stagingEvents.findIndex(
+        (event) => event.type === "viewport-exit-request",
+      );
+      value.fallback.stagingEvents.splice(exitRequestIndex, 0, {
+        abortSignalId: cancellation.abortSignalId,
+        documentKey: cancellation.documentKey,
+        page: cancellation.page,
+        pageDerivation: cancellation.pageDerivation,
+        pageMatchesAttempt: true,
+        renderAttemptId: cancellation.renderAttemptId,
+        revision: cancellation.revision,
+        sourcePage: cancellation.page,
+        type: "visible-compose",
+      });
+    }, /fallback cancellation\/retry/u],
+    ["fallback compose sequenced after boundary with earlier time", (value) => {
+      const cancellation = value.fallback.invisibleCancellation;
+      const exitRequestIndex = value.fallback.stagingEvents.findIndex(
+        (event) => event.type === "viewport-exit-request",
+      );
+      value.fallback.stagingEvents.splice(exitRequestIndex + 1, 0, {
+        abortSignalId: cancellation.abortSignalId,
+        at: 120,
+        documentKey: cancellation.documentKey,
+        page: cancellation.page,
+        pageDerivation: cancellation.pageDerivation,
+        pageMatchesAttempt: true,
+        renderAttemptId: cancellation.renderAttemptId,
+        revision: cancellation.revision,
+        sourcePage: cancellation.page,
+        type: "visible-compose",
+      });
+    }, /fallback cancellation\/retry/u],
+    ["fallback compose timestamps are nonmonotonic", (value) => {
+      const cancellation = value.fallback.invisibleCancellation;
+      const exitRequestIndex = value.fallback.stagingEvents.findIndex(
+        (event) => event.type === "viewport-exit-request",
+      );
+      const compose = (at) => ({
+        abortSignalId: cancellation.abortSignalId,
+        at,
+        documentKey: cancellation.documentKey,
+        page: cancellation.page,
+        pageDerivation: cancellation.pageDerivation,
+        pageMatchesAttempt: true,
+        renderAttemptId: cancellation.renderAttemptId,
+        revision: cancellation.revision,
+        sourcePage: cancellation.page,
+        type: "visible-compose",
+      });
+      value.fallback.stagingEvents.splice(
+        exitRequestIndex,
+        0,
+        compose(125),
+        compose(124),
+      );
+    }, /fallback cancellation\/retry/u],
+    ["fallback continuation resume", (value) => {
+      value.fallback.invisibleCancellation.continuationResumeObserved = false;
+    }, /fallback cancellation\/retry/u],
+    ["fallback continuation resume timing", (value) => {
+      value.fallback.invisibleCancellation.continuationResumedAfterMs = 500;
+    }, /fallback cancellation\/retry/u],
+    ["missing fallback Long Task evidence", (value) => {
+      delete value.fallback.longTasks;
+    }, /fallback Long Task evidence is missing/u],
+    ["malformed fallback Long Task evidence", (value) => {
+      value.fallback.longTasks[0].name = "";
+    }, /fallback Long Task evidence is malformed/u],
+    ["fallback Long Task threshold", (value) => {
+      value.fallback.longTasks[0].duration = 50.01;
+    }, /fallback recorded a Long Task over 50ms/u],
+    ["network privacy", (value) => {
+      value.network.externalRequests.push({ url: "https://example.test/pdf" });
+    }, /recursively attached worker network/u],
+    ["recursive worker coverage", (value) => {
+      value.network.coverageTargets.forcedParserWorker = [];
+    }, /recursively attached worker network/u],
+    ["matrix phase target coverage", (value) => {
+      value.network.matrixCoverage[PDF_SHARPNESS_MATRIX[5].id]
+        .documentTargets = [];
+    }, /recursively attached worker network/u],
+    ["matrix phase request coverage", (value) => {
+      value.network.matrixCoverage[PDF_SHARPNESS_MATRIX[4].id]
+        .parserRequestCount = 0;
+    }, /recursively attached worker network/u],
+    ["service worker bypass", (value) => {
+      value.network.serviceWorkerBypassed = false;
+    }, /recursively attached worker network/u],
+    ["clean initial target baseline", (value) => {
+      value.network.initialTargetBaseline.workerCount = 1;
+      value.network.initialTargetBaseline.targetCount = 2;
+    }, /recursively attached worker network/u],
+    ["service worker resume dispatch ordering", (value) => {
+      const target = value.network.targets.find(
+        (entry) => entry.type === "service_worker",
+      );
+      target.resumeDispatchedAt = target.commands[0].dispatchedAt - 1;
+      target.commands.at(-1).dispatchedAt = target.resumeDispatchedAt;
+    }, /recursively attached worker network/u],
+    ["service worker missing setup command", (value) => {
+      value.network.targets.find(
+        (entry) => entry.type === "service_worker",
+      ).commands.pop();
+    }, /recursively attached worker network/u],
+    ["service worker failed setup command", (value) => {
+      value.network.targets.find(
+        (entry) => entry.type === "service_worker",
+      ).commands[0].status = "failed";
+    }, /recursively attached worker network/u],
+    ["service worker late setup result", (value) => {
+      const target = value.network.targets.find(
+        (entry) => entry.type === "service_worker",
+      );
+      target.commands[0].resultAt = target.commandDeadlineAt + 1;
+    }, /recursively attached worker network/u],
+    ["service worker setup result before resume", (value) => {
+      const target = value.network.targets.find(
+        (entry) => entry.type === "service_worker",
+      );
+      target.commands[0].resultAt = target.resumeDispatchedAt - 1;
+    }, /recursively attached worker network/u],
+    ["service worker nonconsecutive command IDs", (value) => {
+      value.network.targets.find(
+        (entry) => entry.type === "service_worker",
+      ).commands[2].cdpId += 10;
+    }, /recursively attached worker network/u],
+    ["duplicate global target command ID", (value) => {
+      const firstId = value.network.targets.find(
+        (entry) => entry.type === "worker",
+      ).commands[0].cdpId;
+      const serviceWorker = value.network.targets.find(
+        (entry) => entry.type === "service_worker",
+      );
+      serviceWorker.commands.forEach((command, index) => {
+        command.cdpId = firstId + index;
+      });
+    }, /recursively attached worker network/u],
+    ["reversed command dispatch timestamp", (value) => {
+      const target = value.network.targets.find(
+        (entry) => entry.type === "worker",
+      );
+      target.commands[1].dispatchedAt = target.commands[0].dispatchedAt - 1;
+    }, /recursively attached worker network/u],
+    ["reversed command result timestamp", (value) => {
+      const target = value.network.targets.find(
+        (entry) => entry.type === "worker",
+      );
+      const firstResultAt = target.commands[0].resultAt;
+      target.commands[0].resultAt = target.commands[1].resultAt;
+      target.commands[1].resultAt = firstResultAt;
+    }, /recursively attached worker network/u],
+    ["service worker missing bootstrap observation", (value) => {
+      value.network.serviceWorkerBootstrapObservations = [];
+    }, /recursively attached worker network/u],
+    ["service worker wrong bootstrap URL", (value) => {
+      value.network.serviceWorkerBootstrapObservations[0].url += "?wrong=1";
+    }, /recursively attached worker network/u],
+    ["service worker nonterminal bootstrap", (value) => {
+      const request = value.network.requests.find(
+        (entry) => entry.serviceWorkerTargetSessionId,
+      );
+      request.terminalReason = "loading-failed";
+      value.network.serviceWorkerBootstrapObservations[0].terminalReason =
+        request.terminalReason;
+    }, /recursively attached worker network/u],
+    ["service worker bootstrap before resume", (value) => {
+      const target = value.network.targets.find(
+        (entry) => entry.type === "service_worker",
+      );
+      const request = value.network.requests.find(
+        (entry) => entry.serviceWorkerTargetSessionId,
+      );
+      request.startedAt = target.resumeDispatchedAt - 1;
+      value.network.serviceWorkerBootstrapObservations[0].requestStartedAt =
+        request.startedAt;
+    }, /recursively attached worker network/u],
+    ["detached service worker bootstrap", (value) => {
+      value.network.serviceWorkerBootstrapObservations[0]
+        .targetDetachedAtObservation = true;
+    }, /recursively attached worker network/u],
+    ["service worker cannot satisfy PDF bootstrap", (value) => {
+      const serviceWorker = value.network.targets.find(
+        (entry) => entry.type === "service_worker",
+      );
+      const settlement = value.network.targetBootstrapSettlements.find(
+        (entry) => entry.targetType === "worker",
+      );
+      settlement.targetId = serviceWorker.targetId;
+      settlement.targetSessionId = serviceWorker.sessionId;
+      settlement.targetType = serviceWorker.type;
+    }, /recursively attached worker network/u],
+    ["fixed-point attach health", (value) => {
+      value.network.networkFixedPoints[0].attachmentReady = false;
+    }, /recursively attached worker network/u],
+    ["fixed-point attach error", (value) => {
+      value.network.networkFixedPoints[0].attachErrorCount = 1;
+    }, /recursively attached worker network/u],
+    ["fixed-point service worker bypass", (value) => {
+      value.network.networkFixedPoints[0].serviceWorkerBypassed = false;
+    }, /recursively attached worker network/u],
+    ["forced fallback omits its parser settlement", (value) => {
+      value.network.networkFixedPoints.at(-2)
+        .parserBootstrapSettlementCount = 0;
+    }, /recursively attached worker network/u],
+    ["forced fallback claims a document settlement", (value) => {
+      value.network.networkFixedPoints.at(-2)
+        .documentBootstrapSettlementCount = 1;
+    }, /recursively attached worker network/u],
+    ["forced fallback claims an extra parser settlement", (value) => {
+      value.network.networkFixedPoints.at(-2)
+        .parserBootstrapSettlementCount = 2;
+    }, /recursively attached worker network/u],
+    ["final privacy claims a document settlement", (value) => {
+      value.network.networkFixedPoints.at(-1)
+        .documentBootstrapSettlementCount = 1;
+    }, /recursively attached worker network/u],
+    ["final privacy claims a parser settlement", (value) => {
+      value.network.networkFixedPoints.at(-1)
+        .parserBootstrapSettlementCount = 1;
+    }, /recursively attached worker network/u],
+    ["final privacy interval hides a correlated PDF pair", (value) => {
+      appendShadowPdfPairToFinalNetworkInterval(value);
+    }, /recursively attached worker network/u],
+    ["matrix import boundary missing field", (value) => {
+      delete value.network.networkFixedPoints[1].importBoundary.requestCount;
+    }, /recursively attached worker network/u],
+    ["matrix import boundary extra field", (value) => {
+      value.network.networkFixedPoints[1].importBoundary.completedRequestCount =
+        value.network.networkFixedPoints[1].importBoundary.requestCount;
+    }, /recursively attached worker network/u],
+    ["matrix import boundary fractional", (value) => {
+      value.network.networkFixedPoints[1].importBoundary.targetCount += 0.5;
+    }, /recursively attached worker network/u],
+    ["matrix restore readiness", (value) => {
+      value.network.networkFixedPoints[1].restore.readiness.firstPageCount = 0;
+    }, /recursively attached worker network/u],
+    ["matrix restore request settlement", (value) => {
+      value.network.networkFixedPoints[1].restore.fixedPoint
+        .completedRequestCount -= 1;
+    }, /recursively attached worker network/u],
+    ["matrix point private field", (value) => {
+      value.network.networkFixedPoints[1].privatePath = "/home/private.pdf";
+    }, /recursively attached worker network/u],
+    ["matrix restore private field", (value) => {
+      value.network.networkFixedPoints[1].restore.privatePath =
+        "/home/private.pdf";
+    }, /recursively attached worker network/u],
+    ["matrix point incomplete completion endpoint", (value) => {
+      value.network.networkFixedPoints[1].completedRequestCount -= 1;
+    }, /recursively attached worker network/u],
+    ["matrix endpoint consumes next restore request", (value) => {
+      value.network.networkFixedPoints[1].requestCount += 1;
+      value.network.networkFixedPoints[1].completedRequestCount += 1;
+    }, /recursively attached worker network/u],
+    ["fallback fixed point rewinds cumulative history", (value) => {
+      const point = value.network.networkFixedPoints.at(-2);
+      point.attachPromiseCount = 1;
+      point.completedRequestCount = 1;
+      point.requestCount = 1;
+      point.targetBootstrapSettlementCount = 0;
+      point.targetCount = 1;
+    }, /recursively attached worker network/u],
+    ["final fixed point omits a raw target", (value) => {
+      const point = value.network.networkFixedPoints.at(-1);
+      point.attachPromiseCount -= 1;
+      point.targetCount -= 1;
+    }, /recursively attached worker network/u],
+    ["restore and import document requests cross the boundary", (value) => {
+      const point = value.network.networkFixedPoints[1];
+      const previous = value.network.networkFixedPoints[0];
+      const restoreIndex = value.network.requests.findIndex(
+        (request, index) =>
+          index >= previous.requestCount &&
+          index < point.importBoundary.requestCount &&
+          request.sessionId === null &&
+          request.bootstrapTargetSessionId,
+      );
+      const importIndex = value.network.requests.findIndex(
+        (request, index) =>
+          index >= point.importBoundary.requestCount &&
+          index < point.requestCount &&
+          request.sessionId === null &&
+          request.bootstrapTargetSessionId,
+      );
+      [value.network.requests[restoreIndex], value.network.requests[importIndex]] =
+        [value.network.requests[importIndex], value.network.requests[restoreIndex]];
+      value.network.requests.forEach((request, index) => {
+        request.sequence = index + 1;
+      });
+    }, /recursively attached worker network/u],
+    ["import parser is parented to the restore document", (value) => {
+      const point = value.network.networkFixedPoints[1];
+      const previous = value.network.networkFixedPoints[0];
+      const restoreDocument = value.network.targets
+        .slice(previous.targetCount, point.importBoundary.targetCount)
+        .find((target) => /pdf-document\.worker-/u.test(target.url));
+      const importedTargets = value.network.targets.slice(
+        point.importBoundary.targetCount,
+        point.targetCount,
+      );
+      const importedParser = importedTargets.find((target) =>
+        /pdf-parser\.worker-/u.test(target.url)
+      );
+      const requestIndex = value.network.requests.findIndex((request) =>
+        request.bootstrapTargetSessionId === importedParser.sessionId
+      );
+      const [request] = value.network.requests.splice(requestIndex, 1);
+      request.sessionId = restoreDocument.sessionId;
+      importedParser.parentSessionId = restoreDocument.sessionId;
+      importedParser.ancestry = [structuredClone(restoreDocument)];
+      importedParser.bootstrapRequestKey =
+        `${request.sessionId}:${request.requestId}`;
+      const settlement = value.network.targetBootstrapSettlements.find(
+        (entry) => entry.targetSessionId === importedParser.sessionId,
+      );
+      settlement.requestSessionId = request.sessionId;
+      settlement.targetParentSessionId = request.sessionId;
+      value.network.requests.splice(
+        point.importBoundary.requestCount - 1,
+        0,
+        request,
+      );
+      value.network.requests.forEach((entry, index) => {
+        entry.sequence = index + 1;
+      });
+      value.network.nonPageRequests = value.network.requests.filter(
+        (entry) => entry.sessionId !== null,
+      );
+    }, /recursively attached worker network/u],
+    ["import parser declared ancestry contradicts its service parent", (value) => {
+      const point = value.network.networkFixedPoints[1];
+      const importedParser = value.network.targets
+        .slice(point.importBoundary.targetCount, point.targetCount)
+        .find((target) => /pdf-parser\.worker-/u.test(target.url));
+      const serviceWorker = value.network.targets.find(
+        (target) => target.type === "service_worker",
+      );
+      const request = value.network.requests.find((entry) =>
+        entry.bootstrapTargetSessionId === importedParser.sessionId
+      );
+      request.sessionId = serviceWorker.sessionId;
+      importedParser.parentSessionId = serviceWorker.sessionId;
+      importedParser.bootstrapRequestKey =
+        `${request.sessionId}:${request.requestId}`;
+      const settlement = value.network.targetBootstrapSettlements.find(
+        (entry) => entry.targetSessionId === importedParser.sessionId,
+      );
+      settlement.requestSessionId = request.sessionId;
+      settlement.targetParentSessionId = request.sessionId;
+      value.network.nonPageRequests = value.network.requests.filter(
+        (entry) => entry.sessionId !== null,
+      );
+    }, /recursively attached worker network/u],
+    ["restore interval hides an extra phase PDF pair", (value) => {
+      const pointIndex = 1;
+      const point = value.network.networkFixedPoints[pointIndex];
+      const previous = value.network.networkFixedPoints[pointIndex - 1];
+      const restoreTargets = value.network.targets.slice(
+        previous.targetCount,
+        point.importBoundary.targetCount,
+      );
+      const sourceDocument = restoreTargets.find((target) =>
+        /pdf-document\.worker-/u.test(target.url)
+      );
+      const sourceParser = restoreTargets.find((target) =>
+        /pdf-parser\.worker-/u.test(target.url)
+      );
+      const hiddenDocument = structuredClone(sourceDocument);
+      const hiddenParser = structuredClone(sourceParser);
+      hiddenDocument.phase = "shadow-phase";
+      hiddenDocument.sessionId = "shadow-document-session";
+      hiddenDocument.targetId = "shadow-document-target";
+      hiddenDocument.commands.forEach((command) => {
+        command.cdpId += 100_000;
+      });
+      hiddenDocument.ancestry = [];
+      hiddenParser.phase = "shadow-phase";
+      hiddenParser.sessionId = "shadow-parser-session";
+      hiddenParser.targetId = "shadow-parser-target";
+      hiddenParser.parentSessionId = hiddenDocument.sessionId;
+      hiddenParser.commands.forEach((command) => {
+        command.cdpId += 200_000;
+      });
+      hiddenParser.ancestry = [structuredClone(hiddenDocument)];
+      const sourceDocumentRequest = value.network.requests.find(
+        (request) =>
+          request.bootstrapTargetSessionId === sourceDocument.sessionId,
+      );
+      const sourceParserRequest = value.network.requests.find(
+        (request) => request.bootstrapTargetSessionId === sourceParser.sessionId,
+      );
+      const hiddenDocumentRequest = {
+        ...structuredClone(sourceDocumentRequest),
+        bootstrapTargetSessionId: hiddenDocument.sessionId,
+        phase: "shadow-phase",
+        requestId: "shadow-document-request",
+      };
+      const hiddenParserRequest = {
+        ...structuredClone(sourceParserRequest),
+        bootstrapTargetSessionId: hiddenParser.sessionId,
+        phase: "shadow-phase",
+        requestId: "shadow-parser-request",
+        sessionId: hiddenDocument.sessionId,
+      };
+      hiddenDocument.bootstrapRequestKey =
+        `page:${hiddenDocumentRequest.requestId}`;
+      hiddenParser.bootstrapRequestKey =
+        `${hiddenDocument.sessionId}:${hiddenParserRequest.requestId}`;
+      const hiddenSettlement = (source, request, target) => ({
+        ...structuredClone(source),
+        phase: "shadow-phase",
+        requestId: request.requestId,
+        requestSessionId: request.sessionId,
+        targetId: target.targetId,
+        targetParentSessionId: target.parentSessionId,
+        targetSessionId: target.sessionId,
+      });
+      const hiddenSettlements = [
+        hiddenSettlement(
+          value.network.targetBootstrapSettlements.find((entry) =>
+            entry.targetSessionId === sourceDocument.sessionId
+          ),
+          hiddenDocumentRequest,
+          hiddenDocument,
+        ),
+        hiddenSettlement(
+          value.network.targetBootstrapSettlements.find((entry) =>
+            entry.targetSessionId === sourceParser.sessionId
+          ),
+          hiddenParserRequest,
+          hiddenParser,
+        ),
+      ];
+      value.network.targets.splice(
+        previous.targetCount,
+        0,
+        hiddenDocument,
+        hiddenParser,
+      );
+      value.network.requests.splice(
+        previous.requestCount,
+        0,
+        hiddenDocumentRequest,
+        hiddenParserRequest,
+      );
+      value.network.targetBootstrapSettlements.splice(
+        previous.targetBootstrapSettlementCount,
+        0,
+        ...hiddenSettlements,
+      );
+      for (
+        let index = pointIndex;
+        index < value.network.networkFixedPoints.length;
+        index += 1
+      ) {
+        const fixedPoint = value.network.networkFixedPoints[index];
+        fixedPoint.attachPromiseCount += 2;
+        fixedPoint.completedRequestCount += 2;
+        fixedPoint.requestCount += 2;
+        fixedPoint.targetBootstrapSettlementCount += 2;
+        fixedPoint.targetCount += 2;
+        if (fixedPoint.importBoundary) {
+          fixedPoint.importBoundary.attachPromiseCount += 2;
+          fixedPoint.importBoundary.requestCount += 2;
+          fixedPoint.importBoundary.settlementCount += 2;
+          fixedPoint.importBoundary.targetCount += 2;
+          fixedPoint.restore.fixedPoint.attachPromiseCount += 2;
+          fixedPoint.restore.fixedPoint.completedRequestCount += 2;
+          fixedPoint.restore.fixedPoint.requestCount += 2;
+          fixedPoint.restore.fixedPoint.targetBootstrapSettlementCount += 2;
+          fixedPoint.restore.fixedPoint.targetCount += 2;
+        }
+      }
+      value.network.completedRequestCount += 2;
+      value.network.localRequestCount += 2;
+      value.network.nonPageRequestCounts.total += 1;
+      value.network.requests.forEach((request, index) => {
+        request.sequence = index + 1;
+      });
+      value.network.nonPageRequests = value.network.requests.filter(
+        (request) => request.sessionId !== null,
+      );
+    }, /recursively attached worker network/u],
+    ["post-boundary request reuses restore target", (value) => {
+      const point = value.network.networkFixedPoints[1];
+      const restoreDocument = value.network.targets
+        .slice(
+          value.network.networkFixedPoints[0].targetCount,
+          point.importBoundary.targetCount,
+        )
+        .find((target) =>
+          /pdf-document\.worker-/u.test(target.url)
+        );
+      value.network.requests[point.importBoundary.requestCount].sessionId =
+        restoreDocument.sessionId;
+    }, /recursively attached worker network/u],
+    ["boundary cuts into explicit target", (value) => {
+      const boundary = value.network.networkFixedPoints[1].importBoundary;
+      boundary.attachPromiseCount += 1;
+      boundary.targetCount += 1;
+    }, /recursively attached worker network/u],
+    ["bootstrap settlement URL", (value) => {
+      value.network.targetBootstrapSettlements[0].url += "?wrong=1";
+    }, /recursively attached worker network/u],
+    ["bootstrap settlement session", (value) => {
+      value.network.targetBootstrapSettlements[0].requestSessionId =
+        "wrong-session";
+    }, /recursively attached worker network/u],
+    ["bootstrap settlement method", (value) => {
+      value.network.targetBootstrapSettlements[0].method = "POST";
+    }, /recursively attached worker network/u],
+    ["bootstrap settlement resource type", (value) => {
+      value.network.targetBootstrapSettlements[0].resourceType = "Fetch";
+    }, /recursively attached worker network/u],
+    ["bootstrap settlement target type", (value) => {
+      value.network.targetBootstrapSettlements[0].targetType =
+        "service_worker";
+    }, /recursively attached worker network/u],
+    ["bootstrap settlement unattached target", (value) => {
+      const targetSession =
+        value.network.targetBootstrapSettlements[0].targetSessionId;
+      value.network.targets.find(
+        (target) => target.sessionId === targetSession,
+      ).attachComplete = false;
+    }, /recursively attached worker network/u],
+    ["bootstrap settlement failed target command", (value) => {
+      const targetSession =
+        value.network.targetBootstrapSettlements[0].targetSessionId;
+      value.network.targets.find(
+        (target) => target.sessionId === targetSession,
+      ).commands[0].status = "failed";
+    }, /recursively attached worker network/u],
+    ["bootstrap settlement duplicate identity", (value) => {
+      value.network.targetBootstrapSettlements.push({
+        ...value.network.targetBootstrapSettlements[0],
+      });
+      for (const point of value.network.networkFixedPoints) {
+        point.targetBootstrapSettlementCount += 1;
+      }
+    }, /recursively attached worker network/u],
+    ["matrix phase bootstrap settlement coverage", (value) => {
+      value.network.matrixCoverage[PDF_SHARPNESS_MATRIX[0].id]
+        .documentBootstrapSettlementCount = 0;
+    }, /recursively attached worker network/u],
+    ["recursive attach fixed point", (value) => {
+      value.network.networkFixedPoints.pop();
+    }, /recursively attached worker network/u],
+    ["network still in flight", (value) => {
+      value.network.inflightRequestCount = 1;
+    }, /recursively attached worker network/u],
+    ["actual network arrays", (value) => {
+      delete value.network.failures;
+    }, /recursively attached worker network/u],
+    ["artifact binding", (value) => {
+      value.artifacts.sourceCommit = "d".repeat(40);
+    }, /exact source and deployment/u],
+    ["source file omission", (value) => {
+      delete value.source.files[PDF_SHARPNESS_SOURCE_FILES[0]];
+    }, /exact reviewed file set/u],
+    ["source file substitution", (value) => {
+      delete value.source.files[PDF_SHARPNESS_SOURCE_FILES[0]];
+      value.source.files["app/unreviewed-substitute.mjs"] = SHA;
+    }, /exact reviewed file set/u],
+    ["screenshot omission", (value) => {
+      value.artifacts.screenshots.pop();
+    }, /exactly enumerate the reviewed screenshots/u],
+    ["screenshot filename substitution", (value) => {
+      value.matrix[0].comparison.referenceScreenshot.path =
+        "outputs/issue-68/substitute.png";
+    }, /exactly enumerate the reviewed screenshots/u],
+    ["duplicate screenshot path", (value) => {
+      value.artifacts.screenshots.at(-1).path =
+        value.artifacts.screenshots[0].path;
+    }, /exactly enumerate the reviewed screenshots/u],
+    ["screenshot hash reference substitution", (value) => {
+      value.artifacts.screenshots[0] = {
+        ...value.artifacts.screenshots[0],
+        sha256: "f".repeat(64),
+      };
+    }, /exactly enumerate the reviewed screenshots/u],
+    ["teardown", (value) => {
+      value.teardown.app.profileRemoved = false;
+    }, /tear down cleanly/u],
+    ["reference teardown", (value) => {
+      value.teardown.reference.processClosed = false;
+    }, /tear down cleanly/u],
+    ["reference teardown session missing", (value) => {
+      value.teardown.referenceSessions.pop();
+    }, /tear down cleanly/u],
+    ["reference teardown extra session", (value) => {
+      value.teardown.referenceSessions.push(
+        structuredClone(value.teardown.referenceSessions[0]),
+      );
+    }, /tear down cleanly/u],
+    ["reference teardown session order", (value) => {
+      value.teardown.referenceSessions.reverse();
+    }, /tear down cleanly/u],
+    ["reference teardown duplicate profile", (value) => {
+      value.teardown.referenceSessions[1].sessionIdentityHash =
+        value.teardown.referenceSessions[0].sessionIdentityHash;
+      value.matrix[1].comparison.referenceReadiness.captureLifecycle
+        .sessionIdentityHash = value.teardown.referenceSessions[0]
+          .sessionIdentityHash;
+    }, /tear down cleanly/u],
+    ["reference teardown lifecycle mismatch", (value) => {
+      value.teardown.referenceSessions[0].sessionIdentityHash = "f".repeat(64);
+    }, /tear down cleanly/u],
+    ["reference teardown partial failure", (value) => {
+      value.teardown.referenceSessions[2].errorPresent = true;
+    }, /tear down cleanly/u],
+    ["server teardown", (value) => {
+      value.teardown.server.processClosed = false;
+    }, /tear down cleanly/u],
+  ];
+  for (const [name, mutate, pattern] of cases) {
+    await t.test(name, () => {
+      const evidence = passingEvidence();
+      mutate(evidence);
+      assert.match(validatePdfSharpnessEvidence(evidence).join("\n"), pattern);
+    });
+  }
+});
+
+test("fails closed without throwing on omitted arrays and numeric fields", () => {
+  assert.doesNotThrow(() => validatePdfSharpnessEvidence({}));
+  const evidence = passingEvidence();
+  delete evidence.matrix[0].longTasks;
+  delete evidence.matrix[0].runtimeErrors;
+  delete evidence.matrix[0].visibleFirst.staleWorkerBitmaps;
+  delete evidence.bitmapBudget.peak.pixels;
+  delete evidence.fallback.longTasks;
+  delete evidence.network.attachErrors;
+  delete evidence.teardown.errors;
+  const failures = validatePdfSharpnessEvidence(evidence);
+  assert.ok(failures.length >= 7);
+});
+
+test("fails closed without throwing on malformed structured network entries", () => {
+  const cases = [
+    ["null target", (value) => { value.network.targets = [null]; }],
+    ["primitive target", (value) => { value.network.targets = [7]; }],
+    ["null request", (value) => { value.network.requests = [null]; }],
+    ["null non-page request", (value) => {
+      value.network.nonPageRequests = [null];
+    }],
+    ["null settlement", (value) => {
+      value.network.targetBootstrapSettlements = [null];
+    }],
+    ["null service-worker observation", (value) => {
+      value.network.serviceWorkerBootstrapObservations = [null];
+    }],
+    ["null fixed point", (value) => {
+      value.network.networkFixedPoints = [null];
+    }],
+    ["null coverage target", (value) => {
+      value.network.coverageTargets.normalDocumentWorker = [null];
+    }],
+    ["primitive coverage target", (value) => {
+      value.network.coverageTargets.normalParserWorker = ["session"];
+    }],
+    ["missing coverage target field", (value) => {
+      delete value.network.coverageTargets.forcedParserWorker;
+    }],
+    ["null matrix document target", (value) => {
+      value.network.matrixCoverage[PDF_SHARPNESS_MATRIX[0].id]
+        .documentTargets = [null];
+    }],
+    ["primitive matrix parser target", (value) => {
+      value.network.matrixCoverage[PDF_SHARPNESS_MATRIX[0].id]
+        .parserTargets = [3];
+    }],
+    ["null target command", (value) => {
+      value.network.targets[0].commands = [null];
+    }],
+    ["primitive ancestry", (value) => {
+      value.network.targets[1].ancestry = 1;
+    }],
+    ["cyclic coverage entry", (value) => {
+      const cyclic = [];
+      cyclic.push(cyclic);
+      value.network.coverageTargets.normalDocumentWorker = cyclic;
+    }],
+    ["cyclic target ancestry", (value) => {
+      const target = value.network.targets[1];
+      target.ancestry = [target];
+    }],
+    ["BigInt command sequence", (value) => {
+      value.network.targets[0].commands[0].resultSequence = 1n;
+    }],
+    ["BigInt fixed-point endpoint", (value) => {
+      value.network.networkFixedPoints[0].requestCount = 1n;
+    }],
+  ];
+  for (const [name, mutate] of cases) {
+    const evidence = passingEvidence();
+    mutate(evidence);
+    let failures;
+    assert.doesNotThrow(() => {
+      failures = validatePdfSharpnessEvidence(evidence);
+    }, name);
+    assert.ok(failures.length > 0, name);
+  }
+});
+
+test("decodes CDP-style RGBA PNG scanlines for reference analysis", () => {
+  const chunk = (type, data) => {
+    const result = Buffer.alloc(data.length + 12);
+    result.writeUInt32BE(data.length, 0);
+    result.write(type, 4, 4, "ascii");
+    data.copy(result, 8);
+    return result;
+  };
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(2, 0);
+  header.writeUInt32BE(1, 4);
+  header[8] = 8;
+  header[9] = 6;
+  const png = Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk("IHDR", header),
+    chunk("IDAT", deflateSync(Buffer.from([
+      0,
+      250, 250, 250, 255,
+      30, 30, 30, 255,
+    ]))),
+    chunk("IEND", Buffer.alloc(0)),
+  ]);
+  const decoded = decodePngScreenshot(png);
+  assert.equal(decoded.width, 2);
+  assert.equal(decoded.height, 1);
+  assert.deepEqual(
+    Array.from(decoded.pixels),
+    [250, 250, 250, 255, 30, 30, 30, 255],
+  );
+});
+
+function createReferencePixels(width, height, value = 70) {
+  const pixels = new Uint8ClampedArray(width * height * 4);
+  for (let offset = 0; offset < pixels.length; offset += 4) {
+    pixels[offset] = value;
+    pixels[offset + 1] = value;
+    pixels[offset + 2] = value;
+    pixels[offset + 3] = 255;
+  }
+  return pixels;
+}
+
+function paintReferenceRectangle(
+  pixels,
+  width,
+  { height, value, width: rectangleWidth, x, y },
+) {
+  for (let row = y; row < y + height; row += 1) {
+    for (let column = x; column < x + rectangleWidth; column += 1) {
+      const offset = (row * width + column) * 4;
+      pixels[offset] = value;
+      pixels[offset + 1] = value;
+      pixels[offset + 2] = value;
+      pixels[offset + 3] = 255;
+    }
+  }
+}
+
+test("segments a rendered PDF page from disconnected viewer white stripes", () => {
+  const width = 400;
+  const height = 300;
+  const pixels = createReferencePixels(width, height);
+  paintReferenceRectangle(pixels, width, {
+    height: 270,
+    value: 250,
+    width: 90,
+    x: 10,
+    y: 20,
+  });
+  paintReferenceRectangle(pixels, width, {
+    height: 250,
+    value: 250,
+    width: 240,
+    x: 140,
+    y: 30,
+  });
+  for (const y of [80, 120, 160, 200]) {
+    paintReferenceRectangle(pixels, width, {
+      height: 4,
+      value: 30,
+      width: 160,
+      x: 180,
+      y,
+    });
+  }
+
+  const rendered = analyzeReferencePixels({ height, pixels, width });
+  assert.equal(rendered.segmentationVersion, 2);
+  assert.equal(rendered.proof, "white-page-with-rendered-ink");
+  assert.equal(rendered.substantialComponentCount, 1);
+  assert.deepEqual(
+    rendered.pageBounds,
+    { height: 250, width: 240, x: 140, y: 30 },
+  );
+  assert.equal(rendered.runnerUpWhiteArea, 90 * 270);
+  assert.equal(
+    rendered.winnerDominanceRatio,
+    rendered.winnerWhiteArea / rendered.runnerUpWhiteArea,
+  );
+  assert.equal(rendered.renderedPage, true);
+  assert.ok(rendered.inkRowBands >= 4);
+  assert.ok(rendered.inkSpanRatio > 0.5);
+});
+
+test("crops the unique top-anchored requested page when an adjacent page is larger", () => {
+  const width = 400;
+  const height = 600;
+  const pixels = createReferencePixels(width, height);
+  for (const y of [20, 330]) {
+    paintReferenceRectangle(pixels, width, {
+      height: 250,
+      value: 250,
+      width: 240,
+      x: 80,
+      y,
+    });
+  }
+  for (const y of [70, 110, 150, 190]) {
+    paintReferenceRectangle(pixels, width, {
+      height: 4,
+      value: 30,
+      width: 160,
+      x: 120,
+      y,
+    });
+  }
+  for (const y of [390, 450]) {
+    paintReferenceRectangle(pixels, width, {
+      height: 4,
+      value: 30,
+      width: 160,
+      x: 120,
+      y,
+    });
+  }
+  const decoded = { height, pixels, width };
+  const analysis = analyzeReferencePixels(decoded);
+  const target = analyzeReferenceTarget(decoded, 3, analysis);
+  assert.equal(analysis.renderedPage, true);
+  assert.equal(analysis.pageBounds.y, 330);
+  assert.equal(target.requestedPage, 3);
+  assert.equal(target.selectedComponentIndex, 0);
+  assert.equal(target.cropBounds.y, 20);
+  assert.equal(target.readiness.renderedPage, true);
+  assert.deepEqual(
+    target.readiness.pageBounds,
+    { height: 250, width: 240, x: 0, y: 0 },
+  );
+
+  const ambiguous = structuredClone(target);
+  ambiguous.components[1].bounds.y = 100;
+  assert.ok(ambiguous.components[1].bounds.y < ambiguous.anchorLimit);
+});
+
+test("rejects blank pages, spinners, stripes, toolbars, and clipped pages", () => {
+  const width = 240;
+  const height = 180;
+  const createPage = () => {
+    const pixels = createReferencePixels(width, height);
+    paintReferenceRectangle(pixels, width, {
+      height: 150,
+      value: 250,
+      width: 190,
+      x: 25,
+      y: 20,
+    });
+    return pixels;
+  };
+
+  const blank = analyzeReferencePixels({
+    height,
+    pixels: createPage(),
+    width,
+  });
+  assert.equal(blank.renderedPage, false);
+  assert.equal(blank.inkPixels, 0);
+
+  const spinnerPixels = createPage();
+  paintReferenceRectangle(spinnerPixels, width, {
+    height: 20,
+    value: 30,
+    width: 20,
+    x: 110,
+    y: 85,
+  });
+  const spinner = analyzeReferencePixels({
+    height,
+    pixels: spinnerPixels,
+    width,
+  });
+  assert.ok(spinner.inkPixels >= 100);
+  assert.equal(spinner.inkRowBands, 1);
+  assert.equal(spinner.renderedPage, false);
+
+  for (const rectangle of [
+    { height: 180, width: 80, x: 0, y: 0 },
+    { height: 60, width: 240, x: 0, y: 0 },
+    { height: 79, width: 180, x: 20, y: 20 },
+  ]) {
+    const pixels = createReferencePixels(width, height);
+    paintReferenceRectangle(pixels, width, {
+      ...rectangle,
+      value: 250,
+    });
+    const result = analyzeReferencePixels({ height, pixels, width });
+    assert.equal(result.substantialComponentCount, 0);
+    assert.equal(result.pageBounds, null);
+    assert.equal(result.renderedPage, false);
+  }
+});
+
+test("fails closed when white-page components are absent or tied", () => {
+  const absent = analyzeReferencePixels({
+    height: 180,
+    pixels: createReferencePixels(240, 180),
+    width: 240,
+  });
+  assert.equal(absent.substantialComponentCount, 0);
+  assert.equal(absent.winnerWhiteArea, 0);
+  assert.equal(absent.runnerUpWhiteArea, 0);
+  assert.equal(absent.winnerDominanceRatio, null);
+  assert.equal(absent.renderedPage, false);
+
+  const width = 500;
+  const height = 300;
+  const pixels = createReferencePixels(width, height);
+  for (const x of [30, 290]) {
+    paintReferenceRectangle(pixels, width, {
+      height: 200,
+      value: 250,
+      width: 180,
+      x,
+      y: 50,
+    });
+  }
+  const tied = analyzeReferencePixels({ height, pixels, width });
+  assert.equal(tied.substantialComponentCount, 2);
+  assert.equal(tied.winnerWhiteArea, 36_000);
+  assert.equal(tied.runnerUpWhiteArea, 36_000);
+  assert.equal(tied.winnerDominanceRatio, 1);
+  assert.equal(tied.pageBounds, null);
+  assert.equal(tied.renderedPage, false);
+});
+
+test("binds fallback delay to a real attempt instead of a caller page", async () => {
+  const source = await readFile(
+    "scripts/run-pdf-sharpness-browser-regression.mjs",
+    "utf8",
+  );
+  assert.match(source, /delayNextContinuation\(1000\)/u);
+  assert.match(source, /arguments\.length !== 1/u);
+  assert.match(
+    source,
+    /matchesArmedFallbackInjection\(delayNextContinuation, attempt\)/u,
+  );
+  assert.doesNotMatch(source, /delayNextContinuation\(1000,\s*3\)/u);
+});
+
+test("requires exact worker model completion before traversing virtualized pages", async () => {
+  const restoredDocumentKey = "restored-document:restored-revision";
+  const restoredRevision = "restored-revision";
+  const restoredEvents = [
+    {
+      activityId: 1,
+      at: 1,
+      direction: "to-worker",
+      documentKey: restoredDocumentKey,
+      eventId: 1,
+      jobId: 1,
+      revision: restoredRevision,
+      type: "open",
+      workerInstanceId: 1,
+    },
+    ...Array.from({ length: 6 }, (_, index) => ({
+      activityId: index + 2,
+      at: index + 2,
+      direction: "from-worker",
+      documentKey: restoredDocumentKey,
+      eventId: index + 2,
+      jobId: 1,
+      pageNumber: index + 1,
+      revision: restoredRevision,
+      type: "page",
+      workerInstanceId: 1,
+    })),
+    {
+      activityId: 8,
+      at: 8,
+      completedPages: 6,
+      direction: "from-worker",
+      eventId: 8,
+      jobId: 1,
+      pageCount: 6,
+      revision: restoredRevision,
+      type: "progress",
+      workerInstanceId: 1,
+    },
+    {
+      activityId: 9,
+      at: 9,
+      direction: "from-worker",
+      documentKey: restoredDocumentKey,
+      eventId: 9,
+      jobId: 1,
+      pageCount: 6,
+      revision: restoredRevision,
+      type: "complete",
+      workerInstanceId: 1,
+    },
+  ];
+  const pageEvents = Array.from({ length: 6 }, (_, index) => ({
+    activityId: index + 11,
+    at: index + 101,
+    direction: "from-worker",
+    documentKey: DOCUMENT_KEY,
+    eventId: index + 11,
+    jobId: 2,
+    pageNumber: index + 1,
+    revision: REVISION,
+    type: "page",
+    workerInstanceId: 2,
+  }));
+  const events = [
+    ...restoredEvents,
+    {
+      activityId: 10,
+      at: 100,
+      direction: "to-worker",
+      documentKey: DOCUMENT_KEY,
+      eventId: 10,
+      jobId: 2,
+      revision: REVISION,
+      type: "import",
+      workerInstanceId: 2,
+    },
+    ...pageEvents,
+    {
+      activityId: 17,
+      at: 107,
+      completedPages: 6,
+      direction: "from-worker",
+      eventId: 17,
+      jobId: 2,
+      pageCount: 6,
+      revision: REVISION,
+      type: "progress",
+      workerInstanceId: 2,
+    },
+    {
+      activityId: 18,
+      at: 108,
+      direction: "from-worker",
+      documentKey: DOCUMENT_KEY,
+      eventId: 18,
+      jobId: 2,
+      pageCount: 6,
+      revision: REVISION,
+      type: "complete",
+      workerInstanceId: 2,
+    },
+  ];
+  assert.equal(summarizePdfModelCompletion(events, 6).complete, true);
+  assert.equal(summarizePdfModelCompletion(restoredEvents, 6).complete, false);
+  assert.equal(
+    summarizePdfModelCompletion(events.slice(0, -1), 6).complete,
+    false,
+  );
+  assert.equal(
+    summarizePdfModelCompletion(
+      events.map((event) =>
+        event.type === "progress" && event.jobId === 2
+          ? { ...event, pageCount: 7 }
+          : event,
+      ),
+      6,
+    ).complete,
+    false,
+  );
+  assert.equal(
+    summarizePdfModelCompletion([...events, pageEvents[5]], 6).complete,
+    false,
+  );
+  assert.equal(
+    summarizePdfModelCompletion(
+      events.filter(
+        (event) => event.type !== "page" || event.pageNumber !== 6,
+      ),
+      6,
+    ).complete,
+    false,
+  );
+  assert.equal(
+    summarizePdfModelCompletion(
+      events.map((event) =>
+        event.type === "page" && event.jobId === 2 && event.pageNumber === 6
+          ? { ...event, revision: "substituted-revision" }
+          : event,
+      ),
+      6,
+    ).complete,
+    false,
+  );
+  assert.equal(
+    summarizePdfModelCompletion(
+      events.map((event) =>
+        event.type === "progress" && event.jobId === 2
+          ? { ...event, revision: "substituted-revision" }
+          : event,
+      ),
+      6,
+    ).complete,
+    false,
+  );
+  assert.equal(
+    summarizePdfModelCompletion(
+      events.map((event) =>
+        event.type === "page" && event.jobId === 2 && event.pageNumber === 6
+          ? { ...event, documentKey: restoredDocumentKey }
+          : event,
+      ),
+      6,
+    ).complete,
+    false,
+  );
+  assert.equal(
+    summarizePdfModelCompletion([
+      ...events,
+      {
+        activityId: 19,
+        at: 200,
+        direction: "to-worker",
+        documentKey: "new-document:new-revision",
+        eventId: 19,
+        jobId: 3,
+        revision: "new-revision",
+        type: "import",
+        workerInstanceId: 3,
+      },
+    ], 6).complete,
+    false,
+  );
+  assert.equal(
+    summarizePdfModelCompletion([
+      ...events,
+      {
+        activityId: 19,
+        at: 200,
+        direction: "to-worker",
+        documentKey: null,
+        eventId: 19,
+        jobId: 3,
+        revision: null,
+        type: "import",
+        workerInstanceId: 3,
+      },
+    ], 6).complete,
+    false,
+  );
+  const currentImport = events.find((event) => event.type === "import");
+  const beforeImport = events.filter((event) => event !== currentImport);
+  beforeImport.push(currentImport);
+  assert.equal(summarizePdfModelCompletion(beforeImport, 6).complete, false);
+  const completeBeforeProgress = [...events];
+  const progressIndex = completeBeforeProgress.findIndex((event) =>
+    event.type === "progress" && event.jobId === 2
+  );
+  const completeIndex = completeBeforeProgress.findIndex((event) =>
+    event.type === "complete" && event.jobId === 2
+  );
+  [completeBeforeProgress[progressIndex], completeBeforeProgress[completeIndex]] =
+    [completeBeforeProgress[completeIndex], completeBeforeProgress[progressIndex]];
+  assert.equal(
+    summarizePdfModelCompletion(completeBeforeProgress, 6).complete,
+    false,
+  );
+  const reorderCurrentResponses = (responses) => [
+    ...events.filter((event) => event.jobId !== 2 ||
+      !["page", "progress", "complete"].includes(event.type)),
+    ...responses.map((event, index) => ({
+      ...event,
+      activityId: 11 + index,
+      at: 101 + index,
+      eventId: 11 + index,
+    })),
+  ];
+  const currentResponses = events.filter((event) =>
+    event.jobId === 2 && ["page", "progress", "complete"].includes(event.type)
+  );
+  const pageSix = currentResponses.find((event) =>
+    event.type === "page" && event.pageNumber === 6
+  );
+  const withoutPageSix = currentResponses.filter((event) => event !== pageSix);
+  const terminalProgressIndex = withoutPageSix.findIndex((event) =>
+    event.type === "progress"
+  );
+  const pageSixAfterProgress = [...withoutPageSix];
+  pageSixAfterProgress.splice(terminalProgressIndex + 1, 0, pageSix);
+  assert.equal(
+    summarizePdfModelCompletion(
+      reorderCurrentResponses(pageSixAfterProgress),
+      6,
+    ).complete,
+    false,
+  );
+  const pageSixAfterComplete = [...withoutPageSix, pageSix];
+  assert.equal(
+    summarizePdfModelCompletion(
+      reorderCurrentResponses(pageSixAfterComplete),
+      6,
+    ).complete,
+    false,
+  );
+  const progressAfterComplete = [...currentResponses, {
+    ...currentResponses.find((event) => event.type === "progress"),
+    completedPages: 5,
+  }];
+  assert.equal(
+    summarizePdfModelCompletion(
+      reorderCurrentResponses(progressAfterComplete),
+      6,
+    ).complete,
+    false,
+  );
+  assert.equal(
+    summarizePdfModelCompletion(events.map((event) =>
+      event.jobId === 2 && event.direction === "from-worker"
+        ? { ...event, workerInstanceId: 3 }
+        : event
+    ), 6).complete,
+    false,
+  );
+  assert.equal(
+    summarizePdfModelCompletion(events.map((event) =>
+      event.jobId === 2 && event.documentKey === DOCUMENT_KEY
+        ? { ...event, documentKey: "forged-document-key" }
+        : event
+    ), 6).complete,
+    false,
+  );
+  const bigintEvents = events.map((event) => ({ ...event }));
+  bigintEvents.find((event) => event.type === "page" && event.jobId === 2)
+    .eventId = 1n;
+  assert.doesNotThrow(() => summarizePdfModelCompletion(bigintEvents, 6));
+  assert.equal(summarizePdfModelCompletion(bigintEvents, 6).complete, false);
+  const cyclicEvents = events.map((event) => ({ ...event }));
+  cyclicEvents.find((event) => event.type === "page" && event.jobId === 2)
+    .documentKey = cyclicEvents;
+  assert.doesNotThrow(() => summarizePdfModelCompletion(cyclicEvents, 6));
+  assert.equal(summarizePdfModelCompletion(cyclicEvents, 6).complete, false);
+
+  const source = await readFile(
+    "scripts/run-pdf-sharpness-browser-regression.mjs",
+    "utf8",
+  );
+  assert.equal(
+    source.match(/waitForPdfModelCompletion\(cdp, 6\)/gu)?.length,
+    3,
+  );
+  assert.doesNotMatch(source, /waitForPageShell\(cdp, 6\)/u);
+  assert.match(
+    source,
+    /mountPdfPageByTraversal\(cdp, pageNumber\);[\s\S]*waitForPageShell\(cdp, pageNumber\)/u,
+  );
+  assert.match(source, /PDF_VIRTUAL_SCROLL_MAX_STEPS/u);
+  assert.match(source, /requestAnimationFrame\(\(\) =>[\s\S]*requestAnimationFrame/u);
+  assert.doesNotMatch(source, /PDF_PAGE_(?:CHROME|GAP)/u);
+});
+
+test("binds fresh and persisted startup restore before the matrix import", async () => {
+  const restoredOpen = {
+    at: 10,
+    direction: "to-worker",
+    documentKey: "restored-document:restored-revision",
+    eventId: 1,
+    jobId: 4,
+    revision: "restored-revision",
+    type: "open",
+    workerInstanceId: 2,
+  };
+  const restoredPage = {
+    at: 11,
+    direction: "from-worker",
+    documentKey: restoredOpen.documentKey,
+    eventId: 2,
+    first: true,
+    jobId: restoredOpen.jobId,
+    pageNumber: 1,
+    revision: restoredOpen.revision,
+    type: "page",
+    workerInstanceId: restoredOpen.workerInstanceId,
+  };
+  const fresh = {
+    activeDocumentCount: 0,
+    activeDocumentMatchesOpen: false,
+    activeDocumentStateAvailable: true,
+    activePdfPresent: false,
+    expectedPersisted: false,
+    libraryPending: false,
+    sourceFiles: [],
+    workerEvents: [],
+  };
+  const persisted = {
+    activeDocumentCount: 1,
+    activeDocumentMatchesOpen: true,
+    activeDocumentStateAvailable: true,
+    activePdfPresent: true,
+    expectedPersisted: true,
+    libraryPending: false,
+    sourceFiles: [],
+    workerEvents: [restoredOpen, restoredPage],
+  };
+  assert.equal(summarizePdfRestoreReadiness(fresh).ready, true);
+  assert.deepEqual(summarizePdfRestoreReadiness(persisted), {
+    activeDocumentCount: 1,
+    activeDocumentMatchesOpen: true,
+    activeDocumentStateAvailable: true,
+    activePdfCount: 1,
+    expectedPersisted: true,
+    firstPageCount: 1,
+    importRequestCount: 0,
+    libraryPending: false,
+    openRequestCount: 1,
+    ready: true,
+    sourceSelectionCount: 0,
+  });
+  const mutations = [
+    (value) => { value.activeDocumentCount = 0; },
+    (value) => { value.activeDocumentMatchesOpen = false; },
+    (value) => { value.activeDocumentStateAvailable = false; },
+    (value) => { value.activePdfPresent = false; },
+    (value) => { value.libraryPending = true; },
+    (value) => { value.sourceFiles.push({ sha256: SHA }); },
+    (value) => { value.workerEvents.shift(); },
+    (value) => { value.workerEvents.push({ ...restoredOpen, eventId: 3 }); },
+    (value) => { value.workerEvents[1].workerInstanceId += 1; },
+    (value) => { value.workerEvents[1].jobId += 1; },
+    (value) => { value.workerEvents[1].documentKey = "other:revision"; },
+    (value) => { value.workerEvents[1].revision = "other-revision"; },
+    (value) => { value.workerEvents[1].pageNumber = 2; },
+    (value) => { value.workerEvents[1].first = false; },
+    (value) => { delete value.workerEvents[1].first; },
+    (value) => { value.workerEvents[0].eventId = 0; },
+    (value) => { value.workerEvents[0].jobId = Number.MAX_SAFE_INTEGER + 1; },
+    (value) => { value.workerEvents[0].workerInstanceId = -1; },
+    (value) => { value.workerEvents[0].at = Number.NaN; },
+    (value) => { value.workerEvents[1].at = 9; },
+    (value) => {
+      value.workerEvents[0].documentKey = "restored-document:wrong-revision";
+    },
+    (value) => { value.sourceFiles = null; },
+    (value) => { value.workerEvents = null; },
+    (value) => {
+      value.workerEvents.push({
+        ...restoredOpen,
+        eventId: 3,
+        type: "import",
+      });
+    },
+  ];
+  for (const mutate of mutations) {
+    const changed = structuredClone(persisted);
+    mutate(changed);
+    assert.equal(summarizePdfRestoreReadiness(changed).ready, false);
+  }
+  const exactIdentityError = {
+    at: 10.5,
+    direction: "from-worker",
+    documentKey: restoredOpen.documentKey,
+    eventId: 2,
+    jobId: restoredOpen.jobId,
+    revision: restoredOpen.revision,
+    terminal: true,
+    type: "error",
+    workerInstanceId: restoredOpen.workerInstanceId,
+  };
+  const restoreWithPreFirstPageError = (mutate = () => {}) => {
+    const value = structuredClone(persisted);
+    const error = structuredClone(exactIdentityError);
+    mutate(error);
+    value.workerEvents.splice(1, 0, error);
+    return value;
+  };
+  const irrelevantErrorMetadataCases = [
+    ["baseline terminal error", () => {}],
+    ["fractional event identity", (error) => { error.eventId = 1.5; }],
+    ["negative event identity", (error) => { error.eventId = -1; }],
+    ["after-page event identity", (error) => {
+      error.eventId = restoredPage.eventId + 1;
+    }],
+    ["missing event identity", (error) => { delete error.eventId; }],
+    ["NaN clock", (error) => { error.at = Number.NaN; }],
+    ["before-open clock", (error) => { error.at = restoredOpen.at - 1; }],
+    ["after-page clock", (error) => { error.at = restoredPage.at + 1; }],
+    ["missing clock", (error) => { delete error.at; }],
+    ["missing document key", (error) => { delete error.documentKey; }],
+    ["wrong document key", (error) => {
+      error.documentKey = "other-document:other-revision";
+    }],
+    ["resumable terminal flag", (error) => { error.terminal = false; }],
+    ["missing terminal flag", (error) => { delete error.terminal; }],
+    ["resumable outcome", (error) => { error.outcome = "resumable"; }],
+    ["native marker false", (error) => { error.nativeWorkerError = false; }],
+    ["native marker true", (error) => { error.nativeWorkerError = true; }],
+  ];
+  for (const [name, mutate] of irrelevantErrorMetadataCases) {
+    assert.equal(
+      summarizePdfRestoreReadiness(
+        restoreWithPreFirstPageError(mutate),
+      ).ready,
+      false,
+      name,
+    );
+  }
+  const nativeErrorFreeRestore = structuredClone(persisted);
+  assert.equal(summarizePdfRestoreReadiness(nativeErrorFreeRestore).ready, true);
+  const nonmatchingErrorCases = [
+    ["wrong direction", (error) => { error.direction = "to-worker"; }],
+    ["wrong worker", (error) => { error.workerInstanceId += 1; }],
+    ["missing worker", (error) => { delete error.workerInstanceId; }],
+    ["wrong job", (error) => { error.jobId += 1; }],
+    ["missing job", (error) => { delete error.jobId; }],
+    ["wrong revision", (error) => { error.revision = "other-revision"; }],
+    ["missing revision", (error) => { delete error.revision; }],
+  ];
+  for (const [name, mutate] of nonmatchingErrorCases) {
+    assert.equal(
+      summarizePdfRestoreReadiness(
+        restoreWithPreFirstPageError(mutate),
+      ).ready,
+      true,
+      name,
+    );
+  }
+  const errorAfterFirstPage = structuredClone(persisted);
+  errorAfterFirstPage.workerEvents.push({
+    ...exactIdentityError,
+    at: restoredPage.at + 1,
+    eventId: restoredPage.eventId + 1,
+  });
+  assert.equal(summarizePdfRestoreReadiness(errorAfterFirstPage).ready, true);
+  const freshWithOpen = structuredClone(fresh);
+  freshWithOpen.workerEvents.push(restoredOpen, restoredPage);
+  assert.equal(summarizePdfRestoreReadiness(freshWithOpen).ready, false);
+
+  const source = await readFile(
+    "scripts/run-pdf-sharpness-browser-regression.mjs",
+    "utf8",
+  );
+  assert.match(
+    source,
+    /navigateToReader\(cdp, appUrl, configuration\)[\s\S]*waitForPdfRestoreReadiness\(cdp, matrixIndex > 0\)[\s\S]*waitForCdpNetworkFixedPoint\([\s\S]*record: false[\s\S]*captureCdpNetworkBoundary\(networkState\)[\s\S]*importFixture\(cdp, fixture\)/u,
+  );
+  assert.match(
+    source,
+    /addEventListener\("error", \(\) => \{[\s\S]*__issue68ActiveStartIdentity[\s\S]*workerEvents\.push\([\s\S]*nativeWorkerError: true/u,
+  );
+  assert.match(
+    source,
+    /networkState\.phase = "final-network-privacy";[\s\S]*waitForCdpNetworkFixedPoint\([\s\S]*"final-network-privacy"/u,
+  );
+});
+
+test("requires an instant, centered, stable page before adjacent selection", async () => {
+  const centered = {
+    cssScrollBehavior: "smooth",
+    page: {
+      bottom: 850,
+      height: 800,
+      left: 100,
+      right: 900,
+      top: 50,
+      width: 800,
+    },
+    pageNumber: 1,
+    range: "0:3",
+    reader: { bottom: 900, scrollTop: 400, top: 0 },
+    visible: true,
+  };
+  assert.deepEqual(summarizePdfPageCenteringStability([centered], 1), {
+    centered: true,
+    ready: false,
+    stableSampleCount: 1,
+  });
+  assert.deepEqual(
+    summarizePdfPageCenteringStability([
+      structuredClone(centered),
+      structuredClone(centered),
+    ], 1),
+    { centered: true, ready: true, stableSampleCount: 2 },
+  );
+  const moving = structuredClone(centered);
+  moving.reader.scrollTop += 1;
+  assert.equal(
+    summarizePdfPageCenteringStability([centered, moving], 1).ready,
+    false,
+  );
+  const rangeChanged = structuredClone(centered);
+  rangeChanged.range = "1:4";
+  assert.equal(
+    summarizePdfPageCenteringStability([centered, rangeChanged], 1).ready,
+    false,
+  );
+  const rectChanged = structuredClone(centered);
+  rectChanged.page.top += 1;
+  rectChanged.page.bottom += 1;
+  assert.equal(
+    summarizePdfPageCenteringStability([centered, rectChanged], 1).ready,
+    false,
+  );
+  const outsideTolerance = structuredClone(centered);
+  outsideTolerance.page.top += 2.01;
+  outsideTolerance.page.bottom += 2.01;
+  assert.equal(
+    summarizePdfPageCenteringStability(
+      [outsideTolerance, structuredClone(outsideTolerance)],
+      1,
+    ).ready,
+    false,
+  );
+  const midScrollPageThree = structuredClone(centered);
+  midScrollPageThree.page.top = -200;
+  midScrollPageThree.page.bottom = 600;
+  midScrollPageThree.centeredVisiblePage = 3;
+  midScrollPageThree.visiblePages = [1, 2, 3];
+  assert.equal(
+    summarizePdfPageCenteringStability(
+      [midScrollPageThree, structuredClone(midScrollPageThree)],
+      1,
+    ).ready,
+    false,
+  );
+  const centeredPageThree = structuredClone(centered);
+  centeredPageThree.pageNumber = 3;
+  assert.equal(
+    summarizePdfPageCenteringStability(
+      [centeredPageThree, structuredClone(centeredPageThree)],
+      1,
+    ).ready,
+    false,
+  );
+  const planningSample = {
+    page: {
+      bottom: 909.453125,
+      height: 800,
+      left: 100,
+      right: 900,
+      top: 109.453125,
+      width: 800,
+    },
+    pageNumber: 1,
+    range: "0:3",
+    reader: {
+      bottom: 900,
+      clientHeight: 900,
+      left: 0,
+      right: 1_100,
+      scrollHeight: 6_000,
+      scrollTop: 2_157,
+      top: 0,
+    },
+    readerOwned: true,
+    visible: true,
+  };
+  assert.deepEqual(planPdfPageCenterCorrection(planningSample, 1), {
+    centerDelta: 59.453125,
+    centered: false,
+    clamped: false,
+    correctionRequired: true,
+    nextScrollTop: 2_216.453125,
+    valid: true,
+  });
+  const centeredPlanning = structuredClone(planningSample);
+  centeredPlanning.page = {
+    bottom: 850,
+    height: 800,
+    left: 100,
+    right: 900,
+    top: 50,
+    width: 800,
+  };
+  centeredPlanning.reader.scrollTop = 950;
+  assert.deepEqual(planPdfPageCenterCorrection(centeredPlanning, 1), {
+    centerDelta: 0,
+    centered: true,
+    clamped: false,
+    correctionRequired: false,
+    nextScrollTop: 950,
+    valid: true,
+  });
+  const topAligned = structuredClone(centeredPlanning);
+  topAligned.page.top = 0;
+  topAligned.page.bottom = 800;
+  topAligned.reader.scrollTop = 1_000;
+  assert.equal(
+    planPdfPageCenterCorrection(topAligned, 1).nextScrollTop,
+    950,
+  );
+  const evidenceSample = (sample) => ({
+    cssScrollBehavior: "smooth",
+    page: structuredClone(sample.page),
+    pageNumber: sample.pageNumber,
+    range: sample.range,
+    reader: {
+      bottom: sample.reader.bottom,
+      scrollTop: sample.reader.scrollTop,
+      top: sample.reader.top,
+    },
+    visible: sample.visible,
+  });
+  const topEvidence = evidenceSample(topAligned);
+  const firstCenteredEvidence = evidenceSample(centeredPlanning);
+  assert.equal(
+    summarizePdfPageCenteringStability(
+      [topEvidence, firstCenteredEvidence],
+      1,
+    ).ready,
+    false,
+  );
+  assert.equal(
+    summarizePdfPageCenteringStability(
+      [firstCenteredEvidence, structuredClone(firstCenteredEvidence)],
+      1,
+    ).ready,
+    true,
+  );
+
+  const pendingSmooth = structuredClone(centeredPlanning);
+  pendingSmooth.page.top = 100;
+  pendingSmooth.page.bottom = 900;
+  assert.equal(
+    planPdfPageCenterCorrection(pendingSmooth, 1).correctionRequired,
+    true,
+  );
+  assert.equal(
+    summarizePdfPageCenteringStability(
+      [topEvidence, evidenceSample(pendingSmooth)],
+      1,
+    ).stableSampleCount,
+    0,
+  );
+  const delayedLayout = structuredClone(centeredPlanning);
+  delayedLayout.page.top += 10;
+  delayedLayout.page.bottom += 10;
+  assert.equal(
+    planPdfPageCenterCorrection(delayedLayout, 1).nextScrollTop,
+    960,
+  );
+  const recenteredAfterLayout = structuredClone(centeredPlanning);
+  recenteredAfterLayout.reader.scrollTop = 960;
+  assert.equal(
+    summarizePdfPageCenteringStability([
+      firstCenteredEvidence,
+      evidenceSample(delayedLayout),
+    ], 1).stableSampleCount,
+    0,
+  );
+  assert.equal(
+    summarizePdfPageCenteringStability([
+      evidenceSample(delayedLayout),
+      evidenceSample(recenteredAfterLayout),
+    ], 1).ready,
+    false,
+  );
+  assert.equal(
+    summarizePdfPageCenteringStability([
+      evidenceSample(recenteredAfterLayout),
+      evidenceSample(recenteredAfterLayout),
+    ], 1).ready,
+    true,
+  );
+
+  const clamped = structuredClone(centeredPlanning);
+  clamped.reader.scrollTop = 5_100;
+  clamped.page.top = 800;
+  clamped.page.bottom = 1_600;
+  assert.deepEqual(planPdfPageCenterCorrection(clamped, 1), {
+    centerDelta: 750,
+    centered: false,
+    clamped: true,
+    correctionRequired: true,
+    nextScrollTop: 5_100,
+    valid: true,
+  });
+  assert.equal(
+    summarizePdfPageCenteringStability(
+      [evidenceSample(clamped), evidenceSample(clamped)],
+      1,
+    ).ready,
+    false,
+  );
+
+  const invalidPlans = [
+    ["wrong page", (sample) => { sample.pageNumber = 2; }],
+    ["invisible", (sample) => { sample.visible = false; }],
+    ["range exclusion", (sample) => { sample.range = "1:3"; }],
+    ["nonfinite", (sample) => { sample.page.top = Number.NaN; }],
+    ["overflow operand", (sample) => {
+      sample.page.top = Number.MAX_VALUE;
+    }],
+    ["positive unsafe coordinate", (sample) => {
+      sample.page.left = Number.MAX_SAFE_INTEGER + 1;
+    }],
+    ["negative unsafe coordinate", (sample) => {
+      sample.reader.top = -(Number.MAX_SAFE_INTEGER + 1);
+    }],
+    ["positive unsafe scroll", (sample) => {
+      sample.reader.scrollTop = Number.MAX_SAFE_INTEGER + 1;
+    }],
+    ["negative unsafe scroll", (sample) => {
+      sample.reader.scrollTop = -(Number.MAX_SAFE_INTEGER + 1);
+    }],
+    ["negative scroll", (sample) => { sample.reader.scrollTop = -1; }],
+    ["fractional client height", (sample) => {
+      sample.reader.clientHeight += 0.5;
+    }],
+    ["unsafe client height", (sample) => {
+      sample.reader.clientHeight = Number.MAX_SAFE_INTEGER + 1;
+    }],
+    ["fractional scroll height", (sample) => {
+      sample.reader.scrollHeight += 0.5;
+    }],
+    ["unsafe scroll height", (sample) => {
+      sample.reader.scrollHeight = Number.MAX_SAFE_INTEGER + 1;
+    }],
+    ["contradictory height", (sample) => {
+      sample.page.height += 1e-6;
+    }],
+    ["contradictory width", (sample) => {
+      sample.page.width += 1e-6;
+    }],
+    ["nonintersection", (sample) => {
+      sample.page.top = 901;
+      sample.page.bottom = 1_701;
+      sample.visible = false;
+    }],
+    ["unowned reader", (sample) => { sample.readerOwned = false; }],
+  ];
+  for (const [name, mutate] of invalidPlans) {
+    const sample = structuredClone(centeredPlanning);
+    mutate(sample);
+    assert.deepEqual(planPdfPageCenterCorrection(sample, 1), {
+      centerDelta: null,
+      centered: false,
+      clamped: false,
+      correctionRequired: false,
+      nextScrollTop: null,
+      valid: false,
+    }, name);
+  }
+  const unsafePlannedScroll = structuredClone(centeredPlanning);
+  unsafePlannedScroll.reader.clientHeight = 1;
+  unsafePlannedScroll.reader.scrollHeight = Number.MAX_SAFE_INTEGER;
+  unsafePlannedScroll.reader.scrollTop = Number.MAX_SAFE_INTEGER - 1;
+  unsafePlannedScroll.page.top += 2;
+  unsafePlannedScroll.page.bottom += 2;
+  assert.equal(
+    planPdfPageCenterCorrection(unsafePlannedScroll, 1).valid,
+    false,
+  );
+  const dimensionRounding = structuredClone(centeredPlanning);
+  dimensionRounding.page.height += 5e-8;
+  dimensionRounding.page.width += 5e-8;
+  assert.equal(
+    planPdfPageCenterCorrection(dimensionRounding, 1).valid,
+    true,
+  );
+  assert.equal(
+    summarizePdfPageCenteringStability([
+      evidenceSample(dimensionRounding),
+      evidenceSample(dimensionRounding),
+    ], 1).ready,
+    true,
+  );
+  const fractionalScroll = structuredClone(centeredPlanning);
+  fractionalScroll.reader.scrollTop += 0.5;
+  assert.equal(planPdfPageCenterCorrection(fractionalScroll, 1).valid, true);
+  assert.equal(
+    summarizePdfPageCenteringStability([
+      evidenceSample(fractionalScroll),
+      evidenceSample(fractionalScroll),
+    ], 1).ready,
+    true,
+  );
+  const negativeZeroScroll = structuredClone(centeredPlanning);
+  negativeZeroScroll.reader.scrollTop = -0;
+  assert.equal(
+    planPdfPageCenterCorrection(negativeZeroScroll, 1).valid,
+    true,
+  );
+  assert.equal(
+    summarizePdfPageCenteringStability([
+      evidenceSample(negativeZeroScroll),
+      evidenceSample(negativeZeroScroll),
+    ], 1).ready,
+    true,
+  );
+  const negativeScrollEvidence = evidenceSample(centeredPlanning);
+  negativeScrollEvidence.reader.scrollTop = -1;
+  assert.deepEqual(
+    summarizePdfPageCenteringStability([
+      negativeScrollEvidence,
+      structuredClone(negativeScrollEvidence),
+    ], 1),
+    { centered: false, ready: false, stableSampleCount: 0 },
+  );
+  const contradictoryEvidence = evidenceSample(centeredPlanning);
+  contradictoryEvidence.page.height += 1e-6;
+  assert.deepEqual(
+    summarizePdfPageCenteringStability([
+      contradictoryEvidence,
+      structuredClone(contradictoryEvidence),
+    ], 1),
+    { centered: false, ready: false, stableSampleCount: 0 },
+  );
+  const bigintPlanning = structuredClone(centeredPlanning);
+  bigintPlanning.page.top = 1n;
+  assert.doesNotThrow(() => planPdfPageCenterCorrection(bigintPlanning, 1));
+  assert.equal(planPdfPageCenterCorrection(bigintPlanning, 1).valid, false);
+  assert.doesNotThrow(() =>
+    summarizePdfPageCenteringStability([evidenceSample(bigintPlanning)], 1)
+  );
+  const cyclicPlanning = structuredClone(centeredPlanning);
+  cyclicPlanning.page = cyclicPlanning;
+  assert.doesNotThrow(() => planPdfPageCenterCorrection(cyclicPlanning, 1));
+  assert.equal(planPdfPageCenterCorrection(cyclicPlanning, 1).valid, false);
+  const cyclicEvidence = evidenceSample(centeredPlanning);
+  cyclicEvidence.page = cyclicEvidence;
+  assert.doesNotThrow(() =>
+    summarizePdfPageCenteringStability([cyclicEvidence], 1)
+  );
+  assert.equal(
+    summarizePdfPageCenteringStability([cyclicEvidence], 1).ready,
+    false,
+  );
+  const toleranceBoundary = structuredClone(centeredPlanning);
+  toleranceBoundary.page.top += 2;
+  toleranceBoundary.page.bottom += 2;
+  assert.equal(
+    planPdfPageCenterCorrection(toleranceBoundary, 1).centered,
+    true,
+  );
+  const beyondTolerance = structuredClone(toleranceBoundary);
+  beyondTolerance.page.top += 0.000_001;
+  beyondTolerance.page.bottom += 0.000_001;
+  assert.equal(
+    planPdfPageCenterCorrection(beyondTolerance, 1).correctionRequired,
+    true,
+  );
+  const source = await readFile(
+    "scripts/run-pdf-sharpness-browser-regression.mjs",
+    "utf8",
+  );
+  assert.match(
+    source,
+    /scrollIntoView\(\{[\s\S]*behavior: 'instant', block: 'center'[\s\S]*requestAnimationFrame[\s\S]*planPdfPageCenterCorrection\.toString\(\)[\s\S]*root\.scrollTo\(\{ top: plan\.nextScrollTop, behavior: 'instant' \}\)[\s\S]*summarizePdfPageCenteringStability\([\s\S]*proof\.samples,[\s\S]*pageNumber/u,
+  );
+  assert.doesNotMatch(
+    source,
+    /scrollIntoView\(\{\s*behavior: 'auto', block: 'center'/u,
+  );
+  assert.match(
+    source,
+    /selectAdjacentPreviewTarget\(cdp\) \{[\s\S]*scrollPageIntoView\(cdp, 1\)[\s\S]*data-pdf-page-distance="1"/u,
+  );
+});
+
+test("plans bounded sub-viewport traversal toward unmounted PDF pages", () => {
+  const forward = planPdfVirtualScroll({
+    clientHeight: 900,
+    mountedPages: [1, 2, 3],
+    scrollHeight: 6_000,
+    scrollTop: 0,
+    targetPage: 6,
+    visiblePages: [1],
+  });
+  assert.deepEqual(forward, { direction: 1, nextScrollTop: 450 });
+
+  const backward = planPdfVirtualScroll({
+    clientHeight: 900,
+    mountedPages: [4, 5, 6],
+    scrollHeight: 6_000,
+    scrollTop: 3_000,
+    targetPage: 1,
+    visiblePages: [5],
+  });
+  assert.deepEqual(backward, { direction: -1, nextScrollTop: 2_550 });
+
+  const bounded = planPdfVirtualScroll({
+    clientHeight: 900,
+    mountedPages: [1, 2, 3],
+    scrollHeight: 6_000,
+    scrollTop: 0,
+    targetPage: 1,
+    visiblePages: [2],
+  });
+  assert.deepEqual(bounded, { direction: -1, nextScrollTop: 0 });
+});
+
+test("probes mixed bitmap sizes and temporary pinned overflow", () => {
+  const probe = probePdfBitmapBudget();
+  assert.equal(probe.passed, true);
+  assert.ok(probe.peak.count <= PDF_SHARPNESS_MAX_BITMAP_COUNT);
+  assert.ok(probe.peak.pixels <= PDF_SHARPNESS_MAX_BITMAP_PIXELS);
+  assert.ok(
+    probe.pinnedPeak.count > PDF_SHARPNESS_MAX_BITMAP_COUNT ||
+      probe.pinnedPeak.pixels > PDF_SHARPNESS_MAX_BITMAP_PIXELS,
+  );
+  assert.ok(probe.afterUnpin.count <= PDF_SHARPNESS_MAX_BITMAP_COUNT);
+  assert.ok(probe.afterUnpin.pixels <= PDF_SHARPNESS_MAX_BITMAP_PIXELS);
+  assert.ok(probe.closedBitmaps > 0);
+});
+
+test("documents a headed, fresh-build-only command without launching it", async () => {
+  const { stdout } = await execFileAsync(
+    process.execPath,
+    ["scripts/run-pdf-sharpness-browser-regression.mjs", "--help"],
+    { cwd: path.resolve(".") },
+  );
+  assert.match(stdout, /fresh production build/u);
+  assert.match(stdout, /visible browser/u);
+  assert.match(stdout, /--diagnose-fallback-import/u);
+  assert.match(stdout, /--diagnose-app-matrix-runtime/u);
+  assert.match(stdout, /--diagnose-first-network-fixed-point/u);
+  assert.match(stdout, /--diagnose-reference-capture/u);
+  assert.match(stdout, /--reference-configuration/u);
+  assert.doesNotMatch(stdout, /headless/u);
+});
+
+test("keeps the first-network diagnostic bounded and non-recording", async () => {
+  await assert.rejects(
+    execFileAsync(
+      process.execPath,
+      [
+        "scripts/run-pdf-sharpness-browser-regression.mjs",
+        "--diagnose-first-network-fixed-point",
+        "--record",
+      ],
+      { cwd: path.resolve(".") },
+    ),
+    /cannot be combined with --record/u,
+  );
+  await assert.rejects(
+    execFileAsync(
+      process.execPath,
+      [
+        "scripts/run-pdf-sharpness-browser-regression.mjs",
+        "--diagnose-first-network-fixed-point",
+      ],
+      { cwd: path.resolve(".") },
+    ),
+    /requires an explicit --output/u,
+  );
+  await assert.rejects(
+    execFileAsync(
+      process.execPath,
+      [
+        "scripts/run-pdf-sharpness-browser-regression.mjs",
+        "--diagnose-first-network-fixed-point",
+        "--output",
+        "outputs/issue-68-diagnostic",
+      ],
+      { cwd: path.resolve(".") },
+    ),
+    /output must be outside the source repository/u,
+  );
+  await assert.rejects(
+    execFileAsync(
+      process.execPath,
+      [
+        "scripts/run-pdf-sharpness-browser-regression.mjs",
+        "--diagnose-first-network-fixed-point",
+        "--fixture",
+        path.join(os.tmpdir(), "private-reader-document.pdf"),
+        "--output",
+        path.join(os.tmpdir(), "issue-68-network-diagnostic"),
+      ],
+      { cwd: path.resolve(".") },
+    ),
+    /requires the exact repository PDF fixture/u,
+  );
+  const symlinkRoot = await mkdtemp(
+    path.join(os.tmpdir(), "issue-68-output-guard-"),
+  );
+  try {
+    const repositoryLink = path.join(symlinkRoot, "repository-link");
+    await symlink(path.resolve("."), repositoryLink, "dir");
+    await assert.rejects(
+      execFileAsync(
+        process.execPath,
+        [
+          "scripts/run-pdf-sharpness-browser-regression.mjs",
+          "--diagnose-first-network-fixed-point",
+          "--output",
+          path.join(repositoryLink, "outputs", "diagnostic"),
+        ],
+        { cwd: path.resolve(".") },
+      ),
+      /output must be outside the source repository/u,
+    );
+  } finally {
+    await rm(symlinkRoot, { force: true, recursive: true });
+  }
+  const source = await readFile(
+    "scripts/run-pdf-sharpness-browser-regression.mjs",
+    "utf8",
+  );
+  assert.match(
+    source,
+    /!options\.diagnoseFallbackImport &&\s*!options\.diagnoseFirstNetworkFixedPoint[\s\S]*networkState\.phase = "forced-main-fallback"/u,
+  );
+  assert.match(
+    source,
+    /networkState\.fixedPointDiagnostics\.push\(diagnostic\);\s*throw new CdpFixedPointTimeoutError\(diagnostic\)/u,
+  );
+  assert.match(
+    source,
+    /evidence\.networkDiagnostics = \[\s*\.\.\.networkState\.fixedPointDiagnostics/u,
+  );
+  assert.match(
+    source,
+    /const enableResults = await Promise\.allSettled\(\[/u,
+  );
+  assert.match(source, /buildFirstNetworkDiagnosticReport/u);
+  assert.match(source, /pdf-sharpness-network-diagnostic\.json/u);
+});
+
+test("keeps the reference-capture diagnostic bounded and noncanonical", async () => {
+  const runner = "scripts/run-pdf-sharpness-browser-regression.mjs";
+  const freshOutput = path.join(
+    os.tmpdir(),
+    `issue-68-reference-cli-${process.pid}`,
+  );
+  await rm(freshOutput, { force: true, recursive: true });
+  await assert.rejects(
+    execFileAsync(
+      process.execPath,
+      [runner, "--diagnose-reference-capture", "--record"],
+      { cwd: path.resolve(".") },
+    ),
+    /cannot be combined with --record/u,
+  );
+  await assert.rejects(
+    execFileAsync(
+      process.execPath,
+      [runner, "--diagnose-reference-capture"],
+      { cwd: path.resolve(".") },
+    ),
+    /requires an explicit --output/u,
+  );
+  await assert.rejects(
+    execFileAsync(
+      process.execPath,
+      [
+        runner,
+        "--diagnose-reference-capture",
+        "--output",
+        "outputs/issue-68-reference-diagnostic",
+      ],
+      { cwd: path.resolve(".") },
+    ),
+    /output must be outside the source repository/u,
+  );
+  await assert.rejects(
+    execFileAsync(
+      process.execPath,
+      [
+        runner,
+        "--diagnose-reference-capture",
+        "--fixture",
+        path.join(os.tmpdir(), "private-reader-document.pdf"),
+        "--output",
+        freshOutput,
+      ],
+      { cwd: path.resolve(".") },
+    ),
+    /requires the exact repository PDF fixture/u,
+  );
+  await assert.rejects(
+    execFileAsync(
+      process.execPath,
+      [
+        runner,
+        "--diagnose-reference-capture",
+        "--diagnose-fallback-import",
+        "--output",
+        freshOutput,
+      ],
+      { cwd: path.resolve(".") },
+    ),
+    /diagnostic modes are mutually exclusive/u,
+  );
+  await assert.rejects(
+    execFileAsync(
+      process.execPath,
+      [
+        runner,
+        "--reference-configuration",
+        "mobile-dpr3-zoom100",
+        "--output",
+        freshOutput,
+      ],
+      { cwd: path.resolve(".") },
+    ),
+    /only valid with --diagnose-reference-capture/u,
+  );
+  await assert.rejects(
+    execFileAsync(
+      process.execPath,
+      [
+        runner,
+        "--diagnose-reference-capture",
+        "--reference-configuration",
+      ],
+      { cwd: path.resolve(".") },
+    ),
+    /requires one allowlisted configuration ID/u,
+  );
+  await assert.rejects(
+    execFileAsync(
+      process.execPath,
+      [
+        runner,
+        "--diagnose-reference-capture",
+        "--reference-configuration",
+        "mobile-dpr3-pinch200",
+        "--output",
+        freshOutput,
+      ],
+      { cwd: path.resolve(".") },
+    ),
+    /configuration is not allowlisted/u,
+  );
+  await assert.rejects(
+    execFileAsync(
+      process.execPath,
+      [
+        runner,
+        "--diagnose-reference-capture",
+        "--reference-configuration",
+        "mobile-dpr3-zoom100",
+        "--reference-configuration",
+        "desktop-dpr1-zoom100",
+        "--output",
+        freshOutput,
+      ],
+      { cwd: path.resolve(".") },
+    ),
+    /may be selected only once/u,
+  );
+  const existingOutput = await mkdtemp(
+    path.join(os.tmpdir(), "issue-68-reference-existing-"),
+  );
+  try {
+    await assert.rejects(
+      execFileAsync(
+        process.execPath,
+        [
+          runner,
+          "--diagnose-reference-capture",
+          "--output",
+          existingOutput,
+        ],
+        { cwd: path.resolve(".") },
+      ),
+      /fresh absent directory/u,
+    );
+  } finally {
+    await rm(existingOutput, { force: true, recursive: true });
+  }
+  await assert.rejects(
+    execFileAsync(
+      process.execPath,
+      [
+        runner,
+        "--diagnose-reference-capture",
+        "--output",
+        freshOutput,
+      ],
+      {
+        cwd: path.resolve("."),
+        env: { ...process.env, DISPLAY: "", WAYLAND_DISPLAY: "" },
+      },
+    ),
+    /requires a graphical DISPLAY or WAYLAND_DISPLAY/u,
+  );
+  await assert.rejects(
+    execFileAsync(
+      process.execPath,
+      [
+        runner,
+        "--diagnose-reference-capture",
+        "--reference-configuration",
+        "mobile-dpr3-zoom100",
+        "--output",
+        freshOutput,
+      ],
+      {
+        cwd: path.resolve("."),
+        env: { ...process.env, DISPLAY: "", WAYLAND_DISPLAY: "" },
+      },
+    ),
+    /requires a graphical DISPLAY or WAYLAND_DISPLAY/u,
+  );
+
+  assert.deepEqual(
+    Object.keys(REFERENCE_CAPTURE_DIAGNOSTIC_CONFIGURATIONS),
+    ["desktop-dpr1-zoom100", "mobile-dpr3-zoom100"],
+  );
+  assert.equal(
+    REFERENCE_CAPTURE_DIAGNOSTIC_CONFIGURATIONS["mobile-dpr3-zoom100"]
+      .targetPage,
+    3,
+  );
+
+  const source = await readFile(runner, "utf8");
+  for (const step of REFERENCE_CAPTURE_DIAGNOSTIC_STEPS) {
+    assert.match(
+      source,
+      new RegExp(
+        `runReferenceCaptureDiagnosticStage\\(\\s*progress,\\s*"${step}"`,
+        "u",
+      ),
+      `${step} must bind one exact diagnostic operation`,
+    );
+  }
+  assert.match(
+    source,
+    /if \(options\.diagnoseReferenceCapture\) \{[\s\S]*runReferenceCaptureDiagnostic\(options, source\);[\s\S]*return;[\s\S]*buildProductionArtifact/u,
+  );
+  assert.match(
+    source,
+    /runBoundedDiagnosticOperation\(async \(\) => \{[\s\S]*captureStableReferenceDiagnosticCandidates[\s\S]*referenceCdp\?\.close\(\)[\s\S]*closeOwnedBrowser/u,
+  );
+  assert.match(
+    source,
+    /readReferenceCaptureDiagnosticBaseline[\s\S]*Page\.setLifecycleEventsEnabled[\s\S]*applyMatrixConfiguration[\s\S]*navigateReferenceCaptureDiagnosticPage/u,
+  );
+  assert.match(source, /pdf-sharpness-reference-capture-diagnostic\.json/u);
+  assert.doesNotMatch(
+    buildReferenceCaptureDiagnosticReport.toString(),
+    /\bpassed\b|schemaVersion/u,
+  );
+});
+
+test("keeps the fallback-import diagnostic bounded and noncanonical", async () => {
+  const runner = "scripts/run-pdf-sharpness-browser-regression.mjs";
+  await assert.rejects(
+    execFileAsync(
+      process.execPath,
+      [runner, "--diagnose-fallback-import", "--record"],
+      { cwd: path.resolve(".") },
+    ),
+    /cannot be combined with --record/u,
+  );
+  await assert.rejects(
+    execFileAsync(
+      process.execPath,
+      [runner, "--diagnose-fallback-import"],
+      { cwd: path.resolve(".") },
+    ),
+    /requires an explicit --output/u,
+  );
+  await assert.rejects(
+    execFileAsync(
+      process.execPath,
+      [
+        runner,
+        "--diagnose-fallback-import",
+        "--output",
+        "outputs/issue-68-fallback-diagnostic",
+      ],
+      { cwd: path.resolve(".") },
+    ),
+    /output must be outside the source repository/u,
+  );
+  await assert.rejects(
+    execFileAsync(
+      process.execPath,
+      [
+        runner,
+        "--diagnose-fallback-import",
+        "--fixture",
+        path.join(os.tmpdir(), "private-reader-document.pdf"),
+        "--output",
+        path.join(os.tmpdir(), "issue-68-fallback-diagnostic"),
+      ],
+      { cwd: path.resolve(".") },
+    ),
+    /requires the exact repository PDF fixture/u,
+  );
+  await assert.rejects(
+    execFileAsync(
+      process.execPath,
+      [
+        runner,
+        "--diagnose-fallback-import",
+        "--diagnose-first-network-fixed-point",
+        "--output",
+        path.join(os.tmpdir(), "issue-68-fallback-diagnostic"),
+      ],
+      { cwd: path.resolve(".") },
+    ),
+    /diagnostic modes are mutually exclusive/u,
+  );
+
+  const source = await readFile(runner, "utf8");
+  for (const step of FALLBACK_IMPORT_DIAGNOSTIC_STEPS) {
+    assert.match(
+      source,
+      new RegExp(
+        `runFallbackImportDiagnosticStage\\(\\s*` +
+          `(?:progress|fallbackDiagnosticProgress),\\s*"${step}"`,
+        "u",
+      ),
+      `${step} must bind one exact fallback diagnostic operation`,
+    );
+  }
+  assert.match(
+    source,
+    /if \(options\.diagnoseFallbackImport\) \{[\s\S]*collectPersistedFallbackDiagnosticSetup[\s\S]*collectFallbackImportDiagnostic/u,
+  );
+  assert.match(
+    source,
+    /collectPersistedFallbackDiagnosticSetup[\s\S]*navigateToReader\(cdp, appUrl, configuration, true\)[\s\S]*selectFixtureFile/u,
+  );
+  assert.match(source, /buildFallbackImportDiagnosticReport/u);
+  assert.match(
+    source,
+    /console\.debug\('__linelight_issue68_worker__'[\s\S]*Runtime\.consoleAPICalled[\s\S]*target\.workerInstanceId = workerInstanceId\.value/u,
+  );
+  assert.match(
+    source,
+    /isFallbackImportNetworkDiagnosticHealthy\([\s\S]*lifecycle\.importIdentity\?\.workerInstanceId/u,
+  );
+  assert.match(
+    source,
+    /pdf-sharpness-fallback-import-diagnostic\.json/u,
+  );
+  assert.match(
+    source,
+    /finally \{[\s\S]*closeOwnedBrowser[\s\S]*if \(options\.diagnoseFallbackImport\)/u,
+  );
+  assert.doesNotMatch(
+    buildFallbackImportDiagnosticReport.toString(),
+    /\bpassed\b|schemaVersion/u,
+  );
+});
+
+test("forces bounded fallback diagnostic cleanup before reporting", async () => {
+  let cleanupStarted = false;
+  let finallyReached = false;
+  try {
+    await assert.rejects(
+      runBoundedDiagnosticOperation(
+        () => new Promise(() => {}),
+        {
+          onTimeout() {
+            cleanupStarted = true;
+          },
+          timeoutMs: 5,
+        },
+      ),
+      /bounded fallback-import diagnostic timed out/u,
+    );
+  } finally {
+    finallyReached = true;
+  }
+  assert.equal(cleanupStarted, true);
+  assert.equal(finallyReached, true);
+
+  const source = await readFile(
+    "scripts/run-pdf-sharpness-browser-regression.mjs",
+    "utf8",
+  );
+  assert.match(
+    source,
+    /runBoundedDiagnosticOperation\(\(\) => \{[\s\S]*appCollectionPromise = collectAppEvidence\(\)[\s\S]*appCdp\?\.close\(\)[\s\S]*finally \{[\s\S]*closeOwnedBrowser[\s\S]*buildFallbackImportDiagnosticReport/u,
+  );
+});
+
+test("keeps the app-matrix runtime diagnostic bounded and noncanonical", async () => {
+  const runner = "scripts/run-pdf-sharpness-browser-regression.mjs";
+  const freshOutput = path.join(
+    os.tmpdir(),
+    `issue-68-app-runtime-cli-${process.pid}`,
+  );
+  await rm(freshOutput, { force: true, recursive: true });
+  const rejectedArguments = [
+    [["--diagnose-app-matrix-runtime", "--record"], /cannot be combined with --record/u],
+    [["--diagnose-app-matrix-runtime"], /requires an explicit --output/u],
+    [[
+      "--diagnose-app-matrix-runtime",
+      "--output",
+      "outputs/issue-68-app-runtime",
+    ], /output must be outside the source repository/u],
+    [[
+      "--diagnose-app-matrix-runtime",
+      "--fixture",
+      path.join(os.tmpdir(), "private-reader-document.pdf"),
+      "--output",
+      freshOutput,
+    ], /requires the exact repository PDF fixture/u],
+    ...[
+      "--diagnose-fallback-import",
+      "--diagnose-first-network-fixed-point",
+      "--diagnose-reference-capture",
+    ].map((mode) => [[
+      "--diagnose-app-matrix-runtime",
+      mode,
+      "--output",
+      freshOutput,
+    ], /diagnostic modes are mutually exclusive/u]),
+  ];
+  for (const [arguments_, expected] of rejectedArguments) {
+    await assert.rejects(
+      execFileAsync(process.execPath, [runner, ...arguments_], {
+        cwd: path.resolve("."),
+      }),
+      expected,
+    );
+  }
+
+  const existingOutput = await mkdtemp(
+    path.join(os.tmpdir(), "issue-68-app-runtime-existing-"),
+  );
+  const symlinkRoot = await mkdtemp(
+    path.join(os.tmpdir(), "issue-68-app-runtime-link-"),
+  );
+  try {
+    await assert.rejects(
+      execFileAsync(process.execPath, [
+        runner,
+        "--diagnose-app-matrix-runtime",
+        "--output",
+        existingOutput,
+      ], { cwd: path.resolve(".") }),
+      /fresh absent directory/u,
+    );
+    const repositoryLink = path.join(symlinkRoot, "repository-link");
+    await symlink(path.resolve("."), repositoryLink, "dir");
+    await assert.rejects(
+      execFileAsync(process.execPath, [
+        runner,
+        "--diagnose-app-matrix-runtime",
+        "--output",
+        path.join(repositoryLink, "outputs", "runtime-diagnostic"),
+      ], { cwd: path.resolve(".") }),
+      /output must be outside the source repository/u,
+    );
+  } finally {
+    await Promise.all([
+      rm(existingOutput, { force: true, recursive: true }),
+      rm(symlinkRoot, { force: true, recursive: true }),
+    ]);
+  }
+  await assert.rejects(
+    execFileAsync(process.execPath, [
+      runner,
+      "--diagnose-app-matrix-runtime",
+      "--output",
+      freshOutput,
+    ], {
+      cwd: path.resolve("."),
+      env: { ...process.env, DISPLAY: "", WAYLAND_DISPLAY: "" },
+    }),
+    /requires a graphical DISPLAY or WAYLAND_DISPLAY/u,
+  );
+
+  const source = await readFile(runner, "utf8");
+  assert.match(
+    source,
+    /if \(options\.diagnoseAppMatrixRuntime\) \{[\s\S]*existsSync\(options\.outputDirectory\)[\s\S]*await mkdir\(options\.outputDirectory\)/u,
+  );
+  assert.match(
+    source,
+    /appBrowser = await startBrowser[\s\S]*appCdp = await CdpSession\.connect[\s\S]*for \(const \[matrixIndex, configuration\] of[\s\S]*PDF_SHARPNESS_MATRIX\.entries\(\)\)/u,
+  );
+  assert.match(
+    source,
+    /appMatrixRuntimeDiagnostics: options\.diagnoseAppMatrixRuntime/u,
+  );
+  assert.match(
+    source,
+    /!options\.diagnoseFallbackImport &&\s*!options\.diagnoseFirstNetworkFixedPoint &&\s*!options\.diagnoseAppMatrixRuntime[\s\S]*forced-main-fallback/u,
+  );
+  assert.match(
+    source,
+    /APP_MATRIX_RUNTIME_DIAGNOSTIC_RUN_TIMEOUT_MS[\s\S]*appMatrixRuntimeAbortState\.aborted = true[\s\S]*await appCollectionPromise\.catch/u,
+  );
+  assert.match(source, /buildAppMatrixRuntimeDiagnosticReport/u);
+  assert.match(source, /pdf-sharpness-app-matrix-runtime-diagnostic\.json/u);
+  assert.doesNotMatch(
+    buildAppMatrixRuntimeDiagnosticReport.toString(),
+    /\bpassed\b|schemaVersion/u,
+  );
+});
+
+test("stops expression polling when the owned CDP session closes", async () => {
+  let sends = 0;
+  const cdp = {
+    send() {
+      sends += 1;
+      return Promise.reject(new Error("The browser debugging connection closed."));
+    },
+    webSocket: { readyState: 3 },
+  };
+  const startedAt = Date.now();
+  await assert.rejects(
+    waitForHighlightExpression(cdp, "true", "a closed session", 5_000),
+    /debugging connection closed/u,
+  );
+  assert.equal(sends, 1);
+  assert.ok(Date.now() - startedAt < 500);
+});
+
+function passingAppMatrixRuntimeFailureInput(outputDirectory) {
+  const configurationId = "desktop-dpr1-zoom100";
+  const adjacentPage = 2;
+  const priorityTarget = 4;
+  const stageHistory = APP_MATRIX_RUNTIME_DIAGNOSTIC_STAGES.slice(
+    0,
+    APP_MATRIX_RUNTIME_DIAGNOSTIC_STAGES.indexOf(
+      "release-observation-started",
+    ) + 1,
+  );
+  const phaseStages = stageHistory.filter((stage) =>
+    !stage.startsWith("navigate-") &&
+    APP_MATRIX_RUNTIME_DIAGNOSTIC_STAGES.indexOf(stage) <=
+      APP_MATRIX_RUNTIME_DIAGNOSTIC_STAGES.indexOf("scenario-finish-started")
+  );
+  const documentKey = "public-document:revision-1";
+  const revision = "revision-1";
+  const modelIdentity = {
+    documentKey,
+    importActivityId: 5,
+    importAt: 10,
+    importEventId: 5,
+    importJobId: 1,
+    revision,
+    workerInstanceId: 1,
+  };
+  const readerRect = { bottom: 900, left: 0, right: 1_100, top: 0 };
+  const priorityProbe = {
+    compositions: [{
+      activityId: 101,
+      at: 300,
+      bitmapEventId: 19,
+      compositionId: 1,
+      drawInvocationId: 51,
+      geometryVisible: true,
+      height: 990,
+      page: priorityTarget,
+      source: "worker-bitmap",
+      visible: true,
+      width: 765,
+    }],
+    scrollAction: {
+      activityId: 100,
+      at: 290,
+      drawInvocationBoundary: 50,
+      readerViewportAfter: readerRect,
+      readerViewportBefore: readerRect,
+      scrollTopAfter: 1_000,
+      scrollTopBefore: 0,
+      targetGeometryAfter: { bottom: 800, left: 100, right: 900, top: 100 },
+      targetGeometryBefore: {
+        bottom: 1_800,
+        left: 100,
+        right: 900,
+        top: 1_000,
+      },
+      targetPage: priorityTarget,
+    },
+    targetAfter: {
+      canvasHeight: 990,
+      canvasWidth: 765,
+      renderSource: "worker-bitmap",
+      visible: true,
+    },
+    targetBefore: { visible: false },
+    targetPage: priorityTarget,
+  };
+  const page = ({ distance, pageNumber, rect, visible, width, height }) => ({
+    canvas: {
+      capped: "false",
+      connected: true,
+      height,
+      present: true,
+      renderSource: "worker-bitmap",
+      scale: 1.25,
+      targetHeight: height,
+      targetScale: 1.25,
+      targetWidth: width,
+      width,
+    },
+    datasetVisible: visible ? "true" : "false",
+    distance,
+    intersectsLayoutViewport: visible,
+    intersectsReader: visible,
+    intersectsVisualViewport: visible,
+    page: pageNumber,
+    pageIndex: pageNumber - 1,
+    present: true,
+    rect,
+    textOverlayCount: 12,
+  });
+  const row = {
+    adjacentPage,
+    completedSnapshot: {
+      drawHookTimingCount: 0,
+      drawHookTimings: [],
+      longAnimationFrameCount: 0,
+      longAnimationFrameObserverAvailable: false,
+      longAnimationFrames: [],
+      longTasks: [],
+      phaseMarkers: phaseStages.map((stage, index) => ({
+        activityId: index + 1,
+        at: 50 + index * 10,
+        configurationId,
+        drawInvocationId: index,
+        sequence: index + 1,
+        stage,
+        workerEventId: index,
+      })),
+      samplerTimingCount: 0,
+      samplerTimings: [],
+      workerMessageTimingCount: 0,
+      workerMessageTimings: [],
+    },
+    configurationId,
+    currentStage: "release-observation-started",
+    failureStage: "release-observation-started",
+    finalizationErrorPresent: false,
+    modelCompletion: {
+      complete: true,
+      completeEventCount: 1,
+      completedProgressCount: 1,
+      documentKey,
+      importActivityId: 5,
+      importAt: 10,
+      importEventId: 5,
+      importJobId: 1,
+      importRequestCount: 1,
+      pageEventCount: 6,
+      pageNumbers: [1, 2, 3, 4, 5, 6],
+      revision,
+      workerInstanceId: 1,
+    },
+    modelIdentity,
+    networkFailure: null,
+    networkFixedPoint: null,
+    priorityMountDiagnostic: null,
+    priorityProbe,
+    previewCompositionDiagnostic: null,
+    priorityTarget,
+    releaseSnapshot: {
+      drawHookTimingCount: 0,
+      drawHookTimings: [],
+      draws: [{
+        activityId: 101,
+        at: 300,
+        bitmapEventId: 19,
+        compositionId: 1,
+        distance: 0,
+        drawInvocationId: 51,
+        geometry: { bottom: 800, left: 100, right: 900, top: 100 },
+        geometryVisible: true,
+        height: 990,
+        page: priorityTarget,
+        readerViewport: readerRect,
+        scale: 1.25,
+        source: "worker-bitmap",
+        visible: true,
+        visiblePages: [priorityTarget],
+        width: 765,
+      }],
+      elapsedMs: 90_050,
+      evaluationAttemptCount: 901,
+      evaluationErrorCount: 0,
+      longTasks: [],
+      mountedPages: [1, 2, 3, 4, 5, 6],
+      observedAt: 450,
+      pages: [
+        page({
+          distance: 2,
+          height: 100,
+          pageNumber: adjacentPage,
+          rect: { bottom: -100, left: 100, right: 900, top: -1_000 },
+          visible: false,
+          width: 100,
+        }),
+        page({
+          distance: 0,
+          height: 990,
+          pageNumber: priorityTarget,
+          rect: { bottom: 800, left: 100, right: 900, top: 100 },
+          visible: true,
+          width: 765,
+        }),
+      ],
+      phaseMarkers: [],
+      range: "0:5",
+      reader: {
+        clientHeight: 900,
+        clientWidth: 1_100,
+        rect: readerRect,
+        scrollHeight: 5_000,
+        scrollTop: 1_500,
+        scrollWidth: 1_100,
+      },
+      samplerTimingCount: 0,
+      samplerTimings: [],
+      snapshotErrorPresent: false,
+      viewport: {
+        devicePixelRatio: 1,
+        innerHeight: 900,
+        innerWidth: 1_100,
+        visualHeight: 900,
+        visualOffsetLeft: 0,
+        visualOffsetTop: 0,
+        visualScale: 1,
+        visualWidth: 1_100,
+      },
+      visiblePages: [priorityTarget],
+      waitOutcome: "timeout",
+      workerEvents: [],
+      workerMessageTimingCount: 0,
+      workerMessageTimings: [],
+    },
+    scenario: {
+      drawEnd: 1,
+      drawStart: 0,
+      finishedAt: 500,
+      id: configurationId,
+      maximumCanvasCount: 0,
+      maximumCanvasPixels: 0,
+      maximumCountFrame: null,
+      maximumPixelsFrame: null,
+      sampleEnd: 0,
+      sampleStart: 0,
+      startedAt: 100,
+      workerEventEnd: 50,
+      workerEventStart: 5,
+    },
+    scenarioFinalized: true,
+    scenarioStart: {
+      drawStart: 0,
+      id: configurationId,
+      maximumCanvasCount: 0,
+      maximumCanvasPixels: 0,
+      maximumCountFrame: null,
+      maximumPixelsFrame: null,
+      sampleStart: 0,
+      startedAt: 100,
+      workerEventStart: 5,
+    },
+    screenshot: {
+      bytes: 1_024,
+      path: path.relative(
+        path.resolve("."),
+        path.join(outputDirectory, `linelight-${configurationId}.png`),
+      ),
+      sha256: "9".repeat(64),
+    },
+    sequence: 1,
+    sessionIdentityHash: "e".repeat(64),
+    sourceObservation: {
+      bytes: PUBLIC_PDF_FIXTURE_BYTES,
+      selectionCount: 1,
+      sha256: PUBLIC_PDF_FIXTURE_SHA256,
+    },
+    stageHistory,
+    status: "failed",
+  };
+  return {
+    build: {
+      fresh: true,
+      localManifest: {
+        deploymentId: "d".repeat(20),
+        privateField: "/home/private/build",
+        sha256: SHA,
+      },
+      servedManifest: { deploymentId: "d".repeat(20), sha256: SHA },
+      sourceCommit: COMMIT,
+      sourceTree: TREE,
+    },
+    fixture: {
+      bytes: PUBLIC_PDF_FIXTURE_BYTES,
+      path: PUBLIC_PDF_FIXTURE,
+      privateField: "/home/private/fixture",
+      sha256: PUBLIC_PDF_FIXTURE_SHA256,
+    },
+    initialTargetBaseline: {
+      checked: true,
+      pageCount: 1,
+      pageUrlClass: "about",
+      targetCount: 1,
+      workerCount: 0,
+    },
+    outputDirectory,
+    recordedAt: "2026-08-10T00:00:00.000Z",
+    rows: [row],
+    runnerFailure: new Error("/home/private/first stack"),
+    runnerFailureStage: `matrix:${configurationId}`,
+    sessionIdentityHash: "e".repeat(64),
+    source: {
+      ...passingReferenceDiagnosticSource(),
+      postBuildCommit: COMMIT,
+      postBuildStatus: [],
+      postBuildTree: TREE,
+    },
+    teardown: {
+      app: {
+        cdpClosed: true,
+        cdpPresent: true,
+        error: null,
+        present: true,
+        processClosed: true,
+        profileRemoved: true,
+      },
+      browserClosed: true,
+      cdpClosed: true,
+      errors: [],
+      profilesRemoved: true,
+      reference: {
+        cdpClosed: true,
+        cdpPresent: false,
+        error: null,
+        present: false,
+        processClosed: true,
+        profileRemoved: true,
+      },
+      server: { error: null, present: true, processClosed: true },
+      serverClosed: true,
+    },
+  };
+}
+
+function passingAppMatrixNetworkDiagnostic(
+  label,
+  commandOffset = 0,
+  role = "import",
+) {
+  const documentSetup = completedCdpTargetSetup({
+    cdpIdStart: commandOffset + 1,
+    startedAt: commandOffset + 10,
+  });
+  const parserSetup = completedCdpTargetSetup({
+    cdpIdStart: commandOffset + 11,
+    startedAt: commandOffset + 30,
+  });
+  const serviceSetup = completedCdpTargetSetup({
+    cdpIdStart: commandOffset + 21,
+    serviceWorker: true,
+    startedAt: commandOffset + 50,
+  });
+  const documentTarget = {
+    ancestry: [],
+    attachComplete: true,
+    ...documentSetup,
+    detached: false,
+    identityHash: diagnosticIdentity(`${label}-${role}-document-session`, `${label}-${role}-document-target`),
+    parentSessionId: null,
+    phase: label,
+    resumed: true,
+    sessionId: `${label}-${role}-document-session`,
+    targetId: `${label}-${role}-document-target`,
+    type: "worker",
+    urlClass: "pdf-document-worker",
+    waitingForDebugger: true,
+    workerInstanceId: null,
+  };
+  const parserTarget = {
+    ancestry: [{
+      phase: label,
+      sessionId: documentTarget.sessionId,
+      type: "worker",
+      urlClass: "pdf-document-worker",
+    }],
+    attachComplete: true,
+    ...parserSetup,
+    detached: false,
+    identityHash: diagnosticIdentity(`${label}-${role}-parser-session`, `${label}-${role}-parser-target`),
+    parentSessionId: documentTarget.sessionId,
+    phase: label,
+    resumed: true,
+    sessionId: `${label}-${role}-parser-session`,
+    targetId: `${label}-${role}-parser-target`,
+    type: "worker",
+    urlClass: "pdf-parser-worker",
+    waitingForDebugger: true,
+    workerInstanceId: null,
+  };
+  const serviceTarget = {
+    ancestry: [],
+    attachComplete: true,
+    ...serviceSetup,
+    detached: false,
+    identityHash: diagnosticIdentity(`${label}-service-session`, `${label}-service-target`),
+    parentSessionId: null,
+    phase: label,
+    resumed: true,
+    sessionId: `${label}-service-session`,
+    targetId: `${label}-service-target`,
+    type: "service_worker",
+    urlClass: "app-asset",
+    waitingForDebugger: true,
+    workerInstanceId: null,
+  };
+  const settlement = (target, requestId) => ({
+    identityHash: diagnosticIdentity(
+      target.parentSessionId,
+      requestId,
+      target.sessionId,
+      target.targetId,
+    ),
+    method: "GET",
+    phase: label,
+    requestId,
+    requestSessionId: target.parentSessionId,
+    resourceType: "Script",
+    targetDetachedAtSettlement: false,
+    targetId: target.targetId,
+    targetParentSessionId: target.parentSessionId,
+    targetSessionId: target.sessionId,
+    targetType: "worker",
+    terminalReason: "target-attached",
+    urlClass: target.urlClass,
+  });
+  const counts = {
+    attachErrorCount: 0,
+    attachPromiseCount: 3,
+    completedRequestCount: 3,
+    externalRequestCount: 0,
+    inflightRequestCount: 0,
+    networkFailureCount: 0,
+    pendingAttachCount: 0,
+    requestCount: 3,
+    serviceWorkerBootstrapObservationCount: 1,
+    targetBootstrapSettlementCount: 2,
+    targetCount: 3,
+  };
+  return {
+    attachErrors: [],
+    counts,
+    inflightRequests: [],
+    initialTargetBaseline: {
+      checked: true,
+      pageCount: 1,
+      pageUrlClass: "about",
+      targetCount: 1,
+      workerCount: 0,
+    },
+    label,
+    outcome: "fixed-point-reached",
+    pendingAttaches: [],
+    serviceWorkerBootstrapObservations: [{
+      earlierRequestCount: 0,
+      identityHash: diagnosticIdentity(
+        serviceTarget.sessionId,
+        `${label}-service-request`,
+        serviceTarget.sessionId,
+        serviceTarget.targetId,
+      ),
+      method: "GET",
+      phase: label,
+      requestId: `${label}-service-request`,
+      requestIsFirst: true,
+      requestSequence: 3,
+      requestSessionId: serviceTarget.sessionId,
+      requestStartedAt: serviceSetup.resumeDispatchedAt + 1,
+      resourceType: "Script",
+      resumeDispatchedAt: serviceSetup.resumeDispatchedAt,
+      sessionFailureCount: 0,
+      sessionRequestCount: 1,
+      targetDetachedAtObservation: false,
+      targetId: serviceTarget.targetId,
+      targetSessionId: serviceTarget.sessionId,
+      targetType: "service_worker",
+      targetUrlMatched: true,
+      terminalAt: serviceSetup.resumeDispatchedAt + 2,
+      terminalReason: "loading-finished",
+      urlClass: "app-asset",
+    }],
+    serviceWorkerBypassed: true,
+    targetBootstrapSettlements: [
+      settlement(documentTarget, `${label}-${role}-document-request`),
+      settlement(parserTarget, `${label}-${role}-parser-request`),
+    ],
+    targets: [documentTarget, parserTarget, serviceTarget],
+    wait: {
+      recentSamples: [1, 2, 3].map((stableSamples) => ({
+        attachErrorCount: 0,
+        attachmentReady: true,
+        incompleteTargetCount: 0,
+        inflightRequestCount: 0,
+        pendingAttachCount: 0,
+        requestCount: counts.requestCount,
+        serviceWorkerBypassed: true,
+        stableSamples,
+        targetCount: counts.targetCount,
+      })),
+      requiredStableSamples: 3,
+      stableSamples: 3,
+    },
+  };
+}
+
+function passingCumulativeAppMatrixNetworkDiagnostics() {
+  const firstTemplate = passingAppMatrixNetworkDiagnostic(
+    PDF_SHARPNESS_MATRIX[0].id,
+    0,
+  );
+  const serviceTarget = firstTemplate.targets.find(
+    (target) => target.type === "service_worker",
+  );
+  const serviceWorkers = firstTemplate.serviceWorkerBootstrapObservations;
+  let targets = [serviceTarget];
+  let settlements = [];
+  let requestCount = 1;
+  const snapshot = (template, label) => {
+    const counts = {
+      ...template.counts,
+      attachPromiseCount: targets.length,
+      completedRequestCount: requestCount,
+      requestCount,
+      serviceWorkerBootstrapObservationCount: serviceWorkers.length,
+      targetBootstrapSettlementCount: settlements.length,
+      targetCount: targets.length,
+    };
+    return {
+      ...template,
+      counts,
+      importBoundary: null,
+      label,
+      matrixRestoreProof: null,
+      serviceWorkerBootstrapObservations: structuredClone(serviceWorkers),
+      targetBootstrapSettlements: structuredClone(settlements),
+      targets: structuredClone(targets),
+      wait: {
+        ...template.wait,
+        recentSamples: [1, 2, 3].map((stableSamples) => ({
+          attachErrorCount: 0,
+          attachmentReady: true,
+          incompleteTargetCount: 0,
+          inflightRequestCount: 0,
+          pendingAttachCount: 0,
+          requestCount,
+          serviceWorkerBypassed: true,
+          stableSamples,
+          targetCount: targets.length,
+        })),
+      },
+    };
+  };
+  return PDF_SHARPNESS_MATRIX.map((configuration, index) => {
+    const imported = passingAppMatrixNetworkDiagnostic(
+      configuration.id,
+      100 + index * 300,
+      "import",
+    );
+    if (index > 0) {
+      const restored = passingAppMatrixNetworkDiagnostic(
+        configuration.id,
+        index * 300,
+        "restore",
+      );
+      targets = [
+        ...targets,
+        ...restored.targets.filter((target) => target.type === "worker"),
+      ];
+      settlements = [
+        ...settlements,
+        ...restored.targetBootstrapSettlements,
+      ];
+      requestCount += 2;
+    }
+    const restoreDiagnostic = snapshot(imported, configuration.id);
+    const importBoundary = {
+      attachPromiseCount: targets.length,
+      requestCount,
+      settlementCount: settlements.length,
+      targetCount: targets.length,
+    };
+    targets = [
+      ...targets,
+      ...imported.targets.filter((target) => target.type === "worker"),
+    ];
+    settlements = [
+      ...settlements,
+      ...imported.targetBootstrapSettlements,
+    ];
+    requestCount += 2;
+    const current = snapshot(imported, configuration.id);
+    const restoreCount = index > 0 ? 1 : 0;
+    current.importBoundary = importBoundary;
+    current.matrixRestoreProof = {
+      documentBootstrapSettlementCount: restoreCount,
+      networkDiagnostic: restoreDiagnostic,
+      parserBootstrapSettlementCount: restoreCount,
+      readiness: {
+        activeDocumentCount: restoreCount,
+        activeDocumentMatchesOpen: index > 0,
+        activeDocumentStateAvailable: true,
+        activePdfCount: restoreCount,
+        expectedPersisted: index > 0,
+        firstPageCount: restoreCount,
+        importRequestCount: 0,
+        libraryPending: false,
+        openRequestCount: restoreCount,
+        ready: true,
+        sourceSelectionCount: 0,
+      },
+    };
+    return current;
+  });
+}
+
+function passingAppMatrixRuntimeNetworkTimeoutDiagnostic(label) {
+  const index = PDF_SHARPNESS_MATRIX.findIndex(
+    (configuration) => configuration.id === label,
+  );
+  const diagnostic = passingCumulativeAppMatrixNetworkDiagnostics()[index];
+  diagnostic.outcome = "timeout";
+  diagnostic.wait = {
+    elapsedMs: 10_050,
+    recentSamples: [9_800, 9_900, 10_000].map((elapsedMs, sampleIndex) => ({
+      attachErrorCount: 0,
+      attachmentReady: true,
+      elapsedMs,
+      incompleteTargetCount: 0,
+      inflightRequestCount: 0,
+      pendingAttachCount: 0,
+      requestCount: diagnostic.counts.requestCount - (sampleIndex === 0 ? 1 : 0),
+      serviceWorkerBypassed: true,
+      stableSamples: sampleIndex === 2 ? 1 : 0,
+      targetCount: diagnostic.counts.targetCount,
+    })),
+    requiredStableSamples: 3,
+    stableSamples: 1,
+    timeoutMs: 10_000,
+  };
+  return diagnostic;
+}
+
+function passingAppMatrixRuntimeNetworkTimeoutInput(outputDirectory) {
+  const input = passingAppMatrixRuntimeCompletedInput(outputDirectory);
+  input.rows.length = 2;
+  const row = input.rows[1];
+  row.stageHistory = APP_MATRIX_RUNTIME_DIAGNOSTIC_STAGES.slice(0, -1);
+  row.currentStage = "network-fixed-point-started";
+  row.failureStage = "network-fixed-point-started";
+  row.networkFixedPoint = null;
+  row.networkFailure = {
+    category: "fixed-point-timeout",
+    diagnostic: passingAppMatrixRuntimeNetworkTimeoutDiagnostic(
+      row.configurationId,
+    ),
+  };
+  row.status = "failed";
+  input.runnerFailure = new Error("/home/private/network timeout stack");
+  input.runnerFailureStage = `matrix:${row.configurationId}`;
+  return input;
+}
+
+test("validates cumulative fixed-point history and exact current PDF coverage", () => {
+  const diagnostics = passingCumulativeAppMatrixNetworkDiagnostics();
+  diagnostics.forEach((diagnostic, index) => {
+    assert.equal(isCdpFixedPointDiagnosticHealthy(diagnostic), true);
+    assert.equal(
+      diagnostic.targets.slice(diagnostic.importBoundary.targetCount).filter(
+        (target) => target.urlClass === "pdf-document-worker",
+      ).length,
+      1,
+    );
+    assert.equal(
+      diagnostic.matrixRestoreProof.readiness.openRequestCount,
+      index === 0 ? 0 : 1,
+    );
+  });
+
+  const mutations = [
+    ["historical settlement phase", (diagnostic) => {
+      diagnostic.targetBootstrapSettlements[0].phase = diagnostic.label;
+    }],
+    ["historical parser ancestry", (diagnostic) => {
+      diagnostic.targets.find((target) =>
+        target.urlClass === "pdf-parser-worker" &&
+        target.phase !== diagnostic.label
+      ).ancestry[0].phase = diagnostic.label;
+    }],
+    ["historical service-worker phase", (diagnostic) => {
+      diagnostic.serviceWorkerBootstrapObservations[0].phase = diagnostic.label;
+    }],
+    ["missing current phase coverage", (diagnostic) => {
+      const priorPhase = PDF_SHARPNESS_MATRIX.at(-2).id;
+      const currentTargets = diagnostic.targets.filter((target) =>
+        target.phase === diagnostic.label && target.type === "worker"
+      );
+      for (const target of currentTargets) target.phase = priorPhase;
+      const currentSessions = new Set(currentTargets.map((target) =>
+        target.sessionId
+      ));
+      for (const target of currentTargets) {
+        for (const ancestor of target.ancestry) ancestor.phase = priorPhase;
+      }
+      for (const settlement of diagnostic.targetBootstrapSettlements) {
+        if (currentSessions.has(settlement.targetSessionId)) {
+          settlement.phase = priorPhase;
+        }
+      }
+    }],
+    ["duplicate current document class", (diagnostic) => {
+      const parser = diagnostic.targets.find((target) =>
+        target.phase === diagnostic.label &&
+        target.urlClass === "pdf-parser-worker"
+      );
+      parser.urlClass = "pdf-document-worker";
+      diagnostic.targetBootstrapSettlements.find((settlement) =>
+        settlement.targetSessionId === parser.sessionId
+      ).urlClass = "pdf-document-worker";
+    }],
+    ["stale cumulative stable tail", (diagnostic) => {
+      diagnostic.wait.recentSamples.at(-1).targetCount -= 1;
+    }],
+    ["missing import boundary field", (diagnostic) => {
+      delete diagnostic.importBoundary.requestCount;
+    }],
+    ["extra import boundary field", (diagnostic) => {
+      diagnostic.importBoundary.completedRequestCount =
+        diagnostic.importBoundary.requestCount;
+    }],
+    ["fractional import boundary", (diagnostic) => {
+      diagnostic.importBoundary.targetCount += 0.5;
+    }],
+    ["boundary attach target mismatch", (diagnostic) => {
+      diagnostic.importBoundary.attachPromiseCount -= 1;
+    }],
+    ["boundary cuts into explicit import", (diagnostic) => {
+      diagnostic.importBoundary.attachPromiseCount += 1;
+      diagnostic.importBoundary.targetCount += 1;
+    }],
+    ["restore completed request mismatch", (diagnostic) => {
+      diagnostic.matrixRestoreProof.networkDiagnostic.counts
+        .completedRequestCount -= 1;
+    }],
+    ["restore open count mismatch", (diagnostic) => {
+      diagnostic.matrixRestoreProof.readiness.openRequestCount = 0;
+    }],
+    ["restore active document mismatch", (diagnostic) => {
+      diagnostic.matrixRestoreProof.readiness.activeDocumentMatchesOpen =
+        false;
+    }],
+    ["restore first page mismatch", (diagnostic) => {
+      diagnostic.matrixRestoreProof.readiness.firstPageCount = 0;
+    }],
+    ["restore import observed", (diagnostic) => {
+      diagnostic.matrixRestoreProof.readiness.importRequestCount = 1;
+    }],
+    ["restore source observed", (diagnostic) => {
+      diagnostic.matrixRestoreProof.readiness.sourceSelectionCount = 1;
+    }],
+    ["restore continuity drift", (diagnostic) => {
+      diagnostic.matrixRestoreProof.networkDiagnostic.targets[0].detached =
+        !diagnostic.matrixRestoreProof.networkDiagnostic.targets[0].detached;
+    }],
+    ["restore proof private field", (diagnostic) => {
+      diagnostic.matrixRestoreProof.privatePath = "/home/private.pdf";
+    }],
+    ["nested restore proof", (diagnostic) => {
+      const restoreDiagnostic =
+        diagnostic.matrixRestoreProof.networkDiagnostic;
+      restoreDiagnostic.matrixRestoreProof = diagnostic.matrixRestoreProof;
+    }],
+  ];
+  for (const [label, mutate] of mutations) {
+    const diagnostic = structuredClone(diagnostics[5]);
+    mutate(diagnostic);
+    assert.equal(isCdpFixedPointDiagnosticHealthy(diagnostic), false, label);
+  }
+});
+
+function passingAppMatrixRuntimeCompletedInput(outputDirectory) {
+  const base = passingAppMatrixRuntimeFailureInput(outputDirectory);
+  const networkDiagnostics = passingCumulativeAppMatrixNetworkDiagnostics();
+  const rows = PDF_SHARPNESS_MATRIX.map((configuration, index) => {
+    const row = structuredClone(base.rows[0]);
+    const adjacentPage = index < 4 ? 2 : 3;
+    const priorityTarget = adjacentPage +
+      (configuration.kind === "mobile" ? 3 : 2);
+    const documentKey = `public-document-${index + 1}:revision-${index + 1}`;
+    const revision = `revision-${index + 1}`;
+    const importActivityId = index + 5;
+    const importEventId = index + 5;
+    row.adjacentPage = adjacentPage;
+    row.configurationId = configuration.id;
+    row.currentStage = APP_MATRIX_RUNTIME_DIAGNOSTIC_STAGES.at(-1);
+    row.failureStage = null;
+    row.modelCompletion = {
+      complete: true,
+      completeEventCount: 1,
+      completedProgressCount: 1,
+      documentKey,
+      importActivityId,
+      importAt: 10,
+      importEventId,
+      importJobId: index + 1,
+      importRequestCount: 1,
+      pageEventCount: 6,
+      pageNumbers: [1, 2, 3, 4, 5, 6],
+      revision,
+      workerInstanceId: index + 1,
+    };
+    row.modelIdentity = {
+      documentKey,
+      importActivityId,
+      importAt: 10,
+      importEventId,
+      importJobId: index + 1,
+      revision,
+      workerInstanceId: index + 1,
+    };
+    row.networkFixedPoint = networkDiagnostics[index];
+    row.priorityProbe.targetPage = priorityTarget;
+    row.priorityProbe.scrollAction.targetPage = priorityTarget;
+    row.priorityProbe.compositions[0].page = priorityTarget;
+    row.priorityTarget = priorityTarget;
+    row.releaseSnapshot.draws[0].page = priorityTarget;
+    row.releaseSnapshot.draws[0].visiblePages = [priorityTarget];
+    row.releaseSnapshot.pages[0].page = adjacentPage;
+    row.releaseSnapshot.pages[0].pageIndex = adjacentPage - 1;
+    row.releaseSnapshot.pages[0].canvas.height = 0;
+    row.releaseSnapshot.pages[0].canvas.width = 0;
+    row.releaseSnapshot.pages[1].page = priorityTarget;
+    row.releaseSnapshot.pages[1].pageIndex = priorityTarget - 1;
+    row.releaseSnapshot.visiblePages = [priorityTarget];
+    row.releaseSnapshot.viewport = {
+      devicePixelRatio:
+        configuration.baseDevicePixelRatio * configuration.browserZoom,
+      innerHeight: Math.round(configuration.height / configuration.browserZoom),
+      innerWidth: Math.round(configuration.width / configuration.browserZoom),
+      visualHeight:
+        Math.round(configuration.height / configuration.browserZoom) /
+          configuration.pinchZoom,
+      visualOffsetLeft: 0,
+      visualOffsetTop: 0,
+      visualScale: configuration.pinchZoom,
+      visualWidth:
+        Math.round(configuration.width / configuration.browserZoom) /
+          configuration.pinchZoom,
+    };
+    row.releaseSnapshot.waitOutcome = "released";
+    row.screenshot.path = path.relative(
+      path.resolve("."),
+      path.join(outputDirectory, `linelight-${configuration.id}.png`),
+    );
+    row.sequence = index + 1;
+    row.scenarioStart.id = configuration.id;
+    row.scenarioStart.workerEventStart = importEventId;
+    row.scenario.id = configuration.id;
+    row.scenario.workerEventStart = importEventId;
+    row.stageHistory = [...APP_MATRIX_RUNTIME_DIAGNOSTIC_STAGES];
+    const phaseStages = row.stageHistory.filter((stage) =>
+      !stage.startsWith("navigate-") &&
+      APP_MATRIX_RUNTIME_DIAGNOSTIC_STAGES.indexOf(stage) <=
+        APP_MATRIX_RUNTIME_DIAGNOSTIC_STAGES.indexOf("scenario-finish-started")
+    );
+    row.completedSnapshot.phaseMarkers = phaseStages.map((stage, phaseIndex) => ({
+      activityId: phaseIndex + 1,
+      at: 50 + phaseIndex * 10,
+      configurationId: configuration.id,
+      drawInvocationId: phaseIndex,
+      sequence: phaseIndex + 1,
+      stage,
+      workerEventId: phaseIndex,
+    }));
+    row.status = "completed";
+    return row;
+  });
+  return {
+    ...base,
+    rows,
+    runnerFailure: null,
+    runnerFailureStage: null,
+  };
+}
+
+function passingAppMatrixRuntimePriorityMountFailureInput(
+  outputDirectory,
+  {
+    checkpoint = "preview-settle",
+    failureCategory = "timeout",
+  } = {},
+) {
+  const input = passingAppMatrixRuntimeCompletedInput(outputDirectory);
+  const row = input.rows[0];
+  row.stageHistory = APP_MATRIX_RUNTIME_DIAGNOSTIC_STAGES.slice(
+    0,
+    APP_MATRIX_RUNTIME_DIAGNOSTIC_STAGES.indexOf(
+      "priority-mount-started",
+    ) + 1,
+  );
+  row.currentStage = "priority-mount-started";
+  row.failureStage = "priority-mount-started";
+  row.status = "failed";
+  row.networkFixedPoint = null;
+  row.priorityProbe = null;
+  row.releaseSnapshot = null;
+  const phaseStages = row.stageHistory.filter((stage) =>
+    !stage.startsWith("navigate-") &&
+    APP_MATRIX_RUNTIME_DIAGNOSTIC_STAGES.indexOf(stage) <=
+      APP_MATRIX_RUNTIME_DIAGNOSTIC_STAGES.indexOf("scenario-finish-started")
+  );
+  row.completedSnapshot.phaseMarkers = phaseStages.map((stage, index) => ({
+    activityId: index + 1,
+    at: 50 + index * 10,
+    configurationId: row.configurationId,
+    drawInvocationId: index,
+    sequence: index + 1,
+    stage,
+    workerEventId: index,
+  }));
+  const priorityBoundaryWorkerEventId = row.completedSnapshot.phaseMarkers
+    .find((marker) => marker.stage === "priority-mount-started").workerEventId;
+  const importEventId = 5;
+  row.modelIdentity.importEventId = importEventId;
+  const centeringReady = checkpoint !== "intermediate-scroll";
+  const centerSample = {
+    cssScrollBehavior: "smooth",
+    page: {
+      bottom: 800,
+      height: 700,
+      left: 100,
+      right: 900,
+      top: 100,
+      width: 800,
+    },
+    pageNumber: 3,
+    range: "0:5",
+    reader: { bottom: 900, scrollTop: 1_000, top: 0 },
+    visible: true,
+  };
+  const centeringSamples = centeringReady
+    ? [structuredClone(centerSample), structuredClone(centerSample)]
+    : [];
+  const ledgerEvent = ({ eventId, type }) => ({
+    direction: type === "render" ? "to-worker" : "from-worker",
+    distance: type === "render" ? 1 : null,
+    documentKey: null,
+    enabled: type === "render" ? true : null,
+    eventId,
+    height: type === "bitmap" ? 990 : null,
+    jobId: row.modelIdentity.importJobId,
+    pageNumber: row.priorityTarget,
+    revision: row.modelIdentity.revision,
+    scale: 1.25,
+    type,
+    visible: type === "render" ? false : null,
+    width: type === "bitmap" ? 765 : null,
+    workerInstanceId: row.modelIdentity.workerInstanceId,
+  });
+  row.priorityMountDiagnostic = {
+    atFailureEventCount: priorityBoundaryWorkerEventId + 2,
+    centeringProof: {
+      pageNumber: 3,
+      samples: centeringSamples,
+      summary: summarizePdfPageCenteringStability(centeringSamples, 3),
+    },
+    checkpoint,
+    failureCategory,
+    importEventId,
+    ledgerItems: [
+      ledgerEvent({
+        eventId: priorityBoundaryWorkerEventId + 1,
+        type: "render",
+      }),
+      ledgerEvent({
+        eventId: priorityBoundaryWorkerEventId + 2,
+        type: "bitmap",
+      }),
+    ],
+    mountedPages: [1, 2, 3, 4, 5, 6],
+    pages: [{
+      canvas: {
+        height: 700,
+        present: true,
+        scale: 1.25,
+        source: "worker-bitmap",
+        width: 800,
+      },
+      distance: 0,
+      page: 3,
+      present: true,
+      rect: { bottom: 800, left: 100, right: 900, top: 100 },
+      visible: true,
+    }, {
+      canvas: {
+        height: 0,
+        present: true,
+        scale: null,
+        source: null,
+        width: 0,
+      },
+      distance: 1,
+      page: 4,
+      present: true,
+      rect: { bottom: 1_600, left: 100, right: 900, top: 900 },
+      visible: false,
+    }],
+    priorityBoundaryWorkerEventId,
+    range: "0:5",
+    reader: {
+      rect: { bottom: 900, left: 0, right: 1_100, top: 0 },
+      scrollTop: 1_000,
+    },
+    targetEventCount: 2,
+    truncated: false,
+    visiblePages: [3],
+  };
+  input.rows = [row];
+  input.runnerFailure = new Error("private priority mount timeout");
+  input.runnerFailureStage = `matrix:${row.configurationId}`;
+  return input;
+}
+
+function passingAppMatrixRuntimePreviewCompositionFailureInput(
+  outputDirectory,
+  {
+    failureCategory = "timeout",
+    rowIndex = 2,
+  } = {},
+) {
+  const input = passingAppMatrixRuntimeCompletedInput(outputDirectory);
+  const row = input.rows[rowIndex];
+  const terminalStage = "preview-composition-started";
+  row.stageHistory = APP_MATRIX_RUNTIME_DIAGNOSTIC_STAGES.slice(
+    0,
+    APP_MATRIX_RUNTIME_DIAGNOSTIC_STAGES.indexOf(terminalStage) + 1,
+  );
+  row.currentStage = terminalStage;
+  row.failureStage = terminalStage;
+  row.status = "failed";
+  row.networkFailure = null;
+  row.networkFixedPoint = null;
+  row.previewCompositionDiagnostic = null;
+  row.priorityMountDiagnostic = null;
+  row.priorityProbe = null;
+  row.priorityTarget = null;
+  row.releaseSnapshot = null;
+  row.screenshot = null;
+
+  const importEventId = row.modelIdentity.importEventId;
+  const phaseStages = row.stageHistory.filter((stage) =>
+    !stage.startsWith("navigate-")
+  );
+  row.completedSnapshot.phaseMarkers = phaseStages.map((stage, index) => {
+    const marker = {
+      activityId: Math.min(18, index + 1),
+      at: 20 + index * 10,
+      configurationId: row.configurationId,
+      drawInvocationId: 0,
+      sequence: index + 1,
+      stage,
+      workerEventId: Math.min(importEventId, index),
+    };
+    if (stage === "adjacent-scroll-started") {
+      Object.assign(marker, {
+        activityId: 20,
+        at: 220,
+        workerEventId: importEventId + 2,
+      });
+    } else if (stage === "adjacent-scroll-completed") {
+      Object.assign(marker, {
+        activityId: 23,
+        at: 240,
+        drawInvocationId: 1,
+        workerEventId: importEventId + 2,
+      });
+    } else if (stage === terminalStage) {
+      Object.assign(marker, {
+        activityId: 24,
+        at: 250,
+        drawInvocationId: 1,
+        workerEventId: importEventId + 2,
+      });
+    }
+    return marker;
+  });
+
+  const centerSample = {
+    cssScrollBehavior: "smooth",
+    page: {
+      bottom: 846,
+      height: 792,
+      left: 100,
+      right: 712,
+      top: 54,
+      width: 612,
+    },
+    pageNumber: row.adjacentPage,
+    range: "0:5",
+    reader: { bottom: 900, scrollTop: 1_000, top: 0 },
+    visible: true,
+  };
+  const centeringSamples = [
+    structuredClone(centerSample),
+    structuredClone(centerSample),
+  ];
+  const expectedPreviewTarget = {
+    capped: false,
+    height: 990,
+    scale: 1.25,
+    width: 765,
+  };
+  const sharpTarget = { height: 1_584, scale: 2, width: 1_224 };
+  const workerEvent = ({ eventId, type }) => ({
+    activityId: eventId,
+    at: type === "render" ? 200 : 210,
+    direction: type === "render" ? "to-worker" : "from-worker",
+    distance: type === "render" ? 0 : null,
+    documentKey: null,
+    enabled: type === "render" ? true : null,
+    eventId,
+    height: type === "bitmap" ? sharpTarget.height : null,
+    jobId: row.modelIdentity.importJobId,
+    pageNumber: row.adjacentPage,
+    revision: row.modelIdentity.revision,
+    scale: sharpTarget.scale,
+    type,
+    visible: type === "render" ? true : null,
+    width: type === "bitmap" ? sharpTarget.width : null,
+    workerInstanceId: row.modelIdentity.workerInstanceId,
+  });
+  const workerItems = [
+    workerEvent({ eventId: importEventId + 1, type: "render" }),
+    workerEvent({ eventId: importEventId + 2, type: "bitmap" }),
+  ];
+  const drawItems = [{
+    activityId: 22,
+    at: 230,
+    bitmapEventId: importEventId + 2,
+    compositionId: 1,
+    distance: 0,
+    drawInvocationId: 1,
+    geometry: { bottom: 846, left: 100, right: 712, top: 54 },
+    geometryVisible: true,
+    height: sharpTarget.height,
+    page: row.adjacentPage,
+    readerViewport: { bottom: 900, left: 0, right: 1_100, top: 0 },
+    scale: sharpTarget.scale,
+    source: "worker-bitmap",
+    visible: true,
+    visiblePages: [row.adjacentPage],
+    width: sharpTarget.width,
+  }];
+  const scenarioStart = {
+    ...row.scenarioStart,
+    drawStart: 0,
+    startedAt: 100,
+    workerEventStart: importEventId,
+  };
+  row.scenarioStart = scenarioStart;
+  row.scenario = {
+    ...scenarioStart,
+    drawEnd: drawItems.length,
+    finishedAt: 500,
+    sampleEnd: scenarioStart.sampleStart,
+    workerEventEnd: importEventId + 2,
+  };
+  row.previewCompositionDiagnostic = {
+    adjacentScrollProof: {
+      pageNumber: row.adjacentPage,
+      samples: centeringSamples,
+      summary: summarizePdfPageCenteringStability(
+        centeringSamples,
+        row.adjacentPage,
+      ),
+    },
+    checkpoint: "composition-wait",
+    drawItems,
+    drawTotal: drawItems.length,
+    drawTruncated: false,
+    expectedPreviewTarget,
+    failureBoundary: {
+      activityId: 30,
+      at: 400,
+      drawCount: drawItems.length,
+      drawInvocationId: 1,
+      workerEventId: importEventId + 2,
+    },
+    failureCategory,
+    importEventId,
+    page: {
+      canvas: {
+        connected: true,
+        cssHeight: 792,
+        cssWidth: 612,
+        devicePixelRatio: 2,
+        height: sharpTarget.height,
+        present: true,
+        scale: sharpTarget.scale,
+        source: "worker-bitmap",
+        targetHeight: sharpTarget.height,
+        targetScale: sharpTarget.scale,
+        targetWidth: sharpTarget.width,
+        visualViewportScale: 1,
+        width: sharpTarget.width,
+      },
+      distance: 0,
+      page: row.adjacentPage,
+      pageHeight: 792,
+      pageWidth: 612,
+      present: true,
+      rect: { bottom: 880, left: 80, right: 732, top: 40 },
+      textOverlayCount: 12,
+      visible: true,
+    },
+    phaseMarkers: row.completedSnapshot.phaseMarkers.filter((marker) =>
+      [
+        "adjacent-scroll-started",
+        "adjacent-scroll-completed",
+        terminalStage,
+      ].includes(marker.stage)
+    ).map((marker) => structuredClone(marker)),
+    range: "0:5",
+    reader: {
+      rect: { bottom: 900, left: 0, right: 1_100, top: 0 },
+      scrollTop: 1_000,
+    },
+    scenarioStart: structuredClone(scenarioStart),
+    visiblePages: [row.adjacentPage],
+    wait: failureCategory === "timeout"
+      ? {
+          elapsedMs: 90_000,
+          evaluationAttemptCount: 900,
+          evaluationErrorCount: 0,
+          outcome: "timeout",
+          timeoutMs: 90_000,
+        }
+      : {
+          elapsedMs: 0,
+          evaluationAttemptCount: 0,
+          evaluationErrorCount: 0,
+          outcome: "unexpected",
+          timeoutMs: 90_000,
+        },
+    workerItems,
+    workerTotal: workerItems.length,
+    workerTruncated: false,
+  };
+  input.rows = input.rows.slice(0, rowIndex + 1);
+  input.runnerFailure = new Error("private preview composition timeout");
+  input.runnerFailureStage = `matrix:${row.configurationId}`;
+  return input;
+}
+
+function passingAppMatrixRuntimeStageFailureInput(
+  outputDirectory,
+  terminalStage,
+  { finalizedScenarioStart = false } = {},
+) {
+  const input = passingAppMatrixRuntimeCompletedInput(outputDirectory);
+  const row = input.rows[0];
+  const terminalIndex = APP_MATRIX_RUNTIME_DIAGNOSTIC_STAGES.indexOf(
+    terminalStage,
+  );
+  assert.ok(terminalIndex >= 0, terminalStage);
+  row.stageHistory = APP_MATRIX_RUNTIME_DIAGNOSTIC_STAGES.slice(
+    0,
+    terminalIndex + 1,
+  );
+  row.currentStage = terminalStage;
+  row.failureStage = terminalStage;
+  row.status = "failed";
+  const reached = (stage) => row.stageHistory.includes(stage);
+  if (!reached("file-select-completed")) row.sourceObservation = null;
+  if (!reached("model-completion-completed")) {
+    row.modelCompletion = null;
+    row.modelIdentity = null;
+  }
+  if (!reached("adjacent-selection-completed")) row.adjacentPage = null;
+  if (!reached("scenario-start-completed")) {
+    row.scenarioStart = null;
+    if (!(
+      finalizedScenarioStart && terminalStage === "scenario-start-started"
+    )) {
+      row.completedSnapshot = null;
+      row.scenario = null;
+      row.scenarioFinalized = false;
+    }
+  }
+  if (row.completedSnapshot) {
+    row.completedSnapshot.phaseMarkers = row.completedSnapshot.phaseMarkers
+      .filter((marker) =>
+        row.stageHistory.includes(marker.stage) &&
+        APP_MATRIX_RUNTIME_DIAGNOSTIC_STAGES.indexOf(marker.stage) <=
+          APP_MATRIX_RUNTIME_DIAGNOSTIC_STAGES.indexOf(
+            "scenario-finish-started",
+          )
+      );
+  }
+  if (!reached("screenshot-completed")) row.screenshot = null;
+  if (!reached("alignment-completed")) row.priorityTarget = null;
+  row.priorityMountDiagnostic = null;
+  if (!reached("priority-composition-completed")) row.priorityProbe = null;
+  row.previewCompositionDiagnostic = null;
+  if (!reached("release-observation-completed")) row.releaseSnapshot = null;
+  if (!reached("network-fixed-point-completed")) row.networkFixedPoint = null;
+  row.networkFailure = terminalStage === "network-fixed-point-started"
+    ? { category: "unexpected", diagnostic: null }
+    : null;
+  input.rows = [row];
+  input.runnerFailure = new Error(`private ${terminalStage} failure`);
+  input.runnerFailureStage = `matrix:${row.configurationId}`;
+  return input;
+}
+
+function passingAppMatrixRuntimeReleaseEvents(row) {
+  return [{
+    activityId: 102,
+    at: 350,
+    direction: "to-worker",
+    distance: 2,
+    documentKey: null,
+    enabled: false,
+    eventId: 20,
+    jobId: row.modelIdentity.importJobId,
+    pageNumber: row.adjacentPage,
+    revision: row.modelIdentity.revision,
+    scale: 1.25,
+    type: "render",
+    visible: false,
+    workerInstanceId: row.modelIdentity.workerInstanceId,
+  }, {
+    activityId: 103,
+    at: 360,
+    completedPages: null,
+    direction: "from-worker",
+    documentKey: null,
+    eventId: 21,
+    first: null,
+    height: row.priorityProbe.targetAfter.canvasHeight,
+    jobId: row.modelIdentity.importJobId,
+    pageCount: null,
+    pageHeight: null,
+    pageNumber: row.priorityTarget,
+    pageWidth: null,
+    revision: row.modelIdentity.revision,
+    scale: 1.25,
+    terminal: false,
+    type: "bitmap",
+    width: row.priorityProbe.targetAfter.canvasWidth,
+    workerInstanceId: row.modelIdentity.workerInstanceId,
+  }];
+}
+
+function addRepresentativeAppMatrixRuntimeTiming(input, rowIndex = 0) {
+  const row = input.rows[rowIndex];
+  row.scenario = { ...row.scenario, finishedAt: 1_400 };
+  row.completedSnapshot.drawHookTimingCount = 1;
+  row.completedSnapshot.drawHookTimings = [{
+    activityId: 120,
+    blockLookupCompletedAt: 205,
+    blockRectCompletedAt: 215,
+    drawInvocationId: 70,
+    hookEnteredAt: 200,
+    microtaskRecordedAt: 250,
+    nativeDrawCompletedAt: 240,
+    nativeDrawStartedAt: 235,
+    nativeDrawThrew: false,
+    page: row.adjacentPage,
+    readerLookupCompletedAt: 210,
+    readerRectCompletedAt: 220,
+    visiblePagesCompletedAt: 230,
+    visiblePagesStartedAt: 225,
+  }];
+  row.completedSnapshot.samplerTimingCount = 1;
+  row.completedSnapshot.samplerTimings = [{
+    blockCount: 6,
+    endedAt: 195,
+    readerRectCompletedAt: 190,
+    sampleStartedAt: 180,
+  }];
+  row.completedSnapshot.workerMessageTimingCount = 1;
+  row.completedSnapshot.workerMessageTimings = [{
+    activityId: 121,
+    eventId: 71,
+    messageReceivedAt: 190,
+    messageSettledAt: 1_210,
+    pageNumber: row.priorityTarget,
+    type: "bitmap",
+  }];
+  row.completedSnapshot.longTasks = [{
+    attribution: [{
+      containerIdPresent: false,
+      containerNamePresent: false,
+      containerSrcPresent: false,
+      containerType: "window",
+    }],
+    attributionCount: 1,
+    attributionTruncated: false,
+    duration: 1_004,
+    name: "self",
+    startTime: 200,
+  }];
+  row.completedSnapshot.longAnimationFrameCount = 1;
+  row.completedSnapshot.longAnimationFrameObserverAvailable = true;
+  row.completedSnapshot.longAnimationFrames = [{
+    blockingDuration: 1_000,
+    duration: 1_020,
+    pauseDuration: 0,
+    renderStart: 1_200,
+    scriptCount: 1,
+    scripts: [{
+      duration: 1_004,
+      executionStart: 200,
+      forcedStyleAndLayoutDuration: 2,
+      functionNamePresent: true,
+      invokerTypeClass: "event-listener",
+      pauseDuration: 0,
+      sourceUrlClass: "same-origin",
+      startTime: 200,
+    }],
+    scriptsTruncated: false,
+    startTime: 190,
+    styleAndLayoutStart: 1_202,
+  }];
+  return input;
+}
+
+test("builds a fail-closed privacy-safe app-matrix runtime diagnostic", () => {
+  const input = passingAppMatrixRuntimeFailureInput(
+    path.join(os.tmpdir(), "issue-68-app-matrix-runtime-test"),
+  );
+  const report = buildAppMatrixRuntimeDiagnosticReport(input);
+  assert.equal(report.diagnostic, true);
+  assert.equal(report.diagnosticSchemaVersion, 8);
+  assert.equal(report.mode, "app-matrix-runtime");
+  assert.equal(report.completed, false);
+  assert.equal(report.execution.orderExact, true);
+  assert.equal(report.rows[0].integrity, true);
+  assert.deepEqual(report.rows[0].integrityReasons, {
+    networkHistory: {
+      aggregate: true,
+      currentPresent: true,
+      priorFinalContinuous: true,
+      priorHealthy: true,
+      priorLabel: true,
+      priorRestoreContinuous: true,
+      required: false,
+    },
+    rowIdentity: {
+      adjacentPage: true,
+      aggregate: true,
+      configuration: true,
+      modelDocument: true,
+      modelEvent: true,
+      modelJob: true,
+      modelRevision: true,
+      modelShape: true,
+      modelWorker: true,
+      networkFixedPoint: true,
+      previewDiagnostic: true,
+      priorityProbe: true,
+      priorityTarget: true,
+      scenario: true,
+      screenshot: true,
+      sequence: true,
+      session: true,
+      sourceObservation: true,
+    },
+  });
+  assert.equal(
+    isAppMatrixRuntimeIntegrityReasonsValid(
+      report.rows[0].integrityReasons,
+    ),
+    true,
+  );
+  assert.equal(report.rows[0].release.classification, "offscreen-stale-canvas");
+  assert.deepEqual(report.failures, [
+    "The bounded app-matrix runtime diagnostic runner reported a stage failure.",
+  ]);
+  assert.equal("passed" in report, false);
+  assert.equal("schemaVersion" in report, false);
+  const serialized = JSON.stringify(report);
+  assert.doesNotMatch(
+    serialized,
+    /\/home\/private|privateField|"documentKey"|public-document|revision-1/u,
+  );
+
+  const changedPrivateError = buildAppMatrixRuntimeDiagnosticReport({
+    ...input,
+    runnerFailure: new Error("C:\\private\\second stack"),
+  });
+  assert.deepEqual(changedPrivateError, report);
+
+  const missingRunner = buildAppMatrixRuntimeDiagnosticReport({
+    ...input,
+    runnerFailure: null,
+    runnerFailureStage: null,
+  });
+  assert.equal(missingRunner.completed, false);
+  assert.ok(missingRunner.failures.some((failure) =>
+    failure.includes("failure row is not bound")
+  ));
+
+  const privateCleanupReport = (privateValue) => {
+    const changed = passingAppMatrixRuntimeFailureInput(input.outputDirectory);
+    changed.source.privateProfilePath = privateValue;
+    changed.rows[0].privateWorkerDocument = privateValue;
+    changed.teardown.app.error = new Error(privateValue);
+    changed.teardown.app.profilePath = privateValue;
+    changed.teardown.errors = [new Error(privateValue)];
+    return buildAppMatrixRuntimeDiagnosticReport(changed);
+  };
+  const firstPrivateCleanup = privateCleanupReport("/home/private/cleanup-a");
+  const secondPrivateCleanup = privateCleanupReport("C:\\private\\cleanup-b");
+  assert.deepEqual(firstPrivateCleanup, secondPrivateCleanup);
+  assert.doesNotMatch(
+    JSON.stringify(firstPrivateCleanup),
+    /home|private|profilePath|"documentKey"|public-document|revision-1/u,
+  );
+});
+
+test("binds a privacy-safe direct-sharp preview-composition failure", () => {
+  const outputDirectory = path.join(
+    os.tmpdir(),
+    "issue-68-preview-composition-direct-sharp",
+  );
+  const input = passingAppMatrixRuntimePreviewCompositionFailureInput(
+    outputDirectory,
+  );
+  const rawRow = input.rows.at(-1);
+  const sanitized = sanitizeAppMatrixRuntimePreviewCompositionDiagnostic(
+    rawRow.previewCompositionDiagnostic,
+    rawRow,
+  );
+  assert.equal(sanitized.bound, true);
+  assert.equal(sanitized.value.classification, "direct-sharp");
+  assert.equal(sanitized.value.directSharpFound, true);
+  assert.equal(
+    sanitized.value.ledgers.draws.items[0].sharpRequestLocalOrder,
+    1,
+  );
+  assert.equal(sanitized.value.ledgers.draws.items[0].bitmapLocalOrder, 2);
+  assert.equal(
+    sanitized.value.ledgers.draws.items[0].predicates.sharpCompatibleOrder,
+    true,
+  );
+  assert.equal(
+    sanitized.value.ledgers.draws.items[0].predicates.previewTarget,
+    false,
+  );
+  const boundaryInput =
+    passingAppMatrixRuntimePreviewCompositionFailureInput(outputDirectory);
+  const boundaryRaw = boundaryInput.rows.at(-1).previewCompositionDiagnostic;
+  const scrollMarker = boundaryRaw.phaseMarkers.find((marker) =>
+    marker.stage === "adjacent-scroll-started"
+  );
+  boundaryRaw.drawItems[0].at = scrollMarker.at;
+  assert.equal(
+    sanitizeAppMatrixRuntimePreviewCompositionDiagnostic(
+      boundaryRaw,
+      boundaryInput.rows.at(-1),
+    ).value.classification,
+    "direct-sharp",
+  );
+
+  const report = buildAppMatrixRuntimeDiagnosticReport(input);
+  const row = report.rows.at(-1);
+  assert.equal(report.diagnosticSchemaVersion, 8);
+  assert.equal(report.execution.orderExact, true);
+  assert.equal(row.integrity, true, JSON.stringify(row.integrityReasons));
+  assert.equal(row.priorityTarget, null);
+  assert.equal(row.previewCompositionDiagnostic.classification, "direct-sharp");
+  assert.equal(row.integrityReasons.rowIdentity.priorityTarget, true);
+  const serialized = JSON.stringify(row.previewCompositionDiagnostic);
+  assert.doesNotMatch(
+    serialized,
+    /documentKey|revision|jobId|workerInstanceId|eventId|activityId|bitmapEventId|compositionId|drawInvocationId|private/u,
+  );
+  assert.doesNotMatch(serialized, /"at":/u);
+
+  const derivationFailure =
+    passingAppMatrixRuntimePreviewCompositionFailureInput(
+      outputDirectory,
+      { failureCategory: "unexpected" },
+    );
+  const derivationRaw =
+    derivationFailure.rows.at(-1).previewCompositionDiagnostic;
+  derivationRaw.checkpoint = "target-derivation";
+  derivationRaw.expectedPreviewTarget = null;
+  derivationRaw.wait = null;
+  const derivationReport = buildAppMatrixRuntimeDiagnosticReport(
+    derivationFailure,
+  );
+  assert.equal(derivationReport.rows.at(-1).integrity, true);
+  assert.equal(
+    derivationReport.rows.at(-1).previewCompositionDiagnostic.checkpoint,
+    "target-derivation",
+  );
+  assert.deepEqual(
+    derivationReport.rows.at(-1).previewCompositionDiagnostic
+      .expectedPreviewTarget,
+    { height: 990, scale: 1.25, width: 765 },
+  );
+  assert.equal(
+    derivationReport.rows.at(-1).previewCompositionDiagnostic.classification,
+    "target-available-after-failure",
+  );
+  const derivationTimeout =
+    passingAppMatrixRuntimePreviewCompositionFailureInput(outputDirectory);
+  const derivationTimeoutRaw =
+    derivationTimeout.rows.at(-1).previewCompositionDiagnostic;
+  derivationTimeoutRaw.checkpoint = "target-derivation";
+  derivationTimeoutRaw.expectedPreviewTarget = null;
+  derivationTimeoutRaw.wait = null;
+  assert.equal(
+    buildAppMatrixRuntimeDiagnosticReport(derivationTimeout)
+      .rows.at(-1).integrity,
+    true,
+  );
+});
+
+test("binds each producer-shaped target-unavailable terminal state", () => {
+  const outputDirectory = path.join(
+    os.tmpdir(),
+    "issue-68-preview-target-unavailable",
+  );
+  const inputFor = () => {
+    const input = passingAppMatrixRuntimePreviewCompositionFailureInput(
+      outputDirectory,
+    );
+    const raw = input.rows.at(-1).previewCompositionDiagnostic;
+    raw.checkpoint = "target-derivation";
+    raw.expectedPreviewTarget = null;
+    raw.wait = null;
+    return input;
+  };
+  const absentCanvas = (canvas) => Object.assign(canvas, {
+    connected: false,
+    cssHeight: null,
+    cssWidth: null,
+    height: null,
+    present: false,
+    scale: null,
+    source: null,
+    targetHeight: null,
+    targetScale: null,
+    targetWidth: null,
+    width: null,
+  });
+  const absentPage = (raw, range = "0:0,2:5") => {
+    absentCanvas(raw.page.canvas);
+    Object.assign(raw.page, {
+      distance: null,
+      page: null,
+      present: false,
+      rect: null,
+      textOverlayCount: 0,
+      visible: null,
+    });
+    raw.range = range;
+    raw.visiblePages = [];
+  };
+  const cases = [
+    ["canvasConnected", (raw) => { absentCanvas(raw.page.canvas); }],
+    ["canvasCssSize", (raw) => {
+      raw.page.canvas.cssHeight = 0;
+      raw.page.canvas.cssWidth = 0;
+    }],
+    ["canvasPresent", (raw) => { absentCanvas(raw.page.canvas); }],
+    ["pageMetadata", (raw) => {
+      raw.page.pageHeight = null;
+      raw.page.pageWidth = null;
+    }],
+    ["pageVisible", (raw) => {
+      raw.page.distance = 1;
+      raw.page.visible = false;
+      raw.page.rect = { bottom: 1_800, left: 80, right: 732, top: 1_000 };
+      raw.visiblePages = [];
+    }],
+    ["pagePresent", (raw) => { absentPage(raw); }],
+    ["range", (raw) => { absentPage(raw, null); }],
+    ["readerGeometry", (raw) => {
+      absentPage(raw);
+      raw.reader.rect = null;
+      raw.reader.scrollTop = null;
+    }],
+    ["textOverlay", (raw) => { raw.page.textOverlayCount = 0; }],
+  ];
+  for (const [flag, mutate] of cases) {
+    const input = inputFor();
+    mutate(input.rows.at(-1).previewCompositionDiagnostic);
+    const report = buildAppMatrixRuntimeDiagnosticReport(input);
+    const row = report.rows.at(-1);
+    assert.equal(
+      row.integrity,
+      true,
+      `${flag}: ${JSON.stringify(row.integrityReasons)}`,
+    );
+    assert.equal(
+      row.previewCompositionDiagnostic.classification,
+      "target-unavailable",
+      flag,
+    );
+    assert.equal(
+      row.previewCompositionDiagnostic.targetAvailability[flag],
+      false,
+      flag,
+    );
+  }
+
+  const nowReady = buildAppMatrixRuntimeDiagnosticReport(inputFor())
+    .rows.at(-1);
+  assert.equal(nowReady.integrity, true);
+  assert.equal(
+    nowReady.previewCompositionDiagnostic.classification,
+    "target-available-after-failure",
+  );
+  assert.equal(
+    nowReady.previewCompositionDiagnostic.targetAvailability.targetDerivable,
+    true,
+  );
+
+  const contradictions = [
+    ["disconnected present canvas", (raw) => {
+      raw.page.canvas.connected = false;
+    }],
+    ["absent canvas with retained CSS geometry", (raw) => {
+      absentCanvas(raw.page.canvas);
+      raw.page.canvas.cssWidth = 612;
+    }],
+    ["present page without rectangle", (raw) => { raw.page.rect = null; }],
+    ["visible page at distance one", (raw) => { raw.page.distance = 1; }],
+    ["visible-page membership omitted", (raw) => { raw.visiblePages = []; }],
+    ["visible rectangle outside reader", (raw) => {
+      raw.page.rect = { bottom: 1_800, left: 80, right: 732, top: 1_000 };
+    }],
+    ["range omits present page", (raw) => { raw.range = "0:0,2:5"; }],
+    ["absent page retained by range", (raw) => {
+      absentPage(raw);
+      raw.range = "0:5";
+    }],
+    ["absent page with a present canvas", (raw) => {
+      Object.assign(raw.page, {
+        distance: null,
+        page: null,
+        present: false,
+        rect: null,
+        textOverlayCount: 0,
+        visible: null,
+      });
+      raw.range = "0:0,2:5";
+      raw.visiblePages = [];
+    }],
+    ["present page without reader geometry", (raw) => {
+      raw.reader.rect = null;
+      raw.reader.scrollTop = null;
+    }],
+  ];
+  for (const [label, mutate] of contradictions) {
+    const malformed = inputFor();
+    mutate(malformed.rows.at(-1).previewCompositionDiagnostic);
+    assert.equal(
+      buildAppMatrixRuntimeDiagnosticReport(malformed).rows.at(-1).integrity,
+      false,
+      label,
+    );
+  }
+});
+
+test("classifies each finite preview-composition transition from one chain", () => {
+  const outputDirectory = path.join(
+    os.tmpdir(),
+    "issue-68-preview-composition-classes",
+  );
+  const read = (input) => {
+    const row = input.rows.at(-1);
+    const result = sanitizeAppMatrixRuntimePreviewCompositionDiagnostic(
+      row.previewCompositionDiagnostic,
+      row,
+    );
+    assert.equal(result.bound, true);
+    return result.value;
+  };
+  const setSingleTarget = (input, {
+    distance,
+    scale,
+    visible,
+    height,
+    width,
+  }) => {
+    const row = input.rows.at(-1);
+    const raw = row.previewCompositionDiagnostic;
+    const [request, bitmap] = raw.workerItems;
+    Object.assign(request, { distance, scale, visible });
+    Object.assign(bitmap, { height, scale, width });
+    Object.assign(raw.drawItems[0], { height, scale, width });
+    Object.assign(raw.page.canvas, { height, scale, width });
+  };
+
+  const directSameTarget =
+    passingAppMatrixRuntimePreviewCompositionFailureInput(
+      outputDirectory,
+      { rowIndex: 0 },
+    );
+  setSingleTarget(directSameTarget, {
+    distance: 0,
+    height: 792,
+    scale: 1,
+    visible: true,
+    width: 612,
+  });
+  const directSameRaw =
+    directSameTarget.rows.at(-1).previewCompositionDiagnostic;
+  Object.assign(directSameRaw.expectedPreviewTarget, {
+    height: 792,
+    scale: 1,
+    width: 612,
+  });
+  Object.assign(directSameRaw.page.canvas, {
+    devicePixelRatio: 1,
+    targetHeight: 792,
+    targetScale: 1,
+    targetWidth: 612,
+  });
+  const directSame = read(directSameTarget);
+  assert.equal(directSame.classification, "direct-sharp");
+  assert.equal(directSame.ledgers.draws.items[0].sharpRequestLocalOrder, 1);
+
+  const satisfied = structuredClone(directSameTarget);
+  Object.assign(
+    satisfied.rows.at(-1).previewCompositionDiagnostic.workerItems[0],
+    { distance: 1, visible: false },
+  );
+  const satisfiedValue = read(satisfied);
+  assert.equal(satisfiedValue.classification, "preview-satisfied-target");
+  assert.equal(
+    satisfiedValue.ledgers.draws.items[0].previewRequestLocalOrder,
+    1,
+  );
+
+  const previewOnly =
+    passingAppMatrixRuntimePreviewCompositionFailureInput(outputDirectory);
+  setSingleTarget(previewOnly, {
+    distance: 1,
+    height: 990,
+    scale: 1.25,
+    visible: false,
+    width: 765,
+  });
+  assert.equal(read(previewOnly).classification, "preview");
+
+  const upgraded =
+    passingAppMatrixRuntimePreviewCompositionFailureInput(outputDirectory);
+  const upgradedRow = upgraded.rows.at(-1);
+  const upgradedRaw = upgradedRow.previewCompositionDiagnostic;
+  const [sharpRequest, sharpBitmap] = upgradedRaw.workerItems;
+  const previewRequest = structuredClone(sharpRequest);
+  Object.assign(previewRequest, {
+    activityId: 8,
+    at: 180,
+    distance: 1,
+    eventId: upgradedRow.modelIdentity.importEventId + 1,
+    scale: 1.25,
+    visible: false,
+  });
+  const previewBitmap = structuredClone(sharpBitmap);
+  Object.assign(previewBitmap, {
+    activityId: 9,
+    at: 190,
+    eventId: upgradedRow.modelIdentity.importEventId + 2,
+    height: 990,
+    scale: 1.25,
+    width: 765,
+  });
+  Object.assign(sharpRequest, {
+    activityId: 10,
+    at: 200,
+    eventId: upgradedRow.modelIdentity.importEventId + 3,
+  });
+  Object.assign(sharpBitmap, {
+    activityId: 11,
+    at: 210,
+    eventId: upgradedRow.modelIdentity.importEventId + 4,
+  });
+  const sharpDraw = upgradedRaw.drawItems[0];
+  Object.assign(sharpDraw, {
+    activityId: 22,
+    bitmapEventId: sharpBitmap.eventId,
+    compositionId: 2,
+    drawInvocationId: 2,
+  });
+  const previewDraw = structuredClone(sharpDraw);
+  Object.assign(previewDraw, {
+    activityId: 21,
+    at: 225,
+    bitmapEventId: previewBitmap.eventId,
+    compositionId: 1,
+    drawInvocationId: 1,
+    height: 990,
+    scale: 1.25,
+    width: 765,
+  });
+  upgradedRaw.workerItems = [
+    previewRequest,
+    previewBitmap,
+    sharpRequest,
+    sharpBitmap,
+  ];
+  upgradedRaw.workerTotal = upgradedRaw.workerItems.length;
+  upgradedRaw.drawItems = [previewDraw, sharpDraw];
+  upgradedRaw.drawTotal = upgradedRaw.drawItems.length;
+  Object.assign(upgradedRaw.failureBoundary, {
+    drawCount: 2,
+    drawInvocationId: 2,
+    workerEventId: sharpBitmap.eventId,
+  });
+  Object.assign(upgradedRow.scenario, {
+    drawEnd: 2,
+    workerEventEnd: sharpBitmap.eventId,
+  });
+  const upgradedValue = read(upgraded);
+  assert.equal(upgradedValue.classification, "preview-then-sharp");
+  assert.equal(
+    upgradedValue.ledgers.draws.items[1].sharpRequestLocalOrder,
+    3,
+  );
+  assert.equal(upgradedValue.ledgers.draws.items[1].bitmapLocalOrder, 4);
+  assert.equal(upgradedValue.resolutionRegressionObserved, false);
+
+  const regressed = structuredClone(upgraded);
+  const regressedRaw = regressed.rows.at(-1).previewCompositionDiagnostic;
+  const [laterPreview, earlierSharp] = regressedRaw.drawItems;
+  Object.assign(earlierSharp, {
+    activityId: 21,
+    at: 225,
+    compositionId: 1,
+    drawInvocationId: 1,
+  });
+  Object.assign(laterPreview, {
+    activityId: 22,
+    at: 230,
+    compositionId: 2,
+    drawInvocationId: 2,
+  });
+  regressedRaw.drawItems = [earlierSharp, laterPreview];
+  const regressedValue = read(regressed);
+  assert.equal(regressedValue.classification, "resolution-regression");
+  assert.equal(regressedValue.resolutionRegressionObserved, true);
+
+  const recovered = structuredClone(regressed);
+  const recoveredRow = recovered.rows.at(-1);
+  const recoveredRaw = recoveredRow.previewCompositionDiagnostic;
+  const finalSharp = structuredClone(recoveredRaw.drawItems[0]);
+  Object.assign(finalSharp, {
+    activityId: 23,
+    at: 235,
+    compositionId: 3,
+    drawInvocationId: 3,
+  });
+  recoveredRaw.drawItems.push(finalSharp);
+  recoveredRaw.drawTotal = 3;
+  recoveredRaw.failureBoundary.drawCount = 3;
+  recoveredRaw.failureBoundary.drawInvocationId = 3;
+  recoveredRow.scenario.drawEnd = 3;
+  const recoveredValue = read(recovered);
+  assert.equal(recoveredValue.classification, "resolution-regression");
+  assert.equal(recoveredValue.resolutionRegressionObserved, true);
+
+  const previewSharpPreview = structuredClone(upgraded);
+  const previewSharpPreviewRow = previewSharpPreview.rows.at(-1);
+  const previewSharpPreviewRaw =
+    previewSharpPreviewRow.previewCompositionDiagnostic;
+  const repeatedPreview = structuredClone(previewSharpPreviewRaw.drawItems[0]);
+  Object.assign(repeatedPreview, {
+    activityId: 23,
+    at: 235,
+    compositionId: 3,
+    drawInvocationId: 3,
+  });
+  previewSharpPreviewRaw.drawItems.push(repeatedPreview);
+  previewSharpPreviewRaw.drawTotal = 3;
+  previewSharpPreviewRaw.failureBoundary.drawCount = 3;
+  previewSharpPreviewRaw.failureBoundary.drawInvocationId = 3;
+  previewSharpPreviewRow.scenario.drawEnd = 3;
+  const previewSharpPreviewValue = read(previewSharpPreview);
+  assert.equal(
+    previewSharpPreviewValue.classification,
+    "resolution-regression",
+  );
+  assert.equal(previewSharpPreviewValue.resolutionRegressionObserved, true);
+
+  const previewSharpPreviewSharp = structuredClone(previewSharpPreview);
+  const previewSharpPreviewSharpRow = previewSharpPreviewSharp.rows.at(-1);
+  const previewSharpPreviewSharpRaw =
+    previewSharpPreviewSharpRow.previewCompositionDiagnostic;
+  const repeatedSharp = structuredClone(
+    previewSharpPreviewSharpRaw.drawItems[1],
+  );
+  Object.assign(repeatedSharp, {
+    activityId: 24,
+    at: 240,
+    compositionId: 4,
+    drawInvocationId: 4,
+  });
+  previewSharpPreviewSharpRaw.drawItems.push(repeatedSharp);
+  previewSharpPreviewSharpRaw.drawTotal = 4;
+  previewSharpPreviewSharpRaw.failureBoundary.drawCount = 4;
+  previewSharpPreviewSharpRaw.failureBoundary.drawInvocationId = 4;
+  previewSharpPreviewSharpRow.scenario.drawEnd = 4;
+  const previewSharpPreviewSharpValue = read(previewSharpPreviewSharp);
+  assert.equal(
+    previewSharpPreviewSharpValue.classification,
+    "resolution-regression",
+  );
+  assert.equal(
+    previewSharpPreviewSharpValue.resolutionRegressionObserved,
+    true,
+  );
+
+  const none =
+    passingAppMatrixRuntimePreviewCompositionFailureInput(outputDirectory);
+  none.rows.at(-1).previewCompositionDiagnostic.drawItems[0].source =
+    "main-fallback";
+  const noneValue = read(none);
+  assert.equal(noneValue.classification, "none");
+  assert.equal(noneValue.rejectionCounts.drawSource, 1);
+});
+
+test("recomputes preview-composition rejection predicates independently", () => {
+  const outputDirectory = path.join(
+    os.tmpdir(),
+    "issue-68-preview-composition-predicates",
+  );
+  const read = (mutate) => {
+    const input = passingAppMatrixRuntimePreviewCompositionFailureInput(
+      outputDirectory,
+    );
+    const row = input.rows.at(-1);
+    mutate(row.previewCompositionDiagnostic, row);
+    const result = sanitizeAppMatrixRuntimePreviewCompositionDiagnostic(
+      row.previewCompositionDiagnostic,
+      row,
+    );
+    assert.equal(result.bound, true);
+    return result.value;
+  };
+  const semanticMutations = [
+    ["drawTime", (raw, row) => {
+      for (const markers of [
+        raw.phaseMarkers,
+        row.completedSnapshot.phaseMarkers,
+      ]) {
+        const marker = markers.find((candidate) =>
+          candidate.stage === "adjacent-scroll-started"
+        );
+        Object.assign(marker, {
+          activityId: raw.drawItems[0].activityId,
+          at: raw.drawItems[0].at + 1,
+          drawInvocationId: raw.drawItems[0].drawInvocationId,
+        });
+      }
+    }],
+    ["drawSource", (raw) => { raw.drawItems[0].source = "main-fallback"; }],
+    ["drawScale", (raw) => { raw.drawItems[0].scale = 1.75; }],
+    ["drawBitmapDimensions", (raw) => { raw.drawItems[0].width += 1; }],
+    ["drawVisibility", (raw) => { raw.drawItems[0].visible = false; }],
+    ["drawVisibility", (raw) => { raw.drawItems[0].distance = 1; }],
+    ["drawVisibility", (raw) => { raw.drawItems[0].visiblePages = []; }],
+    ["drawGeometry", (raw) => {
+      raw.drawItems[0].geometryVisible = false;
+    }],
+    ["drawGeometry", (raw) => {
+      raw.drawItems[0].geometry = {
+        bottom: -10,
+        left: 100,
+        right: 712,
+        top: -802,
+      };
+    }],
+    ["drawBitmapLink", (raw) => {
+      raw.drawItems[0].bitmapEventId = raw.importEventId;
+    }],
+    ["drawCompatibleOrder", (raw) => {
+      raw.workerItems[1].activityId = 23;
+      raw.workerItems[1].at = 235;
+    }],
+    ["workerTarget", (raw) => {
+      Object.assign(raw.workerItems[0], { scale: 1.5 });
+      Object.assign(raw.workerItems[1], {
+        height: 1_188,
+        scale: 1.5,
+        width: 918,
+      });
+      Object.assign(raw.drawItems[0], {
+        height: 1_188,
+        scale: 1.5,
+        width: 918,
+      });
+    }],
+  ];
+  for (const [count, mutate] of semanticMutations) {
+    const value = read(mutate);
+    assert.equal(value.classification, "none", count);
+    assert.ok(value.rejectionCounts[count] > 0, count);
+  }
+
+  for (const identityField of ["workerInstanceId", "jobId", "revision"]) {
+    const value = read((raw) => {
+      for (const event of raw.workerItems) {
+        event[identityField] = identityField === "revision"
+          ? "stale-revision"
+          : event[identityField] + 100;
+      }
+    });
+    assert.equal(value.classification, "none", identityField);
+    assert.equal(value.rejectionCounts.workerIdentity, 2, identityField);
+  }
+
+  const requestAfterBitmap = read((raw) => {
+    const [request, bitmap] = raw.workerItems;
+    const firstEventId = request.eventId;
+    Object.assign(bitmap, {
+      activityId: 8,
+      at: 200,
+      eventId: firstEventId,
+    });
+    Object.assign(request, {
+      activityId: 9,
+      at: 210,
+      eventId: firstEventId + 1,
+    });
+    raw.workerItems = [bitmap, request];
+    raw.drawItems[0].bitmapEventId = bitmap.eventId;
+  });
+  assert.equal(requestAfterBitmap.classification, "none");
+  assert.equal(requestAfterBitmap.rejectionCounts.sharpBitmapWithoutRequest, 1);
+});
+
+test("fails closed on malformed preview-composition failure snapshots", () => {
+  const outputDirectory = path.join(
+    os.tmpdir(),
+    "issue-68-preview-composition-malformed",
+  );
+  const invalidMutations = [
+    ["wrong import", (raw) => { raw.importEventId += 1; }],
+    ["wrong model event", (_raw, row) => {
+      row.modelIdentity.importEventId += 1;
+    }],
+    ["wrong model worker", (_raw, row) => {
+      row.modelIdentity.workerInstanceId += 1;
+    }],
+    ["phase mismatch", (raw) => {
+      raw.phaseMarkers[0].activityId += 1;
+    }],
+    ["phase order", (raw) => { raw.phaseMarkers.reverse(); }],
+    ["failure activity rewind", (raw) => {
+      raw.failureBoundary.activityId = raw.phaseMarkers.at(-1).activityId - 1;
+    }],
+    ["failure clock rewind", (raw) => {
+      raw.failureBoundary.at = raw.phaseMarkers.at(-1).at - 1;
+    }],
+    ["future worker activity", (raw) => {
+      raw.workerItems[1].activityId = raw.failureBoundary.activityId + 1;
+    }],
+    ["pre-import worker activity", (raw, row) => {
+      raw.workerItems[0].activityId = row.modelIdentity.importActivityId;
+    }],
+    ["future worker clock", (raw) => {
+      raw.workerItems[1].at = raw.failureBoundary.at + 1;
+    }],
+    ["future draw activity", (raw) => {
+      raw.drawItems[0].activityId = raw.failureBoundary.activityId + 1;
+    }],
+    ["future draw clock", (raw) => {
+      raw.drawItems[0].at = raw.failureBoundary.at + 1;
+    }],
+    ["worker order", (raw) => { raw.workerItems.reverse(); }],
+    ["draw event beyond boundary", (raw) => {
+      raw.drawItems[0].bitmapEventId = raw.failureBoundary.workerEventId + 1;
+    }],
+    ["worker truncation", (raw) => {
+      raw.workerTruncated = true;
+      raw.workerTotal += 1;
+    }],
+    ["draw truncation", (raw) => {
+      raw.drawTruncated = true;
+      raw.drawTotal += 1;
+    }],
+    ["worker overflow", (raw) => {
+      raw.workerItems = Array.from(
+        { length: 17 },
+        (_, index) => ({
+          ...structuredClone(raw.workerItems[0]),
+          activityId: index + 1,
+          at: index + 20,
+          eventId: raw.importEventId + index + 1,
+        }),
+      );
+      raw.workerTotal = raw.workerItems.length;
+    }],
+    ["draw overflow", (raw) => {
+      raw.drawItems = Array.from(
+        { length: 17 },
+        (_, index) => ({
+          ...structuredClone(raw.drawItems[0]),
+          activityId: index + 1,
+          at: index + 100,
+          compositionId: index + 1,
+          drawInvocationId: index + 1,
+        }),
+      );
+      raw.drawTotal = raw.drawItems.length;
+    }],
+    ["render direction", (raw) => {
+      raw.workerItems[0].direction = "from-worker";
+    }],
+    ["bitmap direction", (raw) => {
+      raw.workerItems[1].direction = "to-worker";
+    }],
+    ["raw document", (raw) => {
+      raw.workerItems[0].documentKey = "/home/private.pdf";
+    }],
+    ["missing worker", (raw) => {
+      raw.workerItems[0].workerInstanceId = null;
+    }],
+    ["missing job", (raw) => { raw.workerItems[0].jobId = null; }],
+    ["missing revision", (raw) => { raw.workerItems[0].revision = ""; }],
+    ["wrong page", (raw) => { raw.workerItems[0].pageNumber = 4; }],
+    ["wrong DPR", (raw) => { raw.page.canvas.devicePixelRatio = 1; }],
+    ["wrong visual scale", (raw) => {
+      raw.page.canvas.visualViewportScale = 2;
+    }],
+    ["unsafe reader scroll", (raw) => {
+      raw.reader.scrollTop = Number.MAX_VALUE;
+    }],
+    ["unsafe page geometry", (raw) => {
+      raw.page.rect = {
+        bottom: 1e307,
+        left: 1e307,
+        right: 1e307,
+        top: 1e307,
+      };
+    }],
+    ["zero-area reader", (raw) => {
+      raw.reader.rect.right = raw.reader.rect.left;
+    }],
+    ["zero-area draw", (raw) => {
+      raw.drawItems[0].geometry.bottom = raw.drawItems[0].geometry.top;
+    }],
+    ["overflowing draw rectangle", (raw) => {
+      raw.drawItems[0].geometry.left = -Number.MAX_SAFE_INTEGER;
+      raw.drawItems[0].geometry.right = Number.MAX_SAFE_INTEGER;
+    }],
+    ["unsafe worker scale", (raw) => {
+      raw.workerItems[0].scale = 1e307;
+    }],
+    ["self-referential target", (raw) => {
+      raw.page.canvas.cssWidth *= 2;
+      raw.expectedPreviewTarget.width *= 2;
+    }],
+    ["target capped mismatch", (raw) => {
+      raw.expectedPreviewTarget.capped = true;
+    }],
+    ["unstable scroll", (raw) => {
+      raw.adjacentScrollProof.samples[1].reader.scrollTop += 1;
+      raw.adjacentScrollProof.summary = summarizePdfPageCenteringStability(
+        raw.adjacentScrollProof.samples,
+        raw.adjacentScrollProof.pageNumber,
+      );
+    }],
+    ["terminal range", (raw) => { raw.range = "00:5"; }],
+    ["range excludes page", (raw) => { raw.range = "2:5"; }],
+    ["extra field", (raw) => { raw.extra = true; }],
+    ["missing field", (raw) => { delete raw.range; }],
+    ["private field", (raw) => {
+      raw.privatePath = "/home/private.pdf";
+    }],
+    ["NaN", (raw) => { raw.page.canvas.cssWidth = Number.NaN; }],
+    ["BigInt", (raw) => { raw.failureBoundary.activityId = 1n; }],
+    ["cycle", (raw) => { raw.page = raw; }],
+  ];
+  for (const [label, mutate] of invalidMutations) {
+    const input = passingAppMatrixRuntimePreviewCompositionFailureInput(
+      outputDirectory,
+    );
+    const row = input.rows.at(-1);
+    mutate(row.previewCompositionDiagnostic, row);
+    let result;
+    assert.doesNotThrow(() => {
+      result = sanitizeAppMatrixRuntimePreviewCompositionDiagnostic(
+        row.previewCompositionDiagnostic,
+        row,
+      );
+    }, label);
+    assert.equal(result.bound, false, label);
+    assert.equal(result.value, null, label);
+  }
+
+  const absent = passingAppMatrixRuntimePreviewCompositionFailureInput(
+    outputDirectory,
+  );
+  absent.rows.at(-1).previewCompositionDiagnostic = null;
+  assert.equal(
+    buildAppMatrixRuntimeDiagnosticReport(absent).rows.at(-1).integrity,
+    false,
+  );
+  const completed = passingAppMatrixRuntimeCompletedInput(outputDirectory);
+  completed.rows[0].previewCompositionDiagnostic = structuredClone(
+    passingAppMatrixRuntimePreviewCompositionFailureInput(outputDirectory)
+      .rows.at(-1).previewCompositionDiagnostic,
+  );
+  assert.equal(
+    buildAppMatrixRuntimeDiagnosticReport(completed).rows[0].integrity,
+    false,
+  );
+  const otherFailure = passingAppMatrixRuntimeFailureInput(outputDirectory);
+  otherFailure.rows[0].previewCompositionDiagnostic = structuredClone(
+    passingAppMatrixRuntimePreviewCompositionFailureInput(outputDirectory)
+      .rows.at(-1).previewCompositionDiagnostic,
+  );
+  const otherRow = buildAppMatrixRuntimeDiagnosticReport(otherFailure).rows[0];
+  assert.equal(otherRow.integrity, false);
+  assert.equal(otherRow.previewCompositionDiagnostic, null);
+});
+
+test("accepts producer-reachable partial and completed-stage failures", () => {
+  const outputDirectory = path.join(
+    os.tmpdir(),
+    "issue-68-app-matrix-stage-terminals",
+  );
+  const terminalCases = [
+    ["scenario-start-started", {}],
+    ["scenario-start-started", { finalizedScenarioStart: true }],
+    ["adjacent-bitmap-completed", {}],
+    ["priority-mount-started", {}],
+    ["release-observation-started", {}],
+    ["scenario-finish-started", {}],
+    ["scenario-finish-completed", {}],
+  ];
+  for (const [terminalStage, options] of terminalCases) {
+    const report = buildAppMatrixRuntimeDiagnosticReport(
+      passingAppMatrixRuntimeStageFailureInput(
+        outputDirectory,
+        terminalStage,
+        options,
+      ),
+    );
+    assert.equal(
+      report.execution.orderExact,
+      true,
+      `${terminalStage}: ${JSON.stringify(report.rows[0].integrityReasons)}`,
+    );
+    assert.equal(
+      report.rows[0].integrity,
+      true,
+      `${terminalStage}: ${JSON.stringify(report.rows[0].integrityReasons)}`,
+    );
+  }
+});
+
+test("keeps pre-scenario failures absent and stage labels privacy-safe", async () => {
+  const outputDirectory = path.join(
+    os.tmpdir(),
+    "issue-68-app-matrix-pre-scenario-failure",
+  );
+  const first = passingAppMatrixRuntimeStageFailureInput(
+    outputDirectory,
+    "navigate-started",
+  );
+  const firstReport = buildAppMatrixRuntimeDiagnosticReport(first);
+  assert.equal(firstReport.rows[0].integrity, true);
+  assert.equal(firstReport.rows[0].failureCategory, "navigate-failure");
+  assert.equal(firstReport.rows[0].timing, null);
+
+  const later = passingAppMatrixRuntimeCompletedInput(outputDirectory);
+  later.rows.length = 2;
+  const laterRow = later.rows[1];
+  Object.assign(laterRow, {
+    adjacentPage: null,
+    completedSnapshot: null,
+    currentStage: "navigate-started",
+    failureStage: "navigate-started",
+    finalizationErrorPresent: false,
+    modelCompletion: null,
+    modelIdentity: null,
+    networkFailure: null,
+    networkFixedPoint: null,
+    priorityMountDiagnostic: null,
+    priorityProbe: null,
+    previewCompositionDiagnostic: null,
+    priorityTarget: null,
+    releaseSnapshot: null,
+    scenario: null,
+    scenarioFinalized: false,
+    scenarioStart: null,
+    screenshot: null,
+    sourceObservation: null,
+    stageHistory: ["navigate-started"],
+    status: "failed",
+  });
+  later.runnerFailure = new Error("private later navigation failure");
+  later.runnerFailureStage = `matrix:${laterRow.configurationId}`;
+  const laterReport = buildAppMatrixRuntimeDiagnosticReport(later);
+  assert.equal(laterReport.rows[1].integrity, true);
+  assert.equal(laterReport.rows[1].timing, null);
+  assert.equal(laterReport.execution.orderExact, true);
+
+  const privateStage = passingAppMatrixRuntimeStageFailureInput(
+    outputDirectory,
+    "navigate-started",
+  );
+  privateStage.rows[0].currentStage = "/home/private/document-started";
+  privateStage.rows[0].failureStage = "/home/private/document-started";
+  privateStage.rows[0].stageHistory = ["/home/private/document-started"];
+  const privateReport = buildAppMatrixRuntimeDiagnosticReport(privateStage);
+  assert.equal(privateReport.rows[0].integrity, false);
+  assert.equal(
+    privateReport.rows[0].failureCategory,
+    "unknown-stage-failure",
+  );
+  assert.doesNotMatch(JSON.stringify(privateReport), /home\/private/u);
+
+  for (const failureStage of [undefined, ""]) {
+    const completed = passingAppMatrixRuntimeCompletedInput(outputDirectory);
+    completed.rows[0].failureStage = failureStage;
+    assert.equal(
+      buildAppMatrixRuntimeDiagnosticReport(completed).rows[0].integrity,
+      false,
+    );
+  }
+
+  const source = await readFile(
+    "scripts/run-pdf-sharpness-browser-regression.mjs",
+    "utf8",
+  );
+  assert.match(
+    source,
+    /stageHistory\?\.includes\("scenario-start-started"\)[\s\S]*finalizeFailedAppMatrixRuntimeScenario/u,
+  );
+});
+
+test("binds producer-shaped composed maxima on a finalized scenario", () => {
+  const outputDirectory = path.join(
+    os.tmpdir(),
+    "issue-68-app-matrix-composed-finalized-scenario",
+  );
+  const input = passingAppMatrixRuntimeCompletedInput(outputDirectory);
+  const row = input.rows[0];
+  const readerViewport = { bottom: 900, left: 0, right: 1_100, top: 0 };
+  const frame = {
+    at: 300,
+    composedCount: 2,
+    composedPages: [{
+      geometry: { bottom: -100, left: 100, right: 900, top: -900 },
+      geometryVisible: false,
+      height: 100,
+      page: row.adjacentPage,
+      pixels: 10_000,
+      visible: false,
+      width: 100,
+    }, {
+      geometry: { bottom: 800, left: 100, right: 900, top: 100 },
+      geometryVisible: true,
+      height: 990,
+      page: row.priorityTarget,
+      pixels: 757_350,
+      visible: true,
+      width: 765,
+    }],
+    composedPixels: 767_350,
+    geometryVisiblePages: [row.priorityTarget],
+    readerViewport,
+    visiblePages: [row.priorityTarget],
+  };
+  row.scenario.maximumCanvasCount = 2;
+  row.scenario.maximumCanvasPixels = frame.composedPixels;
+  row.scenario.maximumCountFrame = structuredClone(frame);
+  row.scenario.maximumPixelsFrame = structuredClone(frame);
+  row.scenario.sampleEnd = 1;
+  const report = buildAppMatrixRuntimeDiagnosticReport(input);
+  assert.equal(report.rows[0].integrity, true, report.failures.join("\n"));
+
+  const invalid = passingAppMatrixRuntimeCompletedInput(outputDirectory);
+  invalid.rows[0].scenario = structuredClone(row.scenario);
+  invalid.rows[0].scenario.maximumCountFrame.composedPages[0].geometry.right =
+    invalid.rows[0].scenario.maximumCountFrame.composedPages[0].geometry.left;
+  assert.equal(
+    buildAppMatrixRuntimeDiagnosticReport(invalid).rows[0].integrity,
+    false,
+  );
+});
+
+test("binds the exact poll-only release snapshot-error variant", () => {
+  const outputDirectory = path.join(
+    os.tmpdir(),
+    "issue-68-app-matrix-release-snapshot-error",
+  );
+  const pollOnly = (waitOutcome) => ({
+    elapsedMs: 90_000,
+    evaluationAttemptCount: 900,
+    evaluationErrorCount: 1,
+    snapshotErrorPresent: true,
+    waitOutcome,
+  });
+  const timeoutInput = passingAppMatrixRuntimeStageFailureInput(
+    outputDirectory,
+    "release-observation-started",
+  );
+  timeoutInput.rows[0].releaseSnapshot = pollOnly("timeout");
+  const timeoutRow = buildAppMatrixRuntimeDiagnosticReport(timeoutInput).rows[0];
+  assert.equal(timeoutRow.integrity, true);
+  assert.deepEqual(timeoutRow.release, {
+    classification: "timeout-snapshot-unavailable",
+    integrity: true,
+    poll: {
+      elapsedMs: 90_000,
+      evaluationAttemptCount: 900,
+      evaluationErrorCount: 1,
+      waitOutcome: "timeout",
+    },
+    snapshotAvailable: false,
+  });
+
+  const completedInput = passingAppMatrixRuntimeCompletedInput(outputDirectory);
+  completedInput.rows[0].releaseSnapshot = pollOnly("released");
+  const completed = buildAppMatrixRuntimeDiagnosticReport(completedInput);
+  assert.equal(completed.rows[0].integrity, true);
+  assert.equal(
+    completed.rows[0].release.classification,
+    "released-snapshot-unavailable",
+  );
+  assert.equal(completed.rows[0].release.snapshotAvailable, false);
+  assert.equal(completed.completed, true, completed.failures.join("\n"));
+  assert.doesNotMatch(
+    JSON.stringify(completed.rows[0].release),
+    /snapshotErrorPresent|private|path|error/u,
+  );
+
+  const full = buildAppMatrixRuntimeDiagnosticReport(
+    passingAppMatrixRuntimeCompletedInput(outputDirectory),
+  );
+  assert.equal(full.rows[0].release.snapshotAvailable, true);
+  assert.equal("snapshotErrorPresent" in full.rows[0].release.poll, false);
+
+  const invalid = [
+    ["extra private field", (raw) => { raw.privatePath = "/home/private"; }],
+    ["missing field", (raw) => { delete raw.elapsedMs; }],
+    ["zero attempts", (raw) => { raw.evaluationAttemptCount = 0; }],
+    ["too many errors", (raw) => { raw.evaluationErrorCount = 901; }],
+    ["released with only errors", (raw) => {
+      raw.waitOutcome = "released";
+      raw.evaluationErrorCount = raw.evaluationAttemptCount;
+    }],
+    ["invalid outcome", (raw) => { raw.waitOutcome = "private-outcome"; }],
+    ["unsafe elapsed", (raw) => { raw.elapsedMs = Number.MAX_VALUE; }],
+    ["BigInt count", (raw) => { raw.evaluationAttemptCount = 1n; }],
+    ["cyclic extra", (raw) => { raw.self = raw; }],
+  ];
+  for (const [label, mutate] of invalid) {
+    const input = passingAppMatrixRuntimeStageFailureInput(
+      outputDirectory,
+      "release-observation-started",
+    );
+    input.rows[0].releaseSnapshot = pollOnly("timeout");
+    mutate(input.rows[0].releaseSnapshot);
+    let report;
+    assert.doesNotThrow(() => {
+      report = buildAppMatrixRuntimeDiagnosticReport(input);
+    }, label);
+    assert.equal(report.rows[0].integrity, false, label);
+    assert.equal(report.rows[0].release, null, label);
+    assert.doesNotMatch(JSON.stringify(report), /home\/private|private-outcome/u);
+  }
+});
+
+test("enforces exact null-to-value lifecycle boundaries", () => {
+  const outputDirectory = path.join(
+    os.tmpdir(),
+    "issue-68-app-matrix-field-lifecycle",
+  );
+  const completed = passingAppMatrixRuntimeCompletedInput(outputDirectory)
+    .rows[0];
+  const premature = [
+    ["sourceObservation", "file-select-started", (row) => {
+      row.sourceObservation = structuredClone(completed.sourceObservation);
+    }],
+    ["modelShape", "model-completion-started", (row) => {
+      row.modelCompletion = structuredClone(completed.modelCompletion);
+      row.modelIdentity = structuredClone(completed.modelIdentity);
+    }],
+    ["adjacentPage", "adjacent-selection-started", (row) => {
+      row.adjacentPage = completed.adjacentPage;
+    }],
+    ["scenario", "scenario-start-started", (row) => {
+      row.scenarioStart = structuredClone(completed.scenarioStart);
+    }],
+    ["screenshot", "screenshot-started", (row) => {
+      row.screenshot = structuredClone(completed.screenshot);
+    }],
+    ["priorityTarget", "alignment-started", (row) => {
+      row.priorityTarget = completed.priorityTarget;
+    }],
+    ["priorityProbe", "priority-composition-started", (row) => {
+      row.priorityProbe = structuredClone(completed.priorityProbe);
+    }],
+    ["networkFixedPoint", "network-fixed-point-started", (row) => {
+      row.networkFixedPoint = structuredClone(completed.networkFixedPoint);
+    }],
+  ];
+  for (const [reason, stage, mutate] of premature) {
+    const input = passingAppMatrixRuntimeStageFailureInput(
+      outputDirectory,
+      stage,
+    );
+    mutate(input.rows[0]);
+    const row = buildAppMatrixRuntimeDiagnosticReport(input).rows[0];
+    assert.equal(row.integrityReasons.rowIdentity[reason], false, reason);
+    assert.equal(row.integrity, false, reason);
+  }
+
+  const missing = [
+    ["sourceObservation", "model-completion-started", (row) => {
+      row.sourceObservation = null;
+    }],
+    ["modelShape", "adjacent-selection-started", (row) => {
+      row.modelCompletion = null;
+      row.modelIdentity = null;
+    }],
+    ["adjacentPage", "scenario-start-started", (row) => {
+      row.adjacentPage = null;
+    }],
+    ["scenario", "adjacent-bitmap-started", (row) => {
+      row.scenarioStart = null;
+    }],
+    ["screenshot", "alignment-started", (row) => {
+      row.screenshot = null;
+    }],
+    ["priorityTarget", "priority-mount-started", (row) => {
+      row.priorityTarget = null;
+    }],
+    ["priorityProbe", "release-observation-started", (row) => {
+      row.priorityProbe = null;
+    }],
+  ];
+  for (const [reason, stage, mutate] of missing) {
+    const input = passingAppMatrixRuntimeStageFailureInput(
+      outputDirectory,
+      stage,
+    );
+    mutate(input.rows[0]);
+    const row = buildAppMatrixRuntimeDiagnosticReport(input).rows[0];
+    assert.equal(row.integrityReasons.rowIdentity[reason], false, reason);
+    assert.equal(row.integrity, false, reason);
+  }
+
+  const malformedRaw = [
+    ["file-select-started", (row) => { row.sourceObservation = {}; }],
+    ["model-completion-started", (row) => { row.modelIdentity = {}; }],
+    ["scenario-start-started", (row) => { row.completedSnapshot = {}; }],
+    ["priority-composition-started", (row) => { row.priorityProbe = {}; }],
+    ["release-observation-started", (row) => { row.releaseSnapshot = {}; }],
+  ];
+  for (const [stage, mutate] of malformedRaw) {
+    const input = passingAppMatrixRuntimeStageFailureInput(
+      outputDirectory,
+      stage,
+    );
+    mutate(input.rows[0]);
+    assert.equal(
+      buildAppMatrixRuntimeDiagnosticReport(input).rows[0].integrity,
+      false,
+      stage,
+    );
+  }
+});
+
+test("reports every app-matrix row and network integrity predicate", () => {
+  const outputDirectory = path.join(
+    os.tmpdir(),
+    "issue-68-app-matrix-runtime-integrity-reasons",
+  );
+  const passing = buildAppMatrixRuntimeDiagnosticReport(
+    passingAppMatrixRuntimeCompletedInput(outputDirectory),
+  );
+  assert.deepEqual(
+    passing.rows.slice(0, 4).map((row) => row.adjacentPage),
+    [2, 2, 2, 2],
+  );
+  assert.equal(passing.rows[0].integrityReasons.networkHistory.required, false);
+  assert.deepEqual(
+    Object.entries(passing.rows[0].integrityReasons.networkHistory)
+      .filter(([key]) => key !== "required")
+      .map(([, value]) => value),
+    Array(6).fill(true),
+  );
+  assert.equal(passing.rows[1].integrityReasons.networkHistory.required, true);
+  assert.equal(passing.rows[1].integrityReasons.networkHistory.aggregate, true);
+
+  const rowMutations = [
+    ["configuration", (row) => { row.configurationId = "wrong-row"; }],
+    ["sequence", (row) => { row.sequence += 1; }],
+    ["session", (row) => { row.sessionIdentityHash = "f".repeat(64); }],
+    ["adjacentPage", (row) => { row.adjacentPage = 3; }],
+    ["priorityTarget", (row) => { row.priorityTarget = 5; }],
+    ["modelJob", (row) => { row.modelCompletion.importJobId += 1; }],
+    ["modelDocument", (row) => {
+      row.modelCompletion.documentKey = "wrong-document:wrong-revision";
+    }],
+    ["modelRevision", (row) => {
+      row.modelCompletion.revision = "wrong-revision";
+    }],
+    ["modelShape", (row) => {
+      row.modelIdentity.documentKey = "forged-document-key";
+      row.modelCompletion.documentKey = "forged-document-key";
+    }],
+  ];
+  for (const [flag, mutate] of rowMutations) {
+    const input = passingAppMatrixRuntimeCompletedInput(outputDirectory);
+    mutate(input.rows[0]);
+    const report = buildAppMatrixRuntimeDiagnosticReport(input);
+    const reasons = report.rows[0].integrityReasons;
+    assert.equal(reasons.rowIdentity[flag], false, flag);
+    assert.equal(reasons.rowIdentity.aggregate, false, flag);
+    assert.equal(report.rows[0].integrity, false, flag);
+    assert.equal(
+      isAppMatrixRuntimeIntegrityReasonsValid(reasons, false),
+      true,
+      flag,
+    );
+  }
+
+  for (const [label, mutate] of [
+    ["BigInt model page", (row) => {
+      row.modelCompletion.pageNumbers[0] = 1n;
+    }],
+    ["cyclic model pages", (row) => {
+      row.modelCompletion.pageNumbers.push(row.modelCompletion.pageNumbers);
+    }],
+  ]) {
+    const input = passingAppMatrixRuntimeCompletedInput(outputDirectory);
+    mutate(input.rows[0]);
+    let report;
+    assert.doesNotThrow(() => {
+      report = buildAppMatrixRuntimeDiagnosticReport(input);
+    }, label);
+    assert.equal(report.rows[0].integrity, false, label);
+    assert.equal(
+      report.rows[0].integrityReasons.rowIdentity.modelShape,
+      false,
+      label,
+    );
+  }
+
+  const networkMutations = [
+    ["currentPresent", (input) => {
+      input.rows[1].networkFixedPoint = null;
+    }],
+    ["priorLabel", (input) => {
+      input.rows[0].networkFixedPoint.label = "wrong-prior-label";
+    }],
+    ["priorHealthy", (input) => {
+      input.rows[0].networkFixedPoint.counts.inflightRequestCount = 1;
+    }],
+    ["priorRestoreContinuous", (input) => {
+      input.rows[1].networkFixedPoint.matrixRestoreProof.networkDiagnostic =
+        null;
+    }],
+    ["priorFinalContinuous", (input) => {
+      input.rows[1].networkFixedPoint.targets.shift();
+      input.rows[1].networkFixedPoint.counts.targetCount -= 1;
+      input.rows[1].networkFixedPoint.counts.attachPromiseCount -= 1;
+    }],
+  ];
+  for (const [flag, mutate] of networkMutations) {
+    const input = passingAppMatrixRuntimeCompletedInput(outputDirectory);
+    mutate(input);
+    const report = buildAppMatrixRuntimeDiagnosticReport(input);
+    const reasons = report.rows[1].integrityReasons;
+    assert.equal(reasons.networkHistory.required, true, flag);
+    assert.equal(reasons.networkHistory[flag], false, flag);
+    assert.equal(reasons.networkHistory.aggregate, false, flag);
+    assert.equal(report.rows[1].integrity, false, flag);
+    assert.equal(
+      isAppMatrixRuntimeIntegrityReasonsValid(reasons, true),
+      true,
+      flag,
+    );
+  }
+
+  const reasonMutations = [
+    ["extra key", (reasons) => { reasons.rowIdentity.extra = true; }],
+    ["missing key", (reasons) => {
+      delete reasons.networkHistory.priorHealthy;
+    }],
+    ["nonboolean", (reasons) => {
+      reasons.rowIdentity.modelJob = "true";
+    }],
+    ["row aggregate substitution", (reasons) => {
+      reasons.rowIdentity.aggregate = false;
+    }],
+    ["history aggregate substitution", (reasons) => {
+      reasons.networkHistory.aggregate = false;
+    }],
+    ["required substitution", (reasons) => {
+      reasons.networkHistory.required = false;
+    }],
+  ];
+  for (const [label, mutate] of reasonMutations) {
+    const reasons = structuredClone(passing.rows[1].integrityReasons);
+    mutate(reasons);
+    assert.equal(
+      isAppMatrixRuntimeIntegrityReasonsValid(reasons, true),
+      false,
+      label,
+    );
+  }
+  const rawSpoof = passingAppMatrixRuntimeCompletedInput(outputDirectory);
+  rawSpoof.rows[0].integrityReasons = { privateDocument: "/home/private.pdf" };
+  const recomputed = buildAppMatrixRuntimeDiagnosticReport(rawSpoof);
+  assert.deepEqual(recomputed.rows[0].integrityReasons, passing.rows[0].integrityReasons);
+  assert.doesNotMatch(JSON.stringify(recomputed), /privateDocument|private\.pdf/u);
+});
+
+test("retains a bounded priority-mount failure snapshot in schema 8", async () => {
+  const outputDirectory = path.join(
+    os.tmpdir(),
+    "issue-68-priority-mount-diagnostic",
+  );
+  for (const checkpoint of [
+    "intermediate-scroll",
+    "target-shell",
+    "preview-settle",
+  ]) {
+    for (const failureCategory of ["timeout", "unexpected"]) {
+      const input = passingAppMatrixRuntimePriorityMountFailureInput(
+        outputDirectory,
+        { checkpoint, failureCategory },
+      );
+      const report = buildAppMatrixRuntimeDiagnosticReport(input);
+      const diagnostic = report.rows[0].priorityMountDiagnostic;
+      assert.equal(report.diagnosticSchemaVersion, 8);
+      assert.equal(report.rows[0].integrity, true, checkpoint);
+      assert.equal(diagnostic.checkpoint, checkpoint);
+      assert.equal(diagnostic.failureCategory, failureCategory);
+      assert.equal(
+        diagnostic.centering.summary.ready,
+        checkpoint !== "intermediate-scroll",
+      );
+      assert.deepEqual(diagnostic.predicates, {
+        bitmapAfterRequest: true,
+        bitmapAfterStrictRequest: true,
+        bitmapIdentityBound: true,
+        bitmapPresent: true,
+        requestAfterBoundary: true,
+        requestDistanceOne: true,
+        requestEnabled: true,
+        requestIdentityBound: true,
+        requestNonvisible: true,
+        requestPresent: true,
+        strictRequestFound: true,
+      });
+      assert.equal(diagnostic.ledger.items.length, 2);
+      if (checkpoint !== "intermediate-scroll") {
+        assert.deepEqual(diagnostic.centering.samples[0]?.range, {
+          mountedPages: [1, 2, 3, 4, 5, 6],
+          mountedRanges: [{ end: 5, start: 0 }],
+        });
+      }
+      assert.equal("documentMatch" in diagnostic.ledger.items[0], false);
+      assert.deepEqual(
+        diagnostic.ledger.items.map((item) => item.relativeOrder),
+        diagnostic.ledger.items.map((item) => item.relativeOrder)
+          .toSorted((left, right) => left - right),
+      );
+      assert.ok(diagnostic.ledger.items.every((item) =>
+        /^[a-f0-9]{64}$/u.test(item.identityHash)
+      ));
+      const serialized = JSON.stringify(report);
+      assert.doesNotMatch(
+        serialized,
+        /"eventId"|"importEventId"|"workerInstanceId"|"jobId"|"documentKey"|"revision"|private priority mount/u,
+      );
+    }
+  }
+
+  const completed = buildAppMatrixRuntimeDiagnosticReport(
+    passingAppMatrixRuntimeCompletedInput(outputDirectory),
+  );
+  assert.ok(completed.rows.every((row) =>
+    row.priorityMountDiagnostic === null
+  ));
+  const otherFailure = passingAppMatrixRuntimeFailureInput(outputDirectory);
+  assert.equal(
+    buildAppMatrixRuntimeDiagnosticReport(otherFailure)
+      .rows[0].priorityMountDiagnostic,
+    null,
+  );
+
+  const source = await readFile(
+    "scripts/run-pdf-sharpness-browser-regression.mjs",
+    "utf8",
+  );
+  assert.match(
+    source,
+    /"priority-mount",[\s\S]*async \(priorityMarker\)[\s\S]*checkpoint = "intermediate-scroll"[\s\S]*checkpoint = "target-shell"[\s\S]*checkpoint = "preview-settle"[\s\S]*captureAppMatrixPriorityMountFailure/u,
+  );
+  assert.match(
+    source,
+    /targetEvents\.slice\(0, 16\)[\s\S]*truncated: targetEvents\.length > ledgerItems\.length/u,
+  );
+});
+
+test("binds the live priority preview pair after its exact stage boundary", async () => {
+  const importEvent = {
+    direction: "to-worker",
+    documentKey: "public-document:revision-1",
+    eventId: 5,
+    jobId: 1,
+    revision: "revision-1",
+    type: "import",
+    workerInstanceId: 1,
+  };
+  const render = {
+    direction: "to-worker",
+    distance: 1,
+    documentKey: null,
+    enabled: true,
+    eventId: 21,
+    height: null,
+    jobId: 1,
+    pageNumber: 4,
+    revision: "revision-1",
+    scale: 1.25,
+    type: "render",
+    visible: false,
+    width: null,
+    workerInstanceId: 1,
+  };
+  const bitmap = {
+    direction: "from-worker",
+    distance: null,
+    documentKey: null,
+    enabled: null,
+    eventId: 22,
+    height: 990,
+    jobId: 1,
+    pageNumber: 4,
+    revision: "revision-1",
+    scale: 1.25,
+    type: "bitmap",
+    visible: null,
+    width: 765,
+    workerInstanceId: 1,
+  };
+  const select = (workerEvents) => selectPdfPriorityPreviewSettlement({
+    importEvent,
+    priorityBoundaryWorkerEventId: 20,
+    priorityTarget: 4,
+    workerEvents,
+  });
+  assert.deepEqual(select([importEvent, render, bitmap]), {
+    bitmapEventId: 22,
+    requestEventId: 21,
+  });
+  const mutations = [
+    ["pre-boundary pair", (request, response) => {
+      request.eventId = 19;
+      response.eventId = 20;
+    }],
+    ["pre-boundary request", (request) => { request.eventId = 20; }],
+    ["wrong request worker", (request) => {
+      request.workerInstanceId = 2;
+    }],
+    ["colliding wrong-worker pair", (request, response) => {
+      request.workerInstanceId = 2;
+      response.workerInstanceId = 2;
+    }],
+    ["wrong bitmap worker", (_request, response) => {
+      response.workerInstanceId = 2;
+    }],
+    ["wrong bitmap job", (_request, response) => { response.jobId = 2; }],
+    ["wrong bitmap revision", (_request, response) => {
+      response.revision = "wrong-revision";
+    }],
+  ];
+  for (const [label, mutate] of mutations) {
+    const request = structuredClone(render);
+    const response = structuredClone(bitmap);
+    mutate(request, response);
+    assert.equal(select([importEvent, request, response]), null, label);
+  }
+
+  const source = await readFile(
+    "scripts/run-pdf-sharpness-browser-regression.mjs",
+    "utf8",
+  );
+  assert.match(
+    source,
+    /priorityBoundaryWorkerEventId = priorityMarker == null[\s\S]*workerEvents\?\.length[\s\S]*selectPdfPriorityPreviewSettlement\.toString\(\)[\s\S]*priorityBoundaryWorkerEventId/u,
+  );
+  assert.match(
+    source,
+    /message\?\.scale !== null[\s\S]*Number\.isFinite\(Number\(message\.scale\)\)[\s\S]*\? Number\(message\.scale\)[\s\S]*: null/u,
+  );
+});
+
+test("selects an exact linked draw after a compatible preview request", () => {
+  const expectedTarget = {
+    capped: false,
+    height: 990,
+    scale: 1.25,
+    width: 765,
+  };
+  const importEvent = {
+    activityId: 1,
+    at: 10,
+    direction: "to-worker",
+    documentKey: DOCUMENT_KEY,
+    eventId: 1,
+    jobId: 1,
+    revision: REVISION,
+    type: "import",
+    workerInstanceId: 1,
+  };
+  const render = {
+    activityId: 2,
+    at: 20,
+    direction: "to-worker",
+    distance: 1,
+    documentKey: null,
+    enabled: true,
+    eventId: 2,
+    height: null,
+    jobId: 1,
+    pageNumber: 2,
+    revision: REVISION,
+    scale: 1.25,
+    type: "render",
+    visible: false,
+    width: null,
+    workerInstanceId: 1,
+  };
+  const bitmap = {
+    activityId: 3,
+    at: 30,
+    direction: "from-worker",
+    distance: null,
+    documentKey: null,
+    enabled: null,
+    eventId: 3,
+    height: 990,
+    jobId: 1,
+    pageNumber: 2,
+    revision: REVISION,
+    scale: 1.25,
+    type: "bitmap",
+    visible: null,
+    width: 765,
+    workerInstanceId: 1,
+  };
+  const draw = {
+    activityId: 4,
+    at: 36,
+    bitmapEventId: 3,
+    compositionId: 1,
+    distance: 0,
+    drawInvocationId: 1,
+    geometry: { bottom: 800, left: 100, right: 900, top: 100 },
+    geometryVisible: true,
+    height: 990,
+    page: 2,
+    readerViewport: { bottom: 900, left: 0, right: 1_100, top: 0 },
+    scale: 1.25,
+    source: "worker-bitmap",
+    visible: true,
+    visiblePages: [2],
+    width: 765,
+  };
+  const scenarioStart = { drawStart: 0, startedAt: 35 };
+  const select = ({
+    draws = [draw],
+    expected = expectedTarget,
+    imported = importEvent,
+    requireDraw = true,
+    scenario = scenarioStart,
+    workerEvents = [importEvent, render, bitmap],
+  } = {}) => selectPdfRasterCompositionSettlement({
+    draws,
+    expectedTarget: expected,
+    importEvent: imported,
+    pageNumber: 2,
+    requireDraw,
+    scenarioStart: scenario,
+    workerEvents,
+  });
+  const selected = select();
+  assert.equal(selected.request.eventId, 2);
+  assert.equal(selected.bitmap.eventId, 3);
+  assert.equal(selected.draw.bitmapEventId, 3);
+  assert.deepEqual(
+    select({ draws: [], requireDraw: false }),
+    { ...selected, draw: null },
+  );
+  assert.deepEqual(derivePdfPreviewRasterTarget({
+    pageHeight: 792,
+    pageWidth: 612,
+    targetScale: 2,
+  }), expectedTarget.capped === false
+    ? { height: 990, scale: 1.25, width: 765 }
+    : null);
+
+  const mutations = [
+    ["stale preview target", ({ request, response }) => {
+      request.scale = 1;
+      response.scale = 1;
+      response.width = 612;
+      response.height = 792;
+    }],
+    ["direct sharp", ({ request, response, composition }) => {
+      request.scale = 2;
+      response.scale = 2;
+      response.width = 1_224;
+      response.height = 1_584;
+      composition.scale = 2;
+      composition.width = 1_224;
+      composition.height = 1_584;
+    }],
+    ["visible request", ({ request }) => { request.visible = true; }],
+    ["wrong request distance", ({ request }) => { request.distance = 0; }],
+    ["wrong request worker", ({ request }) => {
+      request.workerInstanceId = 2;
+    }],
+    ["wrong bitmap job", ({ response }) => { response.jobId = 2; }],
+    ["wrong bitmap revision", ({ response }) => {
+      response.revision = "stale";
+    }],
+    ["bitmap before request", ({ request, response }) => {
+      request.activityId = 3;
+      response.activityId = 2;
+    }],
+    ["wrong bitmap dimensions", ({ response }) => { response.width -= 1; }],
+    ["null bitmap link", ({ composition }) => {
+      composition.bitmapEventId = null;
+    }],
+    ["wrong bitmap link", ({ composition }) => {
+      composition.bitmapEventId = 2;
+    }],
+    ["pre-scenario draw", ({ composition }) => { composition.at = 34; }],
+    ["nonvisible draw", ({ composition }) => { composition.visible = false; }],
+    ["distance-one draw", ({ composition }) => { composition.distance = 1; }],
+    ["geometry flag", ({ composition }) => {
+      composition.geometryVisible = false;
+    }],
+    ["geometry miss", ({ composition }) => {
+      composition.geometry.top = 1_000;
+      composition.geometry.bottom = 1_800;
+    }],
+    ["zero-area geometry", ({ composition }) => {
+      composition.geometry.right = composition.geometry.left;
+    }],
+    ["unsafe geometry", ({ composition }) => {
+      composition.geometry = {
+        bottom: 1e307 + 800,
+        left: 1e307,
+        right: 1e307 + 900,
+        top: 1e307,
+      };
+    }],
+    ["visible-page split", ({ composition }) => {
+      composition.visiblePages = [1];
+    }],
+    ["wrong source", ({ composition }) => {
+      composition.source = "main-fallback";
+    }],
+    ["wrong scale", ({ composition }) => { composition.scale = 1; }],
+    ["wrong dimensions", ({ composition }) => { composition.width -= 1; }],
+    ["draw before bitmap", ({ composition }) => {
+      composition.activityId = 2;
+    }],
+    ["unsafe draw clock", ({ composition }) => {
+      composition.at = Number.MAX_VALUE;
+    }],
+    ["forged composition occurrence", ({ composition }) => {
+      composition.compositionId = 2;
+    }],
+    ["import occurrence gap", ({ events }) => { events[2].eventId = 4; }],
+    ["import occurrence reorder", ({ events }) => {
+      [events[1], events[2]] = [events[2], events[1]];
+    }],
+  ];
+  for (const [label, mutate] of mutations) {
+    const request = structuredClone(render);
+    const response = structuredClone(bitmap);
+    const composition = structuredClone(draw);
+    const events = [structuredClone(importEvent), request, response];
+    mutate({ composition, events, request, response });
+    assert.equal(
+      select({ draws: [composition], workerEvents: events }),
+      null,
+      label,
+    );
+  }
+  assert.equal(select({ draws: [], workerEvents: [importEvent, bitmap] }), null);
+  for (const value of [1n, Number.NaN]) {
+    const changed = structuredClone(draw);
+    changed.bitmapEventId = value;
+    assert.doesNotThrow(() => select({ draws: [changed] }));
+    assert.equal(select({ draws: [changed] }), null);
+  }
+  const cyclic = structuredClone(draw);
+  cyclic.geometry = cyclic;
+  assert.doesNotThrow(() => select({ draws: [cyclic] }));
+  assert.equal(select({ draws: [cyclic] }), null);
+
+  const priorDraw = {
+    ...structuredClone(draw),
+    activityId: 4,
+    at: 34,
+    bitmapEventId: null,
+    compositionId: 1,
+    drawInvocationId: 1,
+    page: 1,
+  };
+  const boundaryDraw = {
+    ...structuredClone(draw),
+    activityId: 5,
+    compositionId: 2,
+    drawInvocationId: 2,
+  };
+  assert.notEqual(select({
+    draws: [priorDraw, boundaryDraw],
+    scenario: { drawStart: 1, startedAt: 35 },
+  }), null);
+  assert.equal(select({
+    draws: [boundaryDraw],
+    scenario: { drawStart: 1, startedAt: 35 },
+  }), null);
+});
+
+test("recomputes priority-mount predicates from one ordered ledger", () => {
+  const outputDirectory = path.join(
+    os.tmpdir(),
+    "issue-68-priority-mount-predicates",
+  );
+  const reportFor = (mutate) => {
+    const input = passingAppMatrixRuntimePriorityMountFailureInput(
+      outputDirectory,
+    );
+    mutate(input.rows[0].priorityMountDiagnostic, input.rows[0]);
+    return buildAppMatrixRuntimeDiagnosticReport(input).rows[0];
+  };
+  const semanticMutations = [
+    ["requestAfterBoundary", (raw) => {
+      raw.ledgerItems[0].eventId = raw.priorityBoundaryWorkerEventId - 2;
+      raw.ledgerItems[1].eventId = raw.priorityBoundaryWorkerEventId - 1;
+      raw.atFailureEventCount = raw.priorityBoundaryWorkerEventId;
+    }],
+    ["requestEnabled", (raw) => { raw.ledgerItems[0].enabled = null; }],
+    ["requestNonvisible", (raw) => { raw.ledgerItems[0].visible = true; }],
+    ["requestDistanceOne", (raw) => { raw.ledgerItems[0].distance = 2; }],
+    ["requestIdentityBound", (raw) => {
+      raw.ledgerItems[0].workerInstanceId += 1;
+    }],
+    ["requestIdentityBound", (raw) => {
+      raw.ledgerItems[0].jobId += 1;
+    }],
+    ["requestIdentityBound", (raw) => {
+      raw.ledgerItems[0].revision = "wrong-revision";
+    }],
+    ["bitmapPresent", (raw) => {
+      raw.ledgerItems.pop();
+      raw.targetEventCount = 1;
+      raw.atFailureEventCount = raw.ledgerItems[0].eventId;
+    }],
+    ["bitmapIdentityBound", (raw) => {
+      raw.ledgerItems[1].revision = "wrong-revision";
+    }],
+    ["bitmapAfterRequest", (raw) => {
+      const [request, bitmap] = raw.ledgerItems;
+      bitmap.eventId = raw.priorityBoundaryWorkerEventId + 1;
+      request.eventId = raw.priorityBoundaryWorkerEventId + 2;
+      raw.ledgerItems = [bitmap, request];
+    }],
+  ];
+  for (const [flag, mutate] of semanticMutations) {
+    const row = reportFor(mutate);
+    assert.equal(row.integrity, true, flag);
+    assert.equal(row.priorityMountDiagnostic.predicates[flag], false, flag);
+    if (flag.startsWith("request")) {
+      assert.equal(
+        row.priorityMountDiagnostic.predicates.strictRequestFound,
+        false,
+        flag,
+      );
+    }
+    if (flag.startsWith("bitmap")) {
+      assert.equal(
+        row.priorityMountDiagnostic.predicates.bitmapAfterStrictRequest,
+        false,
+        flag,
+      );
+    }
+  }
+
+  const wrongBitmapOnly = reportFor((raw) => {
+    raw.ledgerItems[1].workerInstanceId += 1;
+  });
+  assert.equal(wrongBitmapOnly.integrity, true);
+  assert.equal(
+    wrongBitmapOnly.priorityMountDiagnostic.predicates.bitmapAfterRequest,
+    true,
+  );
+  assert.equal(
+    wrongBitmapOnly.priorityMountDiagnostic.predicates
+      .bitmapAfterStrictRequest,
+    false,
+  );
+  const noBitmap = reportFor((raw) => {
+    raw.ledgerItems.pop();
+    raw.targetEventCount = 1;
+    raw.atFailureEventCount = raw.ledgerItems[0].eventId;
+  });
+  assert.equal(
+    noBitmap.priorityMountDiagnostic.predicates.bitmapAfterRequest,
+    false,
+  );
+  assert.equal(
+    noBitmap.priorityMountDiagnostic.predicates.bitmapAfterStrictRequest,
+    false,
+  );
+  const disabledCleanup = reportFor((raw) => {
+    const strictRequest = raw.ledgerItems[0];
+    const bitmap = raw.ledgerItems[1];
+    const cleanup = structuredClone(strictRequest);
+    cleanup.enabled = false;
+    cleanup.eventId = raw.priorityBoundaryWorkerEventId + 1;
+    cleanup.scale = 0;
+    strictRequest.eventId = raw.priorityBoundaryWorkerEventId + 2;
+    bitmap.eventId = raw.priorityBoundaryWorkerEventId + 3;
+    raw.ledgerItems = [cleanup, strictRequest, bitmap];
+    raw.atFailureEventCount = bitmap.eventId;
+    raw.targetEventCount = 3;
+  });
+  assert.equal(disabledCleanup.integrity, true);
+  assert.equal(
+    disabledCleanup.priorityMountDiagnostic.ledger.items[0].enabled,
+    false,
+  );
+  assert.equal(
+    disabledCleanup.priorityMountDiagnostic.ledger.items[0].scale,
+    0,
+  );
+  assert.equal(
+    disabledCleanup.priorityMountDiagnostic.predicates.strictRequestFound,
+    true,
+  );
+
+  const shellLag = reportFor((raw) => {
+    raw.mountedPages = [1, 2, 3, 5, 6];
+    raw.range = "0:2,4:5";
+    raw.pages[1] = {
+      canvas: {
+        height: null,
+        present: false,
+        scale: null,
+        source: null,
+        width: null,
+      },
+      distance: null,
+      page: 4,
+      present: false,
+      rect: null,
+      visible: null,
+    };
+  });
+  assert.equal(shellLag.integrity, true);
+  assert.equal(shellLag.priorityMountDiagnostic.target.present, false);
+  const distanceLag = reportFor((raw) => { raw.pages[1].distance = 2; });
+  assert.equal(distanceLag.integrity, true);
+  assert.equal(distanceLag.priorityMountDiagnostic.target.distance, 2);
+  const wrongThenCorrectBitmap = reportFor((raw) => {
+    const correctBitmap = raw.ledgerItems[1];
+    const wrongBitmap = structuredClone(correctBitmap);
+    wrongBitmap.eventId = raw.priorityBoundaryWorkerEventId + 2;
+    wrongBitmap.workerInstanceId += 1;
+    correctBitmap.eventId = raw.priorityBoundaryWorkerEventId + 3;
+    raw.ledgerItems = [raw.ledgerItems[0], wrongBitmap, correctBitmap];
+    raw.atFailureEventCount = correctBitmap.eventId;
+    raw.targetEventCount = 3;
+  });
+  assert.equal(wrongThenCorrectBitmap.integrity, true);
+  assert.equal(
+    wrongThenCorrectBitmap.priorityMountDiagnostic.predicates
+      .bitmapAfterStrictRequest,
+    true,
+  );
+  assert.equal(
+    wrongThenCorrectBitmap.priorityMountDiagnostic.predicates
+      .bitmapIdentityBound,
+    true,
+  );
+});
+
+test("fails closed on malformed priority-mount failure snapshots", () => {
+  const outputDirectory = path.join(
+    os.tmpdir(),
+    "issue-68-priority-mount-malformed",
+  );
+  const invalidMutations = [
+    ["boundary plus one", (raw) => {
+      raw.priorityBoundaryWorkerEventId += 1;
+    }],
+    ["boundary minus one", (raw) => {
+      raw.priorityBoundaryWorkerEventId -= 1;
+    }],
+    ["wrong page", (raw) => { raw.ledgerItems[0].pageNumber = 5; }],
+    ["render direction", (raw) => {
+      raw.ledgerItems[0].direction = "from-worker";
+    }],
+    ["bitmap direction", (raw) => {
+      raw.ledgerItems[1].direction = "to-worker";
+    }],
+    ["non-null request document", (raw) => {
+      raw.ledgerItems[0].documentKey = "private-document";
+    }],
+    ["non-null bitmap document", (raw) => {
+      raw.ledgerItems[1].documentKey = "private-document";
+    }],
+    ["negative ledger distance", (raw) => {
+      raw.ledgerItems[0].distance = -1;
+    }],
+    ["fractional ledger distance", (raw) => {
+      raw.ledgerItems[0].distance = 0.5;
+    }],
+    ["negative page distance", (raw) => { raw.pages[1].distance = -1; }],
+    ["fractional page distance", (raw) => {
+      raw.pages[1].distance = 0.5;
+    }],
+    ["missing render worker", (raw) => {
+      raw.ledgerItems[0].workerInstanceId = null;
+    }],
+    ["missing render job", (raw) => { raw.ledgerItems[0].jobId = null; }],
+    ["missing render revision", (raw) => {
+      raw.ledgerItems[0].revision = "";
+    }],
+    ["missing bitmap worker", (raw) => {
+      raw.ledgerItems[1].workerInstanceId = null;
+    }],
+    ["missing bitmap job", (raw) => { raw.ledgerItems[1].jobId = null; }],
+    ["missing bitmap revision", (raw) => {
+      raw.ledgerItems[1].revision = "";
+    }],
+    ["render scale zero", (raw) => { raw.ledgerItems[0].scale = 0; }],
+    ["enabled render scale missing", (raw) => {
+      raw.ledgerItems[0].scale = null;
+    }],
+    ["disabled render scale missing", (raw) => {
+      raw.ledgerItems[0].enabled = false;
+      raw.ledgerItems[0].scale = null;
+    }],
+    ["render width", (raw) => { raw.ledgerItems[0].width = 1; }],
+    ["render height", (raw) => { raw.ledgerItems[0].height = 1; }],
+    ["bitmap scale zero", (raw) => { raw.ledgerItems[1].scale = 0; }],
+    ["bitmap width zero", (raw) => { raw.ledgerItems[1].width = 0; }],
+    ["bitmap height zero", (raw) => { raw.ledgerItems[1].height = 0; }],
+    ["bitmap enabled", (raw) => { raw.ledgerItems[1].enabled = false; }],
+    ["bitmap visible", (raw) => { raw.ledgerItems[1].visible = false; }],
+    ["bitmap distance", (raw) => { raw.ledgerItems[1].distance = 0; }],
+    ["private centering range", (raw) => {
+      raw.centeringProof.samples[0].range = "/home/private.pdf";
+    }],
+    ["overlapping centering range", (raw) => {
+      raw.centeringProof.samples[0].range = "0:3,3:5";
+    }],
+    ["out-of-range centering range", (raw) => {
+      raw.centeringProof.samples[0].range = "0:6";
+    }],
+    ["noncanonical centering range", (raw) => {
+      raw.centeringProof.samples[0].range = "00:5";
+    }],
+    ["noncanonical top-level range", (raw) => {
+      raw.range = "00:5";
+    }],
+    ["ledger order", (raw) => { raw.ledgerItems.reverse(); }],
+    ["truncation", (raw) => {
+      raw.truncated = true;
+      raw.targetEventCount += 1;
+    }],
+    ["extra field", (raw) => { raw.extra = true; }],
+    ["missing field", (raw) => { delete raw.range; }],
+    ["nonarray ledger", (raw) => { raw.ledgerItems = {}; }],
+    ["nonarray pages", (raw) => { raw.pages = null; }],
+    ["private field", (raw) => { raw.privatePath = "/home/private.pdf"; }],
+  ];
+  for (const [label, mutate] of invalidMutations) {
+    const input = passingAppMatrixRuntimePriorityMountFailureInput(
+      outputDirectory,
+    );
+    mutate(input.rows[0].priorityMountDiagnostic);
+    const row = buildAppMatrixRuntimeDiagnosticReport(input).rows[0];
+    assert.equal(row.integrity, false, label);
+    assert.equal(row.priorityMountDiagnostic, null, label);
+    assert.doesNotMatch(JSON.stringify(row), /private\.pdf/u, label);
+  }
+
+  const contradictoryGeometry =
+    passingAppMatrixRuntimePriorityMountFailureInput(outputDirectory);
+  const contradictoryCentering = contradictoryGeometry.rows[0]
+    .priorityMountDiagnostic.centeringProof;
+  contradictoryCentering.samples.forEach((sample) => {
+    sample.page.height += 1e-6;
+  });
+  contradictoryCentering.summary = summarizePdfPageCenteringStability(
+    contradictoryCentering.samples,
+    contradictoryCentering.pageNumber,
+  );
+  assert.deepEqual(contradictoryCentering.summary, {
+    centered: false,
+    ready: false,
+    stableSampleCount: 0,
+  });
+  const contradictoryRow = buildAppMatrixRuntimeDiagnosticReport(
+    contradictoryGeometry,
+  ).rows[0];
+  assert.equal(contradictoryRow.integrity, false);
+  assert.equal(contradictoryRow.priorityMountDiagnostic, null);
+
+  const negativeScrollInput =
+    passingAppMatrixRuntimePriorityMountFailureInput(outputDirectory);
+  const negativeScrollCentering = negativeScrollInput.rows[0]
+    .priorityMountDiagnostic.centeringProof;
+  negativeScrollCentering.samples.forEach((sample) => {
+    sample.reader.scrollTop = -1;
+  });
+  negativeScrollCentering.summary = summarizePdfPageCenteringStability(
+    negativeScrollCentering.samples,
+    negativeScrollCentering.pageNumber,
+  );
+  assert.deepEqual(negativeScrollCentering.summary, {
+    centered: false,
+    ready: false,
+    stableSampleCount: 0,
+  });
+  const negativeScrollRow = buildAppMatrixRuntimeDiagnosticReport(
+    negativeScrollInput,
+  ).rows[0];
+  assert.equal(negativeScrollRow.integrity, false);
+  assert.equal(negativeScrollRow.priorityMountDiagnostic, null);
+  assert.doesNotMatch(JSON.stringify(negativeScrollRow), /"scrollTop":-1/u);
+
+  const intermediateImpossible =
+    passingAppMatrixRuntimePriorityMountFailureInput(
+      outputDirectory,
+      { checkpoint: "intermediate-scroll" },
+    );
+  const impossibleCentering = intermediateImpossible.rows[0]
+    .priorityMountDiagnostic.centeringProof;
+  const impossibleSample = structuredClone(
+    passingAppMatrixRuntimePriorityMountFailureInput(outputDirectory)
+      .rows[0].priorityMountDiagnostic.centeringProof.samples[0],
+  );
+  impossibleSample.visible = false;
+  impossibleSample.page.width += 1e-6;
+  impossibleCentering.samples = [impossibleSample];
+  impossibleCentering.summary = summarizePdfPageCenteringStability(
+    impossibleCentering.samples,
+    impossibleCentering.pageNumber,
+  );
+  const intermediateImpossibleRow = buildAppMatrixRuntimeDiagnosticReport(
+    intermediateImpossible,
+  ).rows[0];
+  assert.equal(intermediateImpossibleRow.integrity, false);
+  assert.equal(intermediateImpossibleRow.priorityMountDiagnostic, null);
+
+  const excludedRange = "0:1,3:5";
+  const readyRangeExclusion =
+    passingAppMatrixRuntimePriorityMountFailureInput(outputDirectory);
+  const readyCentering = readyRangeExclusion.rows[0]
+    .priorityMountDiagnostic.centeringProof;
+  readyCentering.samples.forEach((sample) => {
+    sample.range = excludedRange;
+  });
+  readyCentering.summary = summarizePdfPageCenteringStability(
+    readyCentering.samples,
+    readyCentering.pageNumber,
+  );
+  const readyRangeRow = buildAppMatrixRuntimeDiagnosticReport(
+    readyRangeExclusion,
+  ).rows[0];
+  assert.equal(readyRangeRow.integrity, false);
+  assert.equal(readyRangeRow.priorityMountDiagnostic, null);
+  assert.doesNotMatch(JSON.stringify(readyRangeRow), /0:1,3:5/u);
+
+  const partialRangeExclusion =
+    passingAppMatrixRuntimePriorityMountFailureInput(
+      outputDirectory,
+      { checkpoint: "intermediate-scroll" },
+    );
+  const producerSample = structuredClone(
+    passingAppMatrixRuntimePriorityMountFailureInput(outputDirectory)
+      .rows[0].priorityMountDiagnostic.centeringProof.samples[0],
+  );
+  producerSample.range = excludedRange;
+  producerSample.visible = false;
+  const partialCentering = partialRangeExclusion.rows[0]
+    .priorityMountDiagnostic.centeringProof;
+  partialCentering.samples = [producerSample];
+  partialCentering.summary = summarizePdfPageCenteringStability(
+    partialCentering.samples,
+    partialCentering.pageNumber,
+  );
+  const partialRangeRow = buildAppMatrixRuntimeDiagnosticReport(
+    partialRangeExclusion,
+  ).rows[0];
+  assert.equal(partialRangeRow.integrity, false);
+  assert.equal(partialRangeRow.priorityMountDiagnostic, null);
+  assert.doesNotMatch(JSON.stringify(partialRangeRow), /0:1,3:5/u);
+
+  const successWithSnapshot = passingAppMatrixRuntimeCompletedInput(
+    outputDirectory,
+  );
+  successWithSnapshot.rows[0].priorityMountDiagnostic =
+    passingAppMatrixRuntimePriorityMountFailureInput(outputDirectory)
+      .rows[0].priorityMountDiagnostic;
+  const successRow = buildAppMatrixRuntimeDiagnosticReport(
+    successWithSnapshot,
+  ).rows[0];
+  assert.equal(successRow.priorityMountDiagnostic, null);
+  assert.equal(successRow.integrity, false);
+
+  const otherFailureWithSnapshot = passingAppMatrixRuntimeFailureInput(
+    outputDirectory,
+  );
+  otherFailureWithSnapshot.rows[0].priorityMountDiagnostic =
+    passingAppMatrixRuntimePriorityMountFailureInput(outputDirectory)
+      .rows[0].priorityMountDiagnostic;
+  const otherFailureRow = buildAppMatrixRuntimeDiagnosticReport(
+    otherFailureWithSnapshot,
+  ).rows[0];
+  assert.equal(otherFailureRow.priorityMountDiagnostic, null);
+  assert.equal(otherFailureRow.integrity, false);
+
+  const base = passingAppMatrixRuntimePriorityMountFailureInput(
+    outputDirectory,
+  ).rows[0];
+  const malformed = [null, 1, "diagnostic", [], [null], {}, {
+    ...base.priorityMountDiagnostic,
+    ledgerItems: [null],
+  }, {
+    ...base.priorityMountDiagnostic,
+    atFailureEventCount: 1n,
+  }];
+  const cyclic = structuredClone(base.priorityMountDiagnostic);
+  cyclic.reader = cyclic;
+  const bigintCentering = structuredClone(base.priorityMountDiagnostic);
+  bigintCentering.centeringProof.samples[0].page.top = 1n;
+  const cyclicCentering = structuredClone(base.priorityMountDiagnostic);
+  cyclicCentering.centeringProof.samples[0].page =
+    cyclicCentering.centeringProof.samples[0];
+  malformed.push(cyclic, bigintCentering, cyclicCentering);
+  for (const value of malformed) {
+    assert.doesNotThrow(() =>
+      sanitizeAppMatrixRuntimePriorityMountDiagnostic(value, base)
+    );
+    assert.equal(
+      sanitizeAppMatrixRuntimePriorityMountDiagnostic(value, base).bound,
+      false,
+    );
+  }
+});
+
+test("binds all six app-matrix runtime rows and the exact sixth timeout", () => {
+  const outputDirectory = path.join(
+    os.tmpdir(),
+    "issue-68-app-matrix-runtime-complete",
+  );
+  const completedInput = passingAppMatrixRuntimeCompletedInput(outputDirectory);
+  for (const row of completedInput.rows) {
+    assert.equal(isCdpFixedPointDiagnosticHealthy(row.networkFixedPoint), true);
+  }
+  const completed = buildAppMatrixRuntimeDiagnosticReport(completedInput);
+  assert.equal(
+    completed.completed,
+    true,
+    JSON.stringify(completed.rows.map((row) => row.integrityReasons), null, 2),
+  );
+  assert.deepEqual(completed.failures, []);
+  assert.equal(completed.rows.length, 6);
+  assert.ok(completed.rows.every((row) =>
+    row.timing.phaseMarkers[0].sequence === 1
+  ));
+  assert.ok(completed.rows.every((row) => row.release.events.total === 0));
+  assert.ok(completed.rows.every((row) =>
+    row.timing.longAnimationFrames.availability === "unavailable" &&
+    row.timing.longAnimationFrames.total === 0
+  ));
+
+  const completedMetadataMutations = [
+    ["omitted detached state", (diagnostic) => {
+      delete diagnostic.targets[0].detached;
+    }],
+    ["null detached state", (diagnostic) => {
+      diagnostic.targets[0].detached = null;
+    }],
+    ["string detached state", (diagnostic) => {
+      diagnostic.targets[0].detached = "false";
+    }],
+    ["phantom ancestry", (diagnostic) => {
+      diagnostic.targets[0].ancestry.push({
+        phase: "private-phase",
+        sessionId: "private-parent",
+        type: "worker",
+        urlClass: "other-local",
+      });
+    }],
+    ["cyclic ancestry", (diagnostic) => {
+      diagnostic.targets[0].parentSessionId = diagnostic.targets[0].sessionId;
+      diagnostic.targets[0].ancestry = [];
+    }],
+    ["parent after child", (diagnostic) => {
+      const childIndex = diagnostic.targets.findIndex((target) =>
+        target.phase === diagnostic.label &&
+        target.urlClass === "pdf-parser-worker"
+      );
+      const parentIndex = diagnostic.targets.findIndex((target) =>
+        target.sessionId === diagnostic.targets[childIndex].parentSessionId
+      );
+      [diagnostic.targets[parentIndex], diagnostic.targets[childIndex]] = [
+        diagnostic.targets[childIndex],
+        diagnostic.targets[parentIndex],
+      ];
+    }],
+  ];
+  for (const [label, mutate] of completedMetadataMutations) {
+    const changed = structuredClone(completedInput);
+    mutate(changed.rows.at(-1).networkFixedPoint);
+    const report = buildAppMatrixRuntimeDiagnosticReport(changed);
+    assert.equal(report.completed, false, label);
+    assert.equal(report.rows.at(-1).integrity, false, label);
+  }
+
+  const unresolvedHistoryInput = structuredClone(completedInput);
+  const retainedServiceSession = unresolvedHistoryInput.rows[0]
+    .networkFixedPoint.targets.find((target) =>
+      target.type === "service_worker"
+    ).sessionId;
+  for (const row of unresolvedHistoryInput.rows) {
+    const target = row.networkFixedPoint.targets.find((candidate) =>
+      candidate.sessionId === retainedServiceSession
+    );
+    target.parentSessionId = "unresolved-private-parent";
+    target.ancestry = [];
+  }
+  const unresolvedHistory = buildAppMatrixRuntimeDiagnosticReport(
+    unresolvedHistoryInput,
+  );
+  assert.equal(unresolvedHistory.completed, false);
+  assert.ok(unresolvedHistory.rows.some((row) => row.integrity === false));
+
+  const retainedEventsInput = structuredClone(completedInput);
+  retainedEventsInput.rows[0].releaseSnapshot.workerEvents =
+    passingAppMatrixRuntimeReleaseEvents(retainedEventsInput.rows[0]);
+  const retainedEvents = buildAppMatrixRuntimeDiagnosticReport(
+    retainedEventsInput,
+  );
+  assert.equal(
+    retainedEvents.completed,
+    true,
+    retainedEvents.failures.join("\n"),
+  );
+  assert.equal(retainedEvents.rows[0].release.events.total, 2);
+
+  const failedInput = structuredClone(completedInput);
+  const failed = failedInput.rows[5];
+  failed.stageHistory = APP_MATRIX_RUNTIME_DIAGNOSTIC_STAGES.slice(
+    0,
+    APP_MATRIX_RUNTIME_DIAGNOSTIC_STAGES.indexOf(
+      "release-observation-started",
+    ) + 1,
+  );
+  failed.currentStage = "release-observation-started";
+  failed.failureStage = "release-observation-started";
+  failed.status = "failed";
+  failed.networkFixedPoint = null;
+  failed.releaseSnapshot.pages[0].canvas.height = 100;
+  failed.releaseSnapshot.pages[0].canvas.width = 100;
+  failed.releaseSnapshot.waitOutcome = "timeout";
+  failed.completedSnapshot.phaseMarkers = failed.stageHistory
+    .filter((stage) => !stage.startsWith("navigate-"))
+    .map((stage, index) => ({
+      activityId: index + 1,
+      at: 50 + index * 10,
+      configurationId: failed.configurationId,
+      drawInvocationId: index,
+      sequence: index + 1,
+      stage,
+      workerEventId: index,
+    }));
+  failedInput.runnerFailure = new Error("/home/private/sixth timeout");
+  failedInput.runnerFailureStage = "matrix:mobile-dpr3-pinch200";
+  const timeout = buildAppMatrixRuntimeDiagnosticReport(failedInput);
+  assert.equal(timeout.completed, false);
+  assert.equal(timeout.execution.completedConfigurationCount, 5);
+  assert.equal(
+    timeout.execution.failedConfigurationId,
+    "mobile-dpr3-pinch200",
+  );
+  assert.equal(timeout.execution.orderExact, true, timeout.failures.join("\n"));
+  assert.equal(timeout.rows[5].adjacentPage, 3);
+  assert.equal(timeout.rows[5].priorityTarget, 6);
+  assert.equal(timeout.rows[5].release.classification, "offscreen-stale-canvas");
+  assert.deepEqual(timeout.failures, [
+    "The bounded app-matrix runtime diagnostic runner reported a stage failure.",
+  ]);
+
+  failedInput.runnerFailureStage = "matrix:desktop-dpr1-zoom100";
+  const substitutedStage = buildAppMatrixRuntimeDiagnosticReport(failedInput);
+  assert.equal(substitutedStage.execution.orderExact, true);
+  assert.ok(substitutedStage.failures.some((failure) =>
+    failure.includes("failure row is not bound")
+  ));
+});
+
+test("retains a privacy-safe fixed-point timeout on the failed matrix row", () => {
+  const outputDirectory = path.join(
+    os.tmpdir(),
+    "issue-68-app-matrix-network-timeout",
+  );
+  const input = passingAppMatrixRuntimeNetworkTimeoutInput(outputDirectory);
+  const report = buildAppMatrixRuntimeDiagnosticReport(input);
+  assert.equal(report.completed, false);
+  assert.equal(report.execution.orderExact, true, report.failures.join("\n"));
+  assert.equal(report.rows[1].integrity, true);
+  assert.equal(report.rows[1].failureCategory, "fixed-point-timeout");
+  assert.deepEqual(report.rows[1].networkFailure.failureClasses, [
+    "stability",
+  ]);
+  assert.equal(report.rows[1].networkFailure.label, input.rows[1].configurationId);
+  assert.equal(report.rows[1].networkFailure.stability.timeoutMs, 10_000);
+  assert.equal(report.rows[1].networkFixedPoint, null);
+  assert.deepEqual(report.failures, [
+    "The bounded app-matrix runtime diagnostic runner reported a stage failure.",
+  ]);
+
+  const attachFailureInput = passingAppMatrixRuntimeNetworkTimeoutInput(
+    outputDirectory,
+  );
+  const attachFailureDiagnostic =
+    attachFailureInput.rows[1].networkFailure.diagnostic;
+  const failedTarget = attachFailureDiagnostic.targets
+    .slice(attachFailureDiagnostic.importBoundary.targetCount)
+    .find((target) =>
+    target.phase === attachFailureDiagnostic.label &&
+    target.urlClass === "pdf-document-worker"
+    );
+  const resumeCommand = failedTarget.commands.at(-1);
+  failedTarget.commands = [
+    { ...failedTarget.commands[0], status: "failed" },
+    failedTarget.commands[1],
+    {
+      ...resumeCommand,
+      dispatchSequence: 3,
+      resultSequence: 3,
+    },
+  ];
+  failedTarget.attachComplete = false;
+  attachFailureDiagnostic.attachErrors = [{
+    category: "setup",
+    command: "network-enable",
+    identityHash: diagnosticIdentity(
+      failedTarget.sessionId,
+      failedTarget.targetId,
+    ),
+    sessionId: failedTarget.sessionId,
+    targetId: failedTarget.targetId,
+    type: failedTarget.type,
+    urlClass: failedTarget.urlClass,
+  }];
+  attachFailureDiagnostic.targetBootstrapSettlements =
+    attachFailureDiagnostic.targetBootstrapSettlements.filter(
+      (entry) => entry.targetSessionId !== failedTarget.sessionId,
+    );
+  attachFailureDiagnostic.counts.attachErrorCount = 1;
+  attachFailureDiagnostic.counts.targetBootstrapSettlementCount =
+    attachFailureDiagnostic.targetBootstrapSettlements.length;
+  for (const sample of attachFailureDiagnostic.wait.recentSamples) {
+    sample.attachErrorCount = 1;
+    sample.attachmentReady = false;
+    sample.incompleteTargetCount = 1;
+    sample.stableSamples = 0;
+  }
+  attachFailureDiagnostic.wait.stableSamples = 0;
+  const attachFailure = buildAppMatrixRuntimeDiagnosticReport(
+    attachFailureInput,
+  );
+  assert.equal(
+    attachFailure.execution.orderExact,
+    true,
+    attachFailure.failures.join("\n"),
+  );
+  assert.equal(attachFailure.rows[1].integrity, true);
+  assert.deepEqual(attachFailure.rows[1].networkFailure.failureClasses, [
+    "attach-setup",
+    "pdf-cardinality",
+    "stability",
+  ]);
+  attachFailureDiagnostic.attachErrors[0].type = "shared_worker";
+  attachFailureDiagnostic.attachErrors[0].urlClass = "other-local";
+  const metadataDrift = buildAppMatrixRuntimeDiagnosticReport(
+    attachFailureInput,
+  );
+  assert.equal(
+    metadataDrift.execution.orderExact,
+    true,
+    metadataDrift.failures.join("\n"),
+  );
+  assert.equal(metadataDrift.rows[1].integrity, true);
+
+  const unexpectedInput = passingAppMatrixRuntimeNetworkTimeoutInput(
+    outputDirectory,
+  );
+  unexpectedInput.rows[1].networkFailure = {
+    category: "unexpected",
+    diagnostic: null,
+  };
+  const unexpected = buildAppMatrixRuntimeDiagnosticReport(unexpectedInput);
+  assert.equal(unexpected.execution.orderExact, true);
+  assert.deepEqual(unexpected.rows[1].networkFailure, {
+    category: "unexpected",
+    label: unexpected.rows[1].configurationId,
+  });
+
+  const timeoutDiagnostic = (value) =>
+    value.rows[1].networkFailure.diagnostic;
+  const firstRowTimeoutInput = () => {
+    const value = passingAppMatrixRuntimeCompletedInput(outputDirectory);
+    value.rows.length = 1;
+    const row = value.rows[0];
+    row.stageHistory = APP_MATRIX_RUNTIME_DIAGNOSTIC_STAGES.slice(0, -1);
+    row.currentStage = "network-fixed-point-started";
+    row.failureStage = "network-fixed-point-started";
+    row.networkFixedPoint = null;
+    row.networkFailure = {
+      category: "fixed-point-timeout",
+      diagnostic: passingAppMatrixRuntimeNetworkTimeoutDiagnostic(
+        row.configurationId,
+      ),
+    };
+    row.status = "failed";
+    value.runnerFailure = new Error("/home/private/first-row timeout");
+    value.runnerFailureStage = `matrix:${row.configurationId}`;
+    return value;
+  };
+  const currentDocumentTarget = (diagnostic) => diagnostic.targets
+    .slice(diagnostic.importBoundary?.targetCount ?? 0)
+    .find(
+      (target) => target.phase === diagnostic.label &&
+        target.urlClass === "pdf-document-worker",
+    );
+  const removeTargetSettlement = (diagnostic, target) => {
+    diagnostic.targetBootstrapSettlements =
+      diagnostic.targetBootstrapSettlements.filter(
+        (entry) => entry.targetSessionId !== target.sessionId,
+      );
+    diagnostic.counts.targetBootstrapSettlementCount =
+      diagnostic.targetBootstrapSettlements.length;
+  };
+  const rebindTargetParent = (
+    diagnostic,
+    target,
+    parentSessionId,
+    ancestry,
+  ) => {
+    target.parentSessionId = parentSessionId;
+    target.ancestry = ancestry;
+    const settlement = diagnostic.targetBootstrapSettlements.find((entry) =>
+      entry.targetSessionId === target.sessionId
+    );
+    settlement.requestSessionId = parentSessionId;
+    settlement.targetParentSessionId = parentSessionId;
+    settlement.identityHash = diagnosticIdentity(
+      settlement.requestSessionId,
+      settlement.requestId,
+      settlement.targetSessionId,
+      settlement.targetId,
+    );
+  };
+  const validFirstRowTimeout = buildAppMatrixRuntimeDiagnosticReport(
+    firstRowTimeoutInput(),
+  );
+  assert.equal(
+    validFirstRowTimeout.execution.orderExact,
+    true,
+    validFirstRowTimeout.failures.join("\n"),
+  );
+  assert.equal(validFirstRowTimeout.rows[0].integrity, true);
+
+  const firstRowAncestryMutations = [
+    ["unresolved parent", (diagnostic) => {
+      const target = currentDocumentTarget(diagnostic);
+      rebindTargetParent(
+        diagnostic,
+        target,
+        "unresolved-private-parent",
+        [],
+      );
+    }],
+    ["self cycle", (diagnostic) => {
+      const target = currentDocumentTarget(diagnostic);
+      rebindTargetParent(diagnostic, target, target.sessionId, []);
+    }],
+    ["two-target cycle", (diagnostic) => {
+      const documentTarget = currentDocumentTarget(diagnostic);
+      const parserTarget = diagnostic.targets.find((target) =>
+        target.phase === diagnostic.label &&
+        target.urlClass === "pdf-parser-worker"
+      );
+      rebindTargetParent(
+        diagnostic,
+        documentTarget,
+        parserTarget.sessionId,
+        [{
+          phase: parserTarget.phase,
+          sessionId: parserTarget.sessionId,
+          type: parserTarget.type,
+          urlClass: parserTarget.urlClass,
+        }],
+      );
+      rebindTargetParent(
+        diagnostic,
+        parserTarget,
+        documentTarget.sessionId,
+        [{
+          phase: documentTarget.phase,
+          sessionId: documentTarget.sessionId,
+          type: documentTarget.type,
+          urlClass: documentTarget.urlClass,
+        }],
+      );
+    }],
+    ["parent after child", (diagnostic) => {
+      const childIndex = diagnostic.targets.findIndex((target) =>
+        target.phase === diagnostic.label &&
+        target.urlClass === "pdf-parser-worker"
+      );
+      const parentIndex = diagnostic.targets.findIndex((target) =>
+        target.sessionId === diagnostic.targets[childIndex].parentSessionId
+      );
+      [diagnostic.targets[parentIndex], diagnostic.targets[childIndex]] = [
+        diagnostic.targets[childIndex],
+        diagnostic.targets[parentIndex],
+      ];
+    }],
+  ];
+  for (const [label, mutate] of firstRowAncestryMutations) {
+    const value = firstRowTimeoutInput();
+    mutate(value.rows[0].networkFailure.diagnostic);
+    const changed = buildAppMatrixRuntimeDiagnosticReport(value);
+    assert.equal(changed.completed, false, label);
+    assert.equal(changed.rows[0].integrity, false, label);
+  }
+  const bindIncompleteSamples = (
+    diagnostic,
+    { attachErrorCount = 0, pendingAttachCount = 0 } = {},
+  ) => {
+    for (const sample of diagnostic.wait.recentSamples) {
+      sample.attachErrorCount = attachErrorCount;
+      sample.attachmentReady = false;
+      sample.incompleteTargetCount = 1;
+      sample.pendingAttachCount = pendingAttachCount;
+      sample.stableSamples = 0;
+    }
+    diagnostic.wait.stableSamples = 0;
+  };
+  const makeFailedTarget = (
+    value,
+    {
+      errorCommand = "network-enable",
+      failedCommandCount = 1,
+      withError = false,
+    } = {},
+  ) => {
+    const diagnostic = timeoutDiagnostic(value);
+    const target = currentDocumentTarget(diagnostic);
+    const resume = target.commands.at(-1);
+    target.commands = [
+      { ...target.commands[0], status: "failed" },
+      {
+        ...target.commands[1],
+        status: failedCommandCount > 1 ? "failed" : "completed",
+      },
+      { ...resume, dispatchSequence: 3, resultSequence: 3 },
+    ];
+    target.attachComplete = false;
+    removeTargetSettlement(diagnostic, target);
+    diagnostic.attachErrors = withError
+      ? [{
+          category: "setup",
+          command: errorCommand,
+          identityHash: diagnosticIdentity(target.sessionId, target.targetId),
+          sessionId: target.sessionId,
+          targetId: target.targetId,
+          type: target.type,
+          urlClass: target.urlClass,
+        }]
+      : [];
+    diagnostic.counts.attachErrorCount = diagnostic.attachErrors.length;
+    bindIncompleteSamples(diagnostic, {
+      attachErrorCount: diagnostic.attachErrors.length,
+    });
+    return { diagnostic, target };
+  };
+  const setResumePending = ({ diagnostic, target }) => {
+    const resume = target.commands.at(-1);
+    resume.resultAt = null;
+    resume.resultSequence = null;
+    resume.status = "pending";
+    target.resumed = false;
+    diagnostic.pendingAttaches = [{
+      commands: target.commands.map((command) => ({ ...command })),
+      commandDeadlineAt: target.commandDeadlineAt,
+      identityHash: diagnosticIdentity(target.sessionId, target.targetId),
+      parentSessionId: target.parentSessionId,
+      phase: target.phase,
+      resumeDispatchedAt: target.resumeDispatchedAt,
+      sessionId: target.sessionId,
+      targetId: target.targetId,
+      type: target.type,
+      urlClass: target.urlClass,
+    }];
+    diagnostic.counts.pendingAttachCount = 1;
+    bindIncompleteSamples(diagnostic, {
+      attachErrorCount: diagnostic.attachErrors.length,
+      pendingAttachCount: 1,
+    });
+    return { diagnostic, target };
+  };
+  const makeSetupAndResumeFailureTarget = (
+    value,
+    { errorOrder = ["setup", "resume"] } = {},
+  ) => {
+    const state = makeFailedTarget(value);
+    const { diagnostic, target } = state;
+    const resume = target.commands.at(-1);
+    resume.status = "failed";
+    target.resumed = false;
+    const errorByCategory = {
+      resume: {
+        category: "resume",
+        command: "resume",
+        identityHash: diagnosticIdentity(target.sessionId, target.targetId),
+        sessionId: target.sessionId,
+        targetId: target.targetId,
+        type: target.type,
+        urlClass: target.urlClass,
+      },
+      setup: {
+        category: "setup",
+        command: "network-enable",
+        identityHash: diagnosticIdentity(target.sessionId, target.targetId),
+        sessionId: target.sessionId,
+        targetId: target.targetId,
+        type: target.type,
+        urlClass: target.urlClass,
+      },
+    };
+    diagnostic.attachErrors = errorOrder.map((category) => ({
+      ...errorByCategory[category],
+    }));
+    diagnostic.counts.attachErrorCount = diagnostic.attachErrors.length;
+    bindIncompleteSamples(diagnostic, {
+      attachErrorCount: diagnostic.attachErrors.length,
+    });
+    return state;
+  };
+  const makePendingTarget = (value, { withPending = false } = {}) => {
+    const diagnostic = timeoutDiagnostic(value);
+    const target = currentDocumentTarget(diagnostic);
+    target.commands = [
+      target.commands[0],
+      {
+        ...target.commands[1],
+        resultAt: null,
+        resultSequence: null,
+        status: "pending",
+      },
+    ];
+    target.attachComplete = false;
+    target.resumed = false;
+    target.resumeDispatchedAt = null;
+    removeTargetSettlement(diagnostic, target);
+    diagnostic.pendingAttaches = withPending
+      ? [{
+          commands: target.commands.map((command) => ({ ...command })),
+          commandDeadlineAt: target.commandDeadlineAt,
+          identityHash: diagnosticIdentity(target.sessionId, target.targetId),
+          parentSessionId: target.parentSessionId,
+          phase: target.phase,
+          resumeDispatchedAt: target.resumeDispatchedAt,
+          sessionId: target.sessionId,
+          targetId: target.targetId,
+          type: target.type,
+          urlClass: target.urlClass,
+        }]
+      : [];
+    diagnostic.counts.pendingAttachCount = diagnostic.pendingAttaches.length;
+    bindIncompleteSamples(diagnostic, {
+      pendingAttachCount: diagnostic.pendingAttaches.length,
+    });
+    return { diagnostic, target };
+  };
+  const makeResumeFailureTarget = (value, category = "resume") => {
+    const diagnostic = timeoutDiagnostic(value);
+    const target = currentDocumentTarget(diagnostic);
+    const resume = target.commands.at(-1);
+    resume.status = "failed";
+    target.attachComplete = false;
+    target.resumed = false;
+    removeTargetSettlement(diagnostic, target);
+    diagnostic.attachErrors = [{
+      category,
+      command: "resume",
+      identityHash: diagnosticIdentity(target.sessionId, target.targetId),
+      sessionId: target.sessionId,
+      targetId: target.targetId,
+      type: target.type,
+      urlClass: target.urlClass,
+    }];
+    diagnostic.counts.attachErrorCount = 1;
+    bindIncompleteSamples(diagnostic, { attachErrorCount: 1 });
+    return { diagnostic, target };
+  };
+  const makeSequentialPendingTarget = (
+    value,
+    { resumePending = false, withError = false } = {},
+  ) => {
+    const diagnostic = timeoutDiagnostic(value);
+    const target = currentDocumentTarget(diagnostic);
+    target.commands = target.commands.slice(0, resumePending ? 5 : 3);
+    const pendingCommand = target.commands.at(-1);
+    pendingCommand.resultAt = null;
+    pendingCommand.resultSequence = null;
+    pendingCommand.status = "pending";
+    target.attachComplete = false;
+    target.resumed = false;
+    target.resumeDispatchedAt = resumePending
+      ? pendingCommand.dispatchedAt
+      : null;
+    removeTargetSettlement(diagnostic, target);
+    diagnostic.pendingAttaches = [{
+      commands: target.commands.map((command) => ({ ...command })),
+      commandDeadlineAt: target.commandDeadlineAt,
+      identityHash: diagnosticIdentity(target.sessionId, target.targetId),
+      parentSessionId: target.parentSessionId,
+      phase: target.phase,
+      resumeDispatchedAt: target.resumeDispatchedAt,
+      sessionId: target.sessionId,
+      targetId: target.targetId,
+      type: target.type,
+      urlClass: target.urlClass,
+    }];
+    diagnostic.attachErrors = withError
+      ? [{
+          category: "setup",
+          command: null,
+          identityHash: diagnosticIdentity(target.sessionId, target.targetId),
+          sessionId: target.sessionId,
+          targetId: target.targetId,
+          type: target.type,
+          urlClass: target.urlClass,
+        }]
+      : [];
+    diagnostic.counts.attachErrorCount = diagnostic.attachErrors.length;
+    diagnostic.counts.pendingAttachCount = 1;
+    bindIncompleteSamples(diagnostic, {
+      attachErrorCount: diagnostic.attachErrors.length,
+      pendingAttachCount: 1,
+    });
+    return { diagnostic, target };
+  };
+  const makeServicePendingTarget = (value, { withError = false } = {}) => {
+    const diagnostic = timeoutDiagnostic(value);
+    const setup = completedCdpTargetSetup({
+      cdpIdStart: 1_001,
+      serviceWorker: true,
+      startedAt: 1_100,
+    });
+    const target = {
+      ancestry: [],
+      attachComplete: false,
+      ...setup,
+      detached: false,
+      identityHash: diagnosticIdentity(
+        `${diagnostic.label}-pending-service-session`,
+        `${diagnostic.label}-pending-service-target`,
+      ),
+      parentSessionId: null,
+      phase: diagnostic.label,
+      resumed: true,
+      sessionId: `${diagnostic.label}-pending-service-session`,
+      targetId: `${diagnostic.label}-pending-service-target`,
+      type: "service_worker",
+      urlClass: "app-asset",
+      waitingForDebugger: true,
+      workerInstanceId: null,
+    };
+    target.commands[0].status = "failed";
+    target.commands[3].resultAt = null;
+    target.commands[3].resultSequence = null;
+    target.commands[3].status = "pending";
+    diagnostic.targets.push(target);
+    diagnostic.pendingAttaches = [{
+      commands: target.commands.map((command) => ({ ...command })),
+      commandDeadlineAt: target.commandDeadlineAt,
+      identityHash: diagnosticIdentity(target.sessionId, target.targetId),
+      parentSessionId: target.parentSessionId,
+      phase: target.phase,
+      resumeDispatchedAt: target.resumeDispatchedAt,
+      sessionId: target.sessionId,
+      targetId: target.targetId,
+      type: target.type,
+      urlClass: target.urlClass,
+    }];
+    diagnostic.attachErrors = withError
+      ? [{
+          category: "setup",
+          command: "network-enable",
+          identityHash: diagnosticIdentity(target.sessionId, target.targetId),
+          sessionId: target.sessionId,
+          targetId: target.targetId,
+          type: target.type,
+          urlClass: target.urlClass,
+        }]
+      : [];
+    diagnostic.counts.attachErrorCount = diagnostic.attachErrors.length;
+    diagnostic.counts.pendingAttachCount = 1;
+    diagnostic.counts.attachPromiseCount += 1;
+    diagnostic.counts.targetCount += 1;
+    bindIncompleteSamples(diagnostic, {
+      attachErrorCount: diagnostic.attachErrors.length,
+      pendingAttachCount: 1,
+    });
+    diagnostic.wait.recentSamples.forEach((sample) => {
+      sample.targetCount = diagnostic.counts.targetCount;
+    });
+    return { diagnostic, target };
+  };
+  const makeServiceFailedTarget = (
+    value,
+    { errorCommand = "network-enable" } = {},
+  ) => {
+    const diagnostic = timeoutDiagnostic(value);
+    const setup = completedCdpTargetSetup({
+      cdpIdStart: 1_001,
+      serviceWorker: true,
+      startedAt: 1_100,
+    });
+    const target = {
+      ancestry: [],
+      ...setup,
+      attachComplete: false,
+      detached: false,
+      identityHash: diagnosticIdentity(
+        `${diagnostic.label}-failed-service-session`,
+        `${diagnostic.label}-failed-service-target`,
+      ),
+      parentSessionId: null,
+      phase: diagnostic.label,
+      resumed: true,
+      sessionId: `${diagnostic.label}-failed-service-session`,
+      targetId: `${diagnostic.label}-failed-service-target`,
+      type: "service_worker",
+      urlClass: "app-asset",
+      waitingForDebugger: true,
+      workerInstanceId: null,
+    };
+    target.commands[0].status = "failed";
+    target.commands[1].status = "failed";
+    diagnostic.targets.push(target);
+    diagnostic.attachErrors = [{
+      category: "setup",
+      command: errorCommand,
+      identityHash: diagnosticIdentity(target.sessionId, target.targetId),
+      sessionId: target.sessionId,
+      targetId: target.targetId,
+      type: target.type,
+      urlClass: target.urlClass,
+    }];
+    diagnostic.counts.attachErrorCount = 1;
+    diagnostic.counts.attachPromiseCount += 1;
+    diagnostic.counts.targetCount += 1;
+    bindIncompleteSamples(diagnostic, { attachErrorCount: 1 });
+    diagnostic.wait.recentSamples.forEach((sample) => {
+      sample.targetCount = diagnostic.counts.targetCount;
+    });
+    return { diagnostic, target };
+  };
+  const setInflightRequests = (value, count) => {
+    const diagnostic = timeoutDiagnostic(value);
+    const target = diagnostic.targets[0];
+    diagnostic.inflightRequests = Array.from({ length: count }, (_, index) => {
+      const requestId = `timeout-request-${index + 1}`;
+      return {
+        identityHash: diagnosticIdentity(target.sessionId, requestId),
+        method: "GET",
+        phase: target.phase,
+        requestId,
+        sessionId: target.sessionId,
+        type: "Script",
+        urlClass: target.urlClass,
+      };
+    });
+    diagnostic.counts.inflightRequestCount = count;
+    for (const sample of diagnostic.wait.recentSamples) {
+      sample.inflightRequestCount = count;
+    }
+  };
+  const pendingInput = passingAppMatrixRuntimeNetworkTimeoutInput(
+    outputDirectory,
+  );
+  const pendingState = makePendingTarget(pendingInput, { withPending: true });
+  pendingState.target.commands[0].status = "failed";
+  pendingState.diagnostic.pendingAttaches[0].commands[0].status = "failed";
+  pendingState.diagnostic.pendingAttaches[0].type = "shared_worker";
+  pendingState.diagnostic.pendingAttaches[0].urlClass = "other-local";
+  const pendingReport = buildAppMatrixRuntimeDiagnosticReport(pendingInput);
+  assert.equal(
+    pendingReport.execution.orderExact,
+    true,
+    pendingReport.failures.join("\n"),
+  );
+  assert.equal(pendingReport.rows[1].integrity, true);
+  assert.deepEqual(pendingReport.rows[1].networkFailure.failureClasses, [
+    "pending-attach",
+    "attach-setup",
+    "pdf-cardinality",
+    "stability",
+  ]);
+
+  const resumeFailureInput = passingAppMatrixRuntimeNetworkTimeoutInput(
+    outputDirectory,
+  );
+  makeResumeFailureTarget(resumeFailureInput);
+  const resumeFailure = buildAppMatrixRuntimeDiagnosticReport(
+    resumeFailureInput,
+  );
+  assert.equal(
+    resumeFailure.execution.orderExact,
+    true,
+    resumeFailure.failures.join("\n"),
+  );
+  assert.equal(resumeFailure.rows[1].integrity, true);
+
+  const setupAndResumeFailureInput =
+    passingAppMatrixRuntimeNetworkTimeoutInput(outputDirectory);
+  makeSetupAndResumeFailureTarget(setupAndResumeFailureInput);
+  const setupAndResumeFailure = buildAppMatrixRuntimeDiagnosticReport(
+    setupAndResumeFailureInput,
+  );
+  assert.equal(
+    setupAndResumeFailure.execution.orderExact,
+    true,
+    setupAndResumeFailure.failures.join("\n"),
+  );
+  assert.equal(setupAndResumeFailure.rows[1].integrity, true);
+
+  const resumePendingErrorInput = passingAppMatrixRuntimeNetworkTimeoutInput(
+    outputDirectory,
+  );
+  const resumePendingErrorState = makeFailedTarget(
+    resumePendingErrorInput,
+    { withError: true },
+  );
+  const pendingResume = resumePendingErrorState.target.commands.at(-1);
+  pendingResume.resultAt = null;
+  pendingResume.resultSequence = null;
+  pendingResume.status = "pending";
+  resumePendingErrorState.target.resumed = false;
+  resumePendingErrorState.diagnostic.pendingAttaches = [{
+    commands: resumePendingErrorState.target.commands.map(
+      (command) => ({ ...command }),
+    ),
+    commandDeadlineAt: resumePendingErrorState.target.commandDeadlineAt,
+    identityHash: diagnosticIdentity(
+      resumePendingErrorState.target.sessionId,
+      resumePendingErrorState.target.targetId,
+    ),
+    parentSessionId: resumePendingErrorState.target.parentSessionId,
+    phase: resumePendingErrorState.target.phase,
+    resumeDispatchedAt: resumePendingErrorState.target.resumeDispatchedAt,
+    sessionId: resumePendingErrorState.target.sessionId,
+    targetId: resumePendingErrorState.target.targetId,
+    type: resumePendingErrorState.target.type,
+    urlClass: resumePendingErrorState.target.urlClass,
+  }];
+  resumePendingErrorState.diagnostic.counts.pendingAttachCount = 1;
+  bindIncompleteSamples(resumePendingErrorState.diagnostic, {
+    attachErrorCount: 1,
+    pendingAttachCount: 1,
+  });
+  const resumePendingError = buildAppMatrixRuntimeDiagnosticReport(
+    resumePendingErrorInput,
+  );
+  assert.equal(
+    resumePendingError.execution.orderExact,
+    true,
+    resumePendingError.failures.join("\n"),
+  );
+  assert.equal(resumePendingError.rows[1].integrity, true);
+
+  const multipleFailureInput = passingAppMatrixRuntimeNetworkTimeoutInput(
+    outputDirectory,
+  );
+  makeFailedTarget(multipleFailureInput, {
+    failedCommandCount: 2,
+    withError: true,
+  });
+  const multipleFailure = buildAppMatrixRuntimeDiagnosticReport(
+    multipleFailureInput,
+  );
+  assert.equal(
+    multipleFailure.execution.orderExact,
+    true,
+    multipleFailure.failures.join("\n"),
+  );
+  assert.equal(multipleFailure.rows[1].integrity, true);
+
+  const multipleFailureResumePendingInput =
+    passingAppMatrixRuntimeNetworkTimeoutInput(outputDirectory);
+  setResumePending(makeFailedTarget(multipleFailureResumePendingInput, {
+    failedCommandCount: 2,
+    withError: true,
+  }));
+  const multipleFailureResumePending =
+    buildAppMatrixRuntimeDiagnosticReport(multipleFailureResumePendingInput);
+  assert.equal(
+    multipleFailureResumePending.execution.orderExact,
+    true,
+    multipleFailureResumePending.failures.join("\n"),
+  );
+  assert.equal(multipleFailureResumePending.rows[1].integrity, true);
+
+  const multipleServiceFailureInput =
+    passingAppMatrixRuntimeNetworkTimeoutInput(outputDirectory);
+  makeServiceFailedTarget(multipleServiceFailureInput);
+  const multipleServiceFailure = buildAppMatrixRuntimeDiagnosticReport(
+    multipleServiceFailureInput,
+  );
+  assert.equal(
+    multipleServiceFailure.execution.orderExact,
+    true,
+    multipleServiceFailure.failures.join("\n"),
+  );
+  assert.equal(multipleServiceFailure.rows[1].integrity, true);
+
+  for (const resumePending of [false, true]) {
+    const sequentialPendingInput = passingAppMatrixRuntimeNetworkTimeoutInput(
+      outputDirectory,
+    );
+    makeSequentialPendingTarget(sequentialPendingInput, { resumePending });
+    const sequentialPending = buildAppMatrixRuntimeDiagnosticReport(
+      sequentialPendingInput,
+    );
+    assert.equal(
+      sequentialPending.execution.orderExact,
+      true,
+      sequentialPending.failures.join("\n"),
+    );
+    assert.equal(sequentialPending.rows[1].integrity, true);
+  }
+
+  const servicePendingInput = passingAppMatrixRuntimeNetworkTimeoutInput(
+    outputDirectory,
+  );
+  makeServicePendingTarget(servicePendingInput);
+  const servicePending = buildAppMatrixRuntimeDiagnosticReport(
+    servicePendingInput,
+  );
+  assert.equal(
+    servicePending.execution.orderExact,
+    true,
+    servicePending.failures.join("\n"),
+  );
+  assert.equal(servicePending.rows[1].integrity, true);
+
+  const mutableHistoryInput = passingAppMatrixRuntimeNetworkTimeoutInput(
+    outputDirectory,
+  );
+  const previousMutableDiagnostic = mutableHistoryInput.rows[0]
+    .networkFixedPoint;
+  const currentMutableDiagnostic = timeoutDiagnostic(mutableHistoryInput);
+  const previousPhase = previousMutableDiagnostic.label;
+  const mutableRoot = {
+    ancestry: [],
+    attachComplete: true,
+    ...completedCdpTargetSetup({ cdpIdStart: 2_001, startedAt: 2_100 }),
+    detached: false,
+    identityHash: diagnosticIdentity(
+      `${previousPhase}-mutable-root-session`,
+      `${previousPhase}-mutable-root-target`,
+    ),
+    parentSessionId: null,
+    phase: previousPhase,
+    resumed: true,
+    sessionId: `${previousPhase}-mutable-root-session`,
+    targetId: `${previousPhase}-mutable-root-target`,
+    type: "shared_worker",
+    urlClass: "other-local",
+    waitingForDebugger: true,
+    workerInstanceId: null,
+  };
+  const mutableChild = {
+    ancestry: [{
+      phase: previousPhase,
+      sessionId: mutableRoot.sessionId,
+      type: mutableRoot.type,
+      urlClass: mutableRoot.urlClass,
+    }],
+    attachComplete: true,
+    ...completedCdpTargetSetup({ cdpIdStart: 2_011, startedAt: 2_120 }),
+    detached: false,
+    identityHash: diagnosticIdentity(
+      `${previousPhase}-mutable-child-session`,
+      `${previousPhase}-mutable-child-target`,
+    ),
+    parentSessionId: mutableRoot.sessionId,
+    phase: previousPhase,
+    resumed: true,
+    sessionId: `${previousPhase}-mutable-child-session`,
+    targetId: `${previousPhase}-mutable-child-target`,
+    type: "worker",
+    urlClass: "blob",
+    waitingForDebugger: true,
+    workerInstanceId: null,
+  };
+  const priorMutableTargetCount = previousMutableDiagnostic.targets.length;
+  previousMutableDiagnostic.targets.push(
+    structuredClone(mutableRoot),
+    structuredClone(mutableChild),
+  );
+  currentMutableDiagnostic.targets.splice(
+    priorMutableTargetCount,
+    0,
+    structuredClone(mutableRoot),
+    structuredClone(mutableChild),
+  );
+  const currentMutableRestore =
+    currentMutableDiagnostic.matrixRestoreProof.networkDiagnostic;
+  currentMutableRestore.targets.splice(
+    priorMutableTargetCount,
+    0,
+    structuredClone(mutableRoot),
+    structuredClone(mutableChild),
+  );
+  for (const diagnostic of [
+    previousMutableDiagnostic,
+    currentMutableDiagnostic,
+  ]) {
+    diagnostic.counts.attachPromiseCount += 2;
+    diagnostic.counts.targetCount += 2;
+    diagnostic.wait.recentSamples.forEach((sample) => {
+      sample.targetCount = diagnostic.counts.targetCount;
+    });
+  }
+  currentMutableRestore.counts.attachPromiseCount += 2;
+  currentMutableRestore.counts.targetCount += 2;
+  currentMutableRestore.wait.recentSamples.forEach((sample) => {
+    sample.targetCount = currentMutableRestore.counts.targetCount;
+  });
+  currentMutableDiagnostic.importBoundary.attachPromiseCount += 2;
+  currentMutableDiagnostic.importBoundary.targetCount += 2;
+  const retainedMutableRoot = currentMutableDiagnostic.targets.find(
+    (target) => target.sessionId === mutableRoot.sessionId,
+  );
+  const retainedMutableChild = currentMutableDiagnostic.targets.find(
+    (target) => target.sessionId === mutableChild.sessionId,
+  );
+  retainedMutableRoot.detached = true;
+  retainedMutableRoot.type = "worker";
+  retainedMutableRoot.urlClass = "blob";
+  retainedMutableRoot.workerInstanceId = 99;
+  retainedMutableChild.ancestry[0].type = retainedMutableRoot.type;
+  retainedMutableChild.ancestry[0].urlClass = retainedMutableRoot.urlClass;
+  const mutableHistory = buildAppMatrixRuntimeDiagnosticReport(
+    mutableHistoryInput,
+  );
+  assert.equal(
+    mutableHistory.execution.orderExact,
+    true,
+    mutableHistory.failures.join("\n"),
+  );
+  assert.equal(mutableHistory.rows[1].integrity, true);
+
+  const priorSessionInflightInput =
+    passingAppMatrixRuntimeNetworkTimeoutInput(outputDirectory);
+  const priorSessionInflightDiagnostic = timeoutDiagnostic(
+    priorSessionInflightInput,
+  );
+  const priorSessionTarget = priorSessionInflightDiagnostic.targets.find(
+    (target) => target.phase !== priorSessionInflightDiagnostic.label,
+  );
+  const priorSessionRequestId = "current-phase-prior-session-request";
+  priorSessionInflightDiagnostic.inflightRequests = [{
+    identityHash: diagnosticIdentity(
+      priorSessionTarget.sessionId,
+      priorSessionRequestId,
+    ),
+    method: "GET",
+    phase: priorSessionInflightDiagnostic.label,
+    requestId: priorSessionRequestId,
+    sessionId: priorSessionTarget.sessionId,
+    type: "Script",
+    urlClass: priorSessionTarget.urlClass,
+  }];
+  priorSessionInflightDiagnostic.counts.inflightRequestCount = 1;
+  priorSessionInflightDiagnostic.counts.requestCount += 1;
+  priorSessionInflightDiagnostic.wait.recentSamples.forEach((sample) => {
+    sample.inflightRequestCount = 1;
+    sample.requestCount += 1;
+    sample.stableSamples = 0;
+  });
+  priorSessionInflightDiagnostic.wait.stableSamples = 0;
+  const priorSessionInflight = buildAppMatrixRuntimeDiagnosticReport(
+    priorSessionInflightInput,
+  );
+  assert.equal(
+    priorSessionInflight.execution.orderExact,
+    true,
+    priorSessionInflight.failures.join("\n"),
+  );
+  assert.equal(priorSessionInflight.rows[1].integrity, true);
+
+  const mutations = [
+    ["timeout boundary missing field", (value) => {
+      delete timeoutDiagnostic(value).importBoundary.requestCount;
+    }],
+    ["timeout boundary extra field", (value) => {
+      const boundary = timeoutDiagnostic(value).importBoundary;
+      boundary.completedRequestCount = boundary.requestCount;
+    }],
+    ["timeout boundary cuts import", (value) => {
+      const boundary = timeoutDiagnostic(value).importBoundary;
+      boundary.attachPromiseCount += 1;
+      boundary.targetCount += 1;
+    }],
+    ["timeout restore open count", (value) => {
+      timeoutDiagnostic(value).matrixRestoreProof.readiness.openRequestCount =
+        0;
+    }],
+    ["timeout restore completed request", (value) => {
+      timeoutDiagnostic(value).matrixRestoreProof.networkDiagnostic.counts
+        .completedRequestCount -= 1;
+    }],
+    ["timeout label", (value) => {
+      value.rows[1].networkFailure.diagnostic.label = value.rows[0]
+        .configurationId;
+    }],
+    ["timeout outcome", (value) => {
+      value.rows[1].networkFailure.diagnostic.outcome = "fixed-point-reached";
+    }],
+    ["timeout duration", (value) => {
+      value.rows[1].networkFailure.diagnostic.wait.elapsedMs = 9_999;
+    }],
+    ["timeout final sample", (value) => {
+      value.rows[1].networkFailure.diagnostic.wait.recentSamples.at(-1)
+        .targetCount += 1;
+    }],
+    ["timeout count type", (value) => {
+      value.rows[1].networkFailure.diagnostic.counts.requestCount = "5";
+    }],
+    ["timeout settlement phase", (value) => {
+      value.rows[1].networkFailure.diagnostic.targetBootstrapSettlements[0]
+        .phase = value.rows[1].configurationId;
+    }],
+    ["timeout service-worker bypass", (value) => {
+      const diagnostic = timeoutDiagnostic(value);
+      diagnostic.serviceWorkerBypassed = false;
+      diagnostic.wait.recentSamples.forEach((sample) => {
+        sample.attachmentReady = false;
+        sample.serviceWorkerBypassed = false;
+        sample.stableSamples = 0;
+      });
+      diagnostic.wait.stableSamples = 0;
+    }],
+    ["timeout resume-only target", (value) => {
+      const { diagnostic, target } = makeFailedTarget(value, {
+        withError: true,
+      });
+      const resume = target.commands.at(-1);
+      target.commands = [{
+        ...resume,
+        dispatchSequence: 1,
+        resultSequence: 1,
+      }];
+      diagnostic.attachErrors[0].command = null;
+    }],
+    ["timeout result sequence gap", (value) => {
+      currentDocumentTarget(timeoutDiagnostic(value)).commands.forEach(
+        (command) => {
+          command.resultSequence += 10;
+        },
+      );
+    }],
+    ["timeout reversed target command IDs", (value) => {
+      const commands = currentDocumentTarget(timeoutDiagnostic(value)).commands;
+      [commands[0].cdpId, commands[1].cdpId] = [
+        commands[1].cdpId,
+        commands[0].cdpId,
+      ];
+    }],
+    ["timeout reversed command dispatch", (value) => {
+      const commands = currentDocumentTarget(timeoutDiagnostic(value)).commands;
+      commands[1].dispatchedAt = commands[0].dispatchedAt - 1;
+    }],
+    ["timeout reversed command result chronology", (value) => {
+      const commands = currentDocumentTarget(timeoutDiagnostic(value)).commands;
+      [commands[0].resultAt, commands[1].resultAt] = [
+        commands[1].resultAt,
+        commands[0].resultAt,
+      ];
+    }],
+    ["timeout resume while target was not waiting", (value) => {
+      const target = currentDocumentTarget(timeoutDiagnostic(value));
+      target.waitingForDebugger = false;
+      target.lifecycleStrategy = "already-running";
+    }],
+    ["timeout target boolean type", (value) => {
+      currentDocumentTarget(timeoutDiagnostic(value)).attachComplete = "true";
+    }],
+    ["timeout target lifecycle strategy", (value) => {
+      currentDocumentTarget(timeoutDiagnostic(value)).lifecycleStrategy =
+        "private-strategy";
+    }],
+    ["timeout normal target claims service-worker barrier", (value) => {
+      const diagnostic = timeoutDiagnostic(value);
+      const target = currentDocumentTarget(diagnostic);
+      const resume = target.commands.at(-1);
+      target.lifecycleStrategy = "setup-dispatched-before-resume";
+      target.commandDeadlineAt = resume.dispatchedAt + 100;
+      target.commands.forEach((command, index) => {
+        command.deadlineAt = target.commandDeadlineAt;
+        command.dispatchedAt = Math.min(command.dispatchedAt, resume.dispatchedAt);
+        command.resultAt = resume.dispatchedAt + index + 1;
+        command.resultSequence = index + 1;
+      });
+      bindIncompleteSamples(diagnostic);
+    }],
+    ["timeout phantom document ancestry", (value) => {
+      currentDocumentTarget(timeoutDiagnostic(value)).ancestry.push({
+        phase: "private-phase",
+        sessionId: "private-ancestor",
+        type: "worker",
+        urlClass: "other-local",
+      });
+    }],
+    ["timeout extra parser ancestry", (value) => {
+      const diagnostic = timeoutDiagnostic(value);
+      diagnostic.targets.find((target) =>
+        target.phase === diagnostic.label &&
+        target.urlClass === "pdf-parser-worker"
+      ).ancestry.push({
+        phase: diagnostic.label,
+        sessionId: "phantom-grandparent",
+        type: "worker",
+        urlClass: "pdf-document-worker",
+      });
+    }],
+    ["timeout resume error category", (value) => {
+      makeResumeFailureTarget(value, "setup");
+    }],
+    ["timeout failed target without attach error", (value) => {
+      makeFailedTarget(value);
+    }],
+    ["timeout setup and resume failures omit setup error", (value) => {
+      makeSetupAndResumeFailureTarget(value, { errorOrder: ["resume"] });
+    }],
+    ["timeout setup and resume failures omit resume error", (value) => {
+      makeSetupAndResumeFailureTarget(value, { errorOrder: ["setup"] });
+    }],
+    ["timeout setup and resume failures reverse errors", (value) => {
+      makeSetupAndResumeFailureTarget(value, {
+        errorOrder: ["resume", "setup"],
+      });
+    }],
+    ["timeout multiple normal failures name second failure", (value) => {
+      makeFailedTarget(value, {
+        errorCommand: "runtime-enable",
+        failedCommandCount: 2,
+        withError: true,
+      });
+    }],
+    ["timeout multiple resume-pending failures name second failure", (value) => {
+      setResumePending(makeFailedTarget(value, {
+        errorCommand: "runtime-enable",
+        failedCommandCount: 2,
+        withError: true,
+      }));
+    }],
+    ["timeout multiple service failures name second failure", (value) => {
+      makeServiceFailedTarget(value, { errorCommand: "runtime-enable" });
+    }],
+    ["timeout service failures omit setup error", (value) => {
+      const { diagnostic } = makeServiceFailedTarget(value);
+      diagnostic.attachErrors = [];
+      diagnostic.counts.attachErrorCount = 0;
+      diagnostic.wait.recentSamples.forEach((sample) => {
+        sample.attachErrorCount = 0;
+      });
+    }],
+    ["timeout resume-pending failed setup without attach error", (value) => {
+      const { diagnostic, target } = makeFailedTarget(value);
+      const resume = target.commands.at(-1);
+      resume.resultAt = null;
+      resume.resultSequence = null;
+      resume.status = "pending";
+      target.resumed = false;
+      diagnostic.pendingAttaches = [{
+        commands: target.commands.map((command) => ({ ...command })),
+        commandDeadlineAt: target.commandDeadlineAt,
+        identityHash: diagnosticIdentity(target.sessionId, target.targetId),
+        parentSessionId: target.parentSessionId,
+        phase: target.phase,
+        resumeDispatchedAt: target.resumeDispatchedAt,
+        sessionId: target.sessionId,
+        targetId: target.targetId,
+        type: target.type,
+        urlClass: target.urlClass,
+      }];
+      diagnostic.counts.pendingAttachCount = 1;
+      bindIncompleteSamples(diagnostic, { pendingAttachCount: 1 });
+    }],
+    ["timeout premature normal pending attach error", (value) => {
+      const { diagnostic, target } = makePendingTarget(value, {
+        withPending: true,
+      });
+      target.commands[0].status = "failed";
+      diagnostic.pendingAttaches[0].commands[0].status = "failed";
+      diagnostic.attachErrors = [{
+        category: "setup",
+        command: "network-enable",
+        identityHash: diagnosticIdentity(target.sessionId, target.targetId),
+        sessionId: target.sessionId,
+        targetId: target.targetId,
+        type: target.type,
+        urlClass: target.urlClass,
+      }];
+      diagnostic.counts.attachErrorCount = 1;
+      diagnostic.wait.recentSamples.forEach((sample) => {
+        sample.attachErrorCount = 1;
+      });
+    }],
+    ["timeout premature pending unhandled error", (value) => {
+      const { diagnostic, target } = makePendingTarget(value, {
+        withPending: true,
+      });
+      diagnostic.attachErrors = [{
+        category: "unhandled-setup",
+        command: null,
+        identityHash: diagnosticIdentity(target.sessionId, target.targetId),
+        sessionId: target.sessionId,
+        targetId: target.targetId,
+        type: target.type,
+        urlClass: target.urlClass,
+      }];
+      diagnostic.counts.attachErrorCount = 1;
+      diagnostic.wait.recentSamples.forEach((sample) => {
+        sample.attachErrorCount = 1;
+      });
+    }],
+    ["timeout premature service pending attach error", (value) => {
+      makeServicePendingTarget(value, { withError: true });
+    }],
+    ["timeout premature sequential pending error", (value) => {
+      makeSequentialPendingTarget(value, { withError: true });
+    }],
+    ["timeout premature successful-setup resume error", (value) => {
+      makeSequentialPendingTarget(value, {
+        resumePending: true,
+        withError: true,
+      });
+    }],
+    ["timeout pending target without pending attach", (value) => {
+      makePendingTarget(value);
+    }],
+    ["timeout duplicate attach error", (value) => {
+      const { diagnostic } = makeFailedTarget(value, { withError: true });
+      diagnostic.attachErrors.push({ ...diagnostic.attachErrors[0] });
+      diagnostic.counts.attachErrorCount = 2;
+      diagnostic.wait.recentSamples.forEach((sample) => {
+        sample.attachErrorCount = 2;
+      });
+    }],
+    ["timeout service resume command binding", (value) => {
+      const diagnostic = timeoutDiagnostic(value);
+      const target = diagnostic.targets.find((entry) =>
+        entry.type === "service_worker"
+      );
+      target.resumeDispatchedAt += 1;
+      diagnostic.serviceWorkerBootstrapObservations[0]
+        .resumeDispatchedAt = target.resumeDispatchedAt;
+    }],
+    ["timeout terminal request union", (value) => {
+      const diagnostic = timeoutDiagnostic(value);
+      diagnostic.counts.requestCount -= 1;
+      diagnostic.counts.completedRequestCount -= 1;
+      diagnostic.wait.recentSamples.forEach((sample, index) => {
+        sample.requestCount = diagnostic.counts.requestCount -
+          (index === 0 ? 1 : 0);
+      });
+    }],
+    ["timeout inflight request reuses terminal identity", (value) => {
+      const diagnostic = timeoutDiagnostic(value);
+      const settlement = diagnostic.targetBootstrapSettlements[0];
+      diagnostic.inflightRequests = [{
+        identityHash: diagnosticIdentity(
+          settlement.requestSessionId,
+          settlement.requestId,
+        ),
+        method: settlement.method,
+        phase: settlement.phase,
+        requestId: settlement.requestId,
+        sessionId: settlement.requestSessionId,
+        type: settlement.resourceType,
+        urlClass: settlement.urlClass,
+      }];
+      diagnostic.counts.inflightRequestCount = 1;
+      diagnostic.counts.requestCount += 1;
+      diagnostic.wait.recentSamples.forEach((sample) => {
+        sample.inflightRequestCount = 1;
+        sample.requestCount += 1;
+        sample.stableSamples = 0;
+      });
+      diagnostic.wait.stableSamples = 0;
+    }],
+    ["timeout short retained stability tail", (value) => {
+      const diagnostic = timeoutDiagnostic(value);
+      const sample = {
+        ...diagnostic.wait.recentSamples.at(-1),
+        stableSamples: 2,
+      };
+      diagnostic.wait.recentSamples = [sample];
+      diagnostic.wait.stableSamples = 2;
+    }],
+    ["timeout external failure readiness", (value) => {
+      timeoutDiagnostic(value).counts.externalRequestCount = 1;
+    }],
+    ["timeout network failure readiness", (value) => {
+      timeoutDiagnostic(value).counts.networkFailureCount = 1;
+    }],
+    ["timeout attach error item", (value) => {
+      const diagnostic = timeoutDiagnostic(value);
+      diagnostic.attachErrors = [{}];
+      diagnostic.counts.attachErrorCount = 1;
+      for (const sample of diagnostic.wait.recentSamples) {
+        sample.attachErrorCount = 1;
+      }
+    }],
+    ["timeout pending attach item", (value) => {
+      const diagnostic = timeoutDiagnostic(value);
+      diagnostic.pendingAttaches = [{}];
+      diagnostic.counts.pendingAttachCount = 1;
+      for (const sample of diagnostic.wait.recentSamples) {
+        sample.pendingAttachCount = 1;
+      }
+    }],
+    ["timeout inflight item", (value) => {
+      const diagnostic = timeoutDiagnostic(value);
+      diagnostic.inflightRequests = [{}];
+      diagnostic.counts.inflightRequestCount = 1;
+      diagnostic.counts.completedRequestCount -= 1;
+      for (const sample of diagnostic.wait.recentSamples) {
+        sample.inflightRequestCount = 1;
+      }
+    }],
+    ["timeout service request identity", (value) => {
+      const diagnostic = timeoutDiagnostic(value);
+      const observation = diagnostic.serviceWorkerBootstrapObservations[0];
+      observation.requestId = null;
+      observation.identityHash = diagnosticIdentity(
+        observation.requestSessionId,
+        observation.requestId,
+        observation.targetSessionId,
+        observation.targetId,
+      );
+    }],
+    ["timeout service resume", (value) => {
+      timeoutDiagnostic(value).serviceWorkerBootstrapObservations[0]
+        .resumeDispatchedAt += 1;
+    }],
+    ["timeout service request sequence", (value) => {
+      const diagnostic = timeoutDiagnostic(value);
+      diagnostic.serviceWorkerBootstrapObservations[0].requestSequence =
+        diagnostic.counts.requestCount + 1;
+    }],
+    ["timeout service session request count", (value) => {
+      const diagnostic = timeoutDiagnostic(value);
+      diagnostic.serviceWorkerBootstrapObservations[0].sessionRequestCount =
+        diagnostic.counts.requestCount + 1;
+    }],
+    ["timeout duplicate target command ID", (value) => {
+      const diagnostic = timeoutDiagnostic(value);
+      diagnostic.targets[1].commands[0].cdpId =
+        diagnostic.targets[0].commands[0].cdpId;
+    }],
+    ["timeout PDF target type", (value) => {
+      const diagnostic = timeoutDiagnostic(value);
+      const target = diagnostic.targets.find((entry) =>
+        entry.phase === diagnostic.label &&
+        entry.urlClass === "pdf-document-worker"
+      );
+      target.type = "shared_worker";
+      diagnostic.targetBootstrapSettlements.find((entry) =>
+        entry.targetSessionId === target.sessionId
+      ).targetType = "shared_worker";
+    }],
+    ["timeout worker instance type", (value) => {
+      currentDocumentTarget(timeoutDiagnostic(value)).workerInstanceId =
+        "private-worker";
+    }],
+    ["timeout worker instance BigInt does not throw", (value) => {
+      currentDocumentTarget(timeoutDiagnostic(value)).workerInstanceId = 1n;
+    }],
+    ["timeout non-blob worker instance", (value) => {
+      currentDocumentTarget(timeoutDiagnostic(value)).workerInstanceId = 99;
+    }],
+    ["timeout prior target order", (value) => {
+      const targets = timeoutDiagnostic(value).targets;
+      [targets[0], targets[1]] = [targets[1], targets[0]];
+    }],
+    ["timeout current parent after child", (value) => {
+      const diagnostic = timeoutDiagnostic(value);
+      const childIndex = diagnostic.targets.findIndex((target) =>
+        target.phase === diagnostic.label &&
+        target.urlClass === "pdf-parser-worker"
+      );
+      const parentIndex = diagnostic.targets.findIndex((target) =>
+        target.sessionId === diagnostic.targets[childIndex].parentSessionId
+      );
+      [diagnostic.targets[parentIndex], diagnostic.targets[childIndex]] = [
+        diagnostic.targets[childIndex],
+        diagnostic.targets[parentIndex],
+      ];
+    }],
+    ["timeout prior settlement order", (value) => {
+      const settlements = timeoutDiagnostic(value).targetBootstrapSettlements;
+      [settlements[0], settlements[1]] = [settlements[1], settlements[0]];
+    }],
+    ["timeout prior service observation order", (value) => {
+      const previous = value.rows[0].networkFixedPoint;
+      const current = timeoutDiagnostic(value);
+      const added = passingAppMatrixNetworkDiagnostic(previous.label, 3_000);
+      const target = structuredClone(
+        added.targets.find((entry) => entry.type === "service_worker"),
+      );
+      const observation = structuredClone(
+        added.serviceWorkerBootstrapObservations[0],
+      );
+      observation.requestSequence = 4;
+      previous.targets.push(structuredClone(target));
+      current.targets.splice(previous.targets.length - 1, 0, target);
+      previous.serviceWorkerBootstrapObservations.push(
+        structuredClone(observation),
+      );
+      current.serviceWorkerBootstrapObservations.unshift(observation);
+      for (const diagnostic of [previous, current]) {
+        diagnostic.counts.attachPromiseCount += 1;
+        diagnostic.counts.completedRequestCount += 1;
+        diagnostic.counts.requestCount += 1;
+        diagnostic.counts.serviceWorkerBootstrapObservationCount += 1;
+        diagnostic.counts.targetCount += 1;
+        diagnostic.wait.recentSamples.forEach((sample) => {
+          sample.requestCount += 1;
+          sample.targetCount += 1;
+        });
+      }
+    }],
+    ["timeout prior target regresses to pending", (value) => {
+      const diagnostic = timeoutDiagnostic(value);
+      const target = diagnostic.targets.find((entry) =>
+        entry.phase !== diagnostic.label &&
+        entry.urlClass === "pdf-document-worker"
+      );
+      target.commands = [
+        target.commands[0],
+        {
+          ...target.commands[1],
+          resultAt: null,
+          resultSequence: null,
+          status: "pending",
+        },
+      ];
+      target.attachComplete = false;
+      target.resumed = false;
+      target.resumeDispatchedAt = null;
+      removeTargetSettlement(diagnostic, target);
+      diagnostic.pendingAttaches = [{
+        commands: target.commands.map((command) => ({ ...command })),
+        commandDeadlineAt: target.commandDeadlineAt,
+        identityHash: diagnosticIdentity(target.sessionId, target.targetId),
+        parentSessionId: target.parentSessionId,
+        phase: target.phase,
+        resumeDispatchedAt: target.resumeDispatchedAt,
+        sessionId: target.sessionId,
+        targetId: target.targetId,
+        type: target.type,
+        urlClass: target.urlClass,
+      }];
+      diagnostic.counts.pendingAttachCount = 1;
+      bindIncompleteSamples(diagnostic, { pendingAttachCount: 1 });
+    }],
+    ["timeout prior settlement deleted", (value) => {
+      const diagnostic = timeoutDiagnostic(value);
+      const target = diagnostic.targets.find((entry) =>
+        entry.phase !== diagnostic.label &&
+        entry.urlClass === "pdf-document-worker"
+      );
+      removeTargetSettlement(diagnostic, target);
+    }],
+    ["timeout prior service observation deleted", (value) => {
+      const diagnostic = timeoutDiagnostic(value);
+      diagnostic.serviceWorkerBootstrapObservations = [];
+      diagnostic.counts.serviceWorkerBootstrapObservationCount = 0;
+    }],
+    ["timeout prior target identity substituted", (value) => {
+      const diagnostic = timeoutDiagnostic(value);
+      const target = diagnostic.targets.find((entry) =>
+        entry.phase !== diagnostic.label &&
+        entry.urlClass === "pdf-document-worker"
+      );
+      const settlement = diagnostic.targetBootstrapSettlements.find(
+        (entry) => entry.targetSessionId === target.sessionId,
+      );
+      target.targetId = `${target.targetId}-substituted`;
+      target.identityHash = diagnosticIdentity(target.sessionId, target.targetId);
+      settlement.targetId = target.targetId;
+      settlement.identityHash = diagnosticIdentity(
+        settlement.requestSessionId,
+        settlement.requestId,
+        settlement.targetSessionId,
+        settlement.targetId,
+      );
+    }],
+    ["timeout prior command history substituted", (value) => {
+      const diagnostic = timeoutDiagnostic(value);
+      diagnostic.targets.find((entry) =>
+        entry.phase !== diagnostic.label &&
+        entry.urlClass === "pdf-document-worker"
+      ).commands.forEach((command) => {
+        command.cdpId += 5_000;
+      });
+    }],
+    ["timeout retained detached state regresses", (value) => {
+      const previous = value.rows[0].networkFixedPoint;
+      const current = timeoutDiagnostic(value);
+      const prior = previous.targets.find((entry) =>
+        entry.urlClass === "pdf-document-worker"
+      );
+      prior.detached = true;
+      current.targets.find((entry) => entry.sessionId === prior.sessionId)
+        .detached = false;
+    }],
+    ["timeout prior detached state omitted", (value) => {
+      delete value.rows[0].networkFixedPoint.targets[0].detached;
+    }],
+    ["timeout prior detached state null", (value) => {
+      value.rows[0].networkFixedPoint.targets[0].detached = null;
+    }],
+    ["timeout prior detached state string", (value) => {
+      value.rows[0].networkFixedPoint.targets[0].detached = "false";
+    }],
+    ["timeout retained worker instance clears", (value) => {
+      const previous = value.rows[0].networkFixedPoint;
+      const current = timeoutDiagnostic(value);
+      const setup = completedCdpTargetSetup({
+        cdpIdStart: 7_001,
+        startedAt: 7_100,
+      });
+      const prior = {
+        ancestry: [],
+        attachComplete: true,
+        ...setup,
+        detached: false,
+        identityHash: diagnosticIdentity(
+          `${previous.label}-retained-blob-session`,
+          `${previous.label}-retained-blob-target`,
+        ),
+        parentSessionId: null,
+        phase: previous.label,
+        resumed: true,
+        sessionId: `${previous.label}-retained-blob-session`,
+        targetId: `${previous.label}-retained-blob-target`,
+        type: "worker",
+        urlClass: "blob",
+        waitingForDebugger: true,
+        workerInstanceId: 99,
+      };
+      const retained = structuredClone(prior);
+      retained.workerInstanceId = null;
+      previous.targets.push(prior);
+      current.targets.splice(previous.targets.length - 1, 0, retained);
+      for (const diagnostic of [previous, current]) {
+        diagnostic.counts.attachPromiseCount += 1;
+        diagnostic.counts.targetCount += 1;
+        diagnostic.wait.recentSamples.forEach((sample) => {
+          sample.targetCount += 1;
+        });
+      }
+    }],
+    ["timeout retained service request count decreases", (value) => {
+      const previous = value.rows[0].networkFixedPoint;
+      previous.serviceWorkerBootstrapObservations[0].sessionRequestCount = 2;
+      previous.counts.completedRequestCount += 1;
+      previous.counts.requestCount += 1;
+      previous.wait.recentSamples.forEach((sample) => {
+        sample.requestCount += 1;
+      });
+    }],
+    ["timeout extra prior-phase target", (value) => {
+      const diagnostic = timeoutDiagnostic(value);
+      const sourceTarget = diagnostic.targets.find((entry) =>
+        entry.phase !== diagnostic.label &&
+        entry.urlClass === "pdf-document-worker"
+      );
+      const extra = structuredClone(sourceTarget);
+      extra.ancestry = [];
+      extra.commands.forEach((command) => {
+        command.cdpId += 6_000;
+      });
+      extra.identityHash = diagnosticIdentity(
+        `${sourceTarget.phase}-extra-session`,
+        `${sourceTarget.phase}-extra-target`,
+      );
+      extra.parentSessionId = null;
+      extra.sessionId = `${sourceTarget.phase}-extra-session`;
+      extra.targetId = `${sourceTarget.phase}-extra-target`;
+      extra.type = "shared_worker";
+      extra.urlClass = "other-local";
+      diagnostic.targets.push(extra);
+      diagnostic.counts.attachPromiseCount += 1;
+      diagnostic.counts.targetCount += 1;
+      diagnostic.wait.recentSamples.forEach((sample) => {
+        sample.targetCount = diagnostic.counts.targetCount;
+      });
+    }],
+    ["timeout cumulative request count regresses", (value) => {
+      const previous = value.rows[0].networkFixedPoint;
+      const current = timeoutDiagnostic(value);
+      previous.counts.requestCount = current.counts.requestCount + 1;
+      previous.counts.completedRequestCount = previous.counts.requestCount;
+      previous.wait.recentSamples.forEach((sample) => {
+        sample.requestCount = previous.counts.requestCount;
+      });
+    }],
+    ["timeout external count exceeds requests", (value) => {
+      const diagnostic = timeoutDiagnostic(value);
+      diagnostic.counts.externalRequestCount =
+        diagnostic.counts.requestCount + 1;
+    }],
+    ["timeout inflight count exceeds requests", (value) => {
+      const diagnostic = timeoutDiagnostic(value);
+      diagnostic.counts.completedRequestCount = 0;
+      setInflightRequests(value, diagnostic.counts.requestCount + 1);
+    }],
+    ["timeout completed and inflight exceed requests", (value) => {
+      const diagnostic = timeoutDiagnostic(value);
+      setInflightRequests(value, 1);
+      diagnostic.counts.completedRequestCount = diagnostic.counts.requestCount;
+    }],
+    ["timeout pending count exceeds targets", (value) => {
+      const diagnostic = timeoutDiagnostic(value);
+      diagnostic.counts.pendingAttachCount = diagnostic.counts.targetCount + 1;
+      diagnostic.pendingAttaches = Array.from(
+        { length: diagnostic.counts.pendingAttachCount },
+        () => ({}),
+      );
+      for (const sample of diagnostic.wait.recentSamples) {
+        sample.pendingAttachCount = diagnostic.counts.pendingAttachCount;
+      }
+    }],
+    ["timeout unsafe request count", (value) => {
+      const diagnostic = timeoutDiagnostic(value);
+      diagnostic.counts.requestCount = Number.MAX_SAFE_INTEGER + 1;
+      for (const sample of diagnostic.wait.recentSamples) {
+        sample.requestCount = diagnostic.counts.requestCount;
+      }
+    }],
+    ["timeout fractional elapsed", (value) => {
+      timeoutDiagnostic(value).wait.elapsedMs += 0.5;
+    }],
+    ["timeout decreasing cumulative samples", (value) => {
+      timeoutDiagnostic(value).wait.recentSamples[0].requestCount += 1;
+    }],
+    ["timeout service-worker sample mismatch", (value) => {
+      timeoutDiagnostic(value).wait.recentSamples[0]
+        .serviceWorkerBypassed = false;
+    }],
+    ["timeout impossible stability recurrence", (value) => {
+      timeoutDiagnostic(value).wait.recentSamples[1].stableSamples = 1;
+    }],
+    ["timeout reached fixed point", (value) => {
+      const diagnostic = timeoutDiagnostic(value);
+      diagnostic.wait.recentSamples.forEach((sample, index) => {
+        sample.attachmentReady = true;
+        sample.stableSamples = index + 1;
+      });
+      diagnostic.wait.stableSamples = 3;
+    }],
+    ["timeout command BigInt does not throw", (value) => {
+      currentDocumentTarget(timeoutDiagnostic(value)).commands[0]
+        .privateValue = 1n;
+    }],
+    ["timeout command numeric BigInt does not throw", (value) => {
+      currentDocumentTarget(timeoutDiagnostic(value)).commands[0]
+        .resultSequence = 1n;
+    }],
+    ["timeout cyclic command does not throw", (value) => {
+      const command = currentDocumentTarget(timeoutDiagnostic(value)).commands[0];
+      command.privateValue = command;
+    }],
+    ["timeout cyclic command numeric does not throw", (value) => {
+      const command = currentDocumentTarget(timeoutDiagnostic(value)).commands[0];
+      command.resultSequence = command;
+    }],
+    ["unexpected with diagnostic", (value) => {
+      value.rows[1].networkFailure = {
+        category: "unexpected",
+        diagnostic: value.rows[1].networkFailure.diagnostic,
+      };
+    }],
+  ];
+  for (const [label, mutate] of mutations) {
+    const changed = passingAppMatrixRuntimeNetworkTimeoutInput(outputDirectory);
+    mutate(changed);
+    const changedReport = buildAppMatrixRuntimeDiagnosticReport(changed);
+    assert.equal(changedReport.execution.orderExact, false, label);
+    assert.equal(changedReport.rows[1].integrity, false, label);
+  }
+
+  const privateReport = (privateValue) => {
+    const changed = passingAppMatrixRuntimeNetworkTimeoutInput(outputDirectory);
+    const diagnostic = changed.rows[1].networkFailure.diagnostic;
+    diagnostic.privateError = privateValue;
+    diagnostic.recentActivity = [{ error: privateValue, url: privateValue }];
+    return buildAppMatrixRuntimeDiagnosticReport(changed);
+  };
+  const firstPrivate = privateReport("/home/private/query?secret=first");
+  const secondPrivate = privateReport("C:\\private\\secret=second");
+  assert.deepEqual(firstPrivate, secondPrivate);
+  assert.doesNotMatch(
+    JSON.stringify(firstPrivate),
+    /home\/private|C:\\private|secret|privateError|recentActivity/u,
+  );
+});
+
+test("rejects isolated app-matrix runtime proof substitutions", () => {
+  const outputDirectory = path.join(
+    os.tmpdir(),
+    "issue-68-app-matrix-runtime-mutations",
+  );
+  const mutationCases = [
+    ["dirty post-build source", (input) => {
+      input.source.postBuildStatus = [" M private"];
+    }],
+    ["dirty post-capture source", (input) => {
+      input.source.postCaptureStatus = ["?? private"];
+    }],
+    ["private deployment identity", (input) => {
+      input.build.localManifest.deploymentId = "/home/private/deployment";
+    }],
+    ["wrong fixture hash", (input) => {
+      input.fixture.sha256 = "0".repeat(64);
+    }],
+    ["dirty initial target baseline", (input) => {
+      input.initialTargetBaseline.workerCount = 1;
+    }],
+    ["repository output", (input) => {
+      input.outputDirectory = path.resolve("outputs/app-runtime-forgery");
+    }],
+    ["row session substitution", (input) => {
+      input.rows[5].sessionIdentityHash = "f".repeat(64);
+    }],
+    ["teardown error", (input) => {
+      input.teardown.errors = ["/home/private/cleanup"];
+    }],
+    ["stage reorder", (input) => {
+      [input.rows[0].stageHistory[0], input.rows[0].stageHistory[1]] =
+        [input.rows[0].stageHistory[1], input.rows[0].stageHistory[0]];
+    }],
+    ["completed current stage substitution", (input) => {
+      input.rows[0].currentStage = "release-observation-completed";
+    }],
+    ["completed scenario not finalized", (input) => {
+      input.rows[0].scenarioFinalized = false;
+    }],
+    ["browser source missing", (input) => {
+      input.rows[0].sourceObservation.selectionCount = 0;
+    }],
+    ["browser source size", (input) => {
+      input.rows[0].sourceObservation.bytes += 1;
+    }],
+    ["browser source hash", (input) => {
+      input.rows[0].sourceObservation.sha256 = "0".repeat(64);
+    }],
+    ["model identity", (input) => {
+      input.rows[0].modelCompletion.importJobId += 1;
+    }],
+    ["adjacent page", (input) => {
+      input.rows[0].adjacentPage = 3;
+    }],
+    ["screenshot binding", (input) => {
+      input.rows[0].screenshot.path = "private.png";
+    }],
+    ["empty priority composition", (input) => {
+      input.rows[0].priorityProbe.compositions = [];
+    }],
+    ["priority scroll delta", (input) => {
+      input.rows[0].priorityProbe.scrollAction.scrollTopAfter = 0;
+    }],
+    ["priority before geometry", (input) => {
+      input.rows[0].priorityProbe.scrollAction.targetGeometryBefore = {
+        bottom: 800,
+        left: 100,
+        right: 900,
+        top: 100,
+      };
+    }],
+    ["priority target after geometry", (input) => {
+      input.rows[0].priorityProbe.scrollAction.targetGeometryAfter.top = 1_000;
+      input.rows[0].priorityProbe.scrollAction.targetGeometryAfter.bottom = 1_800;
+    }],
+    ["priority composition dimensions", (input) => {
+      input.rows[0].priorityProbe.compositions[0].width -= 1;
+    }],
+    ["priority composition identity", (input) => {
+      input.rows[0].priorityProbe.compositions[0].compositionId = null;
+    }],
+    ["priority composition time", (input) => {
+      input.rows[0].priorityProbe.compositions[0].at = 289;
+    }],
+    ["malformed mounted range", (input) => {
+      input.rows[0].releaseSnapshot.range = "1:3,3:6";
+    }],
+    ["one-based mounted range", (input) => {
+      input.rows[0].releaseSnapshot.range = "1:6";
+    }],
+    ["duplicate mounted page", (input) => {
+      input.rows[0].releaseSnapshot.mountedPages = [1, 2, 2, 3, 4, 5, 6];
+    }],
+    ["visible page mismatch", (input) => {
+      input.rows[0].releaseSnapshot.visiblePages = [];
+    }],
+    ["viewport substitution", (input) => {
+      input.rows[0].releaseSnapshot.viewport.devicePixelRatio += 1;
+    }],
+    ["correlated geometry claim", (input) => {
+      input.rows[0].releaseSnapshot.pages[0].intersectsReader = true;
+    }],
+    ["target canvas substitution", (input) => {
+      input.rows[0].releaseSnapshot.pages[1].canvas.width -= 1;
+    }],
+    ["worker identity substitution", (input) => {
+      input.rows[0].releaseSnapshot.workerEvents =
+        passingAppMatrixRuntimeReleaseEvents(input.rows[0]);
+      input.rows[0].releaseSnapshot.workerEvents[0].jobId += 1;
+    }],
+    ["worker direction substitution", (input) => {
+      input.rows[0].releaseSnapshot.workerEvents =
+        passingAppMatrixRuntimeReleaseEvents(input.rows[0]);
+      input.rows[0].releaseSnapshot.workerEvents[0].direction = "from-worker";
+    }],
+    ["worker revision substitution", (input) => {
+      input.rows[0].releaseSnapshot.workerEvents =
+        passingAppMatrixRuntimeReleaseEvents(input.rows[0]);
+      input.rows[0].releaseSnapshot.workerEvents[0].revision = "forged";
+    }],
+    ["worker document identity substitution", (input) => {
+      input.rows[0].releaseSnapshot.workerEvents =
+        passingAppMatrixRuntimeReleaseEvents(input.rows[0]);
+      input.rows[0].releaseSnapshot.workerEvents[0].documentKey =
+        "private-document";
+    }],
+    ["worker event before scenario", (input) => {
+      input.rows[0].releaseSnapshot.workerEvents =
+        passingAppMatrixRuntimeReleaseEvents(input.rows[0]);
+      input.rows[0].releaseSnapshot.workerEvents[0].at = 99;
+    }],
+    ["worker event after observation", (input) => {
+      input.rows[0].releaseSnapshot.workerEvents =
+        passingAppMatrixRuntimeReleaseEvents(input.rows[0]);
+      input.rows[0].releaseSnapshot.workerEvents[1].at = 501;
+    }],
+    ["worker event order", (input) => {
+      input.rows[0].releaseSnapshot.workerEvents =
+        passingAppMatrixRuntimeReleaseEvents(input.rows[0]).reverse();
+    }],
+    ["worker event truncation", (input) => {
+      const event = passingAppMatrixRuntimeReleaseEvents(input.rows[0])[0];
+      input.rows[0].releaseSnapshot.workerEvents = Array.from(
+        { length: 33 },
+        (_, index) => ({
+          ...event,
+          activityId: event.activityId + index,
+          at: event.at + index,
+          eventId: event.eventId + index,
+        }),
+      );
+    }],
+    ["release draw truncation", (input) => {
+      const original = input.rows[0].releaseSnapshot.draws[0];
+      input.rows[0].releaseSnapshot.draws = Array.from(
+        { length: 33 },
+        (_, index) => ({
+          ...original,
+          activityId: original.activityId + index,
+          compositionId: original.compositionId + index,
+          drawInvocationId: original.drawInvocationId + index,
+        }),
+      );
+    }],
+    ["release draw before scenario", (input) => {
+      input.rows[0].releaseSnapshot.draws[0].at = 99;
+    }],
+    ["release draw after observation", (input) => {
+      input.rows[0].releaseSnapshot.draws[0].at = 501;
+    }],
+    ["release snapshot error", (input) => {
+      input.rows[0].releaseSnapshot.snapshotErrorPresent = true;
+    }],
+    ["release evaluation errors exceed attempts", (input) => {
+      input.rows[0].releaseSnapshot.evaluationErrorCount = 902;
+    }],
+    ["release observation outside scenario", (input) => {
+      input.rows[0].releaseSnapshot.observedAt = 501;
+    }],
+    ["release page order", (input) => {
+      input.rows[0].releaseSnapshot.pages.reverse();
+    }],
+    ["release extra page", (input) => {
+      input.rows[0].releaseSnapshot.pages.push({
+        ...input.rows[0].releaseSnapshot.pages[0],
+        page: 6,
+        pageIndex: 5,
+      });
+    }],
+    ["fractional layout viewport", (input) => {
+      input.rows[0].releaseSnapshot.viewport.innerWidth += 0.5;
+    }],
+    ["negative visual viewport offset", (input) => {
+      input.rows[0].releaseSnapshot.viewport.visualOffsetLeft = -1;
+    }],
+    ["completed timeout state", (input) => {
+      input.rows[0].releaseSnapshot.waitOutcome = "timeout";
+      input.rows[0].releaseSnapshot.pages[0].canvas.width = 100;
+    }],
+    ["missing phase marker", (input) => {
+      input.rows[0].completedSnapshot.phaseMarkers.pop();
+    }],
+    ["negative timing count", (input) => {
+      input.rows[0].completedSnapshot.drawHookTimingCount = -1;
+    }],
+    ["missing fixed point", (input) => {
+      input.rows[0].networkFixedPoint = null;
+    }],
+    ["wrong fixed-point label", (input) => {
+      input.rows[0].networkFixedPoint.label = "mobile-dpr3-pinch200";
+    }],
+    ["unhealthy fixed point", (input) => {
+      input.rows[0].networkFixedPoint.counts.inflightRequestCount = 1;
+    }],
+  ];
+
+  for (const [label, mutate] of mutationCases) {
+    const input = passingAppMatrixRuntimeCompletedInput(outputDirectory);
+    mutate(input);
+    let report;
+    assert.doesNotThrow(() => {
+      report = buildAppMatrixRuntimeDiagnosticReport(input);
+    }, label);
+    assert.equal(report.completed, false, label);
+    assert.ok(report.failures.length > 0, label);
+  }
+});
+
+test("binds nonzero app-matrix Long Task and LoAF timing", () => {
+  const outputDirectory = path.join(
+    os.tmpdir(),
+    "issue-68-app-matrix-runtime-timing",
+  );
+  const validInput = addRepresentativeAppMatrixRuntimeTiming(
+    passingAppMatrixRuntimeCompletedInput(outputDirectory),
+  );
+  const valid = buildAppMatrixRuntimeDiagnosticReport(validInput);
+  assert.equal(valid.completed, true, valid.failures.join("\n"));
+  assert.deepEqual(
+    valid.rows[0].timing.longTasks[0].correlations,
+    ["worker-message-dispatch"],
+  );
+  assert.equal(valid.rows[0].timing.workerMessages.total, 1);
+  assert.equal(valid.rows[0].timing.drawHooks.total, 1);
+  const longAnimationFrame = valid.rows[0].timing.longAnimationFrames.items[0];
+  assert.equal(
+    valid.rows[0].timing.longAnimationFrames.availability,
+    "available",
+  );
+  assert.deepEqual(longAnimationFrame.overlaps, {
+    drawHooks: [0],
+    longTasks: [0],
+    samplers: [0],
+    workerMessages: [0],
+  });
+  assert.equal(
+    longAnimationFrame.scripts.items[0].sourceUrlClass,
+    "same-origin",
+  );
+  assert.equal(
+    longAnimationFrame.scripts.items[0].invokerTypeClass,
+    "event-listener",
+  );
+
+  const boundaryInput = addRepresentativeAppMatrixRuntimeTiming(
+    passingAppMatrixRuntimeCompletedInput(outputDirectory),
+  );
+  Object.assign(boundaryInput.rows[0].completedSnapshot, {
+    longAnimationFrameCount: 1,
+    longAnimationFrames: [{
+      blockingDuration: 0,
+      duration: 60,
+      pauseDuration: 0,
+      renderStart: 0,
+      scriptCount: 0,
+      scripts: [],
+      scriptsTruncated: false,
+      startTime: 1_210,
+      styleAndLayoutStart: 0,
+    }],
+  });
+  const boundaryReport = buildAppMatrixRuntimeDiagnosticReport(boundaryInput);
+  assert.equal(
+    boundaryReport.completed,
+    true,
+    boundaryReport.failures.join("\n"),
+  );
+  assert.deepEqual(
+    boundaryReport.rows[0].timing.longAnimationFrames.items[0].overlaps,
+    { drawHooks: [], longTasks: [], samplers: [], workerMessages: [] },
+  );
+
+  const privateInput = structuredClone(validInput);
+  const privateFrame = privateInput.rows[0].completedSnapshot
+    .longAnimationFrames[0];
+  privateFrame.observerError = "/home/private/observer-stack";
+  Object.assign(privateFrame.scripts[0], {
+    invoker: "private-element#identifier",
+    sourceFunctionName: "privateFunctionName",
+    sourceURL: "file:///home/private/document.pdf?secret=true",
+  });
+  const privateReport = buildAppMatrixRuntimeDiagnosticReport(privateInput);
+  assert.equal(privateReport.completed, true, privateReport.failures.join("\n"));
+  assert.deepEqual(
+    privateReport.rows[0].timing.longAnimationFrames,
+    valid.rows[0].timing.longAnimationFrames,
+  );
+  assert.doesNotMatch(
+    JSON.stringify(privateReport.rows[0].timing.longAnimationFrames),
+    /home|private|file:|"sourceFunctionName"|"sourceURL"|"invoker":/u,
+  );
+
+  const privatePhaseInput = structuredClone(validInput);
+  privatePhaseInput.rows[0].completedSnapshot.phaseMarkers[0].stage =
+    "/home/private/document-name";
+  const privatePhaseReport = buildAppMatrixRuntimeDiagnosticReport(
+    privatePhaseInput,
+  );
+  assert.equal(privatePhaseReport.rows[0].integrity, false);
+  assert.equal(
+    privatePhaseReport.rows[0].timing.phaseMarkers[0].stage,
+    "invalid",
+  );
+  const timingStrings = [];
+  const collectStrings = (value) => {
+    if (typeof value === "string") {
+      timingStrings.push(value);
+    } else if (Array.isArray(value)) {
+      value.forEach(collectStrings);
+    } else if (value && typeof value === "object") {
+      Object.values(value).forEach(collectStrings);
+    }
+  };
+  collectStrings(privatePhaseReport.rows[0].timing);
+  assert.equal(timingStrings.some((value) => value.includes("private")), false);
+  assert.doesNotMatch(
+    JSON.stringify(privatePhaseReport.rows[0].timing),
+    /home\/private|document-name/u,
+  );
+  const fixedTimingStages = new Set([
+    ...APP_MATRIX_RUNTIME_DIAGNOSTIC_STAGES,
+    "invalid",
+  ]);
+  assert.ok(privatePhaseReport.rows[0].timing.phaseMarkers.every((marker) =>
+    marker.stage === null || fixedTimingStages.has(marker.stage)
+  ));
+
+  const thrownHook = structuredClone(validInput);
+  thrownHook.rows[0].completedSnapshot.drawHookTimings[0].nativeDrawThrew = true;
+  thrownHook.rows[0].completedSnapshot.drawHookTimings[0].microtaskRecordedAt = null;
+  const thrownHookReport = buildAppMatrixRuntimeDiagnosticReport(thrownHook);
+  assert.equal(
+    thrownHookReport.completed,
+    true,
+    thrownHookReport.failures.join("\n"),
+  );
+
+  const normalThenThrow = structuredClone(validInput);
+  const normalTiming = normalThenThrow.rows[0].completedSnapshot
+    .drawHookTimings[0];
+  const laterThrownTiming = {
+    ...normalTiming,
+    activityId: normalTiming.activityId + 1,
+    blockLookupCompletedAt: normalTiming.blockLookupCompletedAt + 100,
+    blockRectCompletedAt: normalTiming.blockRectCompletedAt + 100,
+    drawInvocationId: normalTiming.drawInvocationId + 1,
+    hookEnteredAt: normalTiming.hookEnteredAt + 100,
+    microtaskRecordedAt: null,
+    nativeDrawCompletedAt: normalTiming.nativeDrawCompletedAt + 100,
+    nativeDrawStartedAt: normalTiming.nativeDrawStartedAt + 100,
+    nativeDrawThrew: true,
+    readerLookupCompletedAt: normalTiming.readerLookupCompletedAt + 100,
+    readerRectCompletedAt: normalTiming.readerRectCompletedAt + 100,
+    visiblePagesCompletedAt: normalTiming.visiblePagesCompletedAt + 100,
+    visiblePagesStartedAt: normalTiming.visiblePagesStartedAt + 100,
+  };
+  normalThenThrow.rows[0].completedSnapshot.drawHookTimings = [
+    laterThrownTiming,
+    normalTiming,
+  ];
+  normalThenThrow.rows[0].completedSnapshot.drawHookTimingCount = 2;
+  const normalThenThrowReport = buildAppMatrixRuntimeDiagnosticReport(
+    normalThenThrow,
+  );
+  assert.equal(
+    normalThenThrowReport.completed,
+    true,
+    normalThenThrowReport.failures.join("\n"),
+  );
+  assert.deepEqual(
+    normalThenThrowReport.rows[0].timing.drawHooks.items.map(
+      (timing) => timing.drawInvocationId,
+    ),
+    [normalTiming.drawInvocationId, laterThrownTiming.drawInvocationId],
+  );
+
+  const mutations = [
+    ["draw chronology", (input) => {
+      input.rows[0].completedSnapshot.drawHookTimings[0]
+        .blockLookupCompletedAt = 199;
+    }],
+    ["sampler chronology", (input) => {
+      input.rows[0].completedSnapshot.samplerTimings[0]
+        .readerRectCompletedAt = 196;
+    }],
+    ["worker chronology", (input) => {
+      input.rows[0].completedSnapshot.workerMessageTimings[0]
+        .messageSettledAt = 189;
+    }],
+    ["post-finish worker timing", (input) => {
+      input.rows[0].completedSnapshot.workerMessageTimings[0]
+        .messageSettledAt = 1_401;
+    }],
+    ["worker count mismatch", (input) => {
+      input.rows[0].completedSnapshot.workerMessageTimings = [];
+    }],
+    ["duplicate draw identity", (input) => {
+      const timing = input.rows[0].completedSnapshot.drawHookTimings[0];
+      input.rows[0].completedSnapshot.drawHookTimings.push({ ...timing });
+      input.rows[0].completedSnapshot.drawHookTimingCount = 2;
+    }],
+    ["short Long Task", (input) => {
+      input.rows[0].completedSnapshot.longTasks[0].duration = 49;
+    }],
+    ["null Long Task", (input) => {
+      input.rows[0].completedSnapshot.longTasks[0] = null;
+    }],
+    ["Long Task attribution count", (input) => {
+      input.rows[0].completedSnapshot.longTasks[0].attributionCount = 2;
+    }],
+    ["Long Task outside scenario", (input) => {
+      input.rows[0].completedSnapshot.longTasks[0].startTime = 1_399;
+    }],
+    ["phase order", (input) => {
+      input.rows[0].completedSnapshot.phaseMarkers[1].sequence = 1;
+    }],
+    ["null phase marker", (input) => {
+      input.rows[0].completedSnapshot.phaseMarkers[1] = null;
+    }],
+    ["extra wrong-configuration phase", (input) => {
+      input.rows[0].completedSnapshot.phaseMarkers.push({
+        ...input.rows[0].completedSnapshot.phaseMarkers.at(-1),
+        configurationId: "mobile-dpr3-pinch200",
+      });
+    }],
+    ["decreasing phase boundary", (input) => {
+      input.rows[0].completedSnapshot.phaseMarkers[1].activityId = 0;
+    }],
+    ["reordered worker messages", (input) => {
+      const first = input.rows[0].completedSnapshot.workerMessageTimings[0];
+      input.rows[0].completedSnapshot.workerMessageTimings = [{
+        ...first,
+        activityId: first.activityId + 1,
+        eventId: first.eventId + 1,
+        messageReceivedAt: first.messageReceivedAt + 10,
+        messageSettledAt: first.messageSettledAt + 10,
+      }, first];
+      input.rows[0].completedSnapshot.workerMessageTimingCount = 2;
+    }],
+    ["reordered samplers", (input) => {
+      const first = input.rows[0].completedSnapshot.samplerTimings[0];
+      input.rows[0].completedSnapshot.samplerTimings = [{
+        ...first,
+        endedAt: first.endedAt + 10,
+        readerRectCompletedAt: first.readerRectCompletedAt + 10,
+        sampleStartedAt: first.sampleStartedAt + 10,
+      }, first];
+      input.rows[0].completedSnapshot.samplerTimingCount = 2;
+    }],
+    ["reordered Long Tasks", (input) => {
+      const first = input.rows[0].completedSnapshot.longTasks[0];
+      input.rows[0].completedSnapshot.longTasks = [{
+        ...first,
+        duration: 60,
+        startTime: 1_250,
+      }, first];
+    }],
+    ["concealed attribution overflow", (input) => {
+      const task = input.rows[0].completedSnapshot.longTasks[0];
+      task.attribution = Array.from(
+        { length: 5 },
+        () => ({ ...task.attribution[0] }),
+      );
+      task.attributionCount = 5;
+    }],
+    ["timing ring overflow", (input) => {
+      const timing = input.rows[0].completedSnapshot.workerMessageTimings[0];
+      input.rows[0].completedSnapshot.workerMessageTimings = Array.from(
+        { length: 65 },
+        (_, index) => ({
+          ...timing,
+          activityId: timing.activityId + index,
+          eventId: timing.eventId + index,
+        }),
+      );
+      input.rows[0].completedSnapshot.workerMessageTimingCount = 65;
+    }],
+    ["LoAF unavailable with entry", (input) => {
+      input.rows[0].completedSnapshot.longAnimationFrameObserverAvailable =
+        false;
+    }],
+    ["null LoAF", (input) => {
+      input.rows[0].completedSnapshot.longAnimationFrames[0] = null;
+    }],
+    ["short LoAF", (input) => {
+      input.rows[0].completedSnapshot.longAnimationFrames[0].duration = 49;
+    }],
+    ["LoAF blocking overflow", (input) => {
+      const frame = input.rows[0].completedSnapshot.longAnimationFrames[0];
+      frame.blockingDuration = frame.duration + 1;
+    }],
+    ["LoAF render order", (input) => {
+      const frame = input.rows[0].completedSnapshot.longAnimationFrames[0];
+      frame.styleAndLayoutStart = frame.renderStart - 1;
+    }],
+    ["LoAF outside scenario", (input) => {
+      const frame = input.rows[0].completedSnapshot.longAnimationFrames[0];
+      const offset = 1_200;
+      frame.startTime += offset;
+      frame.renderStart += offset;
+      frame.styleAndLayoutStart += offset;
+      for (const script of frame.scripts) {
+        script.startTime += offset;
+        script.executionStart += offset;
+      }
+    }],
+    ["overlapping LoAFs", (input) => {
+      const frame = input.rows[0].completedSnapshot.longAnimationFrames[0];
+      input.rows[0].completedSnapshot.longAnimationFrames.push({ ...frame });
+      input.rows[0].completedSnapshot.longAnimationFrameCount = 2;
+    }],
+    ["LoAF script outside frame", (input) => {
+      const script = input.rows[0].completedSnapshot.longAnimationFrames[0]
+        .scripts[0];
+      script.startTime = 189;
+      script.executionStart = 189;
+    }],
+    ["LoAF execution start outside script", (input) => {
+      input.rows[0].completedSnapshot.longAnimationFrames[0].scripts[0]
+        .executionStart = 199;
+    }],
+    ["LoAF pause overflow", (input) => {
+      const frame = input.rows[0].completedSnapshot.longAnimationFrames[0];
+      frame.scripts[0].pauseDuration = frame.scripts[0].duration + 1;
+      frame.pauseDuration = frame.scripts[0].pauseDuration;
+    }],
+    ["LoAF pause aggregate", (input) => {
+      input.rows[0].completedSnapshot.longAnimationFrames[0].pauseDuration = 1;
+    }],
+    ["LoAF source class", (input) => {
+      input.rows[0].completedSnapshot.longAnimationFrames[0].scripts[0]
+        .sourceUrlClass = "private-url";
+    }],
+    ["LoAF count mismatch", (input) => {
+      input.rows[0].completedSnapshot.longAnimationFrameCount = 2;
+    }],
+    ["LoAF ring truncation", (input) => {
+      input.rows[0].completedSnapshot.longAnimationFrameCount = 33;
+    }],
+    ["LoAF script truncation", (input) => {
+      const frame = input.rows[0].completedSnapshot.longAnimationFrames[0];
+      frame.scriptCount = 17;
+      frame.scriptsTruncated = true;
+    }],
+    ...[
+      "startTime",
+      "duration",
+      "blockingDuration",
+      "renderStart",
+      "styleAndLayoutStart",
+      "pauseDuration",
+    ].map((field, index) => [
+      `LoAF frame ${field} numeric type`,
+      (input) => {
+        input.rows[0].completedSnapshot.longAnimationFrames[0][field] =
+          index % 2 === 0 ? null : String(
+            input.rows[0].completedSnapshot.longAnimationFrames[0][field],
+          );
+      },
+    ]),
+    ...[
+      "startTime",
+      "duration",
+      "executionStart",
+      "forcedStyleAndLayoutDuration",
+      "pauseDuration",
+    ].map((field, index) => [
+      `LoAF script ${field} numeric type`,
+      (input) => {
+        input.rows[0].completedSnapshot.longAnimationFrames[0].scripts[0][field] =
+          index % 2 === 0 ? null : String(
+            input.rows[0].completedSnapshot.longAnimationFrames[0]
+              .scripts[0][field],
+          );
+      },
+    ]),
+  ];
+  for (const [label, mutate] of mutations) {
+    const input = addRepresentativeAppMatrixRuntimeTiming(
+      passingAppMatrixRuntimeCompletedInput(outputDirectory),
+    );
+    mutate(input);
+    const report = buildAppMatrixRuntimeDiagnosticReport(input);
+    assert.equal(report.completed, false, label);
+    assert.ok(report.failures.length > 0, label);
+  }
+});
+
+test("refuses to record screenshots from a private fixture", async () => {
+  await assert.rejects(
+    execFileAsync(
+      process.execPath,
+      [
+        "scripts/run-pdf-sharpness-browser-regression.mjs",
+        "--record",
+        "--fixture",
+        path.join(os.tmpdir(), "private-reader-document.pdf"),
+      ],
+      { cwd: path.resolve(".") },
+    ),
+    /requires the exact repository PDF fixture/u,
+  );
+});
+
+test(
+  "runs the headed Issue 68 regression only when explicitly enabled",
+  {
+    skip: process.env.LINELIGHT_RUN_PDF_SHARPNESS_BROWSER !== "1",
+    timeout: 900_000,
+  },
+  async () => {
+    const outputDirectory = await mkdtemp(
+      path.join(os.tmpdir(), "linelight-pdf-sharpness-evidence-"),
+    );
+    try {
+      await execFileAsync(
+        process.execPath,
+        [
+          "scripts/run-pdf-sharpness-browser-regression.mjs",
+          "--output",
+          outputDirectory,
+        ],
+        { cwd: path.resolve("."), timeout: 880_000 },
+      );
+      const evidence = JSON.parse(
+        await readFile(
+          path.join(outputDirectory, "pdf-sharpness-browser.json"),
+          "utf8",
+        ),
+      );
+      assert.equal(evidence.passed, true, evidence.failures?.join("\n"));
+      assert.deepEqual(validatePdfSharpnessEvidence(evidence), []);
+    } finally {
+      await rm(outputDirectory, { force: true, recursive: true });
+    }
+  },
+);

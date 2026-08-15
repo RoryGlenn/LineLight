@@ -129,9 +129,16 @@ gating, and truthful terminal outcomes; and
 [`app/pdf-raster-scheduler.mjs`](../app/pdf-raster-scheduler.mjs) owns
 single-flight raster serialization.
 [`app/pdf-document-model.mjs`](../app/pdf-document-model.mjs) builds page-local
-semantic chunks that preserve the shared global indices,
+semantic chunks that preserve the shared global indices and reconciles each
+page's current worker-queue priority without retaining stale visibility; the
+first fallback signal closes that revision's worker raster queue immediately,
+[`app/pdf-raster-scale.mjs`](../app/pdf-raster-scale.mjs) maps responsive page
+geometry, device-pixel ratio, and pinch zoom to bounded physical-pixel raster
+targets and the visible/adjacent preview policy,
+[`app/pdf-fallback-scheduler.mjs`](../app/pdf-fallback-scheduler.mjs) serializes
+and cancels the document-scoped main-thread fallback queue,
 [`app/pdf-page-store.mjs`](../app/pdf-page-store.mjs) is the paged external UI
-store and bounded bitmap cache, and
+store and count-plus-pixel-budgeted bitmap cache, and
 [`app/pdf-progressive-navigation.mjs`](../app/pdf-progressive-navigation.mjs)
 keeps late progress, outline, and bookmark destinations pending until their
 chunk exists. [`app/pdf-terminal-reconciliation.mjs`](../app/pdf-terminal-reconciliation.mjs)
@@ -146,8 +153,11 @@ the persisted PDF text-model version/migration contract. Legacy PDF records are
 rebuilt locally from their stored bytes; no network source or manual re-import
 is used.
 [`app/pdf-page-view.tsx`](../app/pdf-page-view.tsx) owns true range-virtualized
-canvas pages, bitmap composition, the measured PDF.js text/highlight layers,
-and the visible-page fallback. [`app/pdf-outline.mjs`](../app/pdf-outline.mjs)
+canvas pages, progressive preview-to-sharp bitmap upgrades across responsive
+size, DPR, and visual-viewport changes, releases raster backing outside the
+actual viewport while retaining measured text/highlight shells, and owns the
+visible/adjacent/cancel worker state plus the visible-page fallback.
+[`app/pdf-outline.mjs`](../app/pdf-outline.mjs)
 maps PDF destinations to document token indices.
 [`app/reader-virtualization.mjs`](../app/reader-virtualization.mjs) selects the
 bounded page and paragraph render windows and notifies only the PDF or Focus
@@ -172,9 +182,10 @@ page one commits and publishes its semantic model before initial rasterization
 or background extraction. Ready documents stream page one directly and then
 bounded batches, and v3 documents migrate lazily while their recoverable record
 remains intact. The main thread retains the progressive semantic reader model,
-bounded page selectors, and at most eight worker bitmaps. Browser evidence uses
-actual worker bitmap ordering as the page-priority gate; transparent measured
-overlay and background-shell timings remain diagnostic.
+bounded page selectors, and worker bitmaps bounded by both count and total
+physical pixels, with temporary overflow only for pinned visible pages. Browser
+evidence uses actual worker bitmap ordering as the page-priority gate;
+transparent measured overlay and background-shell timings remain diagnostic.
 
 **Verification:** Parser and ordering behavior is covered by
 [`tests/epub-parser.test.mjs`](../tests/epub-parser.test.mjs) and
@@ -182,11 +193,20 @@ overlay and background-shell timings remain diagnostic.
 selection is covered by
 [`tests/reader-virtualization.test.mjs`](../tests/reader-virtualization.test.mjs).
 Incremental semantic equivalence, worker protocol ordering, parser readiness,
-render coalescing, cancellation, stale bitmap disposal, and confirmed terminal
-outcomes are covered by
+current-state queue reprioritization, active cancellation, stale bitmap
+disposal, and confirmed terminal outcomes are covered by
 [`tests/pdf-document-model.test.mjs`](../tests/pdf-document-model.test.mjs).
 Bounded external-store selectors and bitmap disposal are covered by
 [`tests/pdf-page-store.test.mjs`](../tests/pdf-page-store.test.mjs); late
+lower-resolution rejection is covered there, while responsive physical-pixel
+targets, zoom handling, integer canvas caps, and visible/adjacent request policy
+are covered by
+[`tests/pdf-raster-scale.test.mjs`](../tests/pdf-raster-scale.test.mjs).
+Fallback serialization and cancellation are covered by
+[`tests/pdf-fallback-scheduler.test.mjs`](../tests/pdf-fallback-scheduler.test.mjs),
+and [`tests/pdf-raster-lifecycle.test.mjs`](../tests/pdf-raster-lifecycle.test.mjs)
+locks the viewport ownership, document-revision reset, retry, and worker recovery
+integration points. Late
 progress/outline/bookmark targets and explicit playback races are covered by
 [`tests/pdf-progressive-navigation.test.mjs`](../tests/pdf-progressive-navigation.test.mjs);
 and generation-safe terminal UI reconciliation is covered by
@@ -232,6 +252,209 @@ records first-page ordering, Window Long Tasks, control latency, attached worker
 network traffic, resumable cancellation/replacement state, screenshots, and a
 DevTools trace. Review records live in
 [`docs/evidence/issue-56/`](evidence/issue-56/).
+[`scripts/run-pdf-sharpness-browser-regression.mjs`](../scripts/run-pdf-sharpness-browser-regression.mjs)
+builds and serves one clean source commit, then uses headed Brave to pair the
+same local PDF page in the browser viewer and LineLight across desktop DPR,
+effective browser-zoom metrics, mobile DPR, and visual-viewport pinch. It
+launches and tears down one fresh configured reference browser/profile per
+matrix entry, binds each about:blank-to-new-loader lifecycle to its ordered
+teardown row, and validates native mobile layout/visual behavior through
+the named 980-CSS-pixel Chromium default mobile layout width plus
+screen/DPR-derived height and scale relations, without freezing observed
+floating-point decimals. Decoded
+reference pixels retain the global version-2 component proof and separately
+crop the unique top-anchored substantial component for the requested page, so
+an adjacent global winner cannot substitute for the reviewed target. It records
+independently recomputed preview targets that either exactly satisfy the final
+backing without a redundant draw or upgrade through distinct bitmap/composition
+identities, current viewport priority after import-bound worker completion and
+bounded traversal of virtualized page shells. The priority boundary is recorded
+atomically with an instant final target scroll after mounting, and requires the
+target to move from geometrically offscreen to intersecting the reader. One
+monotonic activity sequence covers worker events, the scroll action, and draw invocations; each
+draw also captures an invocation ID and independent page/reader geometry before
+its deferred metadata record. The proof distinguishes an exact cache-satisfied
+composition with zero new target requests/bitmaps from one exact
+request/bitmap/composition chain bound to the transferred bitmap object, and
+rejects only non-target output that overtakes the path-specific target cutoff;
+later adjacent prefetch remains recorded and allowed. Peak canvas frames bind
+every composed page to a scroll-root/page-rect
+intersection that is recomputed independently from the product visibility flag,
+cross-check both recorded maxima, and retain the exact visible page set and
+pixel sum rather than imposing a fixed page count, while the store
+probe separately enforces count-plus-pixel bitmap-cache limits. The runner also
+records offscreen release,
+latest-import/page-bound serialized fallback injection, retry, and delayed
+continuation arms that restored-document staging cannot consume,
+exact `AbortSignal`- and attempt-bound cancellation terminals. A proof-held
+PDF.js continuation resumes only after that terminal, an invisible zero-sized
+canvas with retained text, and a one-second minimum; sanitized partial state is
+preserved on timeout without document identities. It also records per-scenario
+measured narration alignment and drained Long Tasks selected by entry start
+time inside each scenario, per-scenario document/parser worker
+traffic settled to a network-quiet fixed point through bounded attach commands,
+an exact clean pre-navigation target baseline, service-worker bypass, and exact
+one-to-one attached-target bootstrap settlements. Paused service-worker setup
+uses a synchronous four-command dispatch plus resume barrier with one shared
+post-resume deadline, then binds the first terminal session `GET` `Script` to
+the exact raw target URL; PDF/shared workers retain setup-before-resume
+ordering. Fixed-point stability also requires zero attach errors and every
+observed target's exact command sequence, attachment, and resume to complete;
+it cannot become quiet merely because a timed-out command left no pending
+promise. The harness also requires exact source/screenshot manifests and
+owned-process teardown. Its first-scenario report independently binds that
+phase, stable-sample sequence, opaque request/target identities, and nested
+parser ancestry rather than trusting a self-reported fixed-point outcome. The
+bounded first-scenario diagnostic
+mode persists privacy-safe pending-attach, inflight-request, and target-ancestry
+metadata on fixed-point timeouts without running fallback/reference work. A
+separate bounded fallback-import diagnostic persists the exact fixture once,
+reloads the same disposable profile under forced fallback, immediately
+re-imports, and binds success to that new import's worker/model/fallback chain,
+sanitized CDP lifecycle, external screenshot, and complete teardown. Its
+generated module wrapper statically imports the document worker so the real
+message listener is installed before the worker port queue opens; the wrapper
+body first proxies native nested-worker construction to resolve built asset
+paths against the absolute document-worker URL, then disables
+`OffscreenCanvas` and emits its fixed identity sentinel. Every post-boundary
+bootstrap settlement must bind to an exact new target, while import proof
+separately requires exactly one null-parent wrapper blob for the selected worker
+and exactly one parser child with matching ancestry and settlements. Unrelated
+local workers with valid settlements therefore cannot substitute for or
+invalidate that chain. The mode is noncanonical and cannot satisfy acceptance.
+Its exact before/after
+stage sequence and stage-derived fixed failure category retain partial,
+privacy-safe setup hash/count/condition evidence without serializing raw
+exceptions.
+A separate app-matrix runtime diagnostic replays the exact six configurations
+in order with one disposable app browser/profile, but skips fallback and native
+reference capture. It retains a completed prefix plus at most one terminal
+partial row, including the exact public-file observation, priority proof,
+offscreen-release DOM/canvas/geometry snapshot, phase boundaries, bounded
+draw/sampler/worker timing rings, Long Task correlations, and diagnostic-only
+Long Animation Frame timing when that browser API is available. Long Animation
+Frame scripts retain only fixed source/invoker classes and function-name
+presence; callback and drained batches are bound by each frame's own half-open
+scenario overlap and sorted before the bounded snapshot, so delayed delivery
+cannot move a prior frame into the next row. Raw URLs and names never enter the
+report. A release snapshot-read failure has a separate exact poll-only variant
+with fixed released/timeout classification and no DOM, geometry, identity, or
+error fields. Scenario finalization caches one idempotent scenario/snapshot
+pair so retry cannot move a previously frozen boundary. Release proof is anchored
+to the polled DOM/geometry/canvas state, so an empty post-boundary worker-event
+list is valid; any retained event must still match the current worker, job,
+revision, page, type, and order. After each navigation, the diagnostic first
+proves either a settled fresh library or one startup `open` whose document ID
+matches the active IndexedDB document and whose exact `first: true`,
+revision-bound first page resolves the app restore promise without any earlier
+identity-matched worker error; native `Worker` errors are bridged into that same
+ordered open identity before readiness is evaluated. It then reaches a
+generic three-sample CDP quiet point and freezes an exact four-count boundary
+before file selection. Before choosing the adjacent preview, the harness uses
+an instant page-one scroll, recalculates the literal center on every animation
+frame, and repeats a bounded instant correction whenever the page is more than
+two pixels away. It proceeds only after two subsequent visibly centered samples
+with an unchanged reader scroll offset, page rectangle, and virtual range;
+inherited CSS smooth scrolling therefore cannot expose a mid-scroll page as the
+row identity. Each cumulative final fixed
+point validates historical
+targets and settlements against their own phase and requires exactly one new
+post-boundary document worker with one direct parser child and one settlement
+each. Every half-open restore/import interval owns the exact requests and
+settlements for those targets, including the null-session document bootstrap,
+and reconstructs ancestry from parent sessions so a hidden differently phased
+pair cannot pass. Restore and import remain in the real shared phase; the
+validator checks previous-final to restore to import continuity instead of
+filtering detached targets or accepting a doubled phase count.
+The forced-to-final privacy interval is independently required to contain no
+PDF document/parser target, request, or settlement, regardless of phase labels,
+and malformed or recursive structured network entries fail closed. A failed
+network stage retains the already-built label-bound timeout diagnostic as fixed
+failure classes, derived gates/counts, and bounded ID-free stability samples;
+unexpected failures remain a separate fixed category. Its
+fresh-build/source, external-output, privacy, single-session, and full
+app/server teardown bindings are fail-closed. Noncanonical diagnostic schema 8
+also exposes fixed boolean-only row-identity and network-history conjuncts plus
+their exact aggregates, without document, revision, session, path, URL, or raw
+error values; nonrequired first-row history is explicitly true with
+`required: false`. Row-owned source, model, adjacent-page, scenario, screenshot,
+priority, release, and network fields are exact nulls before their producer
+assignment boundary and exact producer-shaped values afterward. The schema
+binds model import/page/progress/complete records in producer array order with
+safe event/activity IDs and clocks, one worker/job/revision identity, exact
+revision-suffixed document key, ordered unique pages, and terminal progress
+before completion. It compares page numbers fieldwise so cyclic or non-JSON
+values fail closed without throwing. The schema
+accepts partial scenario-start finalization and terminal completed-stage
+failures without accepting premature or missing later-stage fields.
+
+Adjacent-bitmap and visible-preview stages share a pure selector over the exact
+import occurrence, an ordered worker/job/revision/page/scale-compatible render
+request and later bitmap, and an exact WeakMap-linked bitmap draw. Worker work
+may predate scenario start, while the connected-canvas draw must be post-scenario
+and may occur during adjacent scrolling. Draws are sliced by their actual array
+occurrence and bound to the exact composition index. The selector independently checks the
+canvas-derived target, dimensions, order, distance, visibility, visible-page
+membership, and canvas/reader geometry. The current canonical evidence policy
+still requires an at-most-1.25x preview per row; a legitimate retained sharp
+bitmap is classified by the failure diagnostic but does not masquerade as that
+preview.
+
+A priority-mount failure additionally retains one
+non-polling browser snapshot bound to the exact import and
+`priority-mount-started` worker-event boundaries. Its fixed checkpoint and
+failure class, final page-centering samples, intermediate/target shell and
+reader state, and at most sixteen ordered target render/bitmap entries expose
+whether a strictly enabled, nonvisible distance-one request received a later
+identity-bound bitmap. The live priority-mount wait uses that same stage
+boundary and the exact import worker/job/revision, so an earlier or colliding
+worker pair cannot settle the stage. The report distinguishes any bitmap later
+than the selected request from a later identity-bound bitmap after the strict
+request, and recomputes those predicates from opaque
+worker/job/revision identity hashes and match booleans; target render/bitmap
+events must retain the producer's null document key. Centering ranges are
+parsed into bounded numeric pages/ranges before publication. The report
+publishes no raw event, worker, job, document, revision, URL, path, or exception
+identities, and truncation or a
+malformed snapshot invalidates the partial row. Success and every other failure
+stage require this snapshot to be null. A distinct failure-only
+`previewCompositionDiagnostic` is captured before finalization only at a failed
+`preview-composition-started` stage. It records fixed target-derivation or
+composition-wait and timeout/unexpected classes, stable scroll proof, exact
+phase/failure boundaries, sanitized terminal state, optional poll counts, and
+at most sixteen untruncated worker/draw entries. Missing target preconditions
+become a fixed `target-unavailable` projection with exact availability booleans
+and nullable safe measurements, while a fully ready late capture is fixed as
+`target-available-after-failure`; contradictory presence, connection,
+visibility, distance, range, and geometry states fail closed. Otherwise the sanitizer distinguishes preview,
+direct sharp, same-target preview satisfaction, preview-to-sharp upgrade,
+resolution regression across every composition, and no matching composition from one compatible
+request/bitmap prefix and exact bitmap/draw edge. Only local order,
+scenario-relative time, opaque hashes, fixed classes, and recomputed predicates
+are published; raw event/activity/composition, worker/job/revision/document,
+URL, path, and error values are omitted. Success and other failure stages
+require this preview snapshot to be null. The report is explicitly noncanonical
+and cannot satisfy Issue 68 acceptance.
+A third, reference-only diagnostic allowlists the first desktop/page-2 and
+mobile-DPR-3/page-3 native-viewer configurations for the exact public fixture
+and retains two consecutive byte-identical PNG candidates plus the analyzer's
+versioned segmentation metrics. It starts from one clean `about:blank` target,
+applies device metrics before the first PDF navigation, binds the returned new
+loader/frame to matching lifecycle and load events, and records fixed viewer
+classes plus actual DPR/layout/visual-viewport metrics. The analyzer forms
+deterministic 4-connected components with the
+existing white predicate, requires one uniquely largest substantial white page,
+then preserves the existing inset and rendered-ink thresholds. It starts no app
+build or server, writes only to a fresh absent external directory, binds the
+exact clean source and fixture, strips raw errors and output paths, proves its
+one owned reference browser/CDP/profile teardown, and remains a distinct
+noncanonical report that cannot satisfy acceptance.
+The independently testable acceptance contract lives in
+[`scripts/pdf-sharpness-evidence.mjs`](../scripts/pdf-sharpness-evidence.mjs),
+its fast and opt-in browser gates live in
+[`tests/pdf-sharpness-browser-harness.test.mjs`](../tests/pdf-sharpness-browser-harness.test.mjs),
+and review records belong in
+[`docs/evidence/issue-68/`](evidence/issue-68/).
 The packaged page is checked by
 [`tests/rendered-html.test.mjs`](../tests/rendered-html.test.mjs). PDF geometry,
 complex reading order, and highlight alignment require representative browser
@@ -258,7 +481,9 @@ stored audio/timing record validation. Audiobook record validation belongs to
 [`app/audiobook-alignment.mjs`](../app/audiobook-alignment.mjs).
 [`app/reader-navigation.mjs`](../app/reader-navigation.mjs) owns contextual
 position snapshots, recovery after text changes, bounded history, and document
-word search. [`app/reader-layout.mjs`](../app/reader-layout.mjs) owns layout
+word search. [`app/reader-lifecycle.mjs`](../app/reader-lifecycle.mjs) keeps an
+asynchronous startup restore bound to its original reader generation so a
+newer explicit import cannot be superseded. [`app/reader-layout.mjs`](../app/reader-layout.mjs) owns layout
 normalization, CSS values, and focus-window selection.
 [`app/reader-virtualization.mjs`](../app/reader-virtualization.mjs) owns bounded
 render windows and placeholder sizing.
@@ -292,6 +517,8 @@ migration, prepared-audio cleanup, and lifecycle behavior;
 profile identity, source fingerprints, and stored-chunk validation;
 [`tests/audiobook-alignment.test.mjs`](../tests/audiobook-alignment.test.mjs)
 for audiobook record, window, alignment, and confidence contracts;
+[`tests/reader-lifecycle.test.mjs`](../tests/reader-lifecycle.test.mjs) for
+startup-restore generation and replacement behavior;
 [`tests/reader-navigation.test.mjs`](../tests/reader-navigation.test.mjs) for
 snapshots, recovery, history, and search; and
 [`tests/reader-layout.test.mjs`](../tests/reader-layout.test.mjs) plus

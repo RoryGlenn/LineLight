@@ -4,11 +4,19 @@ import test from "node:test";
 import {
   createFocusParagraphRenderStore,
   createPdfPageRenderStore,
+  distanceFromViewport,
   estimateParagraphHeight,
   findPageIndexForWord,
   selectVirtualizedIndices,
   selectVirtualizedRanges,
 } from "../app/reader-virtualization.mjs";
+
+test("reports true viewport visibility and page distance", () => {
+  assert.equal(distanceFromViewport(8, 8, 10), 0);
+  assert.equal(distanceFromViewport(10, 8, 10), 0);
+  assert.equal(distanceFromViewport(7, 8, 10), 1);
+  assert.equal(distanceFromViewport(13, 8, 10), 3);
+});
 
 test("keeps rendering bounded around visible and active PDF pages", () => {
   assert.deepEqual(selectVirtualizedIndices([10], 359, 10, 2), [8, 9, 10, 11, 12]);

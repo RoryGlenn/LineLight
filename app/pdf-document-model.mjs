@@ -151,31 +151,97 @@ export function prioritizePdfRenderRequests(requests) {
   );
 }
 
-/**
- * Keep one pending request per page. The newest scale wins while visibility
- * and the nearest known distance are preserved from all coalesced requests.
- */
+/** Keep one current pending state per page; disabled pages leave the queue. */
 export function coalescePdfRenderRequests(requests, incoming) {
-  const samePage = requests.filter(
-    (request) => request.pageNumber === incoming.pageNumber,
-  );
-  if (!samePage.length) return [...requests, incoming];
   const remaining = requests.filter(
     (request) => request.pageNumber !== incoming.pageNumber,
   );
-  return [
-    ...remaining,
-    {
-      ...incoming,
-      visible:
-        Boolean(incoming.visible) ||
-        samePage.some((request) => Boolean(request.visible)),
-      distance: Math.min(
-        Number(incoming.distance ?? Number.POSITIVE_INFINITY),
-        ...samePage.map((request) =>
-          Number(request.distance ?? Number.POSITIVE_INFINITY),
-        ),
-      ),
-    },
-  ];
+  if (incoming.enabled === false) return remaining;
+  return [...remaining, incoming];
+}
+
+export function updatePdfRenderQueue(
+  requests,
+  incoming,
+  { fallbackActive = false } = {},
+) {
+  if (fallbackActive) return [];
+  return coalescePdfRenderRequests(requests, incoming);
+}
+
+export function resolvePdfRenderFallbackQueueActivation(
+  activeRequest,
+) {
+  return {
+    cancelSequence: activeRequest?.sequence ?? null,
+    fallbackActive: true,
+    requests: [],
+  };
+}
+
+/**
+ * Decide whether current page state replaces, follows, or cancels an active
+ * raster. A same-scale priority update never enqueues duplicate work.
+ */
+export function reconcilePdfActiveRenderRequest(
+  activeRequest,
+  incoming,
+  { activeCancelled = false } = {},
+) {
+  if (!activeRequest || activeRequest.pageNumber !== incoming.pageNumber) {
+    return {
+      cancelActive: false,
+      enqueue: incoming.enabled !== false,
+      updatedActive: activeRequest,
+    };
+  }
+  if (incoming.enabled === false) {
+    return {
+      cancelActive: !activeCancelled,
+      enqueue: false,
+      updatedActive: activeRequest,
+    };
+  }
+  if (activeCancelled) {
+    return {
+      cancelActive: false,
+      enqueue: true,
+      updatedActive: activeRequest,
+    };
+  }
+  const activeScale = Number(activeRequest.scale);
+  const incomingScale = Number(incoming.scale);
+  if (incomingScale < activeScale) {
+    return {
+      cancelActive: true,
+      enqueue: true,
+      updatedActive: activeRequest,
+    };
+  }
+  if (incomingScale === activeScale) {
+    return {
+      cancelActive: false,
+      enqueue: false,
+      updatedActive: {
+        ...activeRequest,
+        distance: incoming.distance,
+        visible: incoming.visible,
+      },
+    };
+  }
+  return {
+    cancelActive: false,
+    enqueue: true,
+    updatedActive: activeRequest,
+  };
+}
+
+/** Drop duplicate previews while retaining a queued sharper page raster. */
+export function retainPdfRenderUpgrades(requests, pageNumber, renderedScale) {
+  const completedScale = Number(renderedScale);
+  return requests.filter(
+    (request) =>
+      request.pageNumber !== pageNumber ||
+      Number(request.scale) > completedScale,
+  );
 }
