@@ -43,9 +43,11 @@ import {
   classifyCdpDiagnosticUrl,
   classifyPdfRasterTransition,
   completeCdpNetworkRequest,
+  createAppMatrixScenarioFinalizationCache,
   createFallbackImportDiagnosticProgress,
   createReferenceCaptureDiagnosticProgress,
   decodePngScreenshot,
+  derivePdfPreviewRasterTarget,
   dispatchPausedServiceWorkerCommands,
   dispatchToCdpSession,
   hasCdpPhasePdfBootstrapCoverage,
@@ -73,8 +75,10 @@ import {
   selectPdfFallbackAbortCandidate,
   selectPdfFallbackScenarioEvents,
   selectPdfPriorityPreviewSettlement,
+  selectPdfRasterCompositionSettlement,
   sendToCdpSession,
   sanitizeAppMatrixRuntimePriorityMountDiagnostic,
+  sanitizeAppMatrixRuntimePreviewCompositionDiagnostic,
   settleCdpCommandDispatches,
   summarizePdfFallbackCancellationDiagnostic,
   summarizePdfModelCompletion,
@@ -5736,13 +5740,99 @@ test("drains runtime observers before scenario snapshots", async () => {
   );
   assert.match(
     source,
-    /finishScenario[\s\S]*finishedAt = performance\.now\(\);\s*if \(runtimeDiagnosticsEnabled\) \{\s*drainLongAnimationFrames\(\);\s*\}\s*drainLongTasks\(\)/u,
+    /finalizeCurrentScenario[\s\S]*drainLongAnimationFrames\(\);[\s\S]*drainLongTasks\(\);\s*currentScenario\.finishedAt = performance\.now\(\)/u,
   );
   assert.match(
     source,
-    /state\.snapshot = \(\) => \{\s*if \(runtimeDiagnosticsEnabled\) drainLongAnimationFrames\(\);\s*drainLongTasks\(\)/u,
+    /captureSnapshot = \(drainObservers = true\)[\s\S]*drainLongAnimationFrames\(\);\s*drainLongTasks\(\)/u,
   );
   assert.doesNotMatch(source, /longTaskStart|longTaskEnd/u);
+});
+
+test("caches one atomic scenario finalization bundle and fails closed", async () => {
+  const cache = createAppMatrixScenarioFinalizationCache();
+  cache.begin();
+  const scenario = {
+    finishedAt: 100,
+    id: "first",
+    maximumCanvasCount: 1,
+    maximumCanvasPixels: 200,
+    maximumCountFrame: { composedCount: 1, composedPixels: 200 },
+    maximumPixelsFrame: { composedCount: 1, composedPixels: 200 },
+  };
+  let finalizeCount = 0;
+  let snapshotCount = 0;
+  const finalized = cache.finishSnapshot(
+    () => {
+      finalizeCount += 1;
+      return scenario;
+    },
+    () => {
+      snapshotCount += 1;
+      return {
+        draws: [1],
+        phaseMarkers: ["scenario-finish-started"],
+      };
+    },
+  );
+  assert.equal(finalized.scenario.finishedAt, 100);
+  assert.equal(finalized.scenario.maximumCanvasPixels, 200);
+  scenario.finishedAt = 999;
+  const retryAfterMarkerFailure = cache.finishSnapshot(
+    () => {
+      throw new Error("the cached pair must bypass later finalization");
+    },
+    () => {
+      throw new Error("the cached pair must bypass a later snapshot");
+    },
+  );
+  assert.deepEqual(retryAfterMarkerFailure, finalized);
+  assert.equal(finalizeCount, 1);
+  assert.equal(snapshotCount, 1);
+  retryAfterMarkerFailure.snapshot.phaseMarkers.push("private-late-marker");
+  assert.deepEqual(cache.finishSnapshot(() => null, () => null), finalized);
+
+  cache.begin();
+  assert.equal(cache.finishSnapshot(() => null, () => ({ stale: true })), null);
+  assert.throws(
+    () => cache.finishSnapshot(
+      () => ({ finishedAt: 200, id: "second" }),
+      () => {
+        throw new Error("snapshot capture failed");
+      },
+    ),
+    /snapshot capture failed/u,
+  );
+  assert.throws(
+    () => cache.finishSnapshot(
+      () => ({ finishedAt: 300, id: "forged-retry" }),
+      () => ({ draws: [2] }),
+    ),
+    /finalization bundle is unavailable/u,
+  );
+
+  cache.begin();
+  assert.deepEqual(cache.finishSnapshot(
+    () => ({ finishedAt: 300, id: "third" }),
+    () => ({ draws: [3] }),
+  ), {
+    scenario: { finishedAt: 300, id: "third" },
+    snapshot: { draws: [3] },
+  });
+
+  const source = await readFile(
+    "scripts/run-pdf-sharpness-browser-regression.mjs",
+    "utf8",
+  );
+  assert.match(source, /scenarioFinalizationCache\.begin\(\)/u);
+  assert.match(
+    source,
+    /scenarioFinalizationCache\.finishSnapshot\([\s\S]*captureSnapshot\(false\)[\s\S]*if \(finalization\) currentScenario = null/u,
+  );
+  assert.equal(
+    source.match(/__lineLightIssue68\.finishScenarioSnapshot\(\)/gu)?.length,
+    2,
+  );
 });
 
 test("binds LoAF batches to exact scenario intervals before the ring", () => {
@@ -7772,78 +7862,102 @@ test("requires exact worker model completion before traversing virtualized pages
   const restoredRevision = "restored-revision";
   const restoredEvents = [
     {
+      activityId: 1,
       at: 1,
       direction: "to-worker",
       documentKey: restoredDocumentKey,
+      eventId: 1,
       jobId: 1,
       revision: restoredRevision,
       type: "open",
+      workerInstanceId: 1,
     },
     ...Array.from({ length: 6 }, (_, index) => ({
+      activityId: index + 2,
       at: index + 2,
       direction: "from-worker",
       documentKey: restoredDocumentKey,
+      eventId: index + 2,
       jobId: 1,
       pageNumber: index + 1,
       revision: restoredRevision,
       type: "page",
+      workerInstanceId: 1,
     })),
     {
+      activityId: 8,
       at: 8,
       completedPages: 6,
       direction: "from-worker",
+      eventId: 8,
       jobId: 1,
       pageCount: 6,
       revision: restoredRevision,
       type: "progress",
+      workerInstanceId: 1,
     },
     {
+      activityId: 9,
       at: 9,
       direction: "from-worker",
       documentKey: restoredDocumentKey,
+      eventId: 9,
       jobId: 1,
       pageCount: 6,
       revision: restoredRevision,
       type: "complete",
+      workerInstanceId: 1,
     },
   ];
   const pageEvents = Array.from({ length: 6 }, (_, index) => ({
+    activityId: index + 11,
     at: index + 101,
     direction: "from-worker",
     documentKey: DOCUMENT_KEY,
+    eventId: index + 11,
     jobId: 2,
     pageNumber: index + 1,
     revision: REVISION,
     type: "page",
+    workerInstanceId: 2,
   }));
   const events = [
     ...restoredEvents,
     {
+      activityId: 10,
       at: 100,
       direction: "to-worker",
       documentKey: DOCUMENT_KEY,
+      eventId: 10,
       jobId: 2,
       revision: REVISION,
       type: "import",
+      workerInstanceId: 2,
     },
     ...pageEvents,
     {
+      activityId: 17,
       at: 107,
       completedPages: 6,
       direction: "from-worker",
+      eventId: 17,
       jobId: 2,
       pageCount: 6,
       revision: REVISION,
       type: "progress",
+      workerInstanceId: 2,
     },
     {
+      activityId: 18,
       at: 108,
       direction: "from-worker",
       documentKey: DOCUMENT_KEY,
+      eventId: 18,
       jobId: 2,
       pageCount: 6,
       revision: REVISION,
       type: "complete",
+      workerInstanceId: 2,
     },
   ];
   assert.equal(summarizePdfModelCompletion(events, 6).complete, true);
@@ -7913,12 +8027,15 @@ test("requires exact worker model completion before traversing virtualized pages
     summarizePdfModelCompletion([
       ...events,
       {
+        activityId: 19,
         at: 200,
         direction: "to-worker",
         documentKey: "new-document:new-revision",
+        eventId: 19,
         jobId: 3,
         revision: "new-revision",
         type: "import",
+        workerInstanceId: 3,
       },
     ], 6).complete,
     false,
@@ -7927,16 +8044,110 @@ test("requires exact worker model completion before traversing virtualized pages
     summarizePdfModelCompletion([
       ...events,
       {
+        activityId: 19,
         at: 200,
         direction: "to-worker",
         documentKey: null,
+        eventId: 19,
         jobId: 3,
         revision: null,
         type: "import",
+        workerInstanceId: 3,
       },
     ], 6).complete,
     false,
   );
+  const currentImport = events.find((event) => event.type === "import");
+  const beforeImport = events.filter((event) => event !== currentImport);
+  beforeImport.push(currentImport);
+  assert.equal(summarizePdfModelCompletion(beforeImport, 6).complete, false);
+  const completeBeforeProgress = [...events];
+  const progressIndex = completeBeforeProgress.findIndex((event) =>
+    event.type === "progress" && event.jobId === 2
+  );
+  const completeIndex = completeBeforeProgress.findIndex((event) =>
+    event.type === "complete" && event.jobId === 2
+  );
+  [completeBeforeProgress[progressIndex], completeBeforeProgress[completeIndex]] =
+    [completeBeforeProgress[completeIndex], completeBeforeProgress[progressIndex]];
+  assert.equal(
+    summarizePdfModelCompletion(completeBeforeProgress, 6).complete,
+    false,
+  );
+  const reorderCurrentResponses = (responses) => [
+    ...events.filter((event) => event.jobId !== 2 ||
+      !["page", "progress", "complete"].includes(event.type)),
+    ...responses.map((event, index) => ({
+      ...event,
+      activityId: 11 + index,
+      at: 101 + index,
+      eventId: 11 + index,
+    })),
+  ];
+  const currentResponses = events.filter((event) =>
+    event.jobId === 2 && ["page", "progress", "complete"].includes(event.type)
+  );
+  const pageSix = currentResponses.find((event) =>
+    event.type === "page" && event.pageNumber === 6
+  );
+  const withoutPageSix = currentResponses.filter((event) => event !== pageSix);
+  const terminalProgressIndex = withoutPageSix.findIndex((event) =>
+    event.type === "progress"
+  );
+  const pageSixAfterProgress = [...withoutPageSix];
+  pageSixAfterProgress.splice(terminalProgressIndex + 1, 0, pageSix);
+  assert.equal(
+    summarizePdfModelCompletion(
+      reorderCurrentResponses(pageSixAfterProgress),
+      6,
+    ).complete,
+    false,
+  );
+  const pageSixAfterComplete = [...withoutPageSix, pageSix];
+  assert.equal(
+    summarizePdfModelCompletion(
+      reorderCurrentResponses(pageSixAfterComplete),
+      6,
+    ).complete,
+    false,
+  );
+  const progressAfterComplete = [...currentResponses, {
+    ...currentResponses.find((event) => event.type === "progress"),
+    completedPages: 5,
+  }];
+  assert.equal(
+    summarizePdfModelCompletion(
+      reorderCurrentResponses(progressAfterComplete),
+      6,
+    ).complete,
+    false,
+  );
+  assert.equal(
+    summarizePdfModelCompletion(events.map((event) =>
+      event.jobId === 2 && event.direction === "from-worker"
+        ? { ...event, workerInstanceId: 3 }
+        : event
+    ), 6).complete,
+    false,
+  );
+  assert.equal(
+    summarizePdfModelCompletion(events.map((event) =>
+      event.jobId === 2 && event.documentKey === DOCUMENT_KEY
+        ? { ...event, documentKey: "forged-document-key" }
+        : event
+    ), 6).complete,
+    false,
+  );
+  const bigintEvents = events.map((event) => ({ ...event }));
+  bigintEvents.find((event) => event.type === "page" && event.jobId === 2)
+    .eventId = 1n;
+  assert.doesNotThrow(() => summarizePdfModelCompletion(bigintEvents, 6));
+  assert.equal(summarizePdfModelCompletion(bigintEvents, 6).complete, false);
+  const cyclicEvents = events.map((event) => ({ ...event }));
+  cyclicEvents.find((event) => event.type === "page" && event.jobId === 2)
+    .documentKey = cyclicEvents;
+  assert.doesNotThrow(() => summarizePdfModelCompletion(cyclicEvents, 6));
+  assert.equal(summarizePdfModelCompletion(cyclicEvents, 6).complete, false);
 
   const source = await readFile(
     "scripts/run-pdf-sharpness-browser-regression.mjs",
@@ -9222,6 +9433,9 @@ function passingAppMatrixRuntimeFailureInput(outputDirectory) {
   const revision = "revision-1";
   const modelIdentity = {
     documentKey,
+    importActivityId: 5,
+    importAt: 10,
+    importEventId: 5,
     importJobId: 1,
     revision,
     workerInstanceId: 1,
@@ -9318,28 +9532,53 @@ function passingAppMatrixRuntimeFailureInput(outputDirectory) {
     currentStage: "release-observation-started",
     failureStage: "release-observation-started",
     finalizationErrorPresent: false,
-    modelCompletion: { documentKey, importJobId: 1, revision },
+    modelCompletion: {
+      complete: true,
+      completeEventCount: 1,
+      completedProgressCount: 1,
+      documentKey,
+      importActivityId: 5,
+      importAt: 10,
+      importEventId: 5,
+      importJobId: 1,
+      importRequestCount: 1,
+      pageEventCount: 6,
+      pageNumbers: [1, 2, 3, 4, 5, 6],
+      revision,
+      workerInstanceId: 1,
+    },
     modelIdentity,
     networkFailure: null,
     networkFixedPoint: null,
+    priorityMountDiagnostic: null,
     priorityProbe,
+    previewCompositionDiagnostic: null,
     priorityTarget,
     releaseSnapshot: {
+      drawHookTimingCount: 0,
+      drawHookTimings: [],
       draws: [{
         activityId: 101,
         at: 300,
         bitmapEventId: 19,
         compositionId: 1,
+        distance: 0,
         drawInvocationId: 51,
+        geometry: { bottom: 800, left: 100, right: 900, top: 100 },
+        geometryVisible: true,
         height: 990,
         page: priorityTarget,
+        readerViewport: readerRect,
+        scale: 1.25,
         source: "worker-bitmap",
         visible: true,
+        visiblePages: [priorityTarget],
         width: 765,
       }],
       elapsedMs: 90_050,
       evaluationAttemptCount: 901,
       evaluationErrorCount: 0,
+      longTasks: [],
       mountedPages: [1, 2, 3, 4, 5, 6],
       observedAt: 450,
       pages: [
@@ -9360,6 +9599,7 @@ function passingAppMatrixRuntimeFailureInput(outputDirectory) {
           width: 765,
         }),
       ],
+      phaseMarkers: [],
       range: "0:5",
       reader: {
         clientHeight: 900,
@@ -9369,6 +9609,8 @@ function passingAppMatrixRuntimeFailureInput(outputDirectory) {
         scrollTop: 1_500,
         scrollWidth: 1_100,
       },
+      samplerTimingCount: 0,
+      samplerTimings: [],
       snapshotErrorPresent: false,
       viewport: {
         devicePixelRatio: 1,
@@ -9383,9 +9625,36 @@ function passingAppMatrixRuntimeFailureInput(outputDirectory) {
       visiblePages: [priorityTarget],
       waitOutcome: "timeout",
       workerEvents: [],
+      workerMessageTimingCount: 0,
+      workerMessageTimings: [],
     },
-    scenario: { finishedAt: 500, startedAt: 100 },
+    scenario: {
+      drawEnd: 1,
+      drawStart: 0,
+      finishedAt: 500,
+      id: configurationId,
+      maximumCanvasCount: 0,
+      maximumCanvasPixels: 0,
+      maximumCountFrame: null,
+      maximumPixelsFrame: null,
+      sampleEnd: 0,
+      sampleStart: 0,
+      startedAt: 100,
+      workerEventEnd: 50,
+      workerEventStart: 5,
+    },
     scenarioFinalized: true,
+    scenarioStart: {
+      drawStart: 0,
+      id: configurationId,
+      maximumCanvasCount: 0,
+      maximumCanvasPixels: 0,
+      maximumCountFrame: null,
+      maximumPixelsFrame: null,
+      sampleStart: 0,
+      startedAt: 100,
+      workerEventStart: 5,
+    },
     screenshot: {
       bytes: 1_024,
       path: path.relative(
@@ -9918,16 +10187,36 @@ function passingAppMatrixRuntimeCompletedInput(outputDirectory) {
   const rows = PDF_SHARPNESS_MATRIX.map((configuration, index) => {
     const row = structuredClone(base.rows[0]);
     const adjacentPage = index < 4 ? 2 : 3;
-    const priorityTarget = adjacentPage + 2;
+    const priorityTarget = adjacentPage +
+      (configuration.kind === "mobile" ? 3 : 2);
     const documentKey = `public-document-${index + 1}:revision-${index + 1}`;
     const revision = `revision-${index + 1}`;
+    const importActivityId = index + 5;
+    const importEventId = index + 5;
     row.adjacentPage = adjacentPage;
     row.configurationId = configuration.id;
     row.currentStage = APP_MATRIX_RUNTIME_DIAGNOSTIC_STAGES.at(-1);
     row.failureStage = null;
-    row.modelCompletion = { documentKey, importJobId: index + 1, revision };
+    row.modelCompletion = {
+      complete: true,
+      completeEventCount: 1,
+      completedProgressCount: 1,
+      documentKey,
+      importActivityId,
+      importAt: 10,
+      importEventId,
+      importJobId: index + 1,
+      importRequestCount: 1,
+      pageEventCount: 6,
+      pageNumbers: [1, 2, 3, 4, 5, 6],
+      revision,
+      workerInstanceId: index + 1,
+    };
     row.modelIdentity = {
       documentKey,
+      importActivityId,
+      importAt: 10,
+      importEventId,
       importJobId: index + 1,
       revision,
       workerInstanceId: index + 1,
@@ -9938,6 +10227,7 @@ function passingAppMatrixRuntimeCompletedInput(outputDirectory) {
     row.priorityProbe.compositions[0].page = priorityTarget;
     row.priorityTarget = priorityTarget;
     row.releaseSnapshot.draws[0].page = priorityTarget;
+    row.releaseSnapshot.draws[0].visiblePages = [priorityTarget];
     row.releaseSnapshot.pages[0].page = adjacentPage;
     row.releaseSnapshot.pages[0].pageIndex = adjacentPage - 1;
     row.releaseSnapshot.pages[0].canvas.height = 0;
@@ -9966,6 +10256,10 @@ function passingAppMatrixRuntimeCompletedInput(outputDirectory) {
       path.join(outputDirectory, `linelight-${configuration.id}.png`),
     );
     row.sequence = index + 1;
+    row.scenarioStart.id = configuration.id;
+    row.scenarioStart.workerEventStart = importEventId;
+    row.scenario.id = configuration.id;
+    row.scenario.workerEventStart = importEventId;
     row.stageHistory = [...APP_MATRIX_RUNTIME_DIAGNOSTIC_STAGES];
     const phaseStages = row.stageHistory.filter((stage) =>
       !stage.startsWith("navigate-") &&
@@ -10130,30 +10424,331 @@ function passingAppMatrixRuntimePriorityMountFailureInput(
   return input;
 }
 
+function passingAppMatrixRuntimePreviewCompositionFailureInput(
+  outputDirectory,
+  {
+    failureCategory = "timeout",
+    rowIndex = 2,
+  } = {},
+) {
+  const input = passingAppMatrixRuntimeCompletedInput(outputDirectory);
+  const row = input.rows[rowIndex];
+  const terminalStage = "preview-composition-started";
+  row.stageHistory = APP_MATRIX_RUNTIME_DIAGNOSTIC_STAGES.slice(
+    0,
+    APP_MATRIX_RUNTIME_DIAGNOSTIC_STAGES.indexOf(terminalStage) + 1,
+  );
+  row.currentStage = terminalStage;
+  row.failureStage = terminalStage;
+  row.status = "failed";
+  row.networkFailure = null;
+  row.networkFixedPoint = null;
+  row.previewCompositionDiagnostic = null;
+  row.priorityMountDiagnostic = null;
+  row.priorityProbe = null;
+  row.priorityTarget = null;
+  row.releaseSnapshot = null;
+  row.screenshot = null;
+
+  const importEventId = row.modelIdentity.importEventId;
+  const phaseStages = row.stageHistory.filter((stage) =>
+    !stage.startsWith("navigate-")
+  );
+  row.completedSnapshot.phaseMarkers = phaseStages.map((stage, index) => {
+    const marker = {
+      activityId: Math.min(18, index + 1),
+      at: 20 + index * 10,
+      configurationId: row.configurationId,
+      drawInvocationId: 0,
+      sequence: index + 1,
+      stage,
+      workerEventId: Math.min(importEventId, index),
+    };
+    if (stage === "adjacent-scroll-started") {
+      Object.assign(marker, {
+        activityId: 20,
+        at: 220,
+        workerEventId: importEventId + 2,
+      });
+    } else if (stage === "adjacent-scroll-completed") {
+      Object.assign(marker, {
+        activityId: 23,
+        at: 240,
+        drawInvocationId: 1,
+        workerEventId: importEventId + 2,
+      });
+    } else if (stage === terminalStage) {
+      Object.assign(marker, {
+        activityId: 24,
+        at: 250,
+        drawInvocationId: 1,
+        workerEventId: importEventId + 2,
+      });
+    }
+    return marker;
+  });
+
+  const centerSample = {
+    cssScrollBehavior: "smooth",
+    page: {
+      bottom: 846,
+      height: 792,
+      left: 100,
+      right: 712,
+      top: 54,
+      width: 612,
+    },
+    pageNumber: row.adjacentPage,
+    range: "0:5",
+    reader: { bottom: 900, scrollTop: 1_000, top: 0 },
+    visible: true,
+  };
+  const centeringSamples = [
+    structuredClone(centerSample),
+    structuredClone(centerSample),
+  ];
+  const expectedPreviewTarget = {
+    capped: false,
+    height: 990,
+    scale: 1.25,
+    width: 765,
+  };
+  const sharpTarget = { height: 1_584, scale: 2, width: 1_224 };
+  const workerEvent = ({ eventId, type }) => ({
+    activityId: eventId,
+    at: type === "render" ? 200 : 210,
+    direction: type === "render" ? "to-worker" : "from-worker",
+    distance: type === "render" ? 0 : null,
+    documentKey: null,
+    enabled: type === "render" ? true : null,
+    eventId,
+    height: type === "bitmap" ? sharpTarget.height : null,
+    jobId: row.modelIdentity.importJobId,
+    pageNumber: row.adjacentPage,
+    revision: row.modelIdentity.revision,
+    scale: sharpTarget.scale,
+    type,
+    visible: type === "render" ? true : null,
+    width: type === "bitmap" ? sharpTarget.width : null,
+    workerInstanceId: row.modelIdentity.workerInstanceId,
+  });
+  const workerItems = [
+    workerEvent({ eventId: importEventId + 1, type: "render" }),
+    workerEvent({ eventId: importEventId + 2, type: "bitmap" }),
+  ];
+  const drawItems = [{
+    activityId: 22,
+    at: 230,
+    bitmapEventId: importEventId + 2,
+    compositionId: 1,
+    distance: 0,
+    drawInvocationId: 1,
+    geometry: { bottom: 846, left: 100, right: 712, top: 54 },
+    geometryVisible: true,
+    height: sharpTarget.height,
+    page: row.adjacentPage,
+    readerViewport: { bottom: 900, left: 0, right: 1_100, top: 0 },
+    scale: sharpTarget.scale,
+    source: "worker-bitmap",
+    visible: true,
+    visiblePages: [row.adjacentPage],
+    width: sharpTarget.width,
+  }];
+  const scenarioStart = {
+    ...row.scenarioStart,
+    drawStart: 0,
+    startedAt: 100,
+    workerEventStart: importEventId,
+  };
+  row.scenarioStart = scenarioStart;
+  row.scenario = {
+    ...scenarioStart,
+    drawEnd: drawItems.length,
+    finishedAt: 500,
+    sampleEnd: scenarioStart.sampleStart,
+    workerEventEnd: importEventId + 2,
+  };
+  row.previewCompositionDiagnostic = {
+    adjacentScrollProof: {
+      pageNumber: row.adjacentPage,
+      samples: centeringSamples,
+      summary: summarizePdfPageCenteringStability(
+        centeringSamples,
+        row.adjacentPage,
+      ),
+    },
+    checkpoint: "composition-wait",
+    drawItems,
+    drawTotal: drawItems.length,
+    drawTruncated: false,
+    expectedPreviewTarget,
+    failureBoundary: {
+      activityId: 30,
+      at: 400,
+      drawCount: drawItems.length,
+      drawInvocationId: 1,
+      workerEventId: importEventId + 2,
+    },
+    failureCategory,
+    importEventId,
+    page: {
+      canvas: {
+        connected: true,
+        cssHeight: 792,
+        cssWidth: 612,
+        devicePixelRatio: 2,
+        height: sharpTarget.height,
+        present: true,
+        scale: sharpTarget.scale,
+        source: "worker-bitmap",
+        targetHeight: sharpTarget.height,
+        targetScale: sharpTarget.scale,
+        targetWidth: sharpTarget.width,
+        visualViewportScale: 1,
+        width: sharpTarget.width,
+      },
+      distance: 0,
+      page: row.adjacentPage,
+      pageHeight: 792,
+      pageWidth: 612,
+      present: true,
+      rect: { bottom: 880, left: 80, right: 732, top: 40 },
+      textOverlayCount: 12,
+      visible: true,
+    },
+    phaseMarkers: row.completedSnapshot.phaseMarkers.filter((marker) =>
+      [
+        "adjacent-scroll-started",
+        "adjacent-scroll-completed",
+        terminalStage,
+      ].includes(marker.stage)
+    ).map((marker) => structuredClone(marker)),
+    range: "0:5",
+    reader: {
+      rect: { bottom: 900, left: 0, right: 1_100, top: 0 },
+      scrollTop: 1_000,
+    },
+    scenarioStart: structuredClone(scenarioStart),
+    visiblePages: [row.adjacentPage],
+    wait: failureCategory === "timeout"
+      ? {
+          elapsedMs: 90_000,
+          evaluationAttemptCount: 900,
+          evaluationErrorCount: 0,
+          outcome: "timeout",
+          timeoutMs: 90_000,
+        }
+      : {
+          elapsedMs: 0,
+          evaluationAttemptCount: 0,
+          evaluationErrorCount: 0,
+          outcome: "unexpected",
+          timeoutMs: 90_000,
+        },
+    workerItems,
+    workerTotal: workerItems.length,
+    workerTruncated: false,
+  };
+  input.rows = input.rows.slice(0, rowIndex + 1);
+  input.runnerFailure = new Error("private preview composition timeout");
+  input.runnerFailureStage = `matrix:${row.configurationId}`;
+  return input;
+}
+
+function passingAppMatrixRuntimeStageFailureInput(
+  outputDirectory,
+  terminalStage,
+  { finalizedScenarioStart = false } = {},
+) {
+  const input = passingAppMatrixRuntimeCompletedInput(outputDirectory);
+  const row = input.rows[0];
+  const terminalIndex = APP_MATRIX_RUNTIME_DIAGNOSTIC_STAGES.indexOf(
+    terminalStage,
+  );
+  assert.ok(terminalIndex >= 0, terminalStage);
+  row.stageHistory = APP_MATRIX_RUNTIME_DIAGNOSTIC_STAGES.slice(
+    0,
+    terminalIndex + 1,
+  );
+  row.currentStage = terminalStage;
+  row.failureStage = terminalStage;
+  row.status = "failed";
+  const reached = (stage) => row.stageHistory.includes(stage);
+  if (!reached("file-select-completed")) row.sourceObservation = null;
+  if (!reached("model-completion-completed")) {
+    row.modelCompletion = null;
+    row.modelIdentity = null;
+  }
+  if (!reached("adjacent-selection-completed")) row.adjacentPage = null;
+  if (!reached("scenario-start-completed")) {
+    row.scenarioStart = null;
+    if (!(
+      finalizedScenarioStart && terminalStage === "scenario-start-started"
+    )) {
+      row.completedSnapshot = null;
+      row.scenario = null;
+      row.scenarioFinalized = false;
+    }
+  }
+  if (row.completedSnapshot) {
+    row.completedSnapshot.phaseMarkers = row.completedSnapshot.phaseMarkers
+      .filter((marker) =>
+        row.stageHistory.includes(marker.stage) &&
+        APP_MATRIX_RUNTIME_DIAGNOSTIC_STAGES.indexOf(marker.stage) <=
+          APP_MATRIX_RUNTIME_DIAGNOSTIC_STAGES.indexOf(
+            "scenario-finish-started",
+          )
+      );
+  }
+  if (!reached("screenshot-completed")) row.screenshot = null;
+  if (!reached("alignment-completed")) row.priorityTarget = null;
+  row.priorityMountDiagnostic = null;
+  if (!reached("priority-composition-completed")) row.priorityProbe = null;
+  row.previewCompositionDiagnostic = null;
+  if (!reached("release-observation-completed")) row.releaseSnapshot = null;
+  if (!reached("network-fixed-point-completed")) row.networkFixedPoint = null;
+  row.networkFailure = terminalStage === "network-fixed-point-started"
+    ? { category: "unexpected", diagnostic: null }
+    : null;
+  input.rows = [row];
+  input.runnerFailure = new Error(`private ${terminalStage} failure`);
+  input.runnerFailureStage = `matrix:${row.configurationId}`;
+  return input;
+}
+
 function passingAppMatrixRuntimeReleaseEvents(row) {
   return [{
     activityId: 102,
     at: 350,
     direction: "to-worker",
+    distance: 2,
     documentKey: null,
     enabled: false,
     eventId: 20,
     jobId: row.modelIdentity.importJobId,
     pageNumber: row.adjacentPage,
     revision: row.modelIdentity.revision,
+    scale: 1.25,
     type: "render",
+    visible: false,
     workerInstanceId: row.modelIdentity.workerInstanceId,
   }, {
     activityId: 103,
     at: 360,
+    completedPages: null,
     direction: "from-worker",
     documentKey: null,
     eventId: 21,
+    first: null,
     height: row.priorityProbe.targetAfter.canvasHeight,
     jobId: row.modelIdentity.importJobId,
+    pageCount: null,
+    pageHeight: null,
     pageNumber: row.priorityTarget,
+    pageWidth: null,
     revision: row.modelIdentity.revision,
     scale: 1.25,
+    terminal: false,
     type: "bitmap",
     width: row.priorityProbe.targetAfter.canvasWidth,
     workerInstanceId: row.modelIdentity.workerInstanceId,
@@ -10162,7 +10757,7 @@ function passingAppMatrixRuntimeReleaseEvents(row) {
 
 function addRepresentativeAppMatrixRuntimeTiming(input, rowIndex = 0) {
   const row = input.rows[rowIndex];
-  row.scenario = { finishedAt: 1_400, startedAt: 100 };
+  row.scenario = { ...row.scenario, finishedAt: 1_400 };
   row.completedSnapshot.drawHookTimingCount = 1;
   row.completedSnapshot.drawHookTimings = [{
     activityId: 120,
@@ -10240,7 +10835,7 @@ test("builds a fail-closed privacy-safe app-matrix runtime diagnostic", () => {
   );
   const report = buildAppMatrixRuntimeDiagnosticReport(input);
   assert.equal(report.diagnostic, true);
-  assert.equal(report.diagnosticSchemaVersion, 7);
+  assert.equal(report.diagnosticSchemaVersion, 8);
   assert.equal(report.mode, "app-matrix-runtime");
   assert.equal(report.completed, false);
   assert.equal(report.execution.orderExact, true);
@@ -10260,11 +10855,20 @@ test("builds a fail-closed privacy-safe app-matrix runtime diagnostic", () => {
       aggregate: true,
       configuration: true,
       modelDocument: true,
+      modelEvent: true,
       modelJob: true,
       modelRevision: true,
+      modelShape: true,
+      modelWorker: true,
+      networkFixedPoint: true,
+      previewDiagnostic: true,
+      priorityProbe: true,
       priorityTarget: true,
+      scenario: true,
+      screenshot: true,
       sequence: true,
       session: true,
+      sourceObservation: true,
     },
   });
   assert.equal(
@@ -10319,6 +10923,1161 @@ test("builds a fail-closed privacy-safe app-matrix runtime diagnostic", () => {
   );
 });
 
+test("binds a privacy-safe direct-sharp preview-composition failure", () => {
+  const outputDirectory = path.join(
+    os.tmpdir(),
+    "issue-68-preview-composition-direct-sharp",
+  );
+  const input = passingAppMatrixRuntimePreviewCompositionFailureInput(
+    outputDirectory,
+  );
+  const rawRow = input.rows.at(-1);
+  const sanitized = sanitizeAppMatrixRuntimePreviewCompositionDiagnostic(
+    rawRow.previewCompositionDiagnostic,
+    rawRow,
+  );
+  assert.equal(sanitized.bound, true);
+  assert.equal(sanitized.value.classification, "direct-sharp");
+  assert.equal(sanitized.value.directSharpFound, true);
+  assert.equal(
+    sanitized.value.ledgers.draws.items[0].sharpRequestLocalOrder,
+    1,
+  );
+  assert.equal(sanitized.value.ledgers.draws.items[0].bitmapLocalOrder, 2);
+  assert.equal(
+    sanitized.value.ledgers.draws.items[0].predicates.sharpCompatibleOrder,
+    true,
+  );
+  assert.equal(
+    sanitized.value.ledgers.draws.items[0].predicates.previewTarget,
+    false,
+  );
+  const boundaryInput =
+    passingAppMatrixRuntimePreviewCompositionFailureInput(outputDirectory);
+  const boundaryRaw = boundaryInput.rows.at(-1).previewCompositionDiagnostic;
+  const scrollMarker = boundaryRaw.phaseMarkers.find((marker) =>
+    marker.stage === "adjacent-scroll-started"
+  );
+  boundaryRaw.drawItems[0].at = scrollMarker.at;
+  assert.equal(
+    sanitizeAppMatrixRuntimePreviewCompositionDiagnostic(
+      boundaryRaw,
+      boundaryInput.rows.at(-1),
+    ).value.classification,
+    "direct-sharp",
+  );
+
+  const report = buildAppMatrixRuntimeDiagnosticReport(input);
+  const row = report.rows.at(-1);
+  assert.equal(report.diagnosticSchemaVersion, 8);
+  assert.equal(report.execution.orderExact, true);
+  assert.equal(row.integrity, true, JSON.stringify(row.integrityReasons));
+  assert.equal(row.priorityTarget, null);
+  assert.equal(row.previewCompositionDiagnostic.classification, "direct-sharp");
+  assert.equal(row.integrityReasons.rowIdentity.priorityTarget, true);
+  const serialized = JSON.stringify(row.previewCompositionDiagnostic);
+  assert.doesNotMatch(
+    serialized,
+    /documentKey|revision|jobId|workerInstanceId|eventId|activityId|bitmapEventId|compositionId|drawInvocationId|private/u,
+  );
+  assert.doesNotMatch(serialized, /"at":/u);
+
+  const derivationFailure =
+    passingAppMatrixRuntimePreviewCompositionFailureInput(
+      outputDirectory,
+      { failureCategory: "unexpected" },
+    );
+  const derivationRaw =
+    derivationFailure.rows.at(-1).previewCompositionDiagnostic;
+  derivationRaw.checkpoint = "target-derivation";
+  derivationRaw.expectedPreviewTarget = null;
+  derivationRaw.wait = null;
+  const derivationReport = buildAppMatrixRuntimeDiagnosticReport(
+    derivationFailure,
+  );
+  assert.equal(derivationReport.rows.at(-1).integrity, true);
+  assert.equal(
+    derivationReport.rows.at(-1).previewCompositionDiagnostic.checkpoint,
+    "target-derivation",
+  );
+  assert.deepEqual(
+    derivationReport.rows.at(-1).previewCompositionDiagnostic
+      .expectedPreviewTarget,
+    { height: 990, scale: 1.25, width: 765 },
+  );
+  assert.equal(
+    derivationReport.rows.at(-1).previewCompositionDiagnostic.classification,
+    "target-available-after-failure",
+  );
+  const derivationTimeout =
+    passingAppMatrixRuntimePreviewCompositionFailureInput(outputDirectory);
+  const derivationTimeoutRaw =
+    derivationTimeout.rows.at(-1).previewCompositionDiagnostic;
+  derivationTimeoutRaw.checkpoint = "target-derivation";
+  derivationTimeoutRaw.expectedPreviewTarget = null;
+  derivationTimeoutRaw.wait = null;
+  assert.equal(
+    buildAppMatrixRuntimeDiagnosticReport(derivationTimeout)
+      .rows.at(-1).integrity,
+    true,
+  );
+});
+
+test("binds each producer-shaped target-unavailable terminal state", () => {
+  const outputDirectory = path.join(
+    os.tmpdir(),
+    "issue-68-preview-target-unavailable",
+  );
+  const inputFor = () => {
+    const input = passingAppMatrixRuntimePreviewCompositionFailureInput(
+      outputDirectory,
+    );
+    const raw = input.rows.at(-1).previewCompositionDiagnostic;
+    raw.checkpoint = "target-derivation";
+    raw.expectedPreviewTarget = null;
+    raw.wait = null;
+    return input;
+  };
+  const absentCanvas = (canvas) => Object.assign(canvas, {
+    connected: false,
+    cssHeight: null,
+    cssWidth: null,
+    height: null,
+    present: false,
+    scale: null,
+    source: null,
+    targetHeight: null,
+    targetScale: null,
+    targetWidth: null,
+    width: null,
+  });
+  const absentPage = (raw, range = "0:0,2:5") => {
+    absentCanvas(raw.page.canvas);
+    Object.assign(raw.page, {
+      distance: null,
+      page: null,
+      present: false,
+      rect: null,
+      textOverlayCount: 0,
+      visible: null,
+    });
+    raw.range = range;
+    raw.visiblePages = [];
+  };
+  const cases = [
+    ["canvasConnected", (raw) => { absentCanvas(raw.page.canvas); }],
+    ["canvasCssSize", (raw) => {
+      raw.page.canvas.cssHeight = 0;
+      raw.page.canvas.cssWidth = 0;
+    }],
+    ["canvasPresent", (raw) => { absentCanvas(raw.page.canvas); }],
+    ["pageMetadata", (raw) => {
+      raw.page.pageHeight = null;
+      raw.page.pageWidth = null;
+    }],
+    ["pageVisible", (raw) => {
+      raw.page.distance = 1;
+      raw.page.visible = false;
+      raw.page.rect = { bottom: 1_800, left: 80, right: 732, top: 1_000 };
+      raw.visiblePages = [];
+    }],
+    ["pagePresent", (raw) => { absentPage(raw); }],
+    ["range", (raw) => { absentPage(raw, null); }],
+    ["readerGeometry", (raw) => {
+      absentPage(raw);
+      raw.reader.rect = null;
+      raw.reader.scrollTop = null;
+    }],
+    ["textOverlay", (raw) => { raw.page.textOverlayCount = 0; }],
+  ];
+  for (const [flag, mutate] of cases) {
+    const input = inputFor();
+    mutate(input.rows.at(-1).previewCompositionDiagnostic);
+    const report = buildAppMatrixRuntimeDiagnosticReport(input);
+    const row = report.rows.at(-1);
+    assert.equal(
+      row.integrity,
+      true,
+      `${flag}: ${JSON.stringify(row.integrityReasons)}`,
+    );
+    assert.equal(
+      row.previewCompositionDiagnostic.classification,
+      "target-unavailable",
+      flag,
+    );
+    assert.equal(
+      row.previewCompositionDiagnostic.targetAvailability[flag],
+      false,
+      flag,
+    );
+  }
+
+  const nowReady = buildAppMatrixRuntimeDiagnosticReport(inputFor())
+    .rows.at(-1);
+  assert.equal(nowReady.integrity, true);
+  assert.equal(
+    nowReady.previewCompositionDiagnostic.classification,
+    "target-available-after-failure",
+  );
+  assert.equal(
+    nowReady.previewCompositionDiagnostic.targetAvailability.targetDerivable,
+    true,
+  );
+
+  const contradictions = [
+    ["disconnected present canvas", (raw) => {
+      raw.page.canvas.connected = false;
+    }],
+    ["absent canvas with retained CSS geometry", (raw) => {
+      absentCanvas(raw.page.canvas);
+      raw.page.canvas.cssWidth = 612;
+    }],
+    ["present page without rectangle", (raw) => { raw.page.rect = null; }],
+    ["visible page at distance one", (raw) => { raw.page.distance = 1; }],
+    ["visible-page membership omitted", (raw) => { raw.visiblePages = []; }],
+    ["visible rectangle outside reader", (raw) => {
+      raw.page.rect = { bottom: 1_800, left: 80, right: 732, top: 1_000 };
+    }],
+    ["range omits present page", (raw) => { raw.range = "0:0,2:5"; }],
+    ["absent page retained by range", (raw) => {
+      absentPage(raw);
+      raw.range = "0:5";
+    }],
+    ["absent page with a present canvas", (raw) => {
+      Object.assign(raw.page, {
+        distance: null,
+        page: null,
+        present: false,
+        rect: null,
+        textOverlayCount: 0,
+        visible: null,
+      });
+      raw.range = "0:0,2:5";
+      raw.visiblePages = [];
+    }],
+    ["present page without reader geometry", (raw) => {
+      raw.reader.rect = null;
+      raw.reader.scrollTop = null;
+    }],
+  ];
+  for (const [label, mutate] of contradictions) {
+    const malformed = inputFor();
+    mutate(malformed.rows.at(-1).previewCompositionDiagnostic);
+    assert.equal(
+      buildAppMatrixRuntimeDiagnosticReport(malformed).rows.at(-1).integrity,
+      false,
+      label,
+    );
+  }
+});
+
+test("classifies each finite preview-composition transition from one chain", () => {
+  const outputDirectory = path.join(
+    os.tmpdir(),
+    "issue-68-preview-composition-classes",
+  );
+  const read = (input) => {
+    const row = input.rows.at(-1);
+    const result = sanitizeAppMatrixRuntimePreviewCompositionDiagnostic(
+      row.previewCompositionDiagnostic,
+      row,
+    );
+    assert.equal(result.bound, true);
+    return result.value;
+  };
+  const setSingleTarget = (input, {
+    distance,
+    scale,
+    visible,
+    height,
+    width,
+  }) => {
+    const row = input.rows.at(-1);
+    const raw = row.previewCompositionDiagnostic;
+    const [request, bitmap] = raw.workerItems;
+    Object.assign(request, { distance, scale, visible });
+    Object.assign(bitmap, { height, scale, width });
+    Object.assign(raw.drawItems[0], { height, scale, width });
+    Object.assign(raw.page.canvas, { height, scale, width });
+  };
+
+  const directSameTarget =
+    passingAppMatrixRuntimePreviewCompositionFailureInput(
+      outputDirectory,
+      { rowIndex: 0 },
+    );
+  setSingleTarget(directSameTarget, {
+    distance: 0,
+    height: 792,
+    scale: 1,
+    visible: true,
+    width: 612,
+  });
+  const directSameRaw =
+    directSameTarget.rows.at(-1).previewCompositionDiagnostic;
+  Object.assign(directSameRaw.expectedPreviewTarget, {
+    height: 792,
+    scale: 1,
+    width: 612,
+  });
+  Object.assign(directSameRaw.page.canvas, {
+    devicePixelRatio: 1,
+    targetHeight: 792,
+    targetScale: 1,
+    targetWidth: 612,
+  });
+  const directSame = read(directSameTarget);
+  assert.equal(directSame.classification, "direct-sharp");
+  assert.equal(directSame.ledgers.draws.items[0].sharpRequestLocalOrder, 1);
+
+  const satisfied = structuredClone(directSameTarget);
+  Object.assign(
+    satisfied.rows.at(-1).previewCompositionDiagnostic.workerItems[0],
+    { distance: 1, visible: false },
+  );
+  const satisfiedValue = read(satisfied);
+  assert.equal(satisfiedValue.classification, "preview-satisfied-target");
+  assert.equal(
+    satisfiedValue.ledgers.draws.items[0].previewRequestLocalOrder,
+    1,
+  );
+
+  const previewOnly =
+    passingAppMatrixRuntimePreviewCompositionFailureInput(outputDirectory);
+  setSingleTarget(previewOnly, {
+    distance: 1,
+    height: 990,
+    scale: 1.25,
+    visible: false,
+    width: 765,
+  });
+  assert.equal(read(previewOnly).classification, "preview");
+
+  const upgraded =
+    passingAppMatrixRuntimePreviewCompositionFailureInput(outputDirectory);
+  const upgradedRow = upgraded.rows.at(-1);
+  const upgradedRaw = upgradedRow.previewCompositionDiagnostic;
+  const [sharpRequest, sharpBitmap] = upgradedRaw.workerItems;
+  const previewRequest = structuredClone(sharpRequest);
+  Object.assign(previewRequest, {
+    activityId: 8,
+    at: 180,
+    distance: 1,
+    eventId: upgradedRow.modelIdentity.importEventId + 1,
+    scale: 1.25,
+    visible: false,
+  });
+  const previewBitmap = structuredClone(sharpBitmap);
+  Object.assign(previewBitmap, {
+    activityId: 9,
+    at: 190,
+    eventId: upgradedRow.modelIdentity.importEventId + 2,
+    height: 990,
+    scale: 1.25,
+    width: 765,
+  });
+  Object.assign(sharpRequest, {
+    activityId: 10,
+    at: 200,
+    eventId: upgradedRow.modelIdentity.importEventId + 3,
+  });
+  Object.assign(sharpBitmap, {
+    activityId: 11,
+    at: 210,
+    eventId: upgradedRow.modelIdentity.importEventId + 4,
+  });
+  const sharpDraw = upgradedRaw.drawItems[0];
+  Object.assign(sharpDraw, {
+    activityId: 22,
+    bitmapEventId: sharpBitmap.eventId,
+    compositionId: 2,
+    drawInvocationId: 2,
+  });
+  const previewDraw = structuredClone(sharpDraw);
+  Object.assign(previewDraw, {
+    activityId: 21,
+    at: 225,
+    bitmapEventId: previewBitmap.eventId,
+    compositionId: 1,
+    drawInvocationId: 1,
+    height: 990,
+    scale: 1.25,
+    width: 765,
+  });
+  upgradedRaw.workerItems = [
+    previewRequest,
+    previewBitmap,
+    sharpRequest,
+    sharpBitmap,
+  ];
+  upgradedRaw.workerTotal = upgradedRaw.workerItems.length;
+  upgradedRaw.drawItems = [previewDraw, sharpDraw];
+  upgradedRaw.drawTotal = upgradedRaw.drawItems.length;
+  Object.assign(upgradedRaw.failureBoundary, {
+    drawCount: 2,
+    drawInvocationId: 2,
+    workerEventId: sharpBitmap.eventId,
+  });
+  Object.assign(upgradedRow.scenario, {
+    drawEnd: 2,
+    workerEventEnd: sharpBitmap.eventId,
+  });
+  const upgradedValue = read(upgraded);
+  assert.equal(upgradedValue.classification, "preview-then-sharp");
+  assert.equal(
+    upgradedValue.ledgers.draws.items[1].sharpRequestLocalOrder,
+    3,
+  );
+  assert.equal(upgradedValue.ledgers.draws.items[1].bitmapLocalOrder, 4);
+  assert.equal(upgradedValue.resolutionRegressionObserved, false);
+
+  const regressed = structuredClone(upgraded);
+  const regressedRaw = regressed.rows.at(-1).previewCompositionDiagnostic;
+  const [laterPreview, earlierSharp] = regressedRaw.drawItems;
+  Object.assign(earlierSharp, {
+    activityId: 21,
+    at: 225,
+    compositionId: 1,
+    drawInvocationId: 1,
+  });
+  Object.assign(laterPreview, {
+    activityId: 22,
+    at: 230,
+    compositionId: 2,
+    drawInvocationId: 2,
+  });
+  regressedRaw.drawItems = [earlierSharp, laterPreview];
+  const regressedValue = read(regressed);
+  assert.equal(regressedValue.classification, "resolution-regression");
+  assert.equal(regressedValue.resolutionRegressionObserved, true);
+
+  const recovered = structuredClone(regressed);
+  const recoveredRow = recovered.rows.at(-1);
+  const recoveredRaw = recoveredRow.previewCompositionDiagnostic;
+  const finalSharp = structuredClone(recoveredRaw.drawItems[0]);
+  Object.assign(finalSharp, {
+    activityId: 23,
+    at: 235,
+    compositionId: 3,
+    drawInvocationId: 3,
+  });
+  recoveredRaw.drawItems.push(finalSharp);
+  recoveredRaw.drawTotal = 3;
+  recoveredRaw.failureBoundary.drawCount = 3;
+  recoveredRaw.failureBoundary.drawInvocationId = 3;
+  recoveredRow.scenario.drawEnd = 3;
+  const recoveredValue = read(recovered);
+  assert.equal(recoveredValue.classification, "resolution-regression");
+  assert.equal(recoveredValue.resolutionRegressionObserved, true);
+
+  const previewSharpPreview = structuredClone(upgraded);
+  const previewSharpPreviewRow = previewSharpPreview.rows.at(-1);
+  const previewSharpPreviewRaw =
+    previewSharpPreviewRow.previewCompositionDiagnostic;
+  const repeatedPreview = structuredClone(previewSharpPreviewRaw.drawItems[0]);
+  Object.assign(repeatedPreview, {
+    activityId: 23,
+    at: 235,
+    compositionId: 3,
+    drawInvocationId: 3,
+  });
+  previewSharpPreviewRaw.drawItems.push(repeatedPreview);
+  previewSharpPreviewRaw.drawTotal = 3;
+  previewSharpPreviewRaw.failureBoundary.drawCount = 3;
+  previewSharpPreviewRaw.failureBoundary.drawInvocationId = 3;
+  previewSharpPreviewRow.scenario.drawEnd = 3;
+  const previewSharpPreviewValue = read(previewSharpPreview);
+  assert.equal(
+    previewSharpPreviewValue.classification,
+    "resolution-regression",
+  );
+  assert.equal(previewSharpPreviewValue.resolutionRegressionObserved, true);
+
+  const previewSharpPreviewSharp = structuredClone(previewSharpPreview);
+  const previewSharpPreviewSharpRow = previewSharpPreviewSharp.rows.at(-1);
+  const previewSharpPreviewSharpRaw =
+    previewSharpPreviewSharpRow.previewCompositionDiagnostic;
+  const repeatedSharp = structuredClone(
+    previewSharpPreviewSharpRaw.drawItems[1],
+  );
+  Object.assign(repeatedSharp, {
+    activityId: 24,
+    at: 240,
+    compositionId: 4,
+    drawInvocationId: 4,
+  });
+  previewSharpPreviewSharpRaw.drawItems.push(repeatedSharp);
+  previewSharpPreviewSharpRaw.drawTotal = 4;
+  previewSharpPreviewSharpRaw.failureBoundary.drawCount = 4;
+  previewSharpPreviewSharpRaw.failureBoundary.drawInvocationId = 4;
+  previewSharpPreviewSharpRow.scenario.drawEnd = 4;
+  const previewSharpPreviewSharpValue = read(previewSharpPreviewSharp);
+  assert.equal(
+    previewSharpPreviewSharpValue.classification,
+    "resolution-regression",
+  );
+  assert.equal(
+    previewSharpPreviewSharpValue.resolutionRegressionObserved,
+    true,
+  );
+
+  const none =
+    passingAppMatrixRuntimePreviewCompositionFailureInput(outputDirectory);
+  none.rows.at(-1).previewCompositionDiagnostic.drawItems[0].source =
+    "main-fallback";
+  const noneValue = read(none);
+  assert.equal(noneValue.classification, "none");
+  assert.equal(noneValue.rejectionCounts.drawSource, 1);
+});
+
+test("recomputes preview-composition rejection predicates independently", () => {
+  const outputDirectory = path.join(
+    os.tmpdir(),
+    "issue-68-preview-composition-predicates",
+  );
+  const read = (mutate) => {
+    const input = passingAppMatrixRuntimePreviewCompositionFailureInput(
+      outputDirectory,
+    );
+    const row = input.rows.at(-1);
+    mutate(row.previewCompositionDiagnostic, row);
+    const result = sanitizeAppMatrixRuntimePreviewCompositionDiagnostic(
+      row.previewCompositionDiagnostic,
+      row,
+    );
+    assert.equal(result.bound, true);
+    return result.value;
+  };
+  const semanticMutations = [
+    ["drawTime", (raw, row) => {
+      for (const markers of [
+        raw.phaseMarkers,
+        row.completedSnapshot.phaseMarkers,
+      ]) {
+        const marker = markers.find((candidate) =>
+          candidate.stage === "adjacent-scroll-started"
+        );
+        Object.assign(marker, {
+          activityId: raw.drawItems[0].activityId,
+          at: raw.drawItems[0].at + 1,
+          drawInvocationId: raw.drawItems[0].drawInvocationId,
+        });
+      }
+    }],
+    ["drawSource", (raw) => { raw.drawItems[0].source = "main-fallback"; }],
+    ["drawScale", (raw) => { raw.drawItems[0].scale = 1.75; }],
+    ["drawBitmapDimensions", (raw) => { raw.drawItems[0].width += 1; }],
+    ["drawVisibility", (raw) => { raw.drawItems[0].visible = false; }],
+    ["drawVisibility", (raw) => { raw.drawItems[0].distance = 1; }],
+    ["drawVisibility", (raw) => { raw.drawItems[0].visiblePages = []; }],
+    ["drawGeometry", (raw) => {
+      raw.drawItems[0].geometryVisible = false;
+    }],
+    ["drawGeometry", (raw) => {
+      raw.drawItems[0].geometry = {
+        bottom: -10,
+        left: 100,
+        right: 712,
+        top: -802,
+      };
+    }],
+    ["drawBitmapLink", (raw) => {
+      raw.drawItems[0].bitmapEventId = raw.importEventId;
+    }],
+    ["drawCompatibleOrder", (raw) => {
+      raw.workerItems[1].activityId = 23;
+      raw.workerItems[1].at = 235;
+    }],
+    ["workerTarget", (raw) => {
+      Object.assign(raw.workerItems[0], { scale: 1.5 });
+      Object.assign(raw.workerItems[1], {
+        height: 1_188,
+        scale: 1.5,
+        width: 918,
+      });
+      Object.assign(raw.drawItems[0], {
+        height: 1_188,
+        scale: 1.5,
+        width: 918,
+      });
+    }],
+  ];
+  for (const [count, mutate] of semanticMutations) {
+    const value = read(mutate);
+    assert.equal(value.classification, "none", count);
+    assert.ok(value.rejectionCounts[count] > 0, count);
+  }
+
+  for (const identityField of ["workerInstanceId", "jobId", "revision"]) {
+    const value = read((raw) => {
+      for (const event of raw.workerItems) {
+        event[identityField] = identityField === "revision"
+          ? "stale-revision"
+          : event[identityField] + 100;
+      }
+    });
+    assert.equal(value.classification, "none", identityField);
+    assert.equal(value.rejectionCounts.workerIdentity, 2, identityField);
+  }
+
+  const requestAfterBitmap = read((raw) => {
+    const [request, bitmap] = raw.workerItems;
+    const firstEventId = request.eventId;
+    Object.assign(bitmap, {
+      activityId: 8,
+      at: 200,
+      eventId: firstEventId,
+    });
+    Object.assign(request, {
+      activityId: 9,
+      at: 210,
+      eventId: firstEventId + 1,
+    });
+    raw.workerItems = [bitmap, request];
+    raw.drawItems[0].bitmapEventId = bitmap.eventId;
+  });
+  assert.equal(requestAfterBitmap.classification, "none");
+  assert.equal(requestAfterBitmap.rejectionCounts.sharpBitmapWithoutRequest, 1);
+});
+
+test("fails closed on malformed preview-composition failure snapshots", () => {
+  const outputDirectory = path.join(
+    os.tmpdir(),
+    "issue-68-preview-composition-malformed",
+  );
+  const invalidMutations = [
+    ["wrong import", (raw) => { raw.importEventId += 1; }],
+    ["wrong model event", (_raw, row) => {
+      row.modelIdentity.importEventId += 1;
+    }],
+    ["wrong model worker", (_raw, row) => {
+      row.modelIdentity.workerInstanceId += 1;
+    }],
+    ["phase mismatch", (raw) => {
+      raw.phaseMarkers[0].activityId += 1;
+    }],
+    ["phase order", (raw) => { raw.phaseMarkers.reverse(); }],
+    ["failure activity rewind", (raw) => {
+      raw.failureBoundary.activityId = raw.phaseMarkers.at(-1).activityId - 1;
+    }],
+    ["failure clock rewind", (raw) => {
+      raw.failureBoundary.at = raw.phaseMarkers.at(-1).at - 1;
+    }],
+    ["future worker activity", (raw) => {
+      raw.workerItems[1].activityId = raw.failureBoundary.activityId + 1;
+    }],
+    ["pre-import worker activity", (raw, row) => {
+      raw.workerItems[0].activityId = row.modelIdentity.importActivityId;
+    }],
+    ["future worker clock", (raw) => {
+      raw.workerItems[1].at = raw.failureBoundary.at + 1;
+    }],
+    ["future draw activity", (raw) => {
+      raw.drawItems[0].activityId = raw.failureBoundary.activityId + 1;
+    }],
+    ["future draw clock", (raw) => {
+      raw.drawItems[0].at = raw.failureBoundary.at + 1;
+    }],
+    ["worker order", (raw) => { raw.workerItems.reverse(); }],
+    ["draw event beyond boundary", (raw) => {
+      raw.drawItems[0].bitmapEventId = raw.failureBoundary.workerEventId + 1;
+    }],
+    ["worker truncation", (raw) => {
+      raw.workerTruncated = true;
+      raw.workerTotal += 1;
+    }],
+    ["draw truncation", (raw) => {
+      raw.drawTruncated = true;
+      raw.drawTotal += 1;
+    }],
+    ["worker overflow", (raw) => {
+      raw.workerItems = Array.from(
+        { length: 17 },
+        (_, index) => ({
+          ...structuredClone(raw.workerItems[0]),
+          activityId: index + 1,
+          at: index + 20,
+          eventId: raw.importEventId + index + 1,
+        }),
+      );
+      raw.workerTotal = raw.workerItems.length;
+    }],
+    ["draw overflow", (raw) => {
+      raw.drawItems = Array.from(
+        { length: 17 },
+        (_, index) => ({
+          ...structuredClone(raw.drawItems[0]),
+          activityId: index + 1,
+          at: index + 100,
+          compositionId: index + 1,
+          drawInvocationId: index + 1,
+        }),
+      );
+      raw.drawTotal = raw.drawItems.length;
+    }],
+    ["render direction", (raw) => {
+      raw.workerItems[0].direction = "from-worker";
+    }],
+    ["bitmap direction", (raw) => {
+      raw.workerItems[1].direction = "to-worker";
+    }],
+    ["raw document", (raw) => {
+      raw.workerItems[0].documentKey = "/home/private.pdf";
+    }],
+    ["missing worker", (raw) => {
+      raw.workerItems[0].workerInstanceId = null;
+    }],
+    ["missing job", (raw) => { raw.workerItems[0].jobId = null; }],
+    ["missing revision", (raw) => { raw.workerItems[0].revision = ""; }],
+    ["wrong page", (raw) => { raw.workerItems[0].pageNumber = 4; }],
+    ["wrong DPR", (raw) => { raw.page.canvas.devicePixelRatio = 1; }],
+    ["wrong visual scale", (raw) => {
+      raw.page.canvas.visualViewportScale = 2;
+    }],
+    ["unsafe reader scroll", (raw) => {
+      raw.reader.scrollTop = Number.MAX_VALUE;
+    }],
+    ["unsafe page geometry", (raw) => {
+      raw.page.rect = {
+        bottom: 1e307,
+        left: 1e307,
+        right: 1e307,
+        top: 1e307,
+      };
+    }],
+    ["zero-area reader", (raw) => {
+      raw.reader.rect.right = raw.reader.rect.left;
+    }],
+    ["zero-area draw", (raw) => {
+      raw.drawItems[0].geometry.bottom = raw.drawItems[0].geometry.top;
+    }],
+    ["overflowing draw rectangle", (raw) => {
+      raw.drawItems[0].geometry.left = -Number.MAX_SAFE_INTEGER;
+      raw.drawItems[0].geometry.right = Number.MAX_SAFE_INTEGER;
+    }],
+    ["unsafe worker scale", (raw) => {
+      raw.workerItems[0].scale = 1e307;
+    }],
+    ["self-referential target", (raw) => {
+      raw.page.canvas.cssWidth *= 2;
+      raw.expectedPreviewTarget.width *= 2;
+    }],
+    ["target capped mismatch", (raw) => {
+      raw.expectedPreviewTarget.capped = true;
+    }],
+    ["unstable scroll", (raw) => {
+      raw.adjacentScrollProof.samples[1].reader.scrollTop += 1;
+      raw.adjacentScrollProof.summary = summarizePdfPageCenteringStability(
+        raw.adjacentScrollProof.samples,
+        raw.adjacentScrollProof.pageNumber,
+      );
+    }],
+    ["terminal range", (raw) => { raw.range = "00:5"; }],
+    ["range excludes page", (raw) => { raw.range = "2:5"; }],
+    ["extra field", (raw) => { raw.extra = true; }],
+    ["missing field", (raw) => { delete raw.range; }],
+    ["private field", (raw) => {
+      raw.privatePath = "/home/private.pdf";
+    }],
+    ["NaN", (raw) => { raw.page.canvas.cssWidth = Number.NaN; }],
+    ["BigInt", (raw) => { raw.failureBoundary.activityId = 1n; }],
+    ["cycle", (raw) => { raw.page = raw; }],
+  ];
+  for (const [label, mutate] of invalidMutations) {
+    const input = passingAppMatrixRuntimePreviewCompositionFailureInput(
+      outputDirectory,
+    );
+    const row = input.rows.at(-1);
+    mutate(row.previewCompositionDiagnostic, row);
+    let result;
+    assert.doesNotThrow(() => {
+      result = sanitizeAppMatrixRuntimePreviewCompositionDiagnostic(
+        row.previewCompositionDiagnostic,
+        row,
+      );
+    }, label);
+    assert.equal(result.bound, false, label);
+    assert.equal(result.value, null, label);
+  }
+
+  const absent = passingAppMatrixRuntimePreviewCompositionFailureInput(
+    outputDirectory,
+  );
+  absent.rows.at(-1).previewCompositionDiagnostic = null;
+  assert.equal(
+    buildAppMatrixRuntimeDiagnosticReport(absent).rows.at(-1).integrity,
+    false,
+  );
+  const completed = passingAppMatrixRuntimeCompletedInput(outputDirectory);
+  completed.rows[0].previewCompositionDiagnostic = structuredClone(
+    passingAppMatrixRuntimePreviewCompositionFailureInput(outputDirectory)
+      .rows.at(-1).previewCompositionDiagnostic,
+  );
+  assert.equal(
+    buildAppMatrixRuntimeDiagnosticReport(completed).rows[0].integrity,
+    false,
+  );
+  const otherFailure = passingAppMatrixRuntimeFailureInput(outputDirectory);
+  otherFailure.rows[0].previewCompositionDiagnostic = structuredClone(
+    passingAppMatrixRuntimePreviewCompositionFailureInput(outputDirectory)
+      .rows.at(-1).previewCompositionDiagnostic,
+  );
+  const otherRow = buildAppMatrixRuntimeDiagnosticReport(otherFailure).rows[0];
+  assert.equal(otherRow.integrity, false);
+  assert.equal(otherRow.previewCompositionDiagnostic, null);
+});
+
+test("accepts producer-reachable partial and completed-stage failures", () => {
+  const outputDirectory = path.join(
+    os.tmpdir(),
+    "issue-68-app-matrix-stage-terminals",
+  );
+  const terminalCases = [
+    ["scenario-start-started", {}],
+    ["scenario-start-started", { finalizedScenarioStart: true }],
+    ["adjacent-bitmap-completed", {}],
+    ["priority-mount-started", {}],
+    ["release-observation-started", {}],
+    ["scenario-finish-started", {}],
+    ["scenario-finish-completed", {}],
+  ];
+  for (const [terminalStage, options] of terminalCases) {
+    const report = buildAppMatrixRuntimeDiagnosticReport(
+      passingAppMatrixRuntimeStageFailureInput(
+        outputDirectory,
+        terminalStage,
+        options,
+      ),
+    );
+    assert.equal(
+      report.execution.orderExact,
+      true,
+      `${terminalStage}: ${JSON.stringify(report.rows[0].integrityReasons)}`,
+    );
+    assert.equal(
+      report.rows[0].integrity,
+      true,
+      `${terminalStage}: ${JSON.stringify(report.rows[0].integrityReasons)}`,
+    );
+  }
+});
+
+test("keeps pre-scenario failures absent and stage labels privacy-safe", async () => {
+  const outputDirectory = path.join(
+    os.tmpdir(),
+    "issue-68-app-matrix-pre-scenario-failure",
+  );
+  const first = passingAppMatrixRuntimeStageFailureInput(
+    outputDirectory,
+    "navigate-started",
+  );
+  const firstReport = buildAppMatrixRuntimeDiagnosticReport(first);
+  assert.equal(firstReport.rows[0].integrity, true);
+  assert.equal(firstReport.rows[0].failureCategory, "navigate-failure");
+  assert.equal(firstReport.rows[0].timing, null);
+
+  const later = passingAppMatrixRuntimeCompletedInput(outputDirectory);
+  later.rows.length = 2;
+  const laterRow = later.rows[1];
+  Object.assign(laterRow, {
+    adjacentPage: null,
+    completedSnapshot: null,
+    currentStage: "navigate-started",
+    failureStage: "navigate-started",
+    finalizationErrorPresent: false,
+    modelCompletion: null,
+    modelIdentity: null,
+    networkFailure: null,
+    networkFixedPoint: null,
+    priorityMountDiagnostic: null,
+    priorityProbe: null,
+    previewCompositionDiagnostic: null,
+    priorityTarget: null,
+    releaseSnapshot: null,
+    scenario: null,
+    scenarioFinalized: false,
+    scenarioStart: null,
+    screenshot: null,
+    sourceObservation: null,
+    stageHistory: ["navigate-started"],
+    status: "failed",
+  });
+  later.runnerFailure = new Error("private later navigation failure");
+  later.runnerFailureStage = `matrix:${laterRow.configurationId}`;
+  const laterReport = buildAppMatrixRuntimeDiagnosticReport(later);
+  assert.equal(laterReport.rows[1].integrity, true);
+  assert.equal(laterReport.rows[1].timing, null);
+  assert.equal(laterReport.execution.orderExact, true);
+
+  const privateStage = passingAppMatrixRuntimeStageFailureInput(
+    outputDirectory,
+    "navigate-started",
+  );
+  privateStage.rows[0].currentStage = "/home/private/document-started";
+  privateStage.rows[0].failureStage = "/home/private/document-started";
+  privateStage.rows[0].stageHistory = ["/home/private/document-started"];
+  const privateReport = buildAppMatrixRuntimeDiagnosticReport(privateStage);
+  assert.equal(privateReport.rows[0].integrity, false);
+  assert.equal(
+    privateReport.rows[0].failureCategory,
+    "unknown-stage-failure",
+  );
+  assert.doesNotMatch(JSON.stringify(privateReport), /home\/private/u);
+
+  for (const failureStage of [undefined, ""]) {
+    const completed = passingAppMatrixRuntimeCompletedInput(outputDirectory);
+    completed.rows[0].failureStage = failureStage;
+    assert.equal(
+      buildAppMatrixRuntimeDiagnosticReport(completed).rows[0].integrity,
+      false,
+    );
+  }
+
+  const source = await readFile(
+    "scripts/run-pdf-sharpness-browser-regression.mjs",
+    "utf8",
+  );
+  assert.match(
+    source,
+    /stageHistory\?\.includes\("scenario-start-started"\)[\s\S]*finalizeFailedAppMatrixRuntimeScenario/u,
+  );
+});
+
+test("binds producer-shaped composed maxima on a finalized scenario", () => {
+  const outputDirectory = path.join(
+    os.tmpdir(),
+    "issue-68-app-matrix-composed-finalized-scenario",
+  );
+  const input = passingAppMatrixRuntimeCompletedInput(outputDirectory);
+  const row = input.rows[0];
+  const readerViewport = { bottom: 900, left: 0, right: 1_100, top: 0 };
+  const frame = {
+    at: 300,
+    composedCount: 2,
+    composedPages: [{
+      geometry: { bottom: -100, left: 100, right: 900, top: -900 },
+      geometryVisible: false,
+      height: 100,
+      page: row.adjacentPage,
+      pixels: 10_000,
+      visible: false,
+      width: 100,
+    }, {
+      geometry: { bottom: 800, left: 100, right: 900, top: 100 },
+      geometryVisible: true,
+      height: 990,
+      page: row.priorityTarget,
+      pixels: 757_350,
+      visible: true,
+      width: 765,
+    }],
+    composedPixels: 767_350,
+    geometryVisiblePages: [row.priorityTarget],
+    readerViewport,
+    visiblePages: [row.priorityTarget],
+  };
+  row.scenario.maximumCanvasCount = 2;
+  row.scenario.maximumCanvasPixels = frame.composedPixels;
+  row.scenario.maximumCountFrame = structuredClone(frame);
+  row.scenario.maximumPixelsFrame = structuredClone(frame);
+  row.scenario.sampleEnd = 1;
+  const report = buildAppMatrixRuntimeDiagnosticReport(input);
+  assert.equal(report.rows[0].integrity, true, report.failures.join("\n"));
+
+  const invalid = passingAppMatrixRuntimeCompletedInput(outputDirectory);
+  invalid.rows[0].scenario = structuredClone(row.scenario);
+  invalid.rows[0].scenario.maximumCountFrame.composedPages[0].geometry.right =
+    invalid.rows[0].scenario.maximumCountFrame.composedPages[0].geometry.left;
+  assert.equal(
+    buildAppMatrixRuntimeDiagnosticReport(invalid).rows[0].integrity,
+    false,
+  );
+});
+
+test("binds the exact poll-only release snapshot-error variant", () => {
+  const outputDirectory = path.join(
+    os.tmpdir(),
+    "issue-68-app-matrix-release-snapshot-error",
+  );
+  const pollOnly = (waitOutcome) => ({
+    elapsedMs: 90_000,
+    evaluationAttemptCount: 900,
+    evaluationErrorCount: 1,
+    snapshotErrorPresent: true,
+    waitOutcome,
+  });
+  const timeoutInput = passingAppMatrixRuntimeStageFailureInput(
+    outputDirectory,
+    "release-observation-started",
+  );
+  timeoutInput.rows[0].releaseSnapshot = pollOnly("timeout");
+  const timeoutRow = buildAppMatrixRuntimeDiagnosticReport(timeoutInput).rows[0];
+  assert.equal(timeoutRow.integrity, true);
+  assert.deepEqual(timeoutRow.release, {
+    classification: "timeout-snapshot-unavailable",
+    integrity: true,
+    poll: {
+      elapsedMs: 90_000,
+      evaluationAttemptCount: 900,
+      evaluationErrorCount: 1,
+      waitOutcome: "timeout",
+    },
+    snapshotAvailable: false,
+  });
+
+  const completedInput = passingAppMatrixRuntimeCompletedInput(outputDirectory);
+  completedInput.rows[0].releaseSnapshot = pollOnly("released");
+  const completed = buildAppMatrixRuntimeDiagnosticReport(completedInput);
+  assert.equal(completed.rows[0].integrity, true);
+  assert.equal(
+    completed.rows[0].release.classification,
+    "released-snapshot-unavailable",
+  );
+  assert.equal(completed.rows[0].release.snapshotAvailable, false);
+  assert.equal(completed.completed, true, completed.failures.join("\n"));
+  assert.doesNotMatch(
+    JSON.stringify(completed.rows[0].release),
+    /snapshotErrorPresent|private|path|error/u,
+  );
+
+  const full = buildAppMatrixRuntimeDiagnosticReport(
+    passingAppMatrixRuntimeCompletedInput(outputDirectory),
+  );
+  assert.equal(full.rows[0].release.snapshotAvailable, true);
+  assert.equal("snapshotErrorPresent" in full.rows[0].release.poll, false);
+
+  const invalid = [
+    ["extra private field", (raw) => { raw.privatePath = "/home/private"; }],
+    ["missing field", (raw) => { delete raw.elapsedMs; }],
+    ["zero attempts", (raw) => { raw.evaluationAttemptCount = 0; }],
+    ["too many errors", (raw) => { raw.evaluationErrorCount = 901; }],
+    ["released with only errors", (raw) => {
+      raw.waitOutcome = "released";
+      raw.evaluationErrorCount = raw.evaluationAttemptCount;
+    }],
+    ["invalid outcome", (raw) => { raw.waitOutcome = "private-outcome"; }],
+    ["unsafe elapsed", (raw) => { raw.elapsedMs = Number.MAX_VALUE; }],
+    ["BigInt count", (raw) => { raw.evaluationAttemptCount = 1n; }],
+    ["cyclic extra", (raw) => { raw.self = raw; }],
+  ];
+  for (const [label, mutate] of invalid) {
+    const input = passingAppMatrixRuntimeStageFailureInput(
+      outputDirectory,
+      "release-observation-started",
+    );
+    input.rows[0].releaseSnapshot = pollOnly("timeout");
+    mutate(input.rows[0].releaseSnapshot);
+    let report;
+    assert.doesNotThrow(() => {
+      report = buildAppMatrixRuntimeDiagnosticReport(input);
+    }, label);
+    assert.equal(report.rows[0].integrity, false, label);
+    assert.equal(report.rows[0].release, null, label);
+    assert.doesNotMatch(JSON.stringify(report), /home\/private|private-outcome/u);
+  }
+});
+
+test("enforces exact null-to-value lifecycle boundaries", () => {
+  const outputDirectory = path.join(
+    os.tmpdir(),
+    "issue-68-app-matrix-field-lifecycle",
+  );
+  const completed = passingAppMatrixRuntimeCompletedInput(outputDirectory)
+    .rows[0];
+  const premature = [
+    ["sourceObservation", "file-select-started", (row) => {
+      row.sourceObservation = structuredClone(completed.sourceObservation);
+    }],
+    ["modelShape", "model-completion-started", (row) => {
+      row.modelCompletion = structuredClone(completed.modelCompletion);
+      row.modelIdentity = structuredClone(completed.modelIdentity);
+    }],
+    ["adjacentPage", "adjacent-selection-started", (row) => {
+      row.adjacentPage = completed.adjacentPage;
+    }],
+    ["scenario", "scenario-start-started", (row) => {
+      row.scenarioStart = structuredClone(completed.scenarioStart);
+    }],
+    ["screenshot", "screenshot-started", (row) => {
+      row.screenshot = structuredClone(completed.screenshot);
+    }],
+    ["priorityTarget", "alignment-started", (row) => {
+      row.priorityTarget = completed.priorityTarget;
+    }],
+    ["priorityProbe", "priority-composition-started", (row) => {
+      row.priorityProbe = structuredClone(completed.priorityProbe);
+    }],
+    ["networkFixedPoint", "network-fixed-point-started", (row) => {
+      row.networkFixedPoint = structuredClone(completed.networkFixedPoint);
+    }],
+  ];
+  for (const [reason, stage, mutate] of premature) {
+    const input = passingAppMatrixRuntimeStageFailureInput(
+      outputDirectory,
+      stage,
+    );
+    mutate(input.rows[0]);
+    const row = buildAppMatrixRuntimeDiagnosticReport(input).rows[0];
+    assert.equal(row.integrityReasons.rowIdentity[reason], false, reason);
+    assert.equal(row.integrity, false, reason);
+  }
+
+  const missing = [
+    ["sourceObservation", "model-completion-started", (row) => {
+      row.sourceObservation = null;
+    }],
+    ["modelShape", "adjacent-selection-started", (row) => {
+      row.modelCompletion = null;
+      row.modelIdentity = null;
+    }],
+    ["adjacentPage", "scenario-start-started", (row) => {
+      row.adjacentPage = null;
+    }],
+    ["scenario", "adjacent-bitmap-started", (row) => {
+      row.scenarioStart = null;
+    }],
+    ["screenshot", "alignment-started", (row) => {
+      row.screenshot = null;
+    }],
+    ["priorityTarget", "priority-mount-started", (row) => {
+      row.priorityTarget = null;
+    }],
+    ["priorityProbe", "release-observation-started", (row) => {
+      row.priorityProbe = null;
+    }],
+  ];
+  for (const [reason, stage, mutate] of missing) {
+    const input = passingAppMatrixRuntimeStageFailureInput(
+      outputDirectory,
+      stage,
+    );
+    mutate(input.rows[0]);
+    const row = buildAppMatrixRuntimeDiagnosticReport(input).rows[0];
+    assert.equal(row.integrityReasons.rowIdentity[reason], false, reason);
+    assert.equal(row.integrity, false, reason);
+  }
+
+  const malformedRaw = [
+    ["file-select-started", (row) => { row.sourceObservation = {}; }],
+    ["model-completion-started", (row) => { row.modelIdentity = {}; }],
+    ["scenario-start-started", (row) => { row.completedSnapshot = {}; }],
+    ["priority-composition-started", (row) => { row.priorityProbe = {}; }],
+    ["release-observation-started", (row) => { row.releaseSnapshot = {}; }],
+  ];
+  for (const [stage, mutate] of malformedRaw) {
+    const input = passingAppMatrixRuntimeStageFailureInput(
+      outputDirectory,
+      stage,
+    );
+    mutate(input.rows[0]);
+    assert.equal(
+      buildAppMatrixRuntimeDiagnosticReport(input).rows[0].integrity,
+      false,
+      stage,
+    );
+  }
+});
+
 test("reports every app-matrix row and network integrity predicate", () => {
   const outputDirectory = path.join(
     os.tmpdir(),
@@ -10354,6 +12113,10 @@ test("reports every app-matrix row and network integrity predicate", () => {
     ["modelRevision", (row) => {
       row.modelCompletion.revision = "wrong-revision";
     }],
+    ["modelShape", (row) => {
+      row.modelIdentity.documentKey = "forged-document-key";
+      row.modelCompletion.documentKey = "forged-document-key";
+    }],
   ];
   for (const [flag, mutate] of rowMutations) {
     const input = passingAppMatrixRuntimeCompletedInput(outputDirectory);
@@ -10367,6 +12130,28 @@ test("reports every app-matrix row and network integrity predicate", () => {
       isAppMatrixRuntimeIntegrityReasonsValid(reasons, false),
       true,
       flag,
+    );
+  }
+
+  for (const [label, mutate] of [
+    ["BigInt model page", (row) => {
+      row.modelCompletion.pageNumbers[0] = 1n;
+    }],
+    ["cyclic model pages", (row) => {
+      row.modelCompletion.pageNumbers.push(row.modelCompletion.pageNumbers);
+    }],
+  ]) {
+    const input = passingAppMatrixRuntimeCompletedInput(outputDirectory);
+    mutate(input.rows[0]);
+    let report;
+    assert.doesNotThrow(() => {
+      report = buildAppMatrixRuntimeDiagnosticReport(input);
+    }, label);
+    assert.equal(report.rows[0].integrity, false, label);
+    assert.equal(
+      report.rows[0].integrityReasons.rowIdentity.modelShape,
+      false,
+      label,
     );
   }
 
@@ -10440,7 +12225,7 @@ test("reports every app-matrix row and network integrity predicate", () => {
   assert.doesNotMatch(JSON.stringify(recomputed), /privateDocument|private\.pdf/u);
 });
 
-test("retains a bounded priority-mount failure snapshot in schema 7", async () => {
+test("retains a bounded priority-mount failure snapshot in schema 8", async () => {
   const outputDirectory = path.join(
     os.tmpdir(),
     "issue-68-priority-mount-diagnostic",
@@ -10457,7 +12242,7 @@ test("retains a bounded priority-mount failure snapshot in schema 7", async () =
       );
       const report = buildAppMatrixRuntimeDiagnosticReport(input);
       const diagnostic = report.rows[0].priorityMountDiagnostic;
-      assert.equal(report.diagnosticSchemaVersion, 7);
+      assert.equal(report.diagnosticSchemaVersion, 8);
       assert.equal(report.rows[0].integrity, true, checkpoint);
       assert.equal(diagnostic.checkpoint, checkpoint);
       assert.equal(diagnostic.failureCategory, failureCategory);
@@ -10621,6 +12406,239 @@ test("binds the live priority preview pair after its exact stage boundary", asyn
     source,
     /message\?\.scale !== null[\s\S]*Number\.isFinite\(Number\(message\.scale\)\)[\s\S]*\? Number\(message\.scale\)[\s\S]*: null/u,
   );
+});
+
+test("selects an exact linked draw after a compatible preview request", () => {
+  const expectedTarget = {
+    capped: false,
+    height: 990,
+    scale: 1.25,
+    width: 765,
+  };
+  const importEvent = {
+    activityId: 1,
+    at: 10,
+    direction: "to-worker",
+    documentKey: DOCUMENT_KEY,
+    eventId: 1,
+    jobId: 1,
+    revision: REVISION,
+    type: "import",
+    workerInstanceId: 1,
+  };
+  const render = {
+    activityId: 2,
+    at: 20,
+    direction: "to-worker",
+    distance: 1,
+    documentKey: null,
+    enabled: true,
+    eventId: 2,
+    height: null,
+    jobId: 1,
+    pageNumber: 2,
+    revision: REVISION,
+    scale: 1.25,
+    type: "render",
+    visible: false,
+    width: null,
+    workerInstanceId: 1,
+  };
+  const bitmap = {
+    activityId: 3,
+    at: 30,
+    direction: "from-worker",
+    distance: null,
+    documentKey: null,
+    enabled: null,
+    eventId: 3,
+    height: 990,
+    jobId: 1,
+    pageNumber: 2,
+    revision: REVISION,
+    scale: 1.25,
+    type: "bitmap",
+    visible: null,
+    width: 765,
+    workerInstanceId: 1,
+  };
+  const draw = {
+    activityId: 4,
+    at: 36,
+    bitmapEventId: 3,
+    compositionId: 1,
+    distance: 0,
+    drawInvocationId: 1,
+    geometry: { bottom: 800, left: 100, right: 900, top: 100 },
+    geometryVisible: true,
+    height: 990,
+    page: 2,
+    readerViewport: { bottom: 900, left: 0, right: 1_100, top: 0 },
+    scale: 1.25,
+    source: "worker-bitmap",
+    visible: true,
+    visiblePages: [2],
+    width: 765,
+  };
+  const scenarioStart = { drawStart: 0, startedAt: 35 };
+  const select = ({
+    draws = [draw],
+    expected = expectedTarget,
+    imported = importEvent,
+    requireDraw = true,
+    scenario = scenarioStart,
+    workerEvents = [importEvent, render, bitmap],
+  } = {}) => selectPdfRasterCompositionSettlement({
+    draws,
+    expectedTarget: expected,
+    importEvent: imported,
+    pageNumber: 2,
+    requireDraw,
+    scenarioStart: scenario,
+    workerEvents,
+  });
+  const selected = select();
+  assert.equal(selected.request.eventId, 2);
+  assert.equal(selected.bitmap.eventId, 3);
+  assert.equal(selected.draw.bitmapEventId, 3);
+  assert.deepEqual(
+    select({ draws: [], requireDraw: false }),
+    { ...selected, draw: null },
+  );
+  assert.deepEqual(derivePdfPreviewRasterTarget({
+    pageHeight: 792,
+    pageWidth: 612,
+    targetScale: 2,
+  }), expectedTarget.capped === false
+    ? { height: 990, scale: 1.25, width: 765 }
+    : null);
+
+  const mutations = [
+    ["stale preview target", ({ request, response }) => {
+      request.scale = 1;
+      response.scale = 1;
+      response.width = 612;
+      response.height = 792;
+    }],
+    ["direct sharp", ({ request, response, composition }) => {
+      request.scale = 2;
+      response.scale = 2;
+      response.width = 1_224;
+      response.height = 1_584;
+      composition.scale = 2;
+      composition.width = 1_224;
+      composition.height = 1_584;
+    }],
+    ["visible request", ({ request }) => { request.visible = true; }],
+    ["wrong request distance", ({ request }) => { request.distance = 0; }],
+    ["wrong request worker", ({ request }) => {
+      request.workerInstanceId = 2;
+    }],
+    ["wrong bitmap job", ({ response }) => { response.jobId = 2; }],
+    ["wrong bitmap revision", ({ response }) => {
+      response.revision = "stale";
+    }],
+    ["bitmap before request", ({ request, response }) => {
+      request.activityId = 3;
+      response.activityId = 2;
+    }],
+    ["wrong bitmap dimensions", ({ response }) => { response.width -= 1; }],
+    ["null bitmap link", ({ composition }) => {
+      composition.bitmapEventId = null;
+    }],
+    ["wrong bitmap link", ({ composition }) => {
+      composition.bitmapEventId = 2;
+    }],
+    ["pre-scenario draw", ({ composition }) => { composition.at = 34; }],
+    ["nonvisible draw", ({ composition }) => { composition.visible = false; }],
+    ["distance-one draw", ({ composition }) => { composition.distance = 1; }],
+    ["geometry flag", ({ composition }) => {
+      composition.geometryVisible = false;
+    }],
+    ["geometry miss", ({ composition }) => {
+      composition.geometry.top = 1_000;
+      composition.geometry.bottom = 1_800;
+    }],
+    ["zero-area geometry", ({ composition }) => {
+      composition.geometry.right = composition.geometry.left;
+    }],
+    ["unsafe geometry", ({ composition }) => {
+      composition.geometry = {
+        bottom: 1e307 + 800,
+        left: 1e307,
+        right: 1e307 + 900,
+        top: 1e307,
+      };
+    }],
+    ["visible-page split", ({ composition }) => {
+      composition.visiblePages = [1];
+    }],
+    ["wrong source", ({ composition }) => {
+      composition.source = "main-fallback";
+    }],
+    ["wrong scale", ({ composition }) => { composition.scale = 1; }],
+    ["wrong dimensions", ({ composition }) => { composition.width -= 1; }],
+    ["draw before bitmap", ({ composition }) => {
+      composition.activityId = 2;
+    }],
+    ["unsafe draw clock", ({ composition }) => {
+      composition.at = Number.MAX_VALUE;
+    }],
+    ["forged composition occurrence", ({ composition }) => {
+      composition.compositionId = 2;
+    }],
+    ["import occurrence gap", ({ events }) => { events[2].eventId = 4; }],
+    ["import occurrence reorder", ({ events }) => {
+      [events[1], events[2]] = [events[2], events[1]];
+    }],
+  ];
+  for (const [label, mutate] of mutations) {
+    const request = structuredClone(render);
+    const response = structuredClone(bitmap);
+    const composition = structuredClone(draw);
+    const events = [structuredClone(importEvent), request, response];
+    mutate({ composition, events, request, response });
+    assert.equal(
+      select({ draws: [composition], workerEvents: events }),
+      null,
+      label,
+    );
+  }
+  assert.equal(select({ draws: [], workerEvents: [importEvent, bitmap] }), null);
+  for (const value of [1n, Number.NaN]) {
+    const changed = structuredClone(draw);
+    changed.bitmapEventId = value;
+    assert.doesNotThrow(() => select({ draws: [changed] }));
+    assert.equal(select({ draws: [changed] }), null);
+  }
+  const cyclic = structuredClone(draw);
+  cyclic.geometry = cyclic;
+  assert.doesNotThrow(() => select({ draws: [cyclic] }));
+  assert.equal(select({ draws: [cyclic] }), null);
+
+  const priorDraw = {
+    ...structuredClone(draw),
+    activityId: 4,
+    at: 34,
+    bitmapEventId: null,
+    compositionId: 1,
+    drawInvocationId: 1,
+    page: 1,
+  };
+  const boundaryDraw = {
+    ...structuredClone(draw),
+    activityId: 5,
+    compositionId: 2,
+    drawInvocationId: 2,
+  };
+  assert.notEqual(select({
+    draws: [priorDraw, boundaryDraw],
+    scenario: { drawStart: 1, startedAt: 35 },
+  }), null);
+  assert.equal(select({
+    draws: [boundaryDraw],
+    scenario: { drawStart: 1, startedAt: 35 },
+  }), null);
 });
 
 test("recomputes priority-mount predicates from one ordered ledger", () => {
@@ -11065,7 +13083,11 @@ test("binds all six app-matrix runtime rows and the exact sixth timeout", () => 
     assert.equal(isCdpFixedPointDiagnosticHealthy(row.networkFixedPoint), true);
   }
   const completed = buildAppMatrixRuntimeDiagnosticReport(completedInput);
-  assert.equal(completed.completed, true, completed.failures.join("\n"));
+  assert.equal(
+    completed.completed,
+    true,
+    JSON.stringify(completed.rows.map((row) => row.integrityReasons), null, 2),
+  );
   assert.deepEqual(completed.failures, []);
   assert.equal(completed.rows.length, 6);
   assert.ok(completed.rows.every((row) =>
@@ -11189,7 +13211,7 @@ test("binds all six app-matrix runtime rows and the exact sixth timeout", () => 
   );
   assert.equal(timeout.execution.orderExact, true, timeout.failures.join("\n"));
   assert.equal(timeout.rows[5].adjacentPage, 3);
-  assert.equal(timeout.rows[5].priorityTarget, 5);
+  assert.equal(timeout.rows[5].priorityTarget, 6);
   assert.equal(timeout.rows[5].release.classification, "offscreen-stale-canvas");
   assert.deepEqual(timeout.failures, [
     "The bounded app-matrix runtime diagnostic runner reported a stage failure.",
@@ -13146,6 +15168,41 @@ test("binds nonzero app-matrix Long Task and LoAF timing", () => {
     JSON.stringify(privateReport.rows[0].timing.longAnimationFrames),
     /home|private|file:|"sourceFunctionName"|"sourceURL"|"invoker":/u,
   );
+
+  const privatePhaseInput = structuredClone(validInput);
+  privatePhaseInput.rows[0].completedSnapshot.phaseMarkers[0].stage =
+    "/home/private/document-name";
+  const privatePhaseReport = buildAppMatrixRuntimeDiagnosticReport(
+    privatePhaseInput,
+  );
+  assert.equal(privatePhaseReport.rows[0].integrity, false);
+  assert.equal(
+    privatePhaseReport.rows[0].timing.phaseMarkers[0].stage,
+    "invalid",
+  );
+  const timingStrings = [];
+  const collectStrings = (value) => {
+    if (typeof value === "string") {
+      timingStrings.push(value);
+    } else if (Array.isArray(value)) {
+      value.forEach(collectStrings);
+    } else if (value && typeof value === "object") {
+      Object.values(value).forEach(collectStrings);
+    }
+  };
+  collectStrings(privatePhaseReport.rows[0].timing);
+  assert.equal(timingStrings.some((value) => value.includes("private")), false);
+  assert.doesNotMatch(
+    JSON.stringify(privatePhaseReport.rows[0].timing),
+    /home\/private|document-name/u,
+  );
+  const fixedTimingStages = new Set([
+    ...APP_MATRIX_RUNTIME_DIAGNOSTIC_STAGES,
+    "invalid",
+  ]);
+  assert.ok(privatePhaseReport.rows[0].timing.phaseMarkers.every((marker) =>
+    marker.stage === null || fixedTimingStages.has(marker.stage)
+  ));
 
   const thrownHook = structuredClone(validInput);
   thrownHook.rows[0].completedSnapshot.drawHookTimings[0].nativeDrawThrew = true;

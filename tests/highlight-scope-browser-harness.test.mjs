@@ -109,6 +109,7 @@ test("visual fingerprints cover every source of screenshot movement without read
     "getClientRects",
     "document.fonts?.status",
     ".pdf-page-loading",
+    "loadingBounds.bottom > readerBounds.top",
     ".position-action-stack",
   ]) {
     assert.match(

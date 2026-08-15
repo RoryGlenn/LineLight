@@ -67,7 +67,7 @@ test("coalesces a burst of worker page updates into one render notification", ()
   scheduledNotifications.shift()();
   assert.equal(notifications, 1);
 
-  assert.equal(store.setBitmap(1, { bitmap: { close() {} } }), undefined);
+  assert.equal(store.setBitmap(1, { bitmap: { close() {} } }), true);
   assert.equal(scheduledNotifications.length, 1);
   scheduledNotifications.shift()();
   assert.equal(notifications, 2);

@@ -18,6 +18,10 @@ import { inflateSync } from "node:zlib";
 
 import { createPdfPageStore } from "../app/pdf-page-store.mjs";
 import {
+  constrainPdfRasterScale,
+  resolvePdfRasterTarget,
+} from "../app/pdf-raster-scale.mjs";
+import {
   DEFAULT_PDF_HIGHLIGHT_FIXTURE,
 } from "./generate-pdf-highlight-fixture.mjs";
 import {
@@ -78,6 +82,15 @@ const APP_MATRIX_RUNTIME_DIAGNOSTIC_REPORT =
 const APP_MATRIX_RUNTIME_DIAGNOSTIC_RUN_TIMEOUT_MS = 360_000;
 const APP_MATRIX_RUNTIME_LOAF_LIMIT = 32;
 const APP_MATRIX_RUNTIME_LOAF_SCRIPT_LIMIT = 16;
+const APP_MATRIX_PREVIEW_COMPOSITION_LEDGER_LIMIT = 16;
+const APP_MATRIX_PREVIEW_COMPOSITION_FAILURE_CATEGORIES = new Set([
+  "timeout",
+  "unexpected",
+]);
+const APP_MATRIX_PREVIEW_COMPOSITION_CHECKPOINTS = new Set([
+  "composition-wait",
+  "target-derivation",
+]);
 const REFERENCE_CAPTURE_DIAGNOSTIC_TIMEOUT_MS = 120_000;
 const REFERENCE_CAPTURE_DIAGNOSTIC_DEFAULT_CONFIGURATION =
   "desktop-dpr1-zoom100";
@@ -487,91 +500,145 @@ export function validateCdpInitialTargetBaseline(targetInfos) {
 }
 
 export function summarizePdfModelCompletion(workerEvents, expectedPageCount) {
-  const events = workerEvents ?? [];
-  const importRequests = events.filter(
-    (event) =>
-      event?.direction === "to-worker" &&
-      event?.type === "import",
-  );
-  const importRequestsValid = importRequests.every(
-    (event) =>
-      Number.isFinite(event?.at) &&
-      Number.isInteger(event?.jobId) &&
-      typeof event?.documentKey === "string" &&
-      event.documentKey.length > 0 &&
-      typeof event?.revision === "string" &&
-      event.revision.length > 0,
-  );
-  const importRequest = importRequestsValid
-    ? [...importRequests].sort((left, right) => left.at - right.at).at(-1)
-    : null;
-  const expectedPages = Array.from(
-    { length: expectedPageCount },
-    (_, index) => index + 1,
-  );
-  const matchesImport = (event) =>
-    Boolean(importRequest) &&
-    event?.at >= importRequest.at &&
-    event?.jobId === importRequest.jobId &&
-    event?.revision === importRequest.revision;
-  const pageEvents = events.filter(
-    (event) =>
-      event?.direction === "from-worker" &&
-      event?.type === "page" &&
-      Number.isInteger(event?.pageNumber) &&
-      event?.documentKey === importRequest?.documentKey &&
-      matchesImport(event),
-  );
-  const pageNumbers = [...new Set(pageEvents.map((event) => event.pageNumber))]
-    .sort((left, right) => left - right);
-  const progressEvents = events.filter(
-    (event) =>
-      event?.direction === "from-worker" &&
-      event?.type === "progress" &&
-      event?.completedPages === expectedPageCount &&
-      event?.pageCount === expectedPageCount &&
-      matchesImport(event),
-  );
-  const completeEvents = events.filter(
-    (event) =>
-      event?.direction === "from-worker" &&
-      event?.type === "complete" &&
-      event?.documentKey === importRequest?.documentKey &&
-      event?.pageCount === expectedPageCount &&
-      matchesImport(event),
-  );
-  const completion = completeEvents[0];
-  const expectedPageKey = expectedPages.join(",");
-  const pageNumberKey = pageNumbers.join(",");
-  const identityBound = importRequestsValid && Boolean(importRequest) &&
-    typeof completion?.documentKey === "string" &&
-    completion.documentKey.length > 0 &&
-    typeof completion?.revision === "string" &&
-    completion.revision.length > 0 &&
-    pageEvents.every(
-      (event) =>
-        event.documentKey === completion.documentKey &&
-        event.revision === completion.revision,
-    );
-  return {
-    complete:
-      Number.isInteger(expectedPageCount) &&
-      expectedPageCount > 0 &&
-      pageEvents.length === expectedPageCount &&
-      pageNumberKey === expectedPageKey &&
-      progressEvents.length === 1 &&
-      completeEvents.length === 1 &&
-      identityBound,
-    completeEventCount: completeEvents.length,
-    completedProgressCount: progressEvents.length,
-    documentKey: completion?.documentKey ?? null,
-    importAt: importRequest?.at ?? null,
-    importJobId: importRequest?.jobId ?? null,
-    importRequestCount: importRequests.length,
-    pageEventCount: pageEvents.length,
+  const incomplete = ({
+    completeEventCount = 0,
+    completedProgressCount = 0,
+    documentKey = null,
+    importAt = null,
+    importJobId = null,
+    importRequestCount = 0,
+    pageEventCount = 0,
+    pageNumbers = [],
+    revision = null,
+  } = {}) => ({
+    complete: false,
+    completeEventCount,
+    completedProgressCount,
+    documentKey,
+    importAt,
+    importJobId,
+    importRequestCount,
+    pageEventCount,
     pageNumbers,
-    revision: completion?.revision ?? null,
-  };
+    revision,
+  });
+  try {
+    const events = Array.isArray(workerEvents) ? workerEvents : [];
+    const positiveSafeInteger = (value) =>
+      Number.isSafeInteger(value) && value > 0;
+    const safeClock = (value) =>
+      typeof value === "number" && Number.isFinite(value) && value >= 0 &&
+      Math.abs(value) <= Number.MAX_SAFE_INTEGER;
+    const expectedCountBound = positiveSafeInteger(expectedPageCount);
+    const importEntries = events.flatMap((event, index) =>
+      event?.direction === "to-worker" && event?.type === "import"
+        ? [{ event, index }]
+        : []
+    );
+    const importEntry = importEntries.length === 1 ? importEntries[0] : null;
+    const importRequest = importEntry?.event ?? null;
+    const documentIdentityBound =
+      typeof importRequest?.documentKey === "string" &&
+      typeof importRequest?.revision === "string" &&
+      importRequest.revision.length > 0 &&
+      importRequest.documentKey.length > importRequest.revision.length + 1 &&
+      importRequest.documentKey.endsWith(`:${importRequest.revision}`);
+    const importBound = Boolean(
+      importEntry && positiveSafeInteger(importRequest.activityId) &&
+      positiveSafeInteger(importRequest.eventId) &&
+      positiveSafeInteger(importRequest.jobId) &&
+      positiveSafeInteger(importRequest.workerInstanceId) &&
+      safeClock(importRequest.at) && documentIdentityBound
+    );
+    const responseEntries = importEntry
+      ? events.flatMap((event, index) =>
+          event?.direction === "from-worker" &&
+              ["page", "progress", "complete"].includes(event?.type) &&
+              event?.jobId === importRequest.jobId &&
+              event?.revision === importRequest.revision
+            ? [{ event, index }]
+            : []
+        )
+      : [];
+    const responseShapeBound = importBound && responseEntries.every(
+      ({ event, index }, responseIndex) => {
+        const prior = responseIndex === 0
+          ? importEntry
+          : responseEntries[responseIndex - 1];
+        const identityBound =
+          event.workerInstanceId === importRequest.workerInstanceId &&
+          event.jobId === importRequest.jobId &&
+          event.revision === importRequest.revision &&
+          (event.type === "progress"
+            ? event.documentKey === null || event.documentKey === undefined
+            : event.documentKey === importRequest.documentKey);
+        return index > importEntry.index && identityBound &&
+          positiveSafeInteger(event.activityId) &&
+          positiveSafeInteger(event.eventId) && safeClock(event.at) &&
+          event.activityId > prior.event.activityId &&
+          event.eventId > prior.event.eventId &&
+          event.at >= prior.event.at;
+      },
+    );
+    const pageEntries = responseEntries.filter(({ event }) =>
+      event.type === "page"
+    );
+    const pageNumbers = pageEntries.map(({ event }) => event.pageNumber);
+    const pagesBound = expectedCountBound &&
+      pageEntries.length === expectedPageCount &&
+      pageNumbers.every((pageNumber, index) => pageNumber === index + 1);
+    const terminalProgressEntries = responseEntries.filter(({ event }) =>
+      event.type === "progress" &&
+      event.completedPages === expectedPageCount &&
+      event.pageCount === expectedPageCount
+    );
+    const completeEntries = responseEntries.filter(({ event }) =>
+      event.type === "complete" &&
+      event.pageCount === expectedPageCount
+    );
+    const completion = completeEntries[0]?.event ?? null;
+    const terminalProgress = terminalProgressEntries[0] ?? null;
+    const completionEntry = completeEntries[0] ?? null;
+    const lastPageEntry = pageEntries.at(-1) ?? null;
+    const terminalOrderBound = Boolean(
+      lastPageEntry && terminalProgress && completionEntry &&
+      lastPageEntry.index < terminalProgress.index &&
+      terminalProgress.index < completionEntry.index &&
+      completionEntry.index === responseEntries.at(-1)?.index &&
+      lastPageEntry.event.activityId < terminalProgress.event.activityId &&
+      lastPageEntry.event.eventId < terminalProgress.event.eventId &&
+      lastPageEntry.event.at <= terminalProgress.event.at &&
+      terminalProgress.event.activityId < completionEntry.event.activityId &&
+      terminalProgress.event.eventId < completionEntry.event.eventId &&
+      terminalProgress.event.at <= completionEntry.event.at
+    );
+    const summary = incomplete({
+      completeEventCount: completeEntries.length,
+      completedProgressCount: terminalProgressEntries.length,
+      documentKey: typeof completion?.documentKey === "string"
+        ? completion.documentKey
+        : null,
+      importAt: safeClock(importRequest?.at) ? importRequest.at : null,
+      importJobId: positiveSafeInteger(importRequest?.jobId)
+        ? importRequest.jobId
+        : null,
+      importRequestCount: importEntries.length,
+      pageEventCount: pageEntries.length,
+      pageNumbers,
+      revision: typeof completion?.revision === "string"
+        ? completion.revision
+        : null,
+    });
+    summary.complete = Boolean(
+      expectedCountBound && importBound && responseShapeBound && pagesBound &&
+      terminalProgressEntries.length === 1 && completeEntries.length === 1 &&
+      terminalOrderBound && completion?.documentKey === importRequest.documentKey &&
+      completion?.revision === importRequest.revision
+    );
+    return summary;
+  } catch {
+    return incomplete();
+  }
 }
 
 export function selectPdfPriorityPreviewSettlement({
@@ -636,6 +703,252 @@ export function selectPdfPriorityPreviewSettlement({
         requestEventId: previewRequest.eventId,
       }
     : null;
+}
+
+/**
+ * Select one producer-valid raster request -> bitmap -> connected draw chain.
+ *
+ * The adjacent-preview stage uses the request/bitmap prefix before the page is
+ * visible. The composition stage uses the same selector with `requireDraw` so
+ * a draw that happened while the scroll stage was settling remains eligible.
+ * The request is the latest preceding identity/page/scale-compatible worker
+ * request; the protocol does not expose a request ID on its bitmap response.
+ * The bitmap -> draw edge is exact because the harness records the transferred
+ * ImageBitmap through its WeakMap-backed event ID.
+ * The independently derived target keeps obsolete previews and a direct sharp
+ * draw from satisfying this proof; those remain distinct diagnostic outcomes.
+ */
+export function selectPdfRasterCompositionSettlement({
+  draws,
+  expectedTarget,
+  importEvent,
+  pageNumber,
+  requireDraw = true,
+  scenarioStart,
+  workerEvents,
+} = {}) {
+  try {
+    const positiveSafeInteger = (value) =>
+      Number.isSafeInteger(value) && value > 0;
+    const nonnegativeSafeInteger = (value) =>
+      Number.isSafeInteger(value) && value >= 0;
+    const safeNumber = (value) =>
+      typeof value === "number" && Number.isFinite(value) &&
+      Math.abs(value) <= Number.MAX_SAFE_INTEGER;
+    const finiteClock = (value) =>
+      safeNumber(value) && value >= 0;
+    const positiveFinite = (value) =>
+      safeNumber(value) && value > 0;
+    const closeScale = (left, right) =>
+      positiveFinite(left) && positiveFinite(right) &&
+      Math.abs(left - right) <= 1e-7;
+    const rectangle = (value) => Boolean(
+      value && typeof value === "object" && !Array.isArray(value) &&
+      [value.bottom, value.left, value.right, value.top].every(
+        safeNumber,
+      ) && value.bottom > value.top && value.right > value.left &&
+      value.bottom - value.top <= Number.MAX_SAFE_INTEGER &&
+      value.right - value.left <= Number.MAX_SAFE_INTEGER
+    );
+    const intersects = (left, right) => Boolean(
+      rectangle(left) && rectangle(right) &&
+      left.bottom > right.top && left.top < right.bottom &&
+      left.right > right.left && left.left < right.right
+    );
+    const identityMatches = (event) =>
+      event?.workerInstanceId === importEvent.workerInstanceId &&
+      event?.jobId === importEvent.jobId &&
+      event?.revision === importEvent.revision;
+    if (
+      !Array.isArray(workerEvents) || !Array.isArray(draws) ||
+      !positiveSafeInteger(pageNumber) ||
+      typeof requireDraw !== "boolean" ||
+      !expectedTarget || typeof expectedTarget !== "object" ||
+      !positiveFinite(expectedTarget?.scale) ||
+      expectedTarget.scale > 1.25 + 1e-7 ||
+      !positiveSafeInteger(expectedTarget?.width) ||
+      !positiveSafeInteger(expectedTarget?.height) ||
+      importEvent?.direction !== "to-worker" ||
+      importEvent?.type !== "import" ||
+      !positiveSafeInteger(importEvent?.eventId) ||
+      !positiveSafeInteger(importEvent?.activityId) ||
+      !positiveSafeInteger(importEvent?.workerInstanceId) ||
+      !positiveSafeInteger(importEvent?.jobId) ||
+      !finiteClock(importEvent?.at) ||
+      typeof importEvent?.documentKey !== "string" ||
+      importEvent.documentKey.length === 0 ||
+      typeof importEvent?.revision !== "string" ||
+      importEvent.revision.length === 0 ||
+      (requireDraw && (
+        !scenarioStart || typeof scenarioStart !== "object" ||
+        !nonnegativeSafeInteger(scenarioStart.drawStart) ||
+        scenarioStart.drawStart > draws.length ||
+        !finiteClock(scenarioStart.startedAt) ||
+        scenarioStart.startedAt < importEvent.at
+      ))
+    ) {
+      return null;
+    }
+    const importIndex = importEvent.eventId - 1;
+    const retainedImport = workerEvents[importIndex];
+    const importOccurrenceBound = retainedImport?.direction === "to-worker" &&
+      retainedImport?.type === "import" &&
+      retainedImport?.eventId === importEvent.eventId &&
+      retainedImport?.activityId === importEvent.activityId &&
+      retainedImport?.at === importEvent.at &&
+      retainedImport?.workerInstanceId === importEvent.workerInstanceId &&
+      retainedImport?.jobId === importEvent.jobId &&
+      retainedImport?.documentKey === importEvent.documentKey &&
+      retainedImport?.revision === importEvent.revision &&
+      workerEvents.filter((event) =>
+        event?.direction === "to-worker" && event?.type === "import" &&
+        event?.eventId === importEvent.eventId
+      ).length === 1 &&
+      workerEvents.slice(importIndex).every((event, index) =>
+        positiveSafeInteger(event?.eventId) &&
+        event.eventId === importEvent.eventId + index &&
+        positiveSafeInteger(event?.activityId) && finiteClock(event?.at) &&
+        (index === 0 || (
+          event.activityId > workerEvents[importIndex + index - 1].activityId &&
+          event.at >= workerEvents[importIndex + index - 1].at
+        ))
+    );
+    if (!importOccurrenceBound) return null;
+    const drawOccurrenceBound = !requireDraw || draws.every((draw, index) =>
+      positiveSafeInteger(draw?.activityId) && finiteClock(draw?.at) &&
+      positiveSafeInteger(draw?.compositionId) &&
+      draw.compositionId === index + 1 &&
+      positiveSafeInteger(draw?.drawInvocationId) &&
+      (index === 0 || (
+        draw.activityId > draws[index - 1].activityId &&
+        draw.at >= draws[index - 1].at &&
+        draw.drawInvocationId > draws[index - 1].drawInvocationId
+      ))
+    );
+    if (!drawOccurrenceBound) return null;
+    const requests = workerEvents.flatMap((event, index) => {
+      const producerShape =
+        event?.direction === "to-worker" && event?.type === "render" &&
+        event?.documentKey === null &&
+        positiveSafeInteger(event?.eventId) &&
+        positiveSafeInteger(event?.activityId) && finiteClock(event?.at) &&
+        event.eventId > importEvent.eventId &&
+        event.activityId > importEvent.activityId &&
+        event.at >= importEvent.at && event?.pageNumber === pageNumber &&
+        identityMatches(event) && event?.enabled === true &&
+        event?.visible === false &&
+        nonnegativeSafeInteger(event?.distance) &&
+        event.distance === 1 &&
+        closeScale(event?.scale, expectedTarget.scale) &&
+        (event?.width === null || event?.width === undefined) &&
+        (event?.height === null || event?.height === undefined);
+      return producerShape ? [{ event, index }] : [];
+    });
+    const bitmaps = workerEvents.flatMap((event, index) => {
+      const producerShape =
+        event?.direction === "from-worker" && event?.type === "bitmap" &&
+        event?.documentKey === null &&
+        positiveSafeInteger(event?.eventId) &&
+        positiveSafeInteger(event?.activityId) && finiteClock(event?.at) &&
+        event.eventId > importEvent.eventId &&
+        event.activityId > importEvent.activityId &&
+        event.at >= importEvent.at && event?.pageNumber === pageNumber &&
+        identityMatches(event) &&
+        closeScale(event?.scale, expectedTarget.scale) &&
+        event?.width === expectedTarget.width &&
+        event?.height === expectedTarget.height &&
+        [event?.enabled, event?.visible, event?.distance].every(
+          (value) => value === null || value === undefined,
+        );
+      return producerShape ? [{ event, index }] : [];
+    });
+    for (const bitmapEntry of bitmaps) {
+      const requestEntry = requests.findLast((candidate) =>
+        candidate.index < bitmapEntry.index &&
+        candidate.event.eventId < bitmapEntry.event.eventId &&
+        candidate.event.activityId < bitmapEntry.event.activityId &&
+        candidate.event.at <= bitmapEntry.event.at &&
+        closeScale(candidate.event.scale, bitmapEntry.event.scale)
+      ) ?? null;
+      if (!requestEntry) continue;
+      const prefix = {
+        bitmap: {
+          activityId: bitmapEntry.event.activityId,
+          at: bitmapEntry.event.at,
+          eventId: bitmapEntry.event.eventId,
+          height: bitmapEntry.event.height,
+          pageNumber,
+          scale: bitmapEntry.event.scale,
+          width: bitmapEntry.event.width,
+        },
+        draw: null,
+        request: {
+          activityId: requestEntry.event.activityId,
+          at: requestEntry.event.at,
+          distance: requestEntry.event.distance,
+          eventId: requestEntry.event.eventId,
+          pageNumber,
+          scale: requestEntry.event.scale,
+          visible: requestEntry.event.visible,
+        },
+      };
+      if (!requireDraw) return prefix;
+      const draw = draws.slice(scenarioStart.drawStart).find((candidate) => {
+        const visiblePages = candidate?.visiblePages;
+        const visiblePagesBound = Array.isArray(visiblePages) &&
+          visiblePages.length > 0 && visiblePages.every((value, index) =>
+            positiveSafeInteger(value) &&
+            (index === 0 || value > visiblePages[index - 1])
+          ) && visiblePages.includes(pageNumber);
+        return candidate?.page === pageNumber &&
+          candidate?.source === "worker-bitmap" &&
+          candidate?.visible === true &&
+          candidate?.distance === 0 &&
+          candidate?.geometryVisible === true &&
+          intersects(candidate?.geometry, candidate?.readerViewport) &&
+          visiblePagesBound &&
+          positiveSafeInteger(candidate?.activityId) &&
+          candidate.activityId > bitmapEntry.event.activityId &&
+          finiteClock(candidate?.at) &&
+          candidate.at >= bitmapEntry.event.at &&
+          candidate.at >= scenarioStart.startedAt &&
+          positiveSafeInteger(candidate?.bitmapEventId) &&
+          candidate.bitmapEventId === bitmapEntry.event.eventId &&
+          positiveSafeInteger(candidate?.compositionId) &&
+          candidate.compositionId > scenarioStart.drawStart &&
+          positiveSafeInteger(candidate?.drawInvocationId) &&
+          positiveSafeInteger(candidate?.width) &&
+          positiveSafeInteger(candidate?.height) &&
+          candidate.width === bitmapEntry.event.width &&
+          candidate.height === bitmapEntry.event.height &&
+          closeScale(candidate?.scale, bitmapEntry.event.scale);
+      }) ?? null;
+      if (draw) {
+        return {
+          ...prefix,
+          draw: {
+            activityId: draw.activityId,
+            at: draw.at,
+            bitmapEventId: draw.bitmapEventId,
+            compositionId: draw.compositionId,
+            distance: 0,
+            drawInvocationId: draw.drawInvocationId,
+            geometryVisible: true,
+            height: draw.height,
+            page: pageNumber,
+            scale: draw.scale,
+            source: "worker-bitmap",
+            visible: true,
+            visiblePages: [...draw.visiblePages],
+            width: draw.width,
+          },
+        };
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -960,6 +1273,44 @@ export function collectAppMatrixRuntimeLongAnimationFrameBatch(
   };
 }
 
+export function createAppMatrixScenarioFinalizationCache(
+  cloneValue = structuredClone,
+) {
+  let failed = false;
+  let finalization = null;
+  return {
+    begin() {
+      failed = false;
+      finalization = null;
+    },
+    finishSnapshot(finalizeScenario, readSnapshot) {
+      if (finalization !== null) return cloneValue(finalization);
+      if (failed) {
+        throw new Error("The scenario finalization bundle is unavailable.");
+      }
+      if (
+        typeof finalizeScenario !== "function" ||
+        typeof readSnapshot !== "function"
+      ) {
+        return null;
+      }
+      try {
+        const scenario = finalizeScenario();
+        if (scenario === null || scenario === undefined) return null;
+        const snapshot = readSnapshot();
+        finalization = {
+          scenario: cloneValue(scenario),
+          snapshot: cloneValue(snapshot),
+        };
+        return cloneValue(finalization);
+      } catch (error) {
+        failed = true;
+        throw error;
+      }
+    },
+  };
+}
+
 export function classifyPdfRasterTransition(previewComposition, sharpTarget) {
   return previewComposition?.width === sharpTarget?.targetWidth &&
       previewComposition?.height === sharpTarget?.targetHeight &&
@@ -968,6 +1319,27 @@ export function classifyPdfRasterTransition(previewComposition, sharpTarget) {
       ) <= 1e-7
     ? "preview-satisfied-target"
     : "preview-to-sharp-upgrade";
+}
+
+export function derivePdfPreviewRasterTarget({
+  pageHeight,
+  pageWidth,
+  targetScale,
+} = {}) {
+  if (
+    !Number.isFinite(pageWidth) || pageWidth <= 0 ||
+    !Number.isFinite(pageHeight) || pageHeight <= 0 ||
+    !Number.isFinite(targetScale) || targetScale <= 0
+  ) {
+    return null;
+  }
+  const scale = Math.min(targetScale, 1.25);
+  const width = Math.ceil(pageWidth * scale);
+  const height = Math.ceil(pageHeight * scale);
+  return Number.isSafeInteger(width) && width > 0 &&
+      Number.isSafeInteger(height) && height > 0
+    ? { height, scale, width }
+    : null;
 }
 
 export function selectPdfFallbackScenarioEvents(
@@ -4155,12 +4527,17 @@ export function buildFallbackImportDiagnosticReport({
   };
 }
 
+function appMatrixRuntimeSafeNumber(value) {
+  return typeof value === "number" && Number.isFinite(value) &&
+    Math.abs(value) <= Number.MAX_SAFE_INTEGER;
+}
+
 function appMatrixRuntimeNumber(value) {
-  return Number.isFinite(value) ? value : null;
+  return appMatrixRuntimeSafeNumber(value) ? value : null;
 }
 
 function appMatrixRuntimeInteger(value, minimum = 0) {
-  return Number.isInteger(value) && value >= minimum ? value : null;
+  return Number.isSafeInteger(value) && value >= minimum ? value : null;
 }
 
 function sanitizeAppMatrixRuntimeRectangle(value) {
@@ -4170,8 +4547,10 @@ function sanitizeAppMatrixRuntimeRectangle(value) {
     right: appMatrixRuntimeNumber(value?.right),
     top: appMatrixRuntimeNumber(value?.top),
   };
-  return Object.values(rectangle).every(Number.isFinite) &&
-      rectangle.right >= rectangle.left && rectangle.bottom >= rectangle.top
+  return Object.values(rectangle).every(appMatrixRuntimeSafeNumber) &&
+      rectangle.right > rectangle.left && rectangle.bottom > rectangle.top &&
+      rectangle.right - rectangle.left <= Number.MAX_SAFE_INTEGER &&
+      rectangle.bottom - rectangle.top <= Number.MAX_SAFE_INTEGER
     ? rectangle
     : null;
 }
@@ -4204,6 +4583,38 @@ function appMatrixRuntimeBooleanClass(value) {
 }
 
 function sanitizeAppMatrixRuntimePage(raw, expectedPage, readerRect, viewport) {
+  const pageKeys = [
+    "canvas",
+    "datasetVisible",
+    "distance",
+    "intersectsLayoutViewport",
+    "intersectsReader",
+    "intersectsVisualViewport",
+    "page",
+    "pageIndex",
+    "present",
+    "rect",
+    "textOverlayCount",
+  ];
+  const canvasKeys = [
+    "capped",
+    "connected",
+    "height",
+    "present",
+    "renderSource",
+    "scale",
+    "targetHeight",
+    "targetScale",
+    "targetWidth",
+    "width",
+  ];
+  if (
+    !appMatrixRuntimeExactObject(raw, pageKeys) ||
+    !appMatrixRuntimeExactObject(raw.canvas, canvasKeys) ||
+    raw.page !== expectedPage
+  ) {
+    return null;
+  }
   const rect = sanitizeAppMatrixRuntimeRectangle(raw?.rect);
   const layoutRect = viewport
     ? { bottom: viewport.innerHeight, left: 0, right: viewport.innerWidth, top: 0 }
@@ -4226,6 +4637,21 @@ function sanitizeAppMatrixRuntimePage(raw, expectedPage, readerRect, viewport) {
     visualRect,
   );
   const canvasPresent = raw?.canvas?.present === true;
+  const nullablePositiveNumber = (value) => value === null || (
+    appMatrixRuntimeSafeNumber(value) && value > 0
+  );
+  const nullablePositiveInteger = (value) => value === null || (
+    Number.isSafeInteger(value) && value > 0
+  );
+  const canvasShapeBound = typeof raw.canvas.present === "boolean" &&
+    [null, "true", "false"].includes(raw.canvas.capped) &&
+    [null, "worker-bitmap", "main-fallback"].includes(
+      raw.canvas.renderSource,
+    ) && nullablePositiveNumber(raw.canvas.scale) &&
+    nullablePositiveNumber(raw.canvas.targetScale) &&
+    nullablePositiveInteger(raw.canvas.targetHeight) &&
+    nullablePositiveInteger(raw.canvas.targetWidth);
+  if (!canvasShapeBound) return null;
   const page = {
     canvas: {
       cappedClass: appMatrixRuntimeBooleanClass(raw?.canvas?.capped),
@@ -4242,7 +4668,7 @@ function sanitizeAppMatrixRuntimePage(raw, expectedPage, readerRect, viewport) {
       width: appMatrixRuntimeInteger(raw?.canvas?.width),
     },
     datasetVisibleClass: appMatrixRuntimeVisibleClass(raw?.datasetVisible),
-    distance: Number.isInteger(raw?.distance) ? raw.distance : null,
+    distance: appMatrixRuntimeInteger(raw?.distance),
     intersectsLayoutViewport,
     intersectsReader,
     intersectsVisualViewport,
@@ -4256,13 +4682,32 @@ function sanitizeAppMatrixRuntimePage(raw, expectedPage, readerRect, viewport) {
     raw?.intersectsReader === intersectsReader &&
     raw?.intersectsLayoutViewport === intersectsLayoutViewport &&
     raw?.intersectsVisualViewport === intersectsVisualViewport;
-  const canvasBound = canvasPresent && page.canvas.connected === true &&
-    Number.isInteger(page.canvas.width) && Number.isInteger(page.canvas.height) &&
+  const canvasBound = canvasPresent && raw.canvas.connected === true &&
+    Number.isSafeInteger(raw.canvas.width) && raw.canvas.width >= 0 &&
+    Number.isSafeInteger(raw.canvas.height) && raw.canvas.height >= 0 &&
     page.canvas.renderSourceClass !== "other" &&
     page.canvas.cappedClass !== "invalid";
+  const absentCanvasBound = raw.canvas.present === false &&
+    [
+      raw.canvas.capped,
+      raw.canvas.connected,
+      raw.canvas.height,
+      raw.canvas.renderSource,
+      raw.canvas.scale,
+      raw.canvas.targetHeight,
+      raw.canvas.targetScale,
+      raw.canvas.targetWidth,
+      raw.canvas.width,
+    ].every((value) => value === null);
+  const absentPageBound = raw.present === false && raw.datasetVisible === null &&
+    raw.distance === null && raw.pageIndex === null && raw.rect === null &&
+    raw.textOverlayCount === null && raw.intersectsReader === false &&
+    raw.intersectsLayoutViewport === false &&
+    raw.intersectsVisualViewport === false && absentCanvasBound;
+  if (absentPageBound) return page;
   return raw?.present === true && page.present === true &&
       page.rect !== null && Number.isInteger(page.distance) &&
-      Number.isInteger(page.textOverlayCount) && page.textOverlayCount > 0 &&
+      Number.isInteger(page.textOverlayCount) && page.textOverlayCount >= 0 &&
       !["missing", "invalid"].includes(page.datasetVisibleClass) &&
       page.page === expectedPage &&
       page.pageIndex === expectedPage - 1 &&
@@ -4301,6 +4746,16 @@ function sanitizeAppMatrixRuntimeRange(value, expectedPages) {
 }
 
 function sanitizeAppMatrixRuntimeViewport(value) {
+  if (!appMatrixRuntimeExactObject(value, [
+    "devicePixelRatio",
+    "innerHeight",
+    "innerWidth",
+    "visualHeight",
+    "visualOffsetLeft",
+    "visualOffsetTop",
+    "visualScale",
+    "visualWidth",
+  ])) return null;
   const viewport = {
     devicePixelRatio: appMatrixRuntimeNumber(value?.devicePixelRatio),
     innerHeight: appMatrixRuntimeNumber(value?.innerHeight),
@@ -4311,29 +4766,110 @@ function sanitizeAppMatrixRuntimeViewport(value) {
     visualScale: appMatrixRuntimeNumber(value?.visualScale),
     visualWidth: appMatrixRuntimeNumber(value?.visualWidth),
   };
+  const visualRight = viewport.visualOffsetLeft + viewport.visualWidth;
+  const visualBottom = viewport.visualOffsetTop + viewport.visualHeight;
   return Object.values(viewport).every(Number.isFinite) &&
+      appMatrixRuntimeSafeNumber(visualRight) &&
+      appMatrixRuntimeSafeNumber(visualBottom) &&
       viewport.devicePixelRatio > 0 && viewport.innerHeight > 0 &&
       viewport.innerWidth > 0 && Number.isInteger(viewport.innerHeight) &&
       Number.isInteger(viewport.innerWidth) && viewport.visualHeight > 0 &&
       viewport.visualWidth > 0 && viewport.visualScale > 0 &&
       viewport.visualOffsetLeft >= 0 && viewport.visualOffsetTop >= 0 &&
-      viewport.visualOffsetLeft + viewport.visualWidth <=
-        viewport.innerWidth + 2 &&
-      viewport.visualOffsetTop + viewport.visualHeight <=
-        viewport.innerHeight + 2
+      visualRight <= viewport.innerWidth + 2 &&
+      visualBottom <= viewport.innerHeight + 2
     ? viewport
     : null;
 }
 
 function sanitizeAppMatrixRuntimeRelease(raw, row) {
   if (!raw) return null;
-  const rawMountedPages = Array.isArray(raw.mountedPages) ? raw.mountedPages : [];
-  const rawVisiblePages = Array.isArray(raw.visiblePages) ? raw.visiblePages : [];
+  const snapshotErrorKeys = [
+    "elapsedMs",
+    "evaluationAttemptCount",
+    "evaluationErrorCount",
+    "snapshotErrorPresent",
+    "waitOutcome",
+  ];
+  if (raw.snapshotErrorPresent === true) {
+    const waitOutcome = ["released", "timeout"].includes(raw.waitOutcome)
+      ? raw.waitOutcome
+      : null;
+    const pollBound = appMatrixRuntimeExactObject(raw, snapshotErrorKeys) &&
+      appMatrixRuntimeSafeNumber(raw.elapsedMs) && raw.elapsedMs >= 0 &&
+      Number.isSafeInteger(raw.evaluationAttemptCount) &&
+      raw.evaluationAttemptCount >= 1 &&
+      Number.isSafeInteger(raw.evaluationErrorCount) &&
+      raw.evaluationErrorCount >= 0 &&
+      raw.evaluationErrorCount <= raw.evaluationAttemptCount &&
+      (waitOutcome !== "released" ||
+        raw.evaluationErrorCount < raw.evaluationAttemptCount) &&
+      waitOutcome !== null;
+    if (!pollBound) return null;
+    return {
+      classification: waitOutcome === "released"
+        ? "released-snapshot-unavailable"
+        : "timeout-snapshot-unavailable",
+      integrity: true,
+      poll: {
+        elapsedMs: raw.elapsedMs,
+        evaluationAttemptCount: raw.evaluationAttemptCount,
+        evaluationErrorCount: raw.evaluationErrorCount,
+        waitOutcome,
+      },
+      snapshotAvailable: false,
+    };
+  }
+  const fullSnapshotKeys = [
+    "drawHookTimingCount",
+    "drawHookTimings",
+    "draws",
+    "elapsedMs",
+    "evaluationAttemptCount",
+    "evaluationErrorCount",
+    "longTasks",
+    "mountedPages",
+    "observedAt",
+    "pages",
+    "phaseMarkers",
+    "range",
+    "reader",
+    "samplerTimingCount",
+    "samplerTimings",
+    "snapshotErrorPresent",
+    "viewport",
+    "visiblePages",
+    "waitOutcome",
+    "workerEvents",
+    "workerMessageTimingCount",
+    "workerMessageTimings",
+  ];
+  const arrayFields = [
+    "drawHookTimings",
+    "draws",
+    "longTasks",
+    "mountedPages",
+    "pages",
+    "phaseMarkers",
+    "samplerTimings",
+    "visiblePages",
+    "workerEvents",
+    "workerMessageTimings",
+  ];
+  if (
+    !appMatrixRuntimeExactObject(raw, fullSnapshotKeys) ||
+    raw.snapshotErrorPresent !== false ||
+    arrayFields.some((field) => !Array.isArray(raw[field]))
+  ) {
+    return null;
+  }
+  const rawMountedPages = raw.mountedPages;
+  const rawVisiblePages = raw.visiblePages;
   const mountedPages = [...rawMountedPages];
   const visiblePages = [...rawVisiblePages];
   const sortedUnique = (values) =>
     values.every((value, index) =>
-      Number.isInteger(value) && value >= 1 && value <= 6 &&
+      Number.isSafeInteger(value) && value >= 1 && value <= 6 &&
       (index === 0 || value > values[index - 1])
     );
   const range = sortedUnique(mountedPages)
@@ -4361,7 +4897,17 @@ function sanitizeAppMatrixRuntimeRelease(raw, row) {
     Math.abs(viewport.visualWidth * viewport.visualScale - viewport.innerWidth) <= 2 &&
     Math.abs(viewport.visualHeight * viewport.visualScale - viewport.innerHeight) <= 2
   );
-  const readerRect = sanitizeAppMatrixRuntimeRectangle(raw.reader?.rect);
+  const readerKeys = [
+    "clientHeight",
+    "clientWidth",
+    "rect",
+    "scrollHeight",
+    "scrollTop",
+    "scrollWidth",
+  ];
+  const readerRect = appMatrixRuntimeExactObject(raw.reader, readerKeys)
+    ? sanitizeAppMatrixRuntimeRectangle(raw.reader.rect)
+    : null;
   const reader = readerRect
     ? {
         clientHeight: appMatrixRuntimeInteger(raw.reader?.clientHeight),
@@ -4395,34 +4941,99 @@ function sanitizeAppMatrixRuntimeRelease(raw, row) {
     viewport,
   );
   const pageStateBound = Boolean(
-    source && target && source.distance >= 1 && target.distance === 0 &&
+    source && target &&
+    (source.present === false || source.distance >= 1) &&
+    target.present === true && target.distance === 0 &&
     target.canvas.renderSourceClass === "worker-bitmap" &&
+    Number.isFinite(target.canvas.scale) && target.canvas.scale > 0 &&
+    Number.isFinite(target.canvas.targetScale) &&
+    target.canvas.targetScale > 0 &&
+    Number.isSafeInteger(target.canvas.targetWidth) &&
+    target.canvas.targetWidth > 0 &&
+    Number.isSafeInteger(target.canvas.targetHeight) &&
+    target.canvas.targetHeight > 0 &&
     target.canvas.width > 0 && target.canvas.height > 0 &&
+    target.canvas.width === target.canvas.targetWidth &&
+    target.canvas.height === target.canvas.targetHeight &&
     target.canvas.width === row?.priorityProbe?.targetAfter?.canvasWidth &&
     target.canvas.height === row?.priorityProbe?.targetAfter?.canvasHeight
   );
   const identity = row.modelIdentity;
   const identityBound =
-    Number.isInteger(identity?.workerInstanceId) && identity.workerInstanceId > 0 &&
-    Number.isInteger(identity?.importJobId) && identity.importJobId > 0 &&
+    Number.isSafeInteger(identity?.workerInstanceId) &&
+    identity.workerInstanceId > 0 &&
+    Number.isSafeInteger(identity?.importJobId) && identity.importJobId > 0 &&
     typeof identity?.documentKey === "string" && identity.documentKey.length > 0 &&
     typeof identity?.revision === "string" && identity.revision.length > 0;
-  const allEvents = Array.isArray(raw.workerEvents) ? raw.workerEvents : [];
-  const eventsBound = identityBound && allEvents.every((event) =>
-    event?.workerInstanceId === identity.workerInstanceId &&
-    event?.jobId === identity.importJobId &&
-    event?.documentKey === null &&
-    event?.revision === identity.revision &&
-    [row.adjacentPage, row.priorityTarget].includes(event?.pageNumber) &&
-    ["render", "bitmap"].includes(event?.type) &&
-    (event.type === "render"
-      ? event.direction === "to-worker" && typeof event.enabled === "boolean"
-      : event.direction === "from-worker") &&
-    Number.isInteger(event?.activityId) && event.activityId > 0 &&
-    Number.isInteger(event?.eventId) && event.eventId > 0 &&
-    Number.isFinite(event?.at) &&
-    event.at >= row?.scenario?.startedAt && event.at <= raw.observedAt
-  );
+  const renderEventKeys = [
+    "activityId",
+    "at",
+    "direction",
+    "distance",
+    "documentKey",
+    "enabled",
+    "eventId",
+    "jobId",
+    "pageNumber",
+    "revision",
+    "scale",
+    "type",
+    "visible",
+    "workerInstanceId",
+  ];
+  const bitmapEventKeys = [
+    "activityId",
+    "at",
+    "completedPages",
+    "direction",
+    "documentKey",
+    "eventId",
+    "first",
+    "height",
+    "jobId",
+    "pageCount",
+    "pageHeight",
+    "pageNumber",
+    "pageWidth",
+    "revision",
+    "scale",
+    "terminal",
+    "type",
+    "width",
+    "workerInstanceId",
+  ];
+  const allEvents = raw.workerEvents;
+  const eventsBound = identityBound && allEvents.every((event) => {
+    const commonBound =
+      event?.workerInstanceId === identity.workerInstanceId &&
+      event?.jobId === identity.importJobId && event?.documentKey === null &&
+      event?.revision === identity.revision &&
+      [row.adjacentPage, row.priorityTarget].includes(event?.pageNumber) &&
+      Number.isSafeInteger(event?.activityId) && event.activityId > 0 &&
+      Number.isSafeInteger(event?.eventId) && event.eventId > 0 &&
+      appMatrixRuntimeSafeNumber(event?.at) &&
+      event.at >= row?.scenario?.startedAt && event.at <= raw.observedAt;
+    if (!commonBound) return false;
+    if (event.type === "render") {
+      return appMatrixRuntimeExactObject(event, renderEventKeys) &&
+        event.direction === "to-worker" &&
+        Number.isSafeInteger(event.distance) && event.distance >= 0 &&
+        typeof event.enabled === "boolean" &&
+        typeof event.visible === "boolean" &&
+        (event.scale === null || (
+          appMatrixRuntimeSafeNumber(event.scale) && event.scale >= 0
+        ));
+    }
+    return event.type === "bitmap" &&
+      appMatrixRuntimeExactObject(event, bitmapEventKeys) &&
+      event.direction === "from-worker" && event.completedPages === null &&
+      event.first === null && event.pageCount === null &&
+      event.pageHeight === null && event.pageWidth === null &&
+      event.terminal === false &&
+      Number.isSafeInteger(event.width) && event.width > 0 &&
+      Number.isSafeInteger(event.height) && event.height > 0 &&
+      appMatrixRuntimeSafeNumber(event.scale) && event.scale > 0;
+  });
   const identityHash = identityBound
     ? cdpDiagnosticIdentity(
         identity.workerInstanceId,
@@ -4455,18 +5066,52 @@ function sanitizeAppMatrixRuntimeRelease(raw, row) {
       event.at >= eventItems[index - 1].at
     )
   );
-  const bitmapEventsBound = eventItems.filter((event) =>
-    event.type === "bitmap"
-  ).every((event) =>
-    event.direction === "from-worker" && event.width > 0 && event.height > 0 &&
-    Number.isFinite(event.scale) && event.scale > 0
-  );
-  const allDraws = Array.isArray(raw.draws)
-    ? raw.draws.filter((draw) =>
-        [row.adjacentPage, row.priorityTarget].includes(draw?.page)
-      )
-    : [];
-  const drawItems = allDraws.slice(0, 32).map((draw) => ({
+  const allDraws = raw.draws;
+  const drawKeys = [
+    "activityId",
+    "at",
+    "bitmapEventId",
+    "compositionId",
+    "distance",
+    "drawInvocationId",
+    "geometry",
+    "geometryVisible",
+    "height",
+    "page",
+    "readerViewport",
+    "scale",
+    "source",
+    "visible",
+    "visiblePages",
+    "width",
+  ];
+  const drawShapesBound = allDraws.every((draw) => {
+    const geometry = sanitizeAppMatrixRuntimeRectangle(draw?.geometry);
+    const drawReader = sanitizeAppMatrixRuntimeRectangle(draw?.readerViewport);
+    return appMatrixRuntimeExactObject(draw, drawKeys) &&
+      Number.isSafeInteger(draw.activityId) && draw.activityId > 0 &&
+      appMatrixRuntimeSafeNumber(draw.at) &&
+      Number.isSafeInteger(draw.compositionId) && draw.compositionId > 0 &&
+      Number.isSafeInteger(draw.distance) && draw.distance >= 0 &&
+      Number.isSafeInteger(draw.drawInvocationId) &&
+      draw.drawInvocationId > 0 &&
+      Number.isSafeInteger(draw.height) && draw.height > 0 &&
+      Number.isSafeInteger(draw.page) && draw.page >= 1 && draw.page <= 6 &&
+      appMatrixRuntimeSafeNumber(draw.scale) && draw.scale > 0 &&
+      ["worker-bitmap", "main-fallback"].includes(draw.source) &&
+      typeof draw.visible === "boolean" &&
+      typeof draw.geometryVisible === "boolean" &&
+      Array.isArray(draw.visiblePages) && sortedUnique(draw.visiblePages) &&
+      draw.visible === draw.visiblePages.includes(draw.page) &&
+      Number.isSafeInteger(draw.width) && draw.width > 0 &&
+      geometry !== null && drawReader !== null &&
+      draw.geometryVisible ===
+        appMatrixRuntimeRectanglesIntersect(geometry, drawReader) &&
+      (draw.source === "worker-bitmap"
+        ? Number.isSafeInteger(draw.bitmapEventId) && draw.bitmapEventId > 0
+        : draw.bitmapEventId === null);
+  });
+  const drawItems = drawShapesBound ? allDraws.slice(0, 32).map((draw) => ({
     activityId: appMatrixRuntimeInteger(draw?.activityId, 1),
     at: appMatrixRuntimeNumber(draw?.at),
     bitmapEventId: appMatrixRuntimeInteger(draw?.bitmapEventId, 1),
@@ -4477,14 +5122,17 @@ function sanitizeAppMatrixRuntimeRelease(raw, row) {
     sourceClass: appMatrixRuntimeRenderSourceClass(draw?.source),
     visible: typeof draw?.visible === "boolean" ? draw.visible : null,
     width: appMatrixRuntimeInteger(draw?.width),
-  }));
+  })) : [];
   const drawsBound = drawItems.every((draw, index) =>
     Number.isInteger(draw.activityId) && Number.isFinite(draw.at) &&
     draw.at >= row?.scenario?.startedAt && draw.at <= raw.observedAt &&
-    Number.isInteger(draw.compositionId) &&
+    draw.compositionId === row?.scenario?.drawStart + index + 1 &&
     Number.isInteger(draw.drawInvocationId) &&
-    [row.adjacentPage, row.priorityTarget].includes(draw.page) &&
-    (index === 0 || draw.compositionId > drawItems[index - 1].compositionId)
+    (index === 0 || (
+      draw.activityId > drawItems[index - 1].activityId &&
+      draw.at >= drawItems[index - 1].at &&
+      draw.drawInvocationId > drawItems[index - 1].drawInvocationId
+    ))
   );
   const drawTruncated = allDraws.length > drawItems.length;
   const releasePredicateSatisfied = source?.present === false || Boolean(
@@ -4512,18 +5160,27 @@ function sanitizeAppMatrixRuntimeRelease(raw, row) {
           ? "still-layout-visible"
           : "inconclusive"
     : "inconclusive";
+  const captureCountsBound = [
+    [raw.drawHookTimingCount, raw.drawHookTimings],
+    [raw.samplerTimingCount, raw.samplerTimings],
+    [raw.workerMessageTimingCount, raw.workerMessageTimings],
+  ].every(([count, items]) =>
+    Number.isSafeInteger(count) && count >= items.length &&
+    items.length <= 64
+  ) && raw.phaseMarkers.length <= 48;
   const integrity =
-    raw.snapshotErrorPresent === false &&
-    Number.isInteger(raw.evaluationAttemptCount) &&
+    captureCountsBound &&
+    Number.isSafeInteger(raw.evaluationAttemptCount) &&
     raw.evaluationAttemptCount >= 1 &&
-    Number.isInteger(raw.evaluationErrorCount) && raw.evaluationErrorCount >= 0 &&
+    Number.isSafeInteger(raw.evaluationErrorCount) &&
+    raw.evaluationErrorCount >= 0 &&
     raw.evaluationErrorCount <= raw.evaluationAttemptCount &&
     (waitOutcome !== "released" ||
       raw.evaluationErrorCount < raw.evaluationAttemptCount) &&
-    Number.isFinite(raw.elapsedMs) && raw.elapsedMs >= 0 &&
-    Number.isFinite(raw.observedAt) &&
-    Number.isFinite(row?.scenario?.startedAt) &&
-    Number.isFinite(row?.scenario?.finishedAt) &&
+    Number.isSafeInteger(raw.elapsedMs) && raw.elapsedMs >= 0 &&
+    appMatrixRuntimeSafeNumber(raw.observedAt) &&
+    appMatrixRuntimeSafeNumber(row?.scenario?.startedAt) &&
+    appMatrixRuntimeSafeNumber(row?.scenario?.finishedAt) &&
     raw.observedAt >= row.scenario.startedAt &&
     raw.observedAt <= row.scenario.finishedAt &&
     Boolean(viewportBound && readerBound && range && pageStateBound && pagesBound) &&
@@ -4535,7 +5192,7 @@ function sanitizeAppMatrixRuntimeRelease(raw, row) {
       visiblePages.includes(row.adjacentPage) &&
     (target.datasetVisibleClass === "true") ===
       visiblePages.includes(row.priorityTarget) &&
-    eventsBound && eventOrderBound && bitmapEventsBound &&
+    eventsBound && eventOrderBound &&
     !eventTruncated && waitOutcome !== "invalid" &&
     (waitOutcome !== "released" || releasePredicateSatisfied);
   return {
@@ -4553,7 +5210,7 @@ function sanitizeAppMatrixRuntimeRelease(raw, row) {
       truncated: eventTruncated,
     },
     identityHash,
-    integrity: integrity && drawsBound && !drawTruncated,
+    integrity: integrity && drawShapesBound && drawsBound && !drawTruncated,
     observedAt: appMatrixRuntimeNumber(raw.observedAt),
     poll: {
       elapsedMs: appMatrixRuntimeNumber(raw.elapsedMs),
@@ -4562,12 +5219,12 @@ function sanitizeAppMatrixRuntimeRelease(raw, row) {
         1,
       ),
       evaluationErrorCount: appMatrixRuntimeInteger(raw.evaluationErrorCount),
-      snapshotErrorPresent: raw.snapshotErrorPresent === true,
       waitOutcome,
     },
     range,
     reader,
     releasePredicateSatisfied,
+    snapshotAvailable: true,
     source,
     target,
     viewport,
@@ -4612,9 +5269,11 @@ function sanitizeAppMatrixRuntimePriorityProbe(raw, expectedTarget) {
     Number.isInteger(action?.activityId) && action.activityId > 0 &&
     Number.isInteger(action?.drawInvocationBoundary) &&
     action.drawInvocationBoundary >= 0 &&
-    Number.isFinite(action?.at) &&
-    Number.isFinite(action?.scrollTopBefore) &&
-    Number.isFinite(action?.scrollTopAfter) &&
+    appMatrixRuntimeSafeNumber(action?.at) && action.at >= 0 &&
+    appMatrixRuntimeSafeNumber(action?.scrollTopBefore) &&
+    action.scrollTopBefore >= 0 &&
+    appMatrixRuntimeSafeNumber(action?.scrollTopAfter) &&
+    action.scrollTopAfter >= 0 &&
     action.scrollTopAfter !== action.scrollTopBefore &&
     readerBefore !== null && readerAfter !== null &&
     targetBefore !== null && targetAfter !== null &&
@@ -4684,6 +5343,65 @@ function appMatrixRuntimeExactObject(value, keys) {
   return Boolean(
     value && typeof value === "object" && !Array.isArray(value) &&
     Object.keys(value).sort().join("\0") === [...keys].sort().join("\0")
+  );
+}
+
+function isAppMatrixRuntimeModelBinding(row) {
+  const identity = row?.modelIdentity;
+  const completion = row?.modelCompletion;
+  const identityKeys = [
+    "documentKey",
+    "importActivityId",
+    "importAt",
+    "importEventId",
+    "importJobId",
+    "revision",
+    "workerInstanceId",
+  ];
+  const completionKeys = [
+    "complete",
+    "completeEventCount",
+    "completedProgressCount",
+    "documentKey",
+    "importActivityId",
+    "importAt",
+    "importEventId",
+    "importJobId",
+    "importRequestCount",
+    "pageEventCount",
+    "pageNumbers",
+    "revision",
+    "workerInstanceId",
+  ];
+  return Boolean(
+    appMatrixRuntimeExactObject(identity, identityKeys) &&
+    appMatrixRuntimeExactObject(completion, completionKeys) &&
+    Number.isSafeInteger(identity.importActivityId) &&
+    identity.importActivityId > 0 &&
+    appMatrixRuntimeSafeNumber(identity.importAt) && identity.importAt >= 0 &&
+    Number.isSafeInteger(identity.importEventId) && identity.importEventId > 0 &&
+    Number.isSafeInteger(identity.importJobId) && identity.importJobId > 0 &&
+    Number.isSafeInteger(identity.workerInstanceId) &&
+    identity.workerInstanceId > 0 &&
+    typeof identity.documentKey === "string" && identity.documentKey.length > 0 &&
+    typeof identity.revision === "string" && identity.revision.length > 0 &&
+    identity.documentKey.length > identity.revision.length + 1 &&
+    identity.documentKey.endsWith(`:${identity.revision}`) &&
+    completion.complete === true && completion.completeEventCount === 1 &&
+    completion.completedProgressCount === 1 &&
+    completion.importRequestCount === 1 && completion.pageEventCount === 6 &&
+    Array.isArray(completion.pageNumbers) &&
+    completion.pageNumbers.length === 6 &&
+    completion.pageNumbers.every((pageNumber, index) =>
+      pageNumber === index + 1
+    ) &&
+    completion.documentKey === identity.documentKey &&
+    completion.importActivityId === identity.importActivityId &&
+    completion.importAt === identity.importAt &&
+    completion.importEventId === identity.importEventId &&
+    completion.importJobId === identity.importJobId &&
+    completion.revision === identity.revision &&
+    completion.workerInstanceId === identity.workerInstanceId
   );
 }
 
@@ -4995,7 +5713,8 @@ export function sanitizeAppMatrixRuntimePriorityMountDiagnostic(raw, row) {
         )
       ? sanitizeAppMatrixRuntimeRectangle(raw.reader.rect)
       : null;
-    const reader = readerRect && Number.isFinite(raw.reader.scrollTop) &&
+    const reader = readerRect &&
+        appMatrixRuntimeSafeNumber(raw.reader.scrollTop) &&
         raw.reader.scrollTop >= 0
       ? { rect: readerRect, scrollTop: raw.reader.scrollTop }
       : null;
@@ -5178,48 +5897,1503 @@ export function sanitizeAppMatrixRuntimePriorityMountDiagnostic(raw, row) {
   }
 }
 
+function sanitizeAppMatrixRuntimePreviewTargetDerivationDiagnostic(
+  raw,
+  row,
+  {
+    failureBoundary,
+    phaseMarkers,
+    scrollProof,
+    waitMarker,
+  },
+) {
+  try {
+    const pageKeys = [
+      "canvas",
+      "distance",
+      "page",
+      "pageHeight",
+      "pageWidth",
+      "present",
+      "rect",
+      "textOverlayCount",
+      "visible",
+    ];
+    const canvasKeys = [
+      "connected",
+      "cssHeight",
+      "cssWidth",
+      "devicePixelRatio",
+      "height",
+      "present",
+      "scale",
+      "source",
+      "targetHeight",
+      "targetScale",
+      "targetWidth",
+      "visualViewportScale",
+      "width",
+    ];
+    const workerKeys = [
+      "activityId",
+      "at",
+      "direction",
+      "distance",
+      "documentKey",
+      "enabled",
+      "eventId",
+      "height",
+      "jobId",
+      "pageNumber",
+      "revision",
+      "scale",
+      "type",
+      "visible",
+      "width",
+      "workerInstanceId",
+    ];
+    const drawKeys = [
+      "activityId",
+      "at",
+      "bitmapEventId",
+      "compositionId",
+      "distance",
+      "drawInvocationId",
+      "geometry",
+      "geometryVisible",
+      "height",
+      "page",
+      "readerViewport",
+      "scale",
+      "source",
+      "visible",
+      "visiblePages",
+      "width",
+    ];
+    const finiteOrNull = (value, minimum = -Number.MAX_SAFE_INTEGER) =>
+      value === null || (
+        appMatrixRuntimeSafeNumber(value) &&
+        value >= minimum
+      );
+    const integerOrNull = (value, minimum = 0) =>
+      value === null || (Number.isSafeInteger(value) && value >= minimum);
+    const readRectangle = (value) => {
+      if (value === null) return { bound: true, value: null, valid: false };
+      const sanitized = appMatrixRuntimeExactObject(
+          value,
+          ["bottom", "left", "right", "top"],
+        )
+        ? sanitizeAppMatrixRuntimeRectangle(value)
+        : null;
+      return {
+        bound: sanitized !== null,
+        valid: sanitized !== null,
+        value: sanitized,
+      };
+    };
+    const pageRect = readRectangle(raw?.page?.rect);
+    const readerRect = readRectangle(raw?.reader?.rect);
+    const canvas = raw?.page?.canvas;
+    const configuration = PDF_SHARPNESS_MATRIX.find((candidate) =>
+      candidate.id === row.configurationId
+    ) ?? null;
+    const expectedDevicePixelRatio = configuration
+      ? configuration.baseDevicePixelRatio * configuration.browserZoom
+      : null;
+    const expectedVisualViewportScale = configuration?.pinchZoom ?? null;
+    const pagePresent = raw?.page?.present === true;
+    const canvasPresent = canvas?.present === true;
+    const canvasTargetAllNull = [
+      canvas?.targetHeight,
+      canvas?.targetScale,
+      canvas?.targetWidth,
+    ].every((value) => value === null);
+    const canvasTargetAllPositive =
+      Number.isSafeInteger(canvas?.targetHeight) && canvas.targetHeight > 0 &&
+      appMatrixRuntimeSafeNumber(canvas?.targetScale) &&
+      canvas.targetScale > 0 &&
+      Number.isSafeInteger(canvas?.targetWidth) && canvas.targetWidth > 0;
+    const pageMetadataAllNull = raw?.page?.pageHeight === null &&
+      raw?.page?.pageWidth === null;
+    const pageMetadataAllPositive =
+      appMatrixRuntimeSafeNumber(raw?.page?.pageHeight) &&
+      raw.page.pageHeight > 0 &&
+      appMatrixRuntimeSafeNumber(raw?.page?.pageWidth) &&
+      raw.page.pageWidth > 0;
+    const pageBound = configuration &&
+      appMatrixRuntimeExactObject(raw?.page, pageKeys) &&
+      appMatrixRuntimeExactObject(canvas, canvasKeys) &&
+      appMatrixRuntimeExactObject(raw?.reader, ["rect", "scrollTop"]) &&
+      pageRect.bound && readerRect.bound &&
+      typeof raw.page.present === "boolean" &&
+      [true, false, null].includes(raw.page.visible) &&
+      integerOrNull(raw.page.distance) &&
+      integerOrNull(raw.page.page, 1) &&
+      (pageMetadataAllNull || pageMetadataAllPositive) &&
+      Number.isSafeInteger(raw.page.textOverlayCount) &&
+      raw.page.textOverlayCount >= 0 &&
+      typeof canvas.present === "boolean" &&
+      typeof canvas.connected === "boolean" &&
+      finiteOrNull(canvas.cssHeight, 0) && finiteOrNull(canvas.cssWidth, 0) &&
+      appMatrixRuntimeSafeNumber(canvas.devicePixelRatio) &&
+      canvas.devicePixelRatio > 0 &&
+      Math.abs(canvas.devicePixelRatio - expectedDevicePixelRatio) <= 0.02 &&
+      appMatrixRuntimeSafeNumber(canvas.visualViewportScale) &&
+      canvas.visualViewportScale > 0 &&
+      Math.abs(
+        canvas.visualViewportScale - expectedVisualViewportScale,
+      ) <= 0.02 &&
+      integerOrNull(canvas.height) && integerOrNull(canvas.width) &&
+      finiteOrNull(canvas.scale, Number.EPSILON) &&
+      (canvas.source === null ||
+        ["main-fallback", "worker-bitmap"].includes(canvas.source)) &&
+      (canvasTargetAllNull || canvasTargetAllPositive) &&
+      finiteOrNull(raw.reader.scrollTop, 0) &&
+      (pagePresent
+        ? raw.page.page === row.adjacentPage && pageRect.valid &&
+          typeof raw.page.visible === "boolean" &&
+          Number.isSafeInteger(raw.page.distance)
+        : raw.page.page === null && raw.page.rect === null &&
+          raw.page.visible === null && raw.page.distance === null &&
+          raw.page.textOverlayCount === 0 && canvasPresent === false) &&
+      (canvasPresent
+        ? pagePresent && canvas.connected === true &&
+          Number.isSafeInteger(canvas.height) &&
+          Number.isSafeInteger(canvas.width) &&
+          appMatrixRuntimeSafeNumber(canvas.cssHeight) &&
+          canvas.cssHeight >= 0 &&
+          appMatrixRuntimeSafeNumber(canvas.cssWidth) &&
+          canvas.cssWidth >= 0
+        : canvas.connected === false && canvas.cssHeight === null &&
+          canvas.cssWidth === null && canvas.height === null &&
+          canvas.width === null && canvas.scale === null &&
+          canvas.source === null && canvasTargetAllNull);
+    if (!pageBound) return { bound: false, value: null };
+
+    const range = raw.range === null ? null : parsePdfPageCenterRange(raw.range);
+    const visiblePagesBound = Array.isArray(raw.visiblePages) &&
+      raw.visiblePages.every((value, index) =>
+        Number.isSafeInteger(value) && value >= 1 && value <= 6 &&
+        (index === 0 || value > raw.visiblePages[index - 1])
+      ) && (range === null || raw.visiblePages.every((page) =>
+        range.mountedPages.includes(page)
+      ));
+    if (!visiblePagesBound || (raw.range !== null && range === null)) {
+      return { bound: false, value: null };
+    }
+    const rangeHasPage = Boolean(
+      range?.mountedPages.includes(row.adjacentPage),
+    );
+    const pageVisible = pagePresent && raw.page.visible === true;
+    const synchronousStateBound =
+      (raw.range === null ? !pagePresent : rangeHasPage === pagePresent) &&
+      raw.visiblePages.includes(row.adjacentPage) === pageVisible &&
+      (!pagePresent || (pageVisible
+        ? raw.page.distance === 0
+        : raw.page.distance > 0)) &&
+      (!pagePresent || readerRect.valid) &&
+      (readerRect.valid
+        ? appMatrixRuntimeSafeNumber(raw.reader.scrollTop) &&
+          raw.reader.scrollTop >= 0
+        : raw.reader.scrollTop === null) &&
+      canvasPresent === (canvas?.connected === true) &&
+      (!pagePresent || pageVisible === appMatrixRuntimeRectanglesIntersect(
+        pageRect.value,
+        readerRect.value,
+      ));
+    if (!synchronousStateBound) return { bound: false, value: null };
+    const pageMetadata = pageMetadataAllPositive;
+    const canvasCssSize = appMatrixRuntimeSafeNumber(canvas.cssWidth) &&
+      canvas.cssWidth > 0 && appMatrixRuntimeSafeNumber(canvas.cssHeight) &&
+      canvas.cssHeight > 0;
+    const targetDerivable = pagePresent && canvasPresent &&
+      canvas.connected === true && pageVisible && raw.page.distance === 0 &&
+      pageMetadata && canvasCssSize && rangeHasPage && readerRect.valid &&
+      appMatrixRuntimeRectanglesIntersect(pageRect.value, readerRect.value) &&
+      raw.page.textOverlayCount > 0;
+    const sharpTarget = pageMetadata && canvasCssSize
+      ? resolvePdfRasterTarget({
+          cssHeight: canvas.cssHeight,
+          cssWidth: canvas.cssWidth,
+          devicePixelRatio: canvas.devicePixelRatio,
+          pageHeight: raw.page.pageHeight,
+          pageWidth: raw.page.pageWidth,
+          visualViewportScale: canvas.visualViewportScale,
+        })
+      : null;
+    const previewTarget = sharpTarget
+      ? constrainPdfRasterScale({
+          pageHeight: raw.page.pageHeight,
+          pageWidth: raw.page.pageWidth,
+          scale: Math.min(sharpTarget.scale, 1.25),
+        })
+      : null;
+
+    const identity = row.modelIdentity;
+    const rawWorkers = Array.isArray(raw.workerItems) ? raw.workerItems : null;
+    if (
+      !rawWorkers || !Number.isSafeInteger(raw.workerTotal) ||
+      raw.workerTotal !== rawWorkers.length || raw.workerTotal < 0 ||
+      rawWorkers.length > APP_MATRIX_PREVIEW_COMPOSITION_LEDGER_LIMIT ||
+      raw.workerTruncated !== false
+    ) {
+      return { bound: false, value: null };
+    }
+    const workers = [];
+    for (let index = 0; index < rawWorkers.length; index += 1) {
+      const event = rawWorkers[index];
+      const render = event?.type === "render" &&
+        event.direction === "to-worker" &&
+        typeof event.enabled === "boolean" &&
+        typeof event.visible === "boolean" &&
+        Number.isSafeInteger(event.distance) && event.distance >= 0 &&
+        appMatrixRuntimeSafeNumber(event.scale) &&
+        (event.scale > 0 || (event.enabled === false && event.scale === 0)) &&
+        event.width === null && event.height === null;
+      const bitmap = event?.type === "bitmap" &&
+        event.direction === "from-worker" && event.enabled === null &&
+        event.visible === null && event.distance === null &&
+        appMatrixRuntimeSafeNumber(event.scale) && event.scale > 0 &&
+        Number.isSafeInteger(event.width) && event.width > 0 &&
+        Number.isSafeInteger(event.height) && event.height > 0;
+      const valid = appMatrixRuntimeExactObject(event, workerKeys) &&
+        (render || bitmap) && event.documentKey === null &&
+        Number.isSafeInteger(event.activityId) &&
+        event.activityId > identity.importActivityId &&
+        event.activityId <= failureBoundary.activityId &&
+        appMatrixRuntimeSafeNumber(event.at) &&
+        event.at >= identity.importAt &&
+        event.at <= failureBoundary.at &&
+        Number.isSafeInteger(event.eventId) &&
+        event.eventId > identity.importEventId &&
+        event.eventId <= failureBoundary.workerEventId &&
+        Number.isSafeInteger(event.workerInstanceId) &&
+        event.workerInstanceId > 0 && Number.isSafeInteger(event.jobId) &&
+        event.jobId > 0 && typeof event.revision === "string" &&
+        event.revision.length > 0 && event.pageNumber === row.adjacentPage &&
+        (index === 0 || (
+          event.activityId > rawWorkers[index - 1].activityId &&
+          event.at >= rawWorkers[index - 1].at &&
+          event.eventId > rawWorkers[index - 1].eventId
+        ));
+      if (!valid) return { bound: false, value: null };
+      const identityMatch =
+        event.workerInstanceId === identity.workerInstanceId &&
+        event.jobId === identity.importJobId &&
+        event.revision === identity.revision;
+      workers.push({
+        activityId: event.activityId,
+        at: event.at,
+        distance: event.distance,
+        enabled: event.enabled,
+        eventId: event.eventId,
+        height: event.height,
+        identityHash: cdpDiagnosticIdentity(
+          event.workerInstanceId,
+          event.jobId,
+          event.revision,
+        ),
+        identityMatch,
+        localOrder: index + 1,
+        page: row.adjacentPage,
+        relativeOrder: event.eventId - identity.importEventId,
+        scale: event.scale,
+        type: event.type,
+        visible: event.visible,
+        width: event.width,
+      });
+    }
+    const rawDraws = Array.isArray(raw.drawItems) ? raw.drawItems : null;
+    if (
+      !rawDraws || !Number.isSafeInteger(raw.drawTotal) ||
+      raw.drawTotal !== rawDraws.length || raw.drawTotal < 0 ||
+      rawDraws.length > APP_MATRIX_PREVIEW_COMPOSITION_LEDGER_LIMIT ||
+      raw.drawTruncated !== false
+    ) {
+      return { bound: false, value: null };
+    }
+    const identityBitmaps = workers.filter((event) =>
+      event.type === "bitmap" && event.identityMatch
+    );
+    const compatibleRequests = workers.filter((event) =>
+      event.type === "render" && event.identityMatch && event.enabled === true
+    );
+    const draws = [];
+    for (let index = 0; index < rawDraws.length; index += 1) {
+      const draw = rawDraws[index];
+      const geometry = readRectangle(draw?.geometry);
+      const drawReader = readRectangle(draw?.readerViewport);
+      const drawVisiblePagesBound = Array.isArray(draw?.visiblePages) &&
+        draw.visiblePages.every((value, visibleIndex) =>
+          Number.isSafeInteger(value) && value >= 1 && value <= 6 &&
+          (visibleIndex === 0 || value > draw.visiblePages[visibleIndex - 1])
+        );
+      const valid = appMatrixRuntimeExactObject(draw, drawKeys) &&
+        geometry.bound && drawReader.bound && drawVisiblePagesBound &&
+        Number.isSafeInteger(draw.activityId) && draw.activityId > 0 &&
+        draw.activityId <= failureBoundary.activityId &&
+        appMatrixRuntimeSafeNumber(draw.at) &&
+        draw.at >= raw.scenarioStart.startedAt &&
+        draw.at <= failureBoundary.at &&
+        (draw.bitmapEventId === null || (
+          Number.isSafeInteger(draw.bitmapEventId) && draw.bitmapEventId > 0 &&
+          draw.bitmapEventId <= failureBoundary.workerEventId
+        )) && Number.isSafeInteger(draw.compositionId) &&
+        draw.compositionId > raw.scenarioStart.drawStart &&
+        draw.compositionId <= failureBoundary.drawCount &&
+        Number.isSafeInteger(draw.drawInvocationId) &&
+        draw.drawInvocationId > 0 &&
+        draw.drawInvocationId <= failureBoundary.drawInvocationId &&
+        Number.isSafeInteger(draw.distance) && draw.distance >= 0 &&
+        typeof draw.geometryVisible === "boolean" &&
+        Number.isSafeInteger(draw.width) && draw.width > 0 &&
+        Number.isSafeInteger(draw.height) && draw.height > 0 &&
+        appMatrixRuntimeSafeNumber(draw.scale) && draw.scale > 0 &&
+        draw.page === row.adjacentPage && typeof draw.source === "string" &&
+        draw.source.length > 0 && typeof draw.visible === "boolean" &&
+        (index === 0 || (
+          draw.activityId > rawDraws[index - 1].activityId &&
+          draw.at >= rawDraws[index - 1].at &&
+          draw.compositionId > rawDraws[index - 1].compositionId &&
+          draw.drawInvocationId > rawDraws[index - 1].drawInvocationId
+        ));
+      if (!valid) return { bound: false, value: null };
+      const bitmap = identityBitmaps.find((event) =>
+        event.eventId === draw.bitmapEventId
+      ) ?? null;
+      const request = bitmap
+        ? compatibleRequests.findLast((event) =>
+            event.localOrder < bitmap.localOrder &&
+            event.eventId < bitmap.eventId &&
+            event.activityId < bitmap.activityId && event.at <= bitmap.at &&
+            Math.abs(event.scale - bitmap.scale) <= 1e-7
+          ) ?? null
+        : null;
+      const predicates = {
+        afterScroll: draw.at >= phaseMarkers[0].at &&
+          draw.activityId > phaseMarkers[0].activityId &&
+          draw.drawInvocationId > phaseMarkers[0].drawInvocationId,
+        bitmapDimensions: Boolean(
+          bitmap && bitmap.width === draw.width && bitmap.height === draw.height,
+        ),
+        bitmapExactLink: bitmap !== null,
+        bitmapToDrawOrder: Boolean(
+          bitmap && bitmap.activityId < draw.activityId && bitmap.at <= draw.at,
+        ),
+        compatibleRequest: request !== null,
+        geometry: draw.geometryVisible === true && geometry.valid &&
+          drawReader.valid &&
+          appMatrixRuntimeRectanglesIntersect(geometry.value, drawReader.value),
+        scale: Boolean(bitmap && Math.abs(bitmap.scale - draw.scale) <= 1e-7),
+        source: draw.source === "worker-bitmap",
+        visibility: draw.visible === true && draw.distance === 0 &&
+          draw.visiblePages.includes(row.adjacentPage),
+      };
+      draws.push({
+        atMs: draw.at - raw.scenarioStart.startedAt,
+        bitmapCausal: [
+          predicates.bitmapDimensions,
+          predicates.bitmapExactLink,
+          predicates.bitmapToDrawOrder,
+          predicates.scale,
+        ].every(Boolean),
+        bitmapLocalOrder: bitmap?.localOrder ?? null,
+        compatibleRequestLocalOrder: request?.localOrder ?? null,
+        compositionOrder: draw.compositionId - raw.scenarioStart.drawStart,
+        distance: draw.distance,
+        height: draw.height,
+        localOrder: index + 1,
+        predicates,
+        scale: draw.scale,
+        sourceClass: appMatrixRuntimeRenderSourceClass(draw.source),
+        visible: draw.visible,
+        width: draw.width,
+      });
+    }
+    const publicWorkers = workers.map((event) => ({
+      atMs: event.at - raw.scenarioStart.startedAt,
+      distance: event.distance,
+      enabled: event.enabled,
+      height: event.height,
+      identityHash: event.identityHash,
+      identityMatch: event.identityMatch,
+      localOrder: event.localOrder,
+      page: event.page,
+      relativeOrder: event.relativeOrder,
+      scale: event.scale,
+      type: event.type,
+      visible: event.visible,
+      width: event.width,
+    }));
+    return {
+      bound: true,
+      value: {
+        boundaries: {
+          failure: {
+            activityDelta: failureBoundary.activityId - waitMarker.activityId,
+            atMs: failureBoundary.at - raw.scenarioStart.startedAt,
+            drawCount: failureBoundary.drawCount - raw.scenarioStart.drawStart,
+            drawInvocationDelta:
+              failureBoundary.drawInvocationId - waitMarker.drawInvocationId,
+            workerEventCount:
+              failureBoundary.workerEventId - identity.importEventId,
+          },
+          phases: phaseMarkers.map((marker, index) => ({
+            activityDelta: marker.activityId - raw.phaseMarkers[0].activityId,
+            atMs: marker.at - raw.scenarioStart.startedAt,
+            drawInvocationDelta: marker.drawInvocationId -
+              raw.phaseMarkers[0].drawInvocationId,
+            localOrder: index + 1,
+            stage: marker.stage,
+            workerEventDelta: marker.workerEventId -
+              raw.phaseMarkers[0].workerEventId,
+          })),
+          scenario: { drawBoundary: 0, workerEventBoundary: 0 },
+        },
+        checkpoint: "target-derivation",
+        classification: targetDerivable
+          ? "target-available-after-failure"
+          : "target-unavailable",
+        directSharpFound: false,
+        expectedPreviewTarget: previewTarget
+          ? {
+              height: previewTarget.height,
+              scale: previewTarget.scale,
+              width: previewTarget.width,
+            }
+          : null,
+        failureCategory: raw.failureCategory,
+        ledgers: {
+          draws: {
+            items: draws,
+            retained: draws.length,
+            total: raw.drawTotal,
+            truncated: false,
+          },
+          workerEvents: {
+            items: publicWorkers,
+            retained: publicWorkers.length,
+            total: raw.workerTotal,
+            truncated: false,
+          },
+        },
+        page: {
+          canvas: {
+            connected: canvas.connected,
+            cssHeight: canvas.cssHeight,
+            cssWidth: canvas.cssWidth,
+            devicePixelRatio: canvas.devicePixelRatio,
+            height: canvas.height,
+            present: canvas.present,
+            scale: canvas.scale,
+            sourceClass: appMatrixRuntimeRenderSourceClass(canvas.source),
+            targetHeight: canvas.targetHeight,
+            targetScale: canvas.targetScale,
+            targetWidth: canvas.targetWidth,
+            visualViewportScale: canvas.visualViewportScale,
+            width: canvas.width,
+          },
+          distance: raw.page.distance,
+          page: raw.page.page,
+          pageHeight: raw.page.pageHeight,
+          pageWidth: raw.page.pageWidth,
+          present: raw.page.present,
+          rect: pageRect.value,
+          textOverlayCount: raw.page.textOverlayCount,
+          visible: raw.page.visible,
+        },
+        poll: null,
+        range,
+        reader: {
+          rect: readerRect.value,
+          scrollTop: raw.reader.scrollTop,
+        },
+        rejectionCounts: {
+          drawBitmapDimensions: draws.filter((draw) =>
+            !draw.predicates.bitmapDimensions
+          ).length,
+          drawBitmapLink: draws.filter((draw) =>
+            !draw.predicates.bitmapExactLink
+          ).length,
+          drawBitmapOrder: draws.filter((draw) =>
+            !draw.predicates.bitmapToDrawOrder
+          ).length,
+          drawCompatibleRequest: draws.filter((draw) =>
+            !draw.predicates.compatibleRequest
+          ).length,
+          drawGeometry: draws.filter((draw) =>
+            !draw.predicates.geometry
+          ).length,
+          drawScale: draws.filter((draw) => !draw.predicates.scale).length,
+          drawSource: draws.filter((draw) => !draw.predicates.source).length,
+          drawVisibility: draws.filter((draw) =>
+            !draw.predicates.visibility
+          ).length,
+          workerIdentity: workers.filter((event) =>
+            !event.identityMatch
+          ).length,
+        },
+        scrollProof,
+        sharpTarget: sharpTarget
+          ? {
+              height: sharpTarget.height,
+              scale: sharpTarget.scale,
+              width: sharpTarget.width,
+            }
+          : null,
+        targetAvailability: {
+          canvasConnected: canvasPresent && canvas.connected === true,
+          canvasCssSize,
+          canvasPresent,
+          pageMetadata,
+          pagePresent,
+          pageVisible: pagePresent && raw.page.visible === true &&
+            raw.page.distance === 0,
+          range: range !== null &&
+            range.mountedPages.includes(row.adjacentPage),
+          readerGeometry: readerRect.valid,
+          targetDerivable,
+          textOverlay: raw.page.textOverlayCount > 0,
+          viewport: true,
+        },
+        visiblePages: [...raw.visiblePages],
+      },
+    };
+  } catch {
+    return { bound: false, value: null };
+  }
+}
+
+export function sanitizeAppMatrixRuntimePreviewCompositionDiagnostic(raw, row) {
+  try {
+    const rawKeys = [
+      "adjacentScrollProof",
+      "checkpoint",
+      "drawItems",
+      "drawTotal",
+      "drawTruncated",
+      "expectedPreviewTarget",
+      "failureBoundary",
+      "failureCategory",
+      "importEventId",
+      "page",
+      "phaseMarkers",
+      "range",
+      "reader",
+      "scenarioStart",
+      "visiblePages",
+      "wait",
+      "workerItems",
+      "workerTotal",
+      "workerTruncated",
+    ];
+    const workerKeys = [
+      "activityId",
+      "at",
+      "direction",
+      "distance",
+      "documentKey",
+      "enabled",
+      "eventId",
+      "height",
+      "jobId",
+      "pageNumber",
+      "revision",
+      "scale",
+      "type",
+      "visible",
+      "width",
+      "workerInstanceId",
+    ];
+    const drawKeys = [
+      "activityId",
+      "at",
+      "bitmapEventId",
+      "compositionId",
+      "distance",
+      "drawInvocationId",
+      "geometry",
+      "geometryVisible",
+      "height",
+      "page",
+      "readerViewport",
+      "scale",
+      "source",
+      "visible",
+      "visiblePages",
+      "width",
+    ];
+    const phaseKeys = [
+      "activityId",
+      "at",
+      "configurationId",
+      "drawInvocationId",
+      "sequence",
+      "stage",
+      "workerEventId",
+    ];
+    const scenarioKeys = [
+      "drawStart",
+      "id",
+      "maximumCanvasCount",
+      "maximumCanvasPixels",
+      "maximumCountFrame",
+      "maximumPixelsFrame",
+      "sampleStart",
+      "startedAt",
+      "workerEventStart",
+    ];
+    const pageKeys = [
+      "canvas",
+      "distance",
+      "page",
+      "pageHeight",
+      "pageWidth",
+      "present",
+      "rect",
+      "textOverlayCount",
+      "visible",
+    ];
+    const canvasKeys = [
+      "connected",
+      "cssHeight",
+      "cssWidth",
+      "devicePixelRatio",
+      "height",
+      "present",
+      "scale",
+      "source",
+      "targetHeight",
+      "targetScale",
+      "targetWidth",
+      "visualViewportScale",
+      "width",
+    ];
+    const expectedTargetKeys = ["capped", "height", "scale", "width"];
+    if (
+      !appMatrixRuntimeExactObject(raw, rawKeys) ||
+      !APP_MATRIX_PREVIEW_COMPOSITION_FAILURE_CATEGORIES.has(
+        raw.failureCategory,
+      ) ||
+      !APP_MATRIX_PREVIEW_COMPOSITION_CHECKPOINTS.has(raw.checkpoint) ||
+      !isAppMatrixRuntimeModelBinding(row) ||
+      raw.importEventId !== row.modelIdentity.importEventId ||
+      (raw.checkpoint !== "target-derivation" &&
+        row?.adjacentPage !== raw?.page?.page) ||
+      !appMatrixRuntimeExactObject(raw.scenarioStart, scenarioKeys) ||
+      raw.scenarioStart.id !== row.configurationId ||
+      raw.scenarioStart.maximumCanvasCount !== 0 ||
+      raw.scenarioStart.maximumCanvasPixels !== 0 ||
+      raw.scenarioStart.maximumCountFrame !== null ||
+      raw.scenarioStart.maximumPixelsFrame !== null ||
+      !Number.isSafeInteger(raw.scenarioStart.drawStart) ||
+      raw.scenarioStart.drawStart < 0 ||
+      !Number.isSafeInteger(raw.scenarioStart.sampleStart) ||
+      raw.scenarioStart.sampleStart < 0 ||
+      !Number.isSafeInteger(raw.scenarioStart.workerEventStart) ||
+      raw.scenarioStart.workerEventStart < row.modelIdentity.importEventId ||
+      !appMatrixRuntimeSafeNumber(raw.scenarioStart.startedAt) ||
+      raw.scenarioStart.startedAt < row.modelIdentity.importAt ||
+      JSON.stringify(raw.scenarioStart) !== JSON.stringify(row.scenarioStart)
+    ) {
+      return { bound: false, value: null };
+    }
+    let expectedTarget = raw.expectedPreviewTarget;
+    const targetDerivationFailure = raw.checkpoint === "target-derivation";
+    const expectedTargetBound = targetDerivationFailure
+      ? expectedTarget === null
+      : appMatrixRuntimeExactObject(expectedTarget, expectedTargetKeys) &&
+        typeof expectedTarget.capped === "boolean" &&
+        Number.isSafeInteger(expectedTarget.width) && expectedTarget.width > 0 &&
+        Number.isSafeInteger(expectedTarget.height) && expectedTarget.height > 0 &&
+        appMatrixRuntimeSafeNumber(expectedTarget.scale) &&
+        expectedTarget.scale > 0 &&
+        expectedTarget.scale <= 1.25 + 1e-7;
+    if (!expectedTargetBound) {
+      return { bound: false, value: null };
+    }
+    const failureBoundary = raw.failureBoundary;
+    if (
+      !appMatrixRuntimeExactObject(failureBoundary, [
+        "activityId",
+        "at",
+        "drawCount",
+        "drawInvocationId",
+        "workerEventId",
+      ]) ||
+      !Number.isSafeInteger(failureBoundary.activityId) ||
+      failureBoundary.activityId < 0 ||
+      !appMatrixRuntimeSafeNumber(failureBoundary.at) ||
+      failureBoundary.at < raw.scenarioStart.startedAt ||
+      !Number.isSafeInteger(failureBoundary.drawCount) ||
+      failureBoundary.drawCount < raw.scenarioStart.drawStart ||
+      !Number.isSafeInteger(failureBoundary.drawInvocationId) ||
+      failureBoundary.drawInvocationId < 0 ||
+      !Number.isSafeInteger(failureBoundary.workerEventId) ||
+      failureBoundary.workerEventId < raw.scenarioStart.workerEventStart
+    ) {
+      return { bound: false, value: null };
+    }
+    const finalizedScenarioKeys = [
+      ...scenarioKeys,
+      "drawEnd",
+      "finishedAt",
+      "sampleEnd",
+      "workerEventEnd",
+    ];
+    if (
+      !appMatrixRuntimeExactObject(row?.scenario, finalizedScenarioKeys) ||
+      row.scenario.id !== raw.scenarioStart.id ||
+      row.scenario.drawStart !== raw.scenarioStart.drawStart ||
+      row.scenario.sampleStart !== raw.scenarioStart.sampleStart ||
+      row.scenario.startedAt !== raw.scenarioStart.startedAt ||
+      row.scenario.workerEventStart !== raw.scenarioStart.workerEventStart ||
+      !appMatrixRuntimeSafeNumber(row.scenario.finishedAt) ||
+      row.scenario.finishedAt < failureBoundary.at ||
+      !Number.isSafeInteger(row.scenario.drawEnd) ||
+      row.scenario.drawEnd < failureBoundary.drawCount ||
+      !Number.isSafeInteger(row.scenario.sampleEnd) ||
+      row.scenario.sampleEnd < row.scenario.sampleStart ||
+      !Number.isSafeInteger(row.scenario.workerEventEnd) ||
+      row.scenario.workerEventEnd < failureBoundary.workerEventId
+    ) {
+      return { bound: false, value: null };
+    }
+    const expectedPhaseStages = [
+      "adjacent-scroll-started",
+      "adjacent-scroll-completed",
+      "preview-composition-started",
+    ];
+    const completedPhases = Array.isArray(row?.completedSnapshot?.phaseMarkers)
+      ? row.completedSnapshot.phaseMarkers
+      : null;
+    if (
+      !Array.isArray(raw.phaseMarkers) || raw.phaseMarkers.length !== 3 ||
+      !completedPhases
+    ) {
+      return { bound: false, value: null };
+    }
+    const phaseMarkers = raw.phaseMarkers.map((marker, index) => {
+      const retained = completedPhases.find((candidate) =>
+        candidate?.stage === expectedPhaseStages[index]
+      );
+      const valid = appMatrixRuntimeExactObject(marker, phaseKeys) &&
+        marker.configurationId === row.configurationId &&
+        marker.stage === expectedPhaseStages[index] &&
+        Number.isSafeInteger(marker.activityId) && marker.activityId >= 0 &&
+        appMatrixRuntimeSafeNumber(marker.at) &&
+        Number.isSafeInteger(marker.drawInvocationId) &&
+        marker.drawInvocationId >= 0 &&
+        Number.isSafeInteger(marker.sequence) && marker.sequence > 0 &&
+        Number.isSafeInteger(marker.workerEventId) && marker.workerEventId >= 0 &&
+        JSON.stringify(marker) === JSON.stringify(retained) &&
+        (index === 0 || (
+          marker.activityId >= raw.phaseMarkers[index - 1].activityId &&
+          marker.at >= raw.phaseMarkers[index - 1].at &&
+          marker.drawInvocationId >=
+            raw.phaseMarkers[index - 1].drawInvocationId &&
+          marker.sequence === raw.phaseMarkers[index - 1].sequence + 1 &&
+          marker.workerEventId >= raw.phaseMarkers[index - 1].workerEventId
+        ));
+      return valid
+        ? {
+            activityId: marker.activityId,
+            at: marker.at,
+            drawInvocationId: marker.drawInvocationId,
+            sequence: marker.sequence,
+            stage: marker.stage,
+            workerEventId: marker.workerEventId,
+          }
+        : null;
+    });
+    const waitMarker = raw.phaseMarkers[2];
+    if (
+      phaseMarkers.includes(null) ||
+      failureBoundary.activityId < waitMarker.activityId ||
+      failureBoundary.at < waitMarker.at ||
+      failureBoundary.drawInvocationId < waitMarker.drawInvocationId ||
+      failureBoundary.workerEventId < waitMarker.workerEventId
+    ) {
+      return { bound: false, value: null };
+    }
+    const scrollProof = sanitizeAppMatrixPriorityMountCentering(
+      raw.adjacentScrollProof,
+      row.adjacentPage,
+    );
+    if (!scrollProof || scrollProof.summary.ready !== true) {
+      return { bound: false, value: null };
+    }
+    if (targetDerivationFailure) {
+      if (raw.wait !== null) return { bound: false, value: null };
+      return sanitizeAppMatrixRuntimePreviewTargetDerivationDiagnostic(
+        raw,
+        row,
+        { failureBoundary, phaseMarkers, scrollProof, waitMarker },
+      );
+    }
+    const readerRect = appMatrixRuntimeExactObject(
+        raw.reader,
+        ["rect", "scrollTop"],
+      ) && appMatrixRuntimeExactObject(
+        raw.reader.rect,
+        ["bottom", "left", "right", "top"],
+      )
+      ? sanitizeAppMatrixRuntimeRectangle(raw.reader.rect)
+      : null;
+    const reader = readerRect &&
+        appMatrixRuntimeSafeNumber(raw.reader.scrollTop) &&
+        raw.reader.scrollTop >= 0
+      ? { rect: readerRect, scrollTop: raw.reader.scrollTop }
+      : null;
+    const pageRect = appMatrixRuntimeExactObject(raw.page, pageKeys) &&
+        appMatrixRuntimeExactObject(raw.page.canvas, canvasKeys) &&
+        appMatrixRuntimeExactObject(
+          raw.page.rect,
+          ["bottom", "left", "right", "top"],
+        )
+      ? sanitizeAppMatrixRuntimeRectangle(raw.page.rect)
+      : null;
+    const configuration = PDF_SHARPNESS_MATRIX.find((candidate) =>
+      candidate.id === row.configurationId
+    ) ?? null;
+    const expectedDevicePixelRatio = configuration
+      ? configuration.baseDevicePixelRatio * configuration.browserZoom
+      : null;
+    const expectedVisualViewportScale = configuration?.pinchZoom ?? null;
+    const page = configuration && pageRect && raw.page.present === true &&
+        raw.page.page === row.adjacentPage && raw.page.visible === true &&
+        raw.page.distance === 0 &&
+        appMatrixRuntimeSafeNumber(raw.page.pageWidth) &&
+        raw.page.pageWidth > 0 &&
+        appMatrixRuntimeSafeNumber(raw.page.pageHeight) &&
+        raw.page.pageHeight > 0 &&
+        Number.isSafeInteger(raw.page.textOverlayCount) &&
+        raw.page.textOverlayCount > 0 &&
+        raw.page.canvas.present === true &&
+        raw.page.canvas.connected === true &&
+        appMatrixRuntimeSafeNumber(raw.page.canvas.cssWidth) &&
+        raw.page.canvas.cssWidth > 0 &&
+        appMatrixRuntimeSafeNumber(raw.page.canvas.cssHeight) &&
+        raw.page.canvas.cssHeight > 0 &&
+        appMatrixRuntimeSafeNumber(raw.page.canvas.devicePixelRatio) &&
+        raw.page.canvas.devicePixelRatio > 0 &&
+        Math.abs(
+          raw.page.canvas.devicePixelRatio - expectedDevicePixelRatio,
+        ) <= 0.02 &&
+        appMatrixRuntimeSafeNumber(raw.page.canvas.visualViewportScale) &&
+        raw.page.canvas.visualViewportScale > 0 &&
+        Math.abs(
+          raw.page.canvas.visualViewportScale - expectedVisualViewportScale,
+        ) <= 0.02 &&
+        Number.isSafeInteger(raw.page.canvas.width) &&
+        raw.page.canvas.width >= 0 &&
+        Number.isSafeInteger(raw.page.canvas.height) &&
+        raw.page.canvas.height >= 0 &&
+        appMatrixRuntimeSafeNumber(raw.page.canvas.targetScale) &&
+        raw.page.canvas.targetScale > 0 &&
+        Number.isSafeInteger(raw.page.canvas.targetWidth) &&
+        raw.page.canvas.targetWidth > 0 &&
+        Number.isSafeInteger(raw.page.canvas.targetHeight) &&
+        raw.page.canvas.targetHeight > 0 &&
+        (raw.page.canvas.scale === null || (
+          appMatrixRuntimeSafeNumber(raw.page.canvas.scale) &&
+          raw.page.canvas.scale > 0
+        )) &&
+        (raw.page.canvas.source === null ||
+          ["worker-bitmap", "main-fallback"].includes(raw.page.canvas.source))
+      ? {
+          canvas: {
+            connected: true,
+            cssHeight: raw.page.canvas.cssHeight,
+            cssWidth: raw.page.canvas.cssWidth,
+            devicePixelRatio: raw.page.canvas.devicePixelRatio,
+            height: raw.page.canvas.height,
+            present: true,
+            scale: raw.page.canvas.scale,
+            sourceClass: appMatrixRuntimeRenderSourceClass(
+              raw.page.canvas.source,
+            ),
+            targetHeight: raw.page.canvas.targetHeight,
+            targetScale: raw.page.canvas.targetScale,
+            targetWidth: raw.page.canvas.targetWidth,
+            visualViewportScale: raw.page.canvas.visualViewportScale,
+            width: raw.page.canvas.width,
+          },
+          distance: 0,
+          page: row.adjacentPage,
+          pageHeight: raw.page.pageHeight,
+          pageWidth: raw.page.pageWidth,
+          present: true,
+          rect: pageRect,
+          textOverlayCount: raw.page.textOverlayCount,
+          visible: true,
+        }
+      : null;
+    const recomputedSharpTarget = page
+      ? resolvePdfRasterTarget({
+          cssHeight: page.canvas.cssHeight,
+          cssWidth: page.canvas.cssWidth,
+          devicePixelRatio: page.canvas.devicePixelRatio,
+          pageHeight: page.pageHeight,
+          pageWidth: page.pageWidth,
+          visualViewportScale: page.canvas.visualViewportScale,
+        })
+      : null;
+    const recomputedPreviewTarget = page && recomputedSharpTarget
+      ? constrainPdfRasterScale({
+          pageHeight: page.pageHeight,
+          pageWidth: page.pageWidth,
+          scale: Math.min(recomputedSharpTarget.scale, 1.25),
+        })
+      : null;
+    const range = Array.isArray(raw.visiblePages) &&
+        raw.visiblePages.every((value, index) =>
+          Number.isSafeInteger(value) && value >= 1 && value <= 6 &&
+          (index === 0 || value > raw.visiblePages[index - 1])
+        )
+      ? sanitizeAppMatrixRuntimeRange(
+          raw.range,
+          parsePdfPageCenterRange(raw.range)?.mountedPages ?? [],
+        )
+      : null;
+    if (
+      !reader || !page || !range ||
+      !raw.visiblePages.includes(row.adjacentPage) ||
+      !range.mountedPages.includes(row.adjacentPage) ||
+      !raw.visiblePages.every((visiblePage) =>
+        range.mountedPages.includes(visiblePage)
+      ) ||
+      !appMatrixRuntimeRectanglesIntersect(page.rect, reader.rect) ||
+      recomputedSharpTarget.width !== page.canvas.targetWidth ||
+      recomputedSharpTarget.height !== page.canvas.targetHeight ||
+      Math.abs(recomputedSharpTarget.scale - page.canvas.targetScale) > 1e-7 ||
+      !recomputedPreviewTarget ||
+      (!targetDerivationFailure && (
+        recomputedPreviewTarget.width !== expectedTarget.width ||
+        recomputedPreviewTarget.height !== expectedTarget.height ||
+        recomputedPreviewTarget.capped !== expectedTarget.capped ||
+        Math.abs(recomputedPreviewTarget.scale - expectedTarget.scale) > 1e-7
+      ))
+    ) {
+      return { bound: false, value: null };
+    }
+    if (targetDerivationFailure) expectedTarget = recomputedPreviewTarget;
+    let poll = null;
+    if (targetDerivationFailure) {
+      if (raw.wait !== null) {
+        return { bound: false, value: null };
+      }
+    } else if (raw.wait !== null) {
+      if (
+        !appMatrixRuntimeExactObject(raw.wait, [
+          "elapsedMs",
+          "evaluationAttemptCount",
+          "evaluationErrorCount",
+          "outcome",
+          "timeoutMs",
+        ]) ||
+        !Number.isSafeInteger(raw.wait.elapsedMs) || raw.wait.elapsedMs < 0 ||
+        !Number.isSafeInteger(raw.wait.evaluationAttemptCount) ||
+        raw.wait.evaluationAttemptCount < 0 ||
+        !Number.isSafeInteger(raw.wait.evaluationErrorCount) ||
+        raw.wait.evaluationErrorCount < 0 ||
+        raw.wait.evaluationErrorCount > raw.wait.evaluationAttemptCount ||
+        !["timeout", "unexpected"].includes(raw.wait.outcome) ||
+        raw.wait.outcome !== raw.failureCategory ||
+        raw.wait.timeoutMs !== SCENARIO_TIMEOUT_MS ||
+        (raw.wait.outcome === "timeout" && (
+          raw.wait.evaluationAttemptCount < 1 ||
+          raw.wait.elapsedMs < raw.wait.timeoutMs
+        ))
+      ) {
+        return { bound: false, value: null };
+      }
+      poll = { ...raw.wait };
+    } else if (raw.failureCategory !== "unexpected") {
+      return { bound: false, value: null };
+    }
+    const identity = row.modelIdentity;
+    const sharpTarget = {
+      height: page.canvas.targetHeight,
+      scale: page.canvas.targetScale,
+      width: page.canvas.targetWidth,
+    };
+    const sameTarget = expectedTarget.width === sharpTarget.width &&
+      expectedTarget.height === sharpTarget.height &&
+      Math.abs(expectedTarget.scale - sharpTarget.scale) <= 1e-7;
+    const rawWorkers = Array.isArray(raw.workerItems) ? raw.workerItems : null;
+    const workerLedgerBound = rawWorkers &&
+      Number.isSafeInteger(raw.workerTotal) && raw.workerTotal >= 0 &&
+      raw.workerTotal === rawWorkers.length &&
+      rawWorkers.length <= APP_MATRIX_PREVIEW_COMPOSITION_LEDGER_LIMIT &&
+      raw.workerTruncated === false;
+    if (!workerLedgerBound) return { bound: false, value: null };
+    const workers = [];
+    for (let index = 0; index < rawWorkers.length; index += 1) {
+      const event = rawWorkers[index];
+      const render = event?.type === "render" &&
+        event.direction === "to-worker" &&
+        typeof event.enabled === "boolean" &&
+        typeof event.visible === "boolean" &&
+        Number.isSafeInteger(event.distance) && event.distance >= 0 &&
+        appMatrixRuntimeSafeNumber(event.scale) &&
+        (event.scale > 0 || (event.enabled === false && event.scale === 0)) &&
+        event.width === null && event.height === null;
+      const bitmap = event?.type === "bitmap" &&
+        event.direction === "from-worker" &&
+        event.enabled === null && event.visible === null &&
+        event.distance === null &&
+        appMatrixRuntimeSafeNumber(event.scale) && event.scale > 0 &&
+        Number.isSafeInteger(event.width) && event.width > 0 &&
+        Number.isSafeInteger(event.height) && event.height > 0;
+      const valid = appMatrixRuntimeExactObject(event, workerKeys) &&
+        (render || bitmap) && event.documentKey === null &&
+        Number.isSafeInteger(event.activityId) &&
+        event.activityId > identity.importActivityId &&
+        event.activityId <= failureBoundary.activityId &&
+        appMatrixRuntimeSafeNumber(event.at) &&
+        event.at >= identity.importAt &&
+        event.at <= failureBoundary.at &&
+        Number.isSafeInteger(event.eventId) &&
+        event.eventId > identity.importEventId &&
+        event.eventId <= failureBoundary.workerEventId &&
+        Number.isSafeInteger(event.workerInstanceId) &&
+        event.workerInstanceId > 0 &&
+        Number.isSafeInteger(event.jobId) && event.jobId > 0 &&
+        typeof event.revision === "string" && event.revision.length > 0 &&
+        event.pageNumber === row.adjacentPage &&
+        (index === 0 || (
+          event.activityId > rawWorkers[index - 1].activityId &&
+          event.at >= rawWorkers[index - 1].at &&
+          event.eventId > rawWorkers[index - 1].eventId
+        ));
+      if (!valid) return { bound: false, value: null };
+      const identityMatch =
+        event.workerInstanceId === identity.workerInstanceId &&
+        event.jobId === identity.importJobId &&
+        event.revision === identity.revision;
+      const previewMatch = render
+        ? event.enabled === true && event.visible === false &&
+          event.distance === 1 &&
+          Math.abs(event.scale - expectedTarget.scale) <= 1e-7
+        : event.width === expectedTarget.width &&
+          event.height === expectedTarget.height &&
+          Math.abs(event.scale - expectedTarget.scale) <= 1e-7;
+      const sharpMatch = render
+        ? event.enabled === true &&
+          ((event.visible === true && event.distance === 0) ||
+            (sameTarget && event.visible === false && event.distance === 1)) &&
+          Math.abs(event.scale - sharpTarget.scale) <= 1e-7
+        : event.width === sharpTarget.width &&
+          event.height === sharpTarget.height &&
+          Math.abs(event.scale - sharpTarget.scale) <= 1e-7;
+      workers.push({
+        activityId: event.activityId,
+        at: event.at,
+        distance: event.distance,
+        enabled: event.enabled,
+        eventId: event.eventId,
+        height: event.height,
+        identityMatch,
+        identityHash: cdpDiagnosticIdentity(
+          event.workerInstanceId,
+          event.jobId,
+          event.revision,
+        ),
+        localOrder: index + 1,
+        page: row.adjacentPage,
+        scale: event.scale,
+        previewMatch,
+        sharpMatch,
+        type: event.type,
+        visible: event.visible,
+        width: event.width,
+        relativeOrder: event.eventId - identity.importEventId,
+      });
+    }
+    const rawDraws = Array.isArray(raw.drawItems) ? raw.drawItems : null;
+    const drawLedgerBound = rawDraws &&
+      Number.isSafeInteger(raw.drawTotal) && raw.drawTotal >= 0 &&
+      raw.drawTotal === rawDraws.length &&
+      rawDraws.length <= APP_MATRIX_PREVIEW_COMPOSITION_LEDGER_LIMIT &&
+      raw.drawTruncated === false;
+    if (!drawLedgerBound) return { bound: false, value: null };
+    const previewRequests = workers.filter((event) =>
+      event.type === "render" && event.identityMatch && event.previewMatch
+    );
+    const sharpRequests = workers.filter((event) =>
+      event.type === "render" && event.identityMatch && event.sharpMatch
+    );
+    const requestBeforeBitmap = (requests, bitmap) =>
+      requests.findLast((request) =>
+        request.localOrder < bitmap.localOrder &&
+        request.eventId < bitmap.eventId &&
+        request.activityId < bitmap.activityId && request.at <= bitmap.at
+      ) ?? null;
+    const targetBitmaps = workers.filter((event) =>
+      event.type === "bitmap" && event.identityMatch && event.previewMatch
+    );
+    const sharpBitmaps = workers.filter((event) =>
+      event.type === "bitmap" && event.identityMatch && event.sharpMatch
+    );
+    const identityBitmaps = workers.filter((event) =>
+      event.type === "bitmap" && event.identityMatch
+    );
+    const draws = [];
+    for (let index = 0; index < rawDraws.length; index += 1) {
+      const draw = rawDraws[index];
+      const geometry = draw?.geometry === null
+        ? null
+        : appMatrixRuntimeExactObject(
+            draw?.geometry,
+            ["bottom", "left", "right", "top"],
+          )
+        ? sanitizeAppMatrixRuntimeRectangle(draw.geometry)
+        : null;
+      const drawReader = draw?.readerViewport === null
+        ? null
+        : appMatrixRuntimeExactObject(
+            draw?.readerViewport,
+            ["bottom", "left", "right", "top"],
+          )
+        ? sanitizeAppMatrixRuntimeRectangle(draw.readerViewport)
+        : null;
+      const visiblePagesBound = Array.isArray(draw?.visiblePages) &&
+        draw.visiblePages.every((value, visibleIndex) =>
+          Number.isSafeInteger(value) && value >= 1 && value <= 6 &&
+          (visibleIndex === 0 || value > draw.visiblePages[visibleIndex - 1])
+        );
+      const valid = appMatrixRuntimeExactObject(draw, drawKeys) &&
+        Number.isSafeInteger(draw.activityId) && draw.activityId > 0 &&
+        draw.activityId <= failureBoundary.activityId &&
+        appMatrixRuntimeSafeNumber(draw.at) &&
+        draw.at >= raw.scenarioStart.startedAt &&
+        draw.at <= failureBoundary.at &&
+        (draw.bitmapEventId === null || (
+          Number.isSafeInteger(draw.bitmapEventId) && draw.bitmapEventId > 0 &&
+          draw.bitmapEventId <= failureBoundary.workerEventId
+        )) &&
+        Number.isSafeInteger(draw.compositionId) &&
+        draw.compositionId > raw.scenarioStart.drawStart &&
+        draw.compositionId <= failureBoundary.drawCount &&
+        Number.isSafeInteger(draw.drawInvocationId) &&
+        draw.drawInvocationId > 0 &&
+        draw.drawInvocationId <= failureBoundary.drawInvocationId &&
+        Number.isSafeInteger(draw.distance) && draw.distance >= 0 &&
+        typeof draw.geometryVisible === "boolean" &&
+        Number.isSafeInteger(draw.width) && draw.width > 0 &&
+        Number.isSafeInteger(draw.height) && draw.height > 0 &&
+        appMatrixRuntimeSafeNumber(draw.scale) && draw.scale > 0 &&
+        draw.page === row.adjacentPage &&
+        typeof draw.source === "string" && draw.source.length > 0 &&
+        typeof draw.visible === "boolean" && visiblePagesBound &&
+        (draw.geometry === null || geometry !== null) &&
+        (draw.readerViewport === null || drawReader !== null) &&
+        (index === 0 || (
+          draw.activityId > rawDraws[index - 1].activityId &&
+          draw.at >= rawDraws[index - 1].at &&
+          draw.compositionId > rawDraws[index - 1].compositionId &&
+          draw.drawInvocationId > rawDraws[index - 1].drawInvocationId
+        ));
+      if (!valid) return { bound: false, value: null };
+      const bitmap = identityBitmaps.find((event) =>
+        event.eventId === draw.bitmapEventId
+      ) ?? null;
+      const previewRequest = bitmap?.previewMatch
+        ? requestBeforeBitmap(previewRequests, bitmap)
+        : null;
+      const sharpRequest = bitmap?.sharpMatch
+        ? requestBeforeBitmap(sharpRequests, bitmap)
+        : null;
+      const previewCompatibleOrder = Boolean(
+        previewRequest && bitmap &&
+        previewRequest.activityId < bitmap.activityId &&
+        bitmap.activityId < draw.activityId &&
+        previewRequest.at <= bitmap.at && bitmap.at <= draw.at,
+      );
+      const sharpCompatibleOrder = Boolean(
+        sharpRequest && bitmap &&
+        sharpRequest.activityId < bitmap.activityId &&
+        bitmap.activityId < draw.activityId &&
+        sharpRequest.at <= bitmap.at && bitmap.at <= draw.at,
+      );
+      const predicates = {
+        afterScroll: draw.at >= phaseMarkers[0].at &&
+          draw.activityId > phaseMarkers[0].activityId &&
+          draw.drawInvocationId > phaseMarkers[0].drawInvocationId,
+        bitmapDimensions: Boolean(
+          bitmap && bitmap.width === draw.width && bitmap.height === draw.height,
+        ),
+        bitmapLinked: bitmap !== null,
+        compatibleOrder: previewCompatibleOrder || sharpCompatibleOrder,
+        geometry: draw.geometryVisible === true &&
+          appMatrixRuntimeRectanglesIntersect(geometry, drawReader),
+        previewCompatibleOrder,
+        previewTarget: Boolean(
+          bitmap?.previewMatch && draw.width === expectedTarget.width &&
+          draw.height === expectedTarget.height &&
+          Math.abs(draw.scale - expectedTarget.scale) <= 1e-7,
+        ),
+        scale: Boolean(
+          bitmap && Math.abs(bitmap.scale - draw.scale) <= 1e-7,
+        ),
+        sharpCompatibleOrder,
+        sharpTarget: Boolean(
+          bitmap?.sharpMatch && draw.width === sharpTarget.width &&
+          draw.height === sharpTarget.height &&
+          Math.abs(draw.scale - sharpTarget.scale) <= 1e-7,
+        ),
+        source: draw.source === "worker-bitmap",
+        visibility: draw.visible === true && draw.distance === 0 &&
+          draw.visiblePages.includes(row.adjacentPage),
+      };
+      const sharedCausal = [
+        "afterScroll",
+        "bitmapDimensions",
+        "bitmapLinked",
+        "geometry",
+        "scale",
+        "source",
+        "visibility",
+      ].every((key) => predicates[key] === true);
+      const previewComposed = sharedCausal && previewCompatibleOrder &&
+        predicates.previewTarget;
+      const sharpComposed = sharedCausal && sharpCompatibleOrder &&
+        predicates.sharpTarget;
+      draws.push({
+        activityId: draw.activityId,
+        at: draw.at,
+        bitmapEventId: draw.bitmapEventId,
+        bitmapLocalOrder: bitmap?.localOrder ?? null,
+        previewComposed,
+        compositionId: draw.compositionId,
+        distance: draw.distance,
+        drawInvocationId: draw.drawInvocationId,
+        height: draw.height,
+        localOrder: index + 1,
+        predicates,
+        previewRequestLocalOrder: previewRequest?.localOrder ?? null,
+        scale: draw.scale,
+        sharpComposed,
+        sharpRequestLocalOrder: sharpRequest?.localOrder ?? null,
+        sourceClass: appMatrixRuntimeRenderSourceClass(draw.source),
+        visible: draw.visible,
+        width: draw.width,
+      });
+    }
+    const previewDraw = draws.find((draw) => draw.previewComposed) ?? null;
+    const sharpDraws = draws.filter((draw) => draw.sharpComposed);
+    const firstSharpDraw = sharpDraws[0] ?? null;
+    const sharpAfterPreview = previewDraw
+      ? sharpDraws.find((draw) =>
+          draw.compositionId > previewDraw.compositionId
+        ) ?? null
+      : null;
+    const sameDraw = previewDraw
+      ? sharpDraws.find((draw) =>
+          draw.compositionId === previewDraw.compositionId
+        ) ?? null
+      : null;
+    const resolutionRegressionObserved = draws.some((draw, index) =>
+      draw.previewComposed && draws.slice(0, index).some((prior) =>
+        prior.sharpComposed && (
+          prior.scale > draw.scale + 1e-7 ||
+          (prior.width >= draw.width && prior.height >= draw.height &&
+            (prior.width > draw.width || prior.height > draw.height))
+        )
+      )
+    );
+    const transitionClass = resolutionRegressionObserved
+      ? "resolution-regression"
+      : sameDraw && sameTarget
+        ? "preview-satisfied-target"
+        : previewDraw && sharpAfterPreview
+          ? "preview-then-sharp"
+          : !previewDraw && firstSharpDraw
+            ? "direct-sharp"
+            : previewDraw
+              ? "preview"
+              : "none";
+    const rejectionCounts = {
+      bitmapWithoutRequest: targetBitmaps.filter((bitmap) =>
+        !requestBeforeBitmap(previewRequests, bitmap)
+      ).length,
+      drawBitmapDimensions: draws.filter((draw) =>
+        !draw.predicates.bitmapDimensions
+      ).length,
+      drawBitmapLink: draws.filter((draw) =>
+        !draw.predicates.bitmapLinked
+      ).length,
+      drawCompatibleOrder: draws.filter((draw) =>
+        !draw.predicates.compatibleOrder
+      ).length,
+      drawGeometry: draws.filter((draw) => !draw.predicates.geometry).length,
+      drawPreviewTarget: draws.filter((draw) =>
+        !draw.predicates.previewTarget
+      ).length,
+      drawScale: draws.filter((draw) => !draw.predicates.scale).length,
+      drawSharpTarget: draws.filter((draw) =>
+        !draw.predicates.sharpTarget
+      ).length,
+      drawSource: draws.filter((draw) => !draw.predicates.source).length,
+      drawTime: draws.filter((draw) => !draw.predicates.afterScroll).length,
+      drawVisibility: draws.filter((draw) =>
+        !draw.predicates.visibility
+      ).length,
+      sharpBitmapWithoutRequest: sharpBitmaps.filter((bitmap) =>
+        !requestBeforeBitmap(sharpRequests, bitmap)
+      ).length,
+      workerIdentity: workers.filter((event) => !event.identityMatch).length,
+      workerTarget: workers.filter((event) =>
+        !event.previewMatch && !event.sharpMatch
+      ).length,
+    };
+    const publicWorkers = workers.map((event) => ({
+      atMs: event.at - raw.scenarioStart.startedAt,
+      distance: event.distance,
+      enabled: event.enabled,
+      height: event.height,
+      identityHash: event.identityHash,
+      identityMatch: event.identityMatch,
+      localOrder: event.localOrder,
+      page: event.page,
+      previewMatch: event.previewMatch,
+      relativeOrder: event.relativeOrder,
+      scale: event.scale,
+      sharpMatch: event.sharpMatch,
+      type: event.type,
+      visible: event.visible,
+      width: event.width,
+    }));
+    const publicDraws = draws.map((draw) => ({
+      atMs: draw.at - raw.scenarioStart.startedAt,
+      bitmapLocalOrder: draw.bitmapLocalOrder,
+      compositionOrder: draw.compositionId - raw.scenarioStart.drawStart,
+      distance: draw.distance,
+      height: draw.height,
+      localOrder: draw.localOrder,
+      predicates: draw.predicates,
+      previewComposed: draw.previewComposed,
+      previewRequestLocalOrder: draw.previewRequestLocalOrder,
+      scale: draw.scale,
+      sharpComposed: draw.sharpComposed,
+      sharpRequestLocalOrder: draw.sharpRequestLocalOrder,
+      sourceClass: draw.sourceClass,
+      visible: draw.visible,
+      width: draw.width,
+    }));
+    return {
+      bound: true,
+      value: {
+        boundaries: {
+          failure: {
+            activityDelta: failureBoundary.activityId - waitMarker.activityId,
+            atMs: failureBoundary.at - raw.scenarioStart.startedAt,
+            drawCount: failureBoundary.drawCount -
+              raw.scenarioStart.drawStart,
+            drawInvocationDelta:
+              failureBoundary.drawInvocationId - waitMarker.drawInvocationId,
+            workerEventCount: failureBoundary.workerEventId -
+              identity.importEventId,
+          },
+          phases: phaseMarkers.map((marker, index) => ({
+            activityDelta:
+              marker.activityId - raw.phaseMarkers[0].activityId,
+            atMs: marker.at - raw.scenarioStart.startedAt,
+            drawInvocationDelta:
+              marker.drawInvocationId -
+                raw.phaseMarkers[0].drawInvocationId,
+            localOrder: index + 1,
+            stage: marker.stage,
+            workerEventDelta:
+              marker.workerEventId - raw.phaseMarkers[0].workerEventId,
+          })),
+          scenario: {
+            drawBoundary: 0,
+            workerEventBoundary: 0,
+          },
+        },
+        classification: transitionClass,
+        checkpoint: raw.checkpoint,
+        directSharpFound: transitionClass === "direct-sharp",
+        expectedPreviewTarget: {
+          height: expectedTarget.height,
+          scale: expectedTarget.scale,
+          width: expectedTarget.width,
+        },
+        failureCategory: raw.failureCategory,
+        ledgers: {
+          draws: {
+            items: publicDraws,
+            retained: publicDraws.length,
+            total: raw.drawTotal,
+            truncated: false,
+          },
+          workerEvents: {
+            items: publicWorkers,
+            retained: publicWorkers.length,
+            total: raw.workerTotal,
+            truncated: false,
+          },
+        },
+        page,
+        poll,
+        range,
+        reader,
+        rejectionCounts,
+        resolutionRegressionObserved,
+        scrollProof,
+        sharpTarget,
+        visiblePages: [...raw.visiblePages],
+      },
+    };
+  } catch {
+    return { bound: false, value: null };
+  }
+}
+
 function sanitizeAppMatrixRuntimeTiming(row) {
   const raw = row.completedSnapshot;
   if (!raw || !row.scenario) return null;
   const startedAt = row.scenario.startedAt;
   const finishedAt = row.scenario.finishedAt;
-  const bounded = Number.isFinite(startedAt) && Number.isFinite(finishedAt) &&
-    finishedAt >= startedAt;
+  const bounded = appMatrixRuntimeSafeNumber(startedAt) && startedAt >= 0 &&
+    appMatrixRuntimeSafeNumber(finishedAt) && finishedAt >= startedAt &&
+    appMatrixRuntimeSafeNumber(finishedAt - startedAt);
+  const windowDuration = bounded ? finishedAt - startedAt : null;
+  const relativeOffset = (value) => bounded &&
+      appMatrixRuntimeSafeNumber(value) && value >= startedAt &&
+      value <= finishedAt && appMatrixRuntimeSafeNumber(value - startedAt)
+    ? value - startedAt
+    : null;
+  const phaseOffset = (value) => bounded &&
+      appMatrixRuntimeSafeNumber(value) && value >= 0 &&
+      value <= finishedAt && appMatrixRuntimeSafeNumber(value - startedAt)
+    ? value - startedAt
+    : null;
+  const clippedOffset = (value) => bounded && appMatrixRuntimeSafeNumber(value)
+    ? Math.min(windowDuration, Math.max(0, value - startedAt))
+    : null;
+  const safeSum = (left, right) =>
+    appMatrixRuntimeSafeNumber(left) && appMatrixRuntimeSafeNumber(right) &&
+      appMatrixRuntimeSafeNumber(left + right)
+      ? left + right
+      : null;
   const drawHooks = Array.isArray(raw.drawHookTimings)
     ? raw.drawHookTimings.slice(0, 64).map((timing) => ({
-        blockLookupMs: Number.isFinite(timing?.blockLookupCompletedAt)
-          ? timing.blockLookupCompletedAt - startedAt
-          : null,
+        blockLookupMs: relativeOffset(timing?.blockLookupCompletedAt),
         drawInvocationId: appMatrixRuntimeInteger(timing?.drawInvocationId, 1),
-        enteredMs: Number.isFinite(timing?.hookEnteredAt)
-          ? timing.hookEnteredAt - startedAt
-          : null,
-        nativeEndedMs: Number.isFinite(timing?.nativeDrawCompletedAt)
-          ? timing.nativeDrawCompletedAt - startedAt
-          : null,
-        nativeStartedMs: Number.isFinite(timing?.nativeDrawStartedAt)
-          ? timing.nativeDrawStartedAt - startedAt
-          : null,
+        enteredMs: relativeOffset(timing?.hookEnteredAt),
+        nativeEndedMs: relativeOffset(timing?.nativeDrawCompletedAt),
+        nativeStartedMs: relativeOffset(timing?.nativeDrawStartedAt),
         page: appMatrixRuntimeInteger(timing?.page, 1),
-        readerLookupMs: Number.isFinite(timing?.readerLookupCompletedAt)
-          ? timing.readerLookupCompletedAt - startedAt
-          : null,
-        readerRectMs: Number.isFinite(timing?.readerRectCompletedAt)
-          ? timing.readerRectCompletedAt - startedAt
-          : null,
-        blockRectMs: Number.isFinite(timing?.blockRectCompletedAt)
-          ? timing.blockRectCompletedAt - startedAt
-          : null,
-        settledMs: Number.isFinite(timing?.microtaskRecordedAt)
-          ? timing.microtaskRecordedAt - startedAt
-          : null,
+        readerLookupMs: relativeOffset(timing?.readerLookupCompletedAt),
+        readerRectMs: relativeOffset(timing?.readerRectCompletedAt),
+        blockRectMs: relativeOffset(timing?.blockRectCompletedAt),
+        settledMs: relativeOffset(timing?.microtaskRecordedAt),
         threw: timing?.nativeDrawThrew === true,
-        visibleQueryEndedMs: Number.isFinite(timing?.visiblePagesCompletedAt)
-          ? timing.visiblePagesCompletedAt - startedAt
-          : null,
-        visibleQueryStartedMs: Number.isFinite(timing?.visiblePagesStartedAt)
-          ? timing.visiblePagesStartedAt - startedAt
-          : null,
+        visibleQueryEndedMs: relativeOffset(timing?.visiblePagesCompletedAt),
+        visibleQueryStartedMs: relativeOffset(timing?.visiblePagesStartedAt),
       })).sort((left, right) =>
         Number(left.drawInvocationId) - Number(right.drawInvocationId)
       )
@@ -5227,15 +7401,9 @@ function sanitizeAppMatrixRuntimeTiming(row) {
   const samplers = Array.isArray(raw.samplerTimings)
     ? raw.samplerTimings.slice(0, 64).map((timing) => ({
         blockCount: appMatrixRuntimeInteger(timing?.blockCount),
-        endedMs: Number.isFinite(timing?.endedAt)
-          ? timing.endedAt - startedAt
-          : null,
-        readerRectMs: Number.isFinite(timing?.readerRectCompletedAt)
-          ? timing.readerRectCompletedAt - startedAt
-          : null,
-        startedMs: Number.isFinite(timing?.sampleStartedAt)
-          ? timing.sampleStartedAt - startedAt
-          : null,
+        endedMs: relativeOffset(timing?.endedAt),
+        readerRectMs: relativeOffset(timing?.readerRectCompletedAt),
+        startedMs: relativeOffset(timing?.sampleStartedAt),
       }))
     : [];
   const workerMessages = Array.isArray(raw.workerMessageTimings)
@@ -5243,12 +7411,8 @@ function sanitizeAppMatrixRuntimeTiming(row) {
         activityId: appMatrixRuntimeInteger(timing?.activityId, 1),
         eventId: appMatrixRuntimeInteger(timing?.eventId, 1),
         page: appMatrixRuntimeInteger(timing?.pageNumber, 1),
-        receivedMs: Number.isFinite(timing?.messageReceivedAt)
-          ? timing.messageReceivedAt - startedAt
-          : null,
-        settledMs: Number.isFinite(timing?.messageSettledAt)
-          ? timing.messageSettledAt - startedAt
-          : null,
+        receivedMs: relativeOffset(timing?.messageReceivedAt),
+        settledMs: relativeOffset(timing?.messageSettledAt),
         type: ["render", "bitmap", "page", "progress", "complete", "error"]
           .includes(timing?.type) ? timing.type : "other",
       }))
@@ -5258,9 +7422,11 @@ function sanitizeAppMatrixRuntimeTiming(row) {
     : null;
   const phases = rawPhaseMarkers
     ? rawPhaseMarkers.slice(0, 48).map((marker) => ({
-        atMs: Number.isFinite(marker?.at) ? marker.at - startedAt : null,
+        atMs: phaseOffset(marker?.at),
         sequence: appMatrixRuntimeInteger(marker?.sequence, 1),
-        stage: marker?.stage ?? null,
+        stage: APP_MATRIX_RUNTIME_DIAGNOSTIC_STAGES.includes(marker?.stage)
+          ? marker.stage
+          : marker?.stage == null ? null : "invalid",
       }))
     : [];
   const expectedPhaseStages = row.stageHistory.filter((stage) =>
@@ -5274,11 +7440,11 @@ function sanitizeAppMatrixRuntimeTiming(row) {
     phases.every((phase, index) =>
       phase.stage === expectedPhaseStages[index] &&
       rawPhaseMarkers[index]?.configurationId === row.configurationId &&
-      Number.isInteger(rawPhaseMarkers[index]?.activityId) &&
+      Number.isSafeInteger(rawPhaseMarkers[index]?.activityId) &&
       rawPhaseMarkers[index].activityId >= 0 &&
-      Number.isInteger(rawPhaseMarkers[index]?.drawInvocationId) &&
+      Number.isSafeInteger(rawPhaseMarkers[index]?.drawInvocationId) &&
       rawPhaseMarkers[index].drawInvocationId >= 0 &&
-      Number.isInteger(rawPhaseMarkers[index]?.workerEventId) &&
+      Number.isSafeInteger(rawPhaseMarkers[index]?.workerEventId) &&
       rawPhaseMarkers[index].workerEventId >= 0 &&
       Number.isInteger(phase.sequence) &&
       Number.isFinite(phase.atMs) &&
@@ -5302,7 +7468,7 @@ function sanitizeAppMatrixRuntimeTiming(row) {
   const longTasks = Array.isArray(raw.longTasks)
     ? raw.longTasks.map((task) => {
         const taskStart = task?.startTime;
-        const taskEnd = Number(task?.startTime) + Number(task?.duration);
+        const taskEnd = safeSum(task?.startTime, task?.duration);
         const longDrawRect = drawHooks.some((hook) =>
           intervalOverlaps(
             taskStart,
@@ -5341,8 +7507,8 @@ function sanitizeAppMatrixRuntimeTiming(row) {
           ...(longNativeDraw ? ["browser-native-draw"] : []),
           ...(workerEnvelope ? ["worker-message-dispatch"] : []),
         ];
-        const taskStartMs = taskStart - startedAt;
-        const taskEndMs = taskEnd - startedAt;
+        const taskStartMs = clippedOffset(taskStart);
+        const taskEndMs = clippedOffset(taskEnd);
         const attributionItems = Array.isArray(task?.attribution)
           ? task.attribution.map((item) => ({
               containerIdPresent: item?.containerIdPresent === true,
@@ -5394,24 +7560,24 @@ function sanitizeAppMatrixRuntimeTiming(row) {
   ]);
   const longAnimationFrameResults = (rawLongAnimationFrames ?? []).map(
     (frame) => {
-      const frameStart = Number(frame?.startTime);
-      const frameDuration = Number(frame?.duration);
-      const frameEnd = frameStart + frameDuration;
-      const blockingDuration = Number(frame?.blockingDuration);
-      const renderStart = Number(frame?.renderStart);
-      const styleAndLayoutStart = Number(frame?.styleAndLayoutStart);
+      const frameStart = frame?.startTime;
+      const frameDuration = frame?.duration;
+      const frameEnd = safeSum(frameStart, frameDuration);
+      const blockingDuration = frame?.blockingDuration;
+      const renderStart = frame?.renderStart;
+      const styleAndLayoutStart = frame?.styleAndLayoutStart;
       const rawScripts = Array.isArray(frame?.scripts) ? frame.scripts : null;
       const scripts = (rawScripts ?? []).map((script) => {
-        const scriptStart = Number(script?.startTime);
-        const scriptDuration = Number(script?.duration);
-        const scriptEnd = scriptStart + scriptDuration;
-        const executionStart = Number(script?.executionStart);
+        const scriptStart = script?.startTime;
+        const scriptDuration = script?.duration;
+        const scriptEnd = safeSum(scriptStart, scriptDuration);
+        const executionStart = script?.executionStart;
         return {
           duration: appMatrixRuntimeNumber(script?.duration),
-          endMs: scriptEnd - startedAt,
+          endMs: clippedOffset(scriptEnd),
           executionStartMs: executionStart === 0
             ? null
-            : executionStart - startedAt,
+            : clippedOffset(executionStart),
           forcedStyleAndLayoutDuration: appMatrixRuntimeNumber(
             script?.forcedStyleAndLayoutDuration,
           ),
@@ -5425,32 +7591,39 @@ function sanitizeAppMatrixRuntimeTiming(row) {
           sourceUrlClass: longAnimationFrameSourceClasses.has(
             script?.sourceUrlClass,
           ) ? script.sourceUrlClass : "invalid",
-          startMs: scriptStart - startedAt,
+          startMs: clippedOffset(scriptStart),
         };
       });
       const scriptsBound = rawScripts !== null &&
-        Number.isInteger(frame?.scriptCount) && frame.scriptCount >= 0 &&
+        Number.isSafeInteger(frame?.scriptCount) && frame.scriptCount >= 0 &&
         frame.scriptCount === rawScripts.length &&
         rawScripts.length <= APP_MATRIX_RUNTIME_LOAF_SCRIPT_LIMIT &&
         frame?.scriptsTruncated === false &&
         scripts.every((script, index) =>
-          Number.isFinite(rawScripts[index]?.startTime) &&
-          Number.isFinite(rawScripts[index]?.duration) &&
-          Number.isFinite(rawScripts[index]?.executionStart) &&
-          Number.isFinite(
+          appMatrixRuntimeSafeNumber(rawScripts[index]?.startTime) &&
+          appMatrixRuntimeSafeNumber(rawScripts[index]?.duration) &&
+          appMatrixRuntimeSafeNumber(rawScripts[index]?.executionStart) &&
+          appMatrixRuntimeSafeNumber(
             rawScripts[index]?.forcedStyleAndLayoutDuration,
           ) &&
-          Number.isFinite(rawScripts[index]?.pauseDuration) &&
+          appMatrixRuntimeSafeNumber(rawScripts[index]?.pauseDuration) &&
           Number.isFinite(script.startMs) && Number.isFinite(script.endMs) &&
           Number.isFinite(script.duration) && script.duration >= 0 &&
           script.endMs >= script.startMs &&
-          script.startMs >= frameStart - startedAt &&
-          script.endMs <= frameEnd - startedAt + 1e-7 &&
-          (script.executionStartMs === null || (
-            Number.isFinite(script.executionStartMs) &&
-            script.executionStartMs >= script.startMs &&
-            script.executionStartMs <= script.endMs
-          )) &&
+          rawScripts[index].startTime >= frameStart &&
+          safeSum(
+            rawScripts[index].startTime,
+            rawScripts[index].duration,
+          ) <= frameEnd &&
+          (rawScripts[index].executionStart === 0
+            ? script.executionStartMs === null
+            : Number.isFinite(script.executionStartMs) &&
+              rawScripts[index].executionStart >=
+                rawScripts[index].startTime &&
+              rawScripts[index].executionStart <= safeSum(
+                rawScripts[index].startTime,
+                rawScripts[index].duration,
+              )) &&
           Number.isFinite(script.forcedStyleAndLayoutDuration) &&
           script.forcedStyleAndLayoutDuration >= 0 &&
           script.forcedStyleAndLayoutDuration <= script.duration &&
@@ -5461,9 +7634,11 @@ function sanitizeAppMatrixRuntimeTiming(row) {
           script.sourceUrlClass !== "invalid" &&
           (index === 0 || script.startMs >= scripts[index - 1].startMs)
         );
-      const pauseDuration = Number(frame?.pauseDuration);
+      const pauseDuration = frame?.pauseDuration;
       const scriptPauseDuration = scripts.reduce(
-        (total, script) => total + Number(script.pauseDuration),
+        (total, script) => total === null
+          ? null
+          : safeSum(total, script.pauseDuration),
         0,
       );
       const noRendering = renderStart === 0 && styleAndLayoutStart === 0;
@@ -5477,75 +7652,71 @@ function sanitizeAppMatrixRuntimeTiming(row) {
       const publicFrame = {
         blockingDuration: appMatrixRuntimeNumber(frame?.blockingDuration),
         duration: appMatrixRuntimeNumber(frame?.duration),
-        endMs: frameEnd - startedAt,
+        endMs: clippedOffset(frameEnd),
         overlaps: {
           drawHooks: drawHooks.flatMap((hook, index) =>
             intervalOverlaps(
-              frameStart - startedAt,
-              frameEnd - startedAt,
+              clippedOffset(frameStart),
+              clippedOffset(frameEnd),
               hook.enteredMs,
               hook.threw ? hook.nativeEndedMs : hook.settledMs,
             ) ? [index] : []
           ),
           longTasks: longTasks.flatMap((task, index) =>
             intervalOverlaps(
-              frameStart - startedAt,
-              frameEnd - startedAt,
+              clippedOffset(frameStart),
+              clippedOffset(frameEnd),
               task.startMs,
               task.endMs,
             ) ? [index] : []
           ),
           samplers: samplers.flatMap((sample, index) =>
             intervalOverlaps(
-              frameStart - startedAt,
-              frameEnd - startedAt,
+              clippedOffset(frameStart),
+              clippedOffset(frameEnd),
               sample.startedMs,
               sample.endedMs,
             ) ? [index] : []
           ),
           workerMessages: workerMessages.flatMap((message, index) =>
             intervalOverlaps(
-              frameStart - startedAt,
-              frameEnd - startedAt,
+              clippedOffset(frameStart),
+              clippedOffset(frameEnd),
               message.receivedMs,
               message.settledMs,
             ) ? [index] : []
           ),
         },
         pauseDuration: appMatrixRuntimeNumber(frame?.pauseDuration),
-        phaseAtEnd: phaseAt(frameEnd - startedAt),
-        phaseAtStart: phaseAt(frameStart - startedAt),
-        renderStartMs: renderStart === 0 ? null : renderStart - startedAt,
+        phaseAtEnd: phaseAt(clippedOffset(frameEnd)),
+        phaseAtStart: phaseAt(clippedOffset(frameStart)),
+        renderStartMs: renderStart === 0 ? null : clippedOffset(renderStart),
         scripts: {
           items: scripts,
           retained: scripts.length,
           total: appMatrixRuntimeInteger(frame?.scriptCount),
           truncated: frame?.scriptsTruncated === true,
         },
-        startMs: frameStart - startedAt,
+        startMs: clippedOffset(frameStart),
         styleAndLayoutStartMs: styleAndLayoutStart === 0
           ? null
-          : styleAndLayoutStart - startedAt,
+          : clippedOffset(styleAndLayoutStart),
       };
-      const valid = Number.isFinite(frame?.startTime) &&
-        Number.isFinite(frame?.duration) &&
-        Number.isFinite(frame?.blockingDuration) &&
-        Number.isFinite(frame?.renderStart) &&
-        Number.isFinite(frame?.styleAndLayoutStart) &&
-        Number.isFinite(frame?.pauseDuration) &&
-        Number.isFinite(frameStart) &&
-        Number.isFinite(frameDuration) && frameDuration >= 50 &&
-        Number.isFinite(frameEnd) &&
-        Number.isFinite(blockingDuration) && blockingDuration >= 0 &&
+      const valid = appMatrixRuntimeSafeNumber(frameStart) &&
+        appMatrixRuntimeSafeNumber(frameDuration) && frameDuration >= 50 &&
+        appMatrixRuntimeSafeNumber(frameEnd) &&
+        appMatrixRuntimeSafeNumber(blockingDuration) && blockingDuration >= 0 &&
         blockingDuration <= frameDuration &&
-        Number.isFinite(renderStart) && renderStart >= 0 &&
-        Number.isFinite(styleAndLayoutStart) && styleAndLayoutStart >= 0 &&
+        appMatrixRuntimeSafeNumber(renderStart) && renderStart >= 0 &&
+        appMatrixRuntimeSafeNumber(styleAndLayoutStart) &&
+        styleAndLayoutStart >= 0 &&
         renderingBound && scriptsBound &&
-        Number.isFinite(pauseDuration) && pauseDuration >= 0 &&
+        appMatrixRuntimeSafeNumber(pauseDuration) && pauseDuration >= 0 &&
         pauseDuration <= frameDuration &&
+        appMatrixRuntimeSafeNumber(scriptPauseDuration) &&
         Math.abs(pauseDuration - scriptPauseDuration) <= 1e-7 &&
         frameStart < finishedAt && frameEnd > startedAt &&
-        frameEnd <= finishedAt + 1e-7;
+        frameEnd <= finishedAt;
       return { publicFrame, valid };
     },
   );
@@ -5555,7 +7726,7 @@ function sanitizeAppMatrixRuntimeTiming(row) {
   const longAnimationFrameTotal = appMatrixRuntimeInteger(
     raw.longAnimationFrameCount,
   );
-  const longAnimationFrameTruncated = Number.isInteger(
+  const longAnimationFrameTruncated = Number.isSafeInteger(
     raw.longAnimationFrameCount,
   ) && raw.longAnimationFrameCount > longAnimationFrameItems.length;
   const longAnimationFrameAvailability =
@@ -5565,7 +7736,7 @@ function sanitizeAppMatrixRuntimeTiming(row) {
         ? "unavailable"
         : "invalid";
   const longAnimationFramesBound = rawLongAnimationFrames !== null &&
-    Number.isInteger(raw.longAnimationFrameCount) &&
+    Number.isSafeInteger(raw.longAnimationFrameCount) &&
     raw.longAnimationFrameCount >= 0 &&
     rawLongAnimationFrames.length <= APP_MATRIX_RUNTIME_LOAF_LIMIT &&
     raw.longAnimationFrameCount === rawLongAnimationFrames.length &&
@@ -5620,8 +7791,8 @@ function sanitizeAppMatrixRuntimeTiming(row) {
         raw.samplerTimings[index - 1].sampleStartedAt
     ) &&
     raw.workerMessageTimings.every((timing, index) =>
-      Number.isInteger(timing?.activityId) && timing.activityId > 0 &&
-      Number.isInteger(timing?.eventId) && timing.eventId > 0 &&
+      Number.isSafeInteger(timing?.activityId) && timing.activityId > 0 &&
+      Number.isSafeInteger(timing?.eventId) && timing.eventId > 0 &&
       (index === 0 || (
         timing.activityId >
           raw.workerMessageTimings[index - 1].activityId &&
@@ -5630,10 +7801,15 @@ function sanitizeAppMatrixRuntimeTiming(row) {
           raw.workerMessageTimings[index - 1].messageReceivedAt
       ))
     ) &&
-    raw.longTasks.every((task, index) =>
-      index === 0 || Number(task?.startTime) >=
-        Number(raw.longTasks[index - 1]?.startTime)
-    );
+    raw.longTasks.every((task, index) => {
+      const end = safeSum(task?.startTime, task?.duration);
+      return appMatrixRuntimeSafeNumber(task?.startTime) &&
+        appMatrixRuntimeSafeNumber(task?.duration) && task.duration >= 50 &&
+        appMatrixRuntimeSafeNumber(end) && end > startedAt &&
+        task.startTime < finishedAt && end <= finishedAt &&
+        (index === 0 || task.startTime >=
+          raw.longTasks[index - 1].startTime);
+    });
   const timingArraysPresent = Array.isArray(raw.drawHookTimings) &&
     Array.isArray(raw.samplerTimings) &&
     Array.isArray(raw.workerMessageTimings) &&
@@ -5641,9 +7817,12 @@ function sanitizeAppMatrixRuntimeTiming(row) {
     Array.isArray(raw.phaseMarkers);
   const integrity = bounded && timingArraysPresent && phaseBound &&
     longAnimationFramesBound &&
-    Number.isInteger(raw.drawHookTimingCount) && raw.drawHookTimingCount >= 0 &&
-    Number.isInteger(raw.samplerTimingCount) && raw.samplerTimingCount >= 0 &&
-    Number.isInteger(raw.workerMessageTimingCount) && raw.workerMessageTimingCount >= 0 &&
+    Number.isSafeInteger(raw.drawHookTimingCount) &&
+    raw.drawHookTimingCount >= 0 &&
+    Number.isSafeInteger(raw.samplerTimingCount) &&
+    raw.samplerTimingCount >= 0 &&
+    Number.isSafeInteger(raw.workerMessageTimingCount) &&
+    raw.workerMessageTimingCount >= 0 &&
     raw.drawHookTimings?.length <= 64 && raw.samplerTimings?.length <= 64 &&
     raw.workerMessageTimings?.length <= 64 &&
     raw.drawHookTimingCount === raw.drawHookTimings.length &&
@@ -5657,13 +7836,13 @@ function sanitizeAppMatrixRuntimeTiming(row) {
     drawHooks.every((hook) =>
       hook.enteredMs >= 0 &&
       (hook.threw ? hook.nativeEndedMs : hook.settledMs) <=
-        finishedAt - startedAt
+        windowDuration
     ) &&
     samplers.every((sample) =>
-      sample.startedMs >= 0 && sample.endedMs <= finishedAt - startedAt
+      sample.startedMs >= 0 && sample.endedMs <= windowDuration
     ) &&
     workerMessages.every((message) =>
-      message.receivedMs >= 0 && message.settledMs <= finishedAt - startedAt
+      message.receivedMs >= 0 && message.settledMs <= windowDuration
     ) &&
     drawHooks.every((hook) =>
       Number.isInteger(hook.drawInvocationId) && Number.isInteger(hook.page)
@@ -5686,7 +7865,7 @@ function sanitizeAppMatrixRuntimeTiming(row) {
       Number.isFinite(task.startMs) && Number.isFinite(task.endMs) &&
       Number.isFinite(task.duration) && task.duration >= 50 &&
       task.endMs >= task.startMs && task.attribution.truncated === false
-      && task.startMs >= 0 && task.endMs <= finishedAt - startedAt + 1
+      && task.startMs >= 0 && task.endMs <= windowDuration
       && task.attribution.total === task.attribution.retained
       && task.attribution.total <= 4
       && typeof task.phaseAtStart === "string"
@@ -6895,11 +9074,20 @@ const APP_MATRIX_ROW_IDENTITY_REASON_KEYS = [
   "aggregate",
   "configuration",
   "modelDocument",
+  "modelEvent",
   "modelJob",
   "modelRevision",
+  "modelShape",
+  "modelWorker",
+  "networkFixedPoint",
+  "previewDiagnostic",
+  "priorityProbe",
   "priorityTarget",
+  "scenario",
+  "screenshot",
   "sequence",
   "session",
+  "sourceObservation",
 ].sort();
 const APP_MATRIX_NETWORK_HISTORY_REASON_KEYS = [
   "aggregate",
@@ -6950,6 +9138,162 @@ export function isAppMatrixRuntimeIntegrityReasonsValid(
     (value.networkHistory.required
       ? value.networkHistory.aggregate === historyChecksBound
       : historyChecksBound && value.networkHistory.aggregate === true);
+}
+
+function isExactAppMatrixSourceObservation(value) {
+  return appMatrixRuntimeExactObject(
+    value,
+    ["bytes", "selectionCount", "sha256"],
+  ) && value.selectionCount === 1 &&
+    value.bytes === PUBLIC_PDF_FIXTURE_BYTES &&
+    value.sha256 === PUBLIC_PDF_FIXTURE_SHA256;
+}
+
+function isExactAppMatrixScenarioStart(value, configurationId) {
+  return appMatrixRuntimeExactObject(value, [
+    "drawStart",
+    "id",
+    "maximumCanvasCount",
+    "maximumCanvasPixels",
+    "maximumCountFrame",
+    "maximumPixelsFrame",
+    "sampleStart",
+    "startedAt",
+    "workerEventStart",
+  ]) && value.id === configurationId &&
+    Number.isSafeInteger(value.drawStart) && value.drawStart >= 0 &&
+    value.maximumCanvasCount === 0 && value.maximumCanvasPixels === 0 &&
+    value.maximumCountFrame === null && value.maximumPixelsFrame === null &&
+    Number.isSafeInteger(value.sampleStart) && value.sampleStart >= 0 &&
+    appMatrixRuntimeSafeNumber(value.startedAt) && value.startedAt >= 0 &&
+    Number.isSafeInteger(value.workerEventStart) && value.workerEventStart >= 0;
+}
+
+function isExactAppMatrixScenarioPageSequence(value) {
+  return Array.isArray(value) && value.length <= 6 && value.every(
+    (page, index) => Number.isSafeInteger(page) && page >= 1 && page <= 6 &&
+      (index === 0 || page > value[index - 1]),
+  );
+}
+
+function isExactAppMatrixScenarioMaximumFrame(
+  value,
+  { finishedAt, maximumCanvasCount, maximumCanvasPixels, startedAt },
+) {
+  if (!appMatrixRuntimeExactObject(value, [
+    "at",
+    "composedCount",
+    "composedPages",
+    "composedPixels",
+    "geometryVisiblePages",
+    "readerViewport",
+    "visiblePages",
+  ]) || !appMatrixRuntimeSafeNumber(value.at) ||
+    value.at < startedAt || value.at > finishedAt ||
+    !Number.isSafeInteger(value.composedCount) || value.composedCount <= 0 ||
+    value.composedCount > maximumCanvasCount ||
+    !Number.isSafeInteger(value.composedPixels) || value.composedPixels <= 0 ||
+    value.composedPixels > maximumCanvasPixels ||
+    !Array.isArray(value.composedPages) ||
+    value.composedPages.length !== value.composedCount ||
+    !isExactAppMatrixScenarioPageSequence(value.geometryVisiblePages) ||
+    !isExactAppMatrixScenarioPageSequence(value.visiblePages) ||
+    !(value.readerViewport === null ||
+      sanitizeAppMatrixRuntimeRectangle(value.readerViewport) !== null)) {
+    return false;
+  }
+  let pixelTotal = 0;
+  const composedPageNumbers = [];
+  for (const page of value.composedPages) {
+    if (!appMatrixRuntimeExactObject(page, [
+      "geometry",
+      "geometryVisible",
+      "height",
+      "page",
+      "pixels",
+      "visible",
+      "width",
+    ]) || !Number.isSafeInteger(page.page) || page.page < 1 || page.page > 6 ||
+      composedPageNumbers.includes(page.page) ||
+      !Number.isSafeInteger(page.width) || page.width <= 0 ||
+      !Number.isSafeInteger(page.height) || page.height <= 0 ||
+      !Number.isSafeInteger(page.pixels) || page.pixels <= 0 ||
+      page.width * page.height !== page.pixels ||
+      sanitizeAppMatrixRuntimeRectangle(page.geometry) === null ||
+      typeof page.geometryVisible !== "boolean" ||
+      typeof page.visible !== "boolean" ||
+      page.geometryVisible !== value.geometryVisiblePages.includes(page.page) ||
+      page.visible !== value.visiblePages.includes(page.page)) {
+      return false;
+    }
+    composedPageNumbers.push(page.page);
+    pixelTotal += page.pixels;
+    if (!Number.isSafeInteger(pixelTotal)) return false;
+  }
+  return composedPageNumbers.every(
+    (page, index) => index === 0 || page > composedPageNumbers[index - 1],
+  ) && pixelTotal === value.composedPixels;
+}
+
+function isExactAppMatrixFinalizedScenario(value, configurationId) {
+  if (!appMatrixRuntimeExactObject(value, [
+    "drawEnd",
+    "drawStart",
+    "finishedAt",
+    "id",
+    "maximumCanvasCount",
+    "maximumCanvasPixels",
+    "maximumCountFrame",
+    "maximumPixelsFrame",
+    "sampleEnd",
+    "sampleStart",
+    "startedAt",
+    "workerEventEnd",
+    "workerEventStart",
+  ]) || value.id !== configurationId ||
+    !Number.isSafeInteger(value.drawStart) || value.drawStart < 0 ||
+    !Number.isSafeInteger(value.drawEnd) || value.drawEnd < value.drawStart ||
+    !Number.isSafeInteger(value.sampleStart) || value.sampleStart < 0 ||
+    !Number.isSafeInteger(value.sampleEnd) || value.sampleEnd < value.sampleStart ||
+    !Number.isSafeInteger(value.workerEventStart) || value.workerEventStart < 0 ||
+    !Number.isSafeInteger(value.workerEventEnd) ||
+    value.workerEventEnd < value.workerEventStart ||
+    !appMatrixRuntimeSafeNumber(value.startedAt) || value.startedAt < 0 ||
+    !appMatrixRuntimeSafeNumber(value.finishedAt) ||
+    value.finishedAt < value.startedAt ||
+    !Number.isSafeInteger(value.maximumCanvasCount) ||
+    value.maximumCanvasCount < 0 || value.maximumCanvasCount > 6 ||
+    !Number.isSafeInteger(value.maximumCanvasPixels) ||
+    value.maximumCanvasPixels < 0 ||
+    (value.maximumCanvasCount === 0) !== (value.maximumCanvasPixels === 0)) {
+    return false;
+  }
+  if (value.maximumCanvasCount === 0) {
+    return value.maximumCountFrame === null &&
+      value.maximumPixelsFrame === null;
+  }
+  const frameWindow = {
+    finishedAt: value.finishedAt,
+    maximumCanvasCount: value.maximumCanvasCount,
+    maximumCanvasPixels: value.maximumCanvasPixels,
+    startedAt: value.startedAt,
+  };
+  return isExactAppMatrixScenarioMaximumFrame(
+    value.maximumCountFrame,
+    frameWindow,
+  ) && value.maximumCountFrame.composedCount === value.maximumCanvasCount &&
+    isExactAppMatrixScenarioMaximumFrame(
+      value.maximumPixelsFrame,
+      frameWindow,
+    ) && value.maximumPixelsFrame.composedPixels === value.maximumCanvasPixels;
+}
+
+function appMatrixFieldLifecycle({
+  boundaryReached,
+  exact,
+  raw,
+}) {
+  return boundaryReached ? exact(raw) : raw === null;
 }
 
 export function buildAppMatrixRuntimeDiagnosticReport({
@@ -7004,10 +9348,15 @@ export function buildAppMatrixRuntimeDiagnosticReport({
     const expectedScreenshotPath = outputIsExternal && screenshotName
       ? path.relative(REPOSITORY_ROOT, path.join(outputDirectory, screenshotName))
       : null;
-    const screenshotExpected = stageHistory.includes("screenshot-completed");
+    const reached = (stage) => stageHistory.includes(stage);
+    const failed = row?.status === "failed";
+    const screenshotExpected = reached("screenshot-completed");
     const screenshotBound = !screenshotExpected
-      ? rawScreenshot == null
-      : rawScreenshot?.path === expectedScreenshotPath &&
+      ? rawScreenshot === null
+      : appMatrixRuntimeExactObject(
+          rawScreenshot,
+          ["bytes", "path", "sha256"],
+        ) && rawScreenshot.path === expectedScreenshotPath &&
         Number.isInteger(rawScreenshot?.bytes) && rawScreenshot.bytes > 0 &&
         SHA256_PATTERN.test(rawScreenshot?.sha256 ?? "");
     const release = sanitizeAppMatrixRuntimeRelease(row?.releaseSnapshot, row);
@@ -7016,7 +9365,7 @@ export function buildAppMatrixRuntimeDiagnosticReport({
       row?.priorityProbe,
       row?.priorityTarget,
     );
-    const networkExpected = stageHistory.includes("network-fixed-point-completed");
+    const networkExpected = reached("network-fixed-point-completed");
     const networkHealthy = networkExpected &&
       row?.networkFixedPoint?.label === expected?.id &&
       isCdpFixedPointDiagnosticHealthy(row.networkFixedPoint) &&
@@ -7073,51 +9422,129 @@ export function buildAppMatrixRuntimeDiagnosticReport({
         }
       : null;
     const expectedAdjacentPage = index < 4 ? 2 : 3;
-    const expectedPriorityTarget = Math.min(6, expectedAdjacentPage + 2);
+    const expectedPriorityTarget = Math.min(
+      6,
+      expectedAdjacentPage + (expected?.kind === "mobile" ? 3 : 2),
+    );
+    const modelExpected = reached("model-completion-completed");
+    const modelBinding = isAppMatrixRuntimeModelBinding(row);
+    const modelNull = row?.modelCompletion === null &&
+      row?.modelIdentity === null;
+    const adjacentExpected = reached("adjacent-selection-completed");
+    const adjacentBound = appMatrixFieldLifecycle({
+      boundaryReached: adjacentExpected,
+      exact: (value) => value === expectedAdjacentPage,
+      raw: row?.adjacentPage,
+    });
+    const sourceExpected = reached("file-select-completed");
+    const sourceObservationBound = appMatrixFieldLifecycle({
+      boundaryReached: sourceExpected,
+      exact: isExactAppMatrixSourceObservation,
+      raw: row?.sourceObservation,
+    });
+    const scenarioExpected = reached("scenario-start-completed");
+    const scenarioStartInProgress = failed &&
+      row?.currentStage === "scenario-start-started";
+    const scenarioStartBound = appMatrixFieldLifecycle({
+      boundaryReached: scenarioExpected,
+      exact: (value) => isExactAppMatrixScenarioStart(
+        value,
+        expected?.id,
+      ),
+      raw: row?.scenarioStart,
+    });
+    const scenarioFinalizedArtifactsBound =
+      row?.scenarioFinalized === true &&
+      row?.finalizationErrorPresent === false &&
+      isExactAppMatrixFinalizedScenario(row?.scenario, expected?.id) &&
+      row?.completedSnapshot && typeof row.completedSnapshot === "object";
+    const scenarioAbsent = row?.scenario === null &&
+      row?.completedSnapshot === null &&
+      row?.scenarioFinalized === false &&
+      row?.finalizationErrorPresent === false;
+    const scenarioArtifactsBound = scenarioExpected
+      ? scenarioStartBound && scenarioFinalizedArtifactsBound &&
+        row.scenario.drawStart === row.scenarioStart.drawStart &&
+        row.scenario.sampleStart === row.scenarioStart.sampleStart &&
+        row.scenario.startedAt === row.scenarioStart.startedAt &&
+        row.scenario.workerEventStart === row.scenarioStart.workerEventStart
+      : scenarioStartInProgress
+        ? scenarioStartBound && (
+            scenarioAbsent || scenarioFinalizedArtifactsBound
+          )
+        : scenarioStartBound && scenarioAbsent;
+    const priorityTargetExpected = reached("alignment-completed");
+    const priorityTargetBound = appMatrixFieldLifecycle({
+      boundaryReached: priorityTargetExpected,
+      exact: (value) => value === expectedPriorityTarget,
+      raw: row?.priorityTarget,
+    });
+    const priorityExpected = reached("priority-composition-completed");
+    const priorityProbeBound = priorityExpected
+      ? row?.priorityProbe !== null && priorityProbe !== null
+      : row?.priorityProbe === null;
+    const networkLifecycleBound = networkExpected
+      ? networkHealthy
+      : row?.networkFixedPoint === null;
+    const previewCompositionFailure = failed &&
+      row?.currentStage === "preview-composition-started";
+    const previewCompositionResult = previewCompositionFailure
+      ? sanitizeAppMatrixRuntimePreviewCompositionDiagnostic(
+          row?.previewCompositionDiagnostic,
+          row,
+        )
+      : {
+          bound: row?.previewCompositionDiagnostic === null,
+          value: null,
+        };
     const rowIdentityReasons = {
-      adjacentPage: row?.adjacentPage === expectedAdjacentPage,
+      adjacentPage: adjacentBound,
       aggregate: false,
       configuration: expected?.id === row?.configurationId,
-      modelDocument:
-        row?.modelCompletion?.documentKey === row?.modelIdentity?.documentKey,
-      modelJob:
-        row?.modelCompletion?.importJobId === row?.modelIdentity?.importJobId,
-      modelRevision:
-        row?.modelCompletion?.revision === row?.modelIdentity?.revision,
-      priorityTarget: row?.priorityTarget === expectedPriorityTarget,
+      modelDocument: modelExpected ? modelBinding : modelNull,
+      modelEvent: modelExpected ? modelBinding : modelNull,
+      modelJob: modelExpected ? modelBinding : modelNull,
+      modelRevision: modelExpected ? modelBinding : modelNull,
+      modelShape: modelExpected ? modelBinding : modelNull,
+      modelWorker: modelExpected ? modelBinding : modelNull,
+      networkFixedPoint: networkLifecycleBound,
+      previewDiagnostic: previewCompositionResult.bound,
+      priorityProbe: priorityProbeBound,
+      priorityTarget: priorityTargetBound,
+      scenario: Boolean(scenarioArtifactsBound),
+      screenshot: screenshotBound,
       sequence: row?.sequence === index + 1,
       session: row?.sessionIdentityHash === sessionIdentityHash,
+      sourceObservation: sourceObservationBound,
     };
     rowIdentityReasons.aggregate = Object.entries(rowIdentityReasons).every(
       ([key, value]) => key === "aggregate" || value === true,
     );
     const rowIdentityBound = rowIdentityReasons.aggregate;
-    const sourceObservationBound =
-      row?.sourceObservation?.selectionCount === 1 &&
-      row?.sourceObservation?.bytes === PUBLIC_PDF_FIXTURE_BYTES &&
-      row?.sourceObservation?.sha256 === PUBLIC_PDF_FIXTURE_SHA256;
-    const failed = row?.status === "failed";
-    const scenarioExpected = stageHistory.includes("scenario-start-completed");
-    const priorityExpected = stageHistory.includes("priority-composition-completed");
-    const failureStep = typeof row?.currentStage === "string" &&
-        row.currentStage.endsWith("-started")
-      ? row.currentStage.slice(0, -"-started".length)
+    const failureStageKnown = APP_MATRIX_RUNTIME_DIAGNOSTIC_STAGES.includes(
+      row?.currentStage,
+    );
+    const failureStageMatch = failureStageKnown
+      ? /^(.*)-(?:started|completed)$/u.exec(row.currentStage)
       : null;
+    const failureStep = failureStageMatch?.[1] ?? null;
     const priorityMountFailure = failed &&
       row?.currentStage === "priority-mount-started";
     const priorityMountResult = priorityMountFailure
-      ? sanitizeAppMatrixRuntimePriorityMountDiagnostic(
-          row?.priorityMountDiagnostic,
-          row,
-        )
+      ? row?.priorityMountDiagnostic === null
+        ? { bound: true, value: null }
+        : sanitizeAppMatrixRuntimePriorityMountDiagnostic(
+            row?.priorityMountDiagnostic,
+            row,
+          )
       : {
-          bound: row?.priorityMountDiagnostic == null,
+          bound: row?.priorityMountDiagnostic === null,
           value: null,
         };
     const failedAtNetworkStage = failed &&
       row?.currentStage === "network-fixed-point-started";
     const networkFailureResult = sanitizeAppMatrixRuntimeNetworkFailure(
-      row?.networkFailure ?? null,
+      row?.networkFailure,
       expected?.id,
       failedAtNetworkStage,
     );
@@ -7175,48 +9602,63 @@ export function buildAppMatrixRuntimeDiagnosticReport({
     );
     const statusBound = failed
       ? exactPrefix && !fullSequence &&
-        stageHistory.length > 0 && Boolean(failureStep) &&
+        stageHistory.length > 0 && failureStageKnown && Boolean(failureStep) &&
         row?.failureStage === row?.currentStage &&
-        stageHistory.at(-1) === row?.currentStage &&
-        (!scenarioExpected || (
-          row?.scenarioFinalized === true &&
-          row?.finalizationErrorPresent === false
-        ))
-      : row?.status === "completed" && fullSequence && !row?.failureStage &&
+        stageHistory.at(-1) === row?.currentStage
+      : row?.status === "completed" && fullSequence &&
+        row?.failureStage === null &&
         row?.currentStage === APP_MATRIX_RUNTIME_DIAGNOSTIC_STAGES.at(-1) &&
         row?.scenarioFinalized === true &&
         row?.finalizationErrorPresent === false;
     const releaseCompleted = stageHistory.includes(
       "release-observation-completed",
     );
-    const releaseContinuationBound = releaseCompleted
+    const releaseStarted = stageHistory.includes(
+      "release-observation-started",
+    );
+    const releaseFailure = failed &&
+      row?.currentStage === "release-observation-started";
+    const releaseLifecycleBound = releaseCompleted
       ? release?.poll?.waitOutcome === "released" &&
-        release?.releasePredicateSatisfied === true
-      : failed && row?.currentStage === "release-observation-started";
+        release?.integrity === true && (
+          release?.snapshotAvailable === true &&
+            release?.releasePredicateSatisfied === true ||
+          release?.snapshotAvailable === false &&
+            release?.classification === "released-snapshot-unavailable"
+        )
+      : releaseFailure
+        ? row?.releaseSnapshot === null
+          ? release === null
+          : release?.integrity === true
+        : !releaseStarted && row?.releaseSnapshot === null && release === null;
     const integrity = Boolean(
       integrityReasonsBound && rowIdentityBound &&
       sourceObservationBound && statusBound &&
       screenshotBound &&
       priorityMountResult.bound &&
-      (scenarioExpected ? timing?.integrity === true : timing === null) &&
-      (priorityExpected ? priorityProbe !== null : priorityProbe === null) &&
+      previewCompositionResult.bound &&
+      (row?.scenarioFinalized === true
+        ? timing?.integrity === true
+        : timing === null) &&
+      priorityProbeBound &&
       (networkExpected
         ? networkHealthy && row?.networkFailure === null
-        : row?.networkFixedPoint == null && networkFailureResult.bound) &&
-      networkHistoryBound &&
-      (stageHistory.includes("release-observation-started")
-        ? release?.integrity === true && releaseContinuationBound
-        : release === null)
+        : row?.networkFixedPoint === null && networkFailureResult.bound) &&
+      networkHistoryBound && releaseLifecycleBound
     );
     return {
       adjacentPage: appMatrixRuntimeInteger(row?.adjacentPage, 1),
       configurationId: expected?.id ?? null,
-      failureCategory: networkFailure?.category ??
-        (failed ? `${failureStep}-failure` : "none"),
+      failureCategory: networkFailure?.category ?? (failed
+        ? failureStep === null
+          ? "unknown-stage-failure"
+          : `${failureStep}-failure`
+        : "none"),
       integrity,
       integrityReasons,
       networkFailure,
       networkFixedPoint,
+      previewCompositionDiagnostic: previewCompositionResult.value,
       priorityMountDiagnostic: priorityMountResult.value,
       priorityProbe,
       priorityTarget: appMatrixRuntimeInteger(row?.priorityTarget, 1),
@@ -7226,7 +9668,7 @@ export function buildAppMatrixRuntimeDiagnosticReport({
         : null,
       sequence: index + 1,
       sessionIdentityHash: rowIdentityBound ? sessionIdentityHash : null,
-      source: sourceObservationBound
+      source: sourceExpected && sourceObservationBound
         ? {
             bytes: row.sourceObservation.bytes,
             selectionCount: 1,
@@ -7345,7 +9787,7 @@ export function buildAppMatrixRuntimeDiagnosticReport({
       rowOrderBound && phaseSequenceBound && runnerFailureBound &&
       !teardownFailed && !runnerFailure,
     diagnostic: true,
-    diagnosticSchemaVersion: 7,
+    diagnosticSchemaVersion: 8,
     execution: {
       attemptedConfigurationCount: publicRows.length,
       completedConfigurationCount,
@@ -8630,6 +11072,9 @@ const INSTRUMENTATION_SOURCE = String.raw`
     workerMessageTimings: []
   };
   let currentScenario = null;
+  const scenarioFinalizationCache = (
+    ${createAppMatrixScenarioFinalizationCache.toString()}
+  )();
   let currentPriorityProbe = null;
   let failNextFallback = null;
   let fallbackProofIdentity = null;
@@ -9238,6 +11683,7 @@ const INSTRUMENTATION_SOURCE = String.raw`
       const blockRectCompletedAt = runtimeDiagnosticsEnabled
         ? performance.now()
         : null;
+      const canvasRect = destination.getBoundingClientRect();
       const readerRect = reader?.getBoundingClientRect() ?? null;
       const readerRectCompletedAt = runtimeDiagnosticsEnabled
         ? performance.now()
@@ -9245,12 +11691,12 @@ const INSTRUMENTATION_SOURCE = String.raw`
       const geometryCompletedAt = runtimeDiagnosticsEnabled
         ? performance.now()
         : null;
-      const geometry = blockRect
+      const geometry = canvasRect
         ? {
-            bottom: blockRect.bottom,
-            left: blockRect.left,
-            right: blockRect.right,
-            top: blockRect.top
+            bottom: canvasRect.bottom,
+            left: canvasRect.left,
+            right: canvasRect.right,
+            top: canvasRect.top
           }
         : null;
       const readerViewport = readerRect
@@ -9282,11 +11728,11 @@ const INSTRUMENTATION_SOURCE = String.raw`
         drawInvocationId: ++drawInvocationSequence,
         geometry,
         geometryVisible: Boolean(
-          blockRect && readerRect &&
-          blockRect.bottom > readerRect.top &&
-          blockRect.top < readerRect.bottom &&
-          blockRect.right > readerRect.left &&
-          blockRect.left < readerRect.right
+          canvasRect && readerRect &&
+          canvasRect.bottom > readerRect.top &&
+          canvasRect.top < readerRect.bottom &&
+          canvasRect.right > readerRect.left &&
+          canvasRect.left < readerRect.right
         ),
         height: destination.height,
         page: Number(block?.dataset.pdfPageIndex || -1) + 1,
@@ -9575,6 +12021,7 @@ const INSTRUMENTATION_SOURCE = String.raw`
       state.workerMessageTimingCount = 0;
       state.workerMessageTimings.length = 0;
     }
+    scenarioFinalizationCache.begin();
     const scenario = {
       id,
       drawStart: state.draws.length,
@@ -9590,19 +12037,25 @@ const INSTRUMENTATION_SOURCE = String.raw`
     currentScenario = scenario;
     return structuredClone(scenario);
   };
-  state.finishScenario = () => {
+  const finalizeCurrentScenario = () => {
     if (!currentScenario) return null;
-    currentScenario.finishedAt = performance.now();
+    if (currentScenario.finishedAt !== undefined) {
+      throw new Error('The current scenario finalization already failed.');
+    }
     if (runtimeDiagnosticsEnabled) {
       drainLongAnimationFrames();
     }
     drainLongTasks();
+    currentScenario.finishedAt = performance.now();
     currentScenario.drawEnd = state.draws.length;
     currentScenario.sampleEnd = state.samples.length;
     currentScenario.workerEventEnd = workerEvents.length;
-    const result = structuredClone(currentScenario);
-    currentScenario = null;
-    return result;
+    return structuredClone(currentScenario);
+  };
+  state.finishScenario = () => {
+    const scenario = finalizeCurrentScenario();
+    if (scenario) currentScenario = null;
+    return scenario;
   };
   state.beginPriorityScroll = (targetPage) => {
     const latestImport = latestValidatedPdfImport();
@@ -9906,9 +12359,18 @@ const INSTRUMENTATION_SOURCE = String.raw`
     state.phaseMarkers.push(marker);
     return structuredClone(marker);
   };
-  state.snapshot = () => {
-    if (runtimeDiagnosticsEnabled) drainLongAnimationFrames();
-    drainLongTasks();
+  state.readMatrixRuntimeBoundary = () => ({
+    activityId: activitySequence,
+    at: performance.now(),
+    drawCount: state.draws.length,
+    drawInvocationId: drawInvocationSequence,
+    workerEventId: workerEvents.length
+  });
+  const captureSnapshot = (drainObservers = true) => {
+    if (drainObservers) {
+      if (runtimeDiagnosticsEnabled) drainLongAnimationFrames();
+      drainLongTasks();
+    }
     return structuredClone({
       drawHookTimingCount: state.drawHookTimingCount,
       drawHookTimings: state.drawHookTimings,
@@ -9935,6 +12397,15 @@ const INSTRUMENTATION_SOURCE = String.raw`
       workerMessageTimingCount: state.workerMessageTimingCount,
       workerMessageTimings: state.workerMessageTimings
     });
+  };
+  state.snapshot = () => captureSnapshot();
+  state.finishScenarioSnapshot = () => {
+    const finalization = scenarioFinalizationCache.finishSnapshot(
+      () => finalizeCurrentScenario(),
+      () => captureSnapshot(false)
+    );
+    if (finalization) currentScenario = null;
+    return finalization;
   };
 })();
 `;
@@ -10208,6 +12679,11 @@ async function waitForAppMatrixPageRelease(
       modelCompletion,
       scenarioStart,
     );
+    if (!lastSnapshot || typeof lastSnapshot !== "object" ||
+        Array.isArray(lastSnapshot)) {
+      lastSnapshot = null;
+      snapshotErrorPresent = true;
+    }
   } catch {
     snapshotErrorPresent = true;
   }
@@ -11766,6 +14242,193 @@ async function captureAppMatrixPriorityMountFailure(
   };
 }
 
+async function captureAppMatrixPreviewCompositionFailure(
+  cdp,
+  {
+    adjacentScrollProof,
+    checkpoint,
+    expectedPreviewTarget,
+    failureCategory,
+    importEvent,
+    pageNumber,
+    scenarioStart,
+    wait,
+  },
+) {
+  const snapshot = await evaluate(
+    cdp,
+    browserExpression(`
+      const state = globalThis.__lineLightIssue68;
+      const workerEvents = Array.isArray(state?.workerEvents)
+        ? state.workerEvents
+        : [];
+      const draws = Array.isArray(state?.draws) ? state.draws : [];
+      const reader = document.querySelector('.reader-scroll');
+      const list = document.querySelector('.pdf-pages');
+      const block = document.querySelector('#pdf-page-${pageNumber}');
+      const canvas = block?.querySelector('canvas');
+      const canvasRect = canvas?.getBoundingClientRect() ?? null;
+      const rectangle = (element) => {
+        const rect = element?.getBoundingClientRect();
+        return rect ? {
+          bottom: rect.bottom,
+          left: rect.left,
+          right: rect.right,
+          top: rect.top
+        } : null;
+      };
+      const finiteOrNull = (value) => Number.isFinite(value) ? value : null;
+      const booleanOrNull = (value) =>
+        typeof value === 'boolean' ? value : null;
+      const targetEvents = workerEvents.filter((event) =>
+        Number.isInteger(event?.eventId) &&
+        event.eventId > ${importEvent?.eventId ?? "null"} &&
+        event.pageNumber === ${pageNumber} &&
+        ['render', 'bitmap'].includes(event.type)
+      );
+      const targetDraws = draws.slice(${scenarioStart?.drawStart ?? 0})
+        .filter((draw) => draw?.page === ${pageNumber});
+      const workerItems = targetEvents.slice(
+        0,
+        ${APP_MATRIX_PREVIEW_COMPOSITION_LEDGER_LIMIT},
+      ).map((event) => ({
+        activityId: event.activityId ?? null,
+        at: finiteOrNull(event.at),
+        direction: event.direction ?? null,
+        distance: finiteOrNull(event.distance),
+        documentKey: event.documentKey ?? null,
+        enabled: booleanOrNull(event.enabled),
+        eventId: event.eventId ?? null,
+        height: finiteOrNull(event.height),
+        jobId: event.jobId ?? null,
+        pageNumber: event.pageNumber ?? null,
+        revision: event.revision ?? null,
+        scale: finiteOrNull(event.scale),
+        type: event.type ?? null,
+        visible: booleanOrNull(event.visible),
+        width: finiteOrNull(event.width),
+        workerInstanceId: event.workerInstanceId ?? null
+      }));
+      const drawItems = targetDraws.slice(
+        0,
+        ${APP_MATRIX_PREVIEW_COMPOSITION_LEDGER_LIMIT},
+      ).map((draw) => ({
+        activityId: draw.activityId ?? null,
+        at: finiteOrNull(draw.at),
+        bitmapEventId: draw.bitmapEventId ?? null,
+        compositionId: draw.compositionId ?? null,
+        distance: finiteOrNull(draw.distance),
+        drawInvocationId: draw.drawInvocationId ?? null,
+        geometry: draw.geometry ?? null,
+        geometryVisible: booleanOrNull(draw.geometryVisible),
+        height: finiteOrNull(draw.height),
+        page: draw.page ?? null,
+        readerViewport: draw.readerViewport ?? null,
+        scale: finiteOrNull(draw.scale),
+        source: draw.source ?? null,
+        visible: booleanOrNull(draw.visible),
+        visiblePages: Array.isArray(draw.visiblePages)
+          ? [...draw.visiblePages]
+          : null,
+        width: finiteOrNull(draw.width)
+      }));
+      const phaseStages = new Set([
+        'adjacent-scroll-started',
+        'adjacent-scroll-completed',
+        'preview-composition-started'
+      ]);
+      const phaseMarkers = (state?.phaseMarkers ?? []).filter((marker) =>
+        marker?.configurationId === ${JSON.stringify(scenarioStart?.id ?? null)} &&
+        phaseStages.has(marker?.stage)
+      ).map((marker) => ({
+        activityId: marker.activityId,
+        at: marker.at,
+        configurationId: marker.configurationId,
+        drawInvocationId: marker.drawInvocationId,
+        sequence: marker.sequence,
+        stage: marker.stage,
+        workerEventId: marker.workerEventId
+      }));
+      const pageEvent = workerEvents.findLast((event) =>
+        event.direction === 'from-worker' && event.type === 'page' &&
+        event.pageNumber === ${pageNumber} &&
+        event.workerInstanceId === ${importEvent?.workerInstanceId ?? "null"} &&
+        event.jobId === ${importEvent?.jobId ?? "null"} &&
+        event.documentKey === ${JSON.stringify(importEvent?.documentKey ?? null)} &&
+        event.revision === ${JSON.stringify(importEvent?.revision ?? null)}
+      ) ?? null;
+      const failureBoundary = state?.readMatrixRuntimeBoundary?.() ?? null;
+      return {
+        drawItems,
+        drawTotal: targetDraws.length,
+        drawTruncated: targetDraws.length > drawItems.length,
+        failureBoundary,
+        page: {
+          canvas: {
+            connected: canvas?.isConnected === true,
+            cssHeight: finiteOrNull(canvasRect?.height),
+            cssWidth: finiteOrNull(canvasRect?.width),
+            devicePixelRatio: finiteOrNull(devicePixelRatio),
+            height: Number.isInteger(canvas?.height) ? canvas.height : null,
+            present: Boolean(canvas),
+            scale: finiteOrNull(Number(canvas?.dataset.pdfRasterScale)),
+            source: canvas?.dataset.pdfRenderSource || null,
+            targetHeight: finiteOrNull(Number(canvas?.dataset.pdfRasterTargetHeight)),
+            targetScale: finiteOrNull(Number(canvas?.dataset.pdfRasterTargetScale)),
+            targetWidth: finiteOrNull(Number(canvas?.dataset.pdfRasterTargetWidth)),
+            visualViewportScale: finiteOrNull(visualViewport?.scale || 1),
+            width: Number.isInteger(canvas?.width) ? canvas.width : null
+          },
+          distance: finiteOrNull(Number(block?.dataset.pdfPageDistance)),
+          page: block
+            ? finiteOrNull(Number(block.dataset.pdfPageIndex) + 1)
+            : null,
+          pageHeight: finiteOrNull(pageEvent?.pageHeight),
+          pageWidth: finiteOrNull(pageEvent?.pageWidth),
+          present: Boolean(block),
+          rect: rectangle(block),
+          textOverlayCount: block?.querySelectorAll('.pdf-word-overlay').length ?? 0,
+          visible: block ? block.dataset.pdfPageVisible === 'true' : null
+        },
+        phaseMarkers,
+        range: list?.dataset.pdfRange ?? null,
+        reader: {
+          rect: rectangle(reader),
+          scrollTop: finiteOrNull(reader?.scrollTop)
+        },
+        visiblePages: Array.from(document.querySelectorAll(
+          '.pdf-page-block[data-pdf-page-visible="true"]'
+        )).map((candidate) => Number(candidate.dataset.pdfPageIndex) + 1)
+          .filter(Number.isInteger).sort((left, right) => left - right),
+        workerItems,
+        workerTotal: targetEvents.length,
+        workerTruncated: targetEvents.length > workerItems.length
+      };
+    `),
+  );
+  return {
+    adjacentScrollProof: adjacentScrollProof ?? null,
+    checkpoint,
+    drawItems: snapshot?.drawItems ?? null,
+    drawTotal: snapshot?.drawTotal ?? null,
+    drawTruncated: snapshot?.drawTruncated ?? null,
+    expectedPreviewTarget: expectedPreviewTarget ?? null,
+    failureBoundary: snapshot?.failureBoundary ?? null,
+    failureCategory,
+    importEventId: importEvent?.eventId ?? null,
+    page: snapshot?.page ?? null,
+    phaseMarkers: snapshot?.phaseMarkers ?? null,
+    range: snapshot?.range ?? null,
+    reader: snapshot?.reader ?? null,
+    scenarioStart: scenarioStart ?? null,
+    visiblePages: snapshot?.visiblePages ?? null,
+    wait: wait ?? null,
+    workerItems: snapshot?.workerItems ?? null,
+    workerTotal: snapshot?.workerTotal ?? null,
+    workerTruncated: snapshot?.workerTruncated ?? null,
+  };
+}
+
 async function waitForSharpCanvas(
   cdp,
   pageNumber,
@@ -11812,6 +14475,125 @@ async function waitForSharpCanvas(
     `page ${pageNumber} physical-pixel raster`,
     SCENARIO_TIMEOUT_MS,
   );
+}
+
+async function waitForPdfPreviewTarget(
+  cdp,
+  pageNumber,
+  modelIdentity,
+  { visible = null } = {},
+) {
+  const geometry = await waitForExpression(
+    cdp,
+    browserExpression(`
+      const block = document.querySelector('#pdf-page-${pageNumber}');
+      const canvas = block?.querySelector('canvas');
+      const bounds = canvas?.getBoundingClientRect();
+      const pageEvent = globalThis.__lineLightIssue68.workerEvents.findLast(
+        (event) => event.direction === 'from-worker' &&
+          event.type === 'page' && event.pageNumber === ${pageNumber} &&
+          event.workerInstanceId === ${modelIdentity?.workerInstanceId ?? "null"} &&
+          event.jobId === ${modelIdentity?.importJobId ?? "null"} &&
+          event.documentKey === ${JSON.stringify(modelIdentity?.documentKey ?? null)} &&
+          event.revision === ${JSON.stringify(modelIdentity?.revision ?? null)}
+      );
+      const visibilityBound = ${JSON.stringify(visible)} === null ||
+        (block?.dataset.pdfPageVisible === String(${JSON.stringify(visible)}) &&
+          Number(block?.dataset.pdfPageDistance) === (${JSON.stringify(visible)} ? 0 : 1));
+      return visibilityBound && canvas?.isConnected === true &&
+        bounds?.width > 0 && bounds?.height > 0 &&
+        pageEvent?.pageWidth > 0 && pageEvent?.pageHeight > 0 && {
+        cssHeight: bounds.height,
+        cssWidth: bounds.width,
+        devicePixelRatio,
+        pageHeight: pageEvent?.pageHeight,
+        pageWidth: pageEvent?.pageWidth,
+        visualViewportScale: visualViewport?.scale || 1
+      };
+    `),
+    `page ${pageNumber} independently derived preview target`,
+    SCENARIO_TIMEOUT_MS,
+  );
+  const sharpTarget = resolvePdfRasterTarget(geometry);
+  return constrainPdfRasterScale({
+    pageHeight: geometry.pageHeight,
+    pageWidth: geometry.pageWidth,
+    scale: Math.min(sharpTarget.scale, 1.25),
+  });
+}
+
+async function waitForPdfPreviewCompositionSettlement(
+  cdp,
+  {
+    expectedTarget,
+    importEvent,
+    pageNumber,
+    runtimeDiagnostic,
+    scenarioStart,
+  },
+  timeoutMs = SCENARIO_TIMEOUT_MS,
+) {
+  const startedAt = Date.now();
+  let evaluationAttemptCount = 0;
+  let evaluationErrorCount = 0;
+  const annotateUnexpected = (error) => {
+    const annotated = error instanceof Error
+      ? error
+      : new Error("App-matrix preview composition wait failed.");
+    annotated.pdfPreviewCompositionWait = {
+      elapsedMs: Date.now() - startedAt,
+      evaluationAttemptCount,
+      evaluationErrorCount,
+      outcome: "unexpected",
+      timeoutMs,
+    };
+    return annotated;
+  };
+  const expression = browserExpression(`
+    const select = (${selectPdfRasterCompositionSettlement.toString()});
+    return select({
+      draws: globalThis.__lineLightIssue68?.draws,
+      expectedTarget: ${JSON.stringify(expectedTarget)},
+      importEvent: ${JSON.stringify(importEvent)},
+      pageNumber: ${pageNumber},
+      requireDraw: true,
+      scenarioStart: ${JSON.stringify(scenarioStart)},
+      workerEvents: globalThis.__lineLightIssue68?.workerEvents
+    }) || false;
+  `);
+  while (Date.now() - startedAt < timeoutMs) {
+    if (runtimeDiagnostic?.abortState?.aborted === true) {
+      throw annotateUnexpected(
+        new Error("App-matrix runtime diagnostic collection was aborted."),
+      );
+    }
+    try {
+      evaluationAttemptCount += 1;
+      const settlement = await evaluate(cdp, expression);
+      if (settlement) return settlement;
+    } catch (error) {
+      if (
+        runtimeDiagnostic?.abortState?.aborted === true ||
+        (typeof cdp?.webSocket?.readyState === "number" &&
+          cdp.webSocket.readyState !== 1)
+      ) {
+        throw annotateUnexpected(error);
+      }
+      evaluationErrorCount += 1;
+    }
+    await delay(100);
+  }
+  const error = new Error(
+    `Timed out waiting for page ${pageNumber} connected-canvas preview composition.`,
+  );
+  error.pdfPreviewCompositionWait = {
+    elapsedMs: Date.now() - startedAt,
+    evaluationAttemptCount,
+    evaluationErrorCount,
+    outcome: "timeout",
+    timeoutMs,
+  };
+  throw error;
 }
 
 async function readViewport(cdp) {
@@ -12304,11 +15086,7 @@ async function finalizeFailedAppMatrixRuntimeScenario(cdp, runtimeDiagnostic) {
   try {
     const finalized = await evaluate(
       cdp,
-      browserExpression(`
-        const scenario = globalThis.__lineLightIssue68.finishScenario();
-        const snapshot = globalThis.__lineLightIssue68.snapshot();
-        return { scenario, snapshot };
-      `),
+      `globalThis.__lineLightIssue68.finishScenarioSnapshot()`,
     );
     rememberAppMatrixRuntimeSnapshot(
       runtimeDiagnostic,
@@ -12381,7 +15159,7 @@ async function collectMatrixRun(
       readiness: restoreReadiness,
     },
   });
-  await runAppMatrixRuntimeStage(
+  const sourceObservation = await runAppMatrixRuntimeStage(
     cdp,
     runtimeDiagnostic,
     "file-select",
@@ -12393,21 +15171,21 @@ async function collectMatrixRun(
         "the browser-side imported PDF hash",
         SCENARIO_TIMEOUT_MS,
       );
-      if (runtimeDiagnostic) {
-        const observedSources = await evaluate(
+      if (!runtimeDiagnostic) return null;
+      const observedSources = await evaluate(
           cdp,
           `globalThis.__lineLightIssue68.sourceFiles.map(({ sha256, size }) => ({ sha256, size }))`,
-        );
-        runtimeDiagnostic.sourceObservation = {
-          bytes: observedSources?.[0]?.size ?? null,
-          selectionCount: Array.isArray(observedSources)
-            ? observedSources.length
-            : null,
-          sha256: observedSources?.[0]?.sha256 ?? null,
-        };
-      }
+      );
+      return {
+        bytes: observedSources?.[0]?.size ?? null,
+        selectionCount: Array.isArray(observedSources)
+          ? observedSources.length
+          : null,
+        sha256: observedSources?.[0]?.sha256 ?? null,
+      };
     },
   );
+  if (runtimeDiagnostic) runtimeDiagnostic.sourceObservation = sourceObservation;
   let importEvent = null;
   const modelCompletion = await runAppMatrixRuntimeStage(
     cdp,
@@ -12444,13 +15222,22 @@ async function collectMatrixRun(
     runtimeDiagnostic.modelIdentity = importEvent
       ? {
           documentKey: importEvent.documentKey,
+          importActivityId: importEvent.activityId,
+          importAt: importEvent.at,
           importEventId: importEvent.eventId,
           importJobId: importEvent.jobId,
           revision: importEvent.revision,
           workerInstanceId: importEvent.workerInstanceId,
         }
       : null;
-    runtimeDiagnostic.modelCompletion = modelCompletion;
+    runtimeDiagnostic.modelCompletion = importEvent
+      ? {
+          ...modelCompletion,
+          importActivityId: importEvent.activityId,
+          importEventId: importEvent.eventId,
+          workerInstanceId: importEvent.workerInstanceId,
+        }
+      : null;
   }
   const adjacent = await runAppMatrixRuntimeStage(
     cdp,
@@ -12483,25 +15270,41 @@ async function collectMatrixRun(
     ),
   );
   if (runtimeDiagnostic) runtimeDiagnostic.scenarioStart = scenarioStart;
+  let initialPreviewTarget = null;
   await runAppMatrixRuntimeStage(
     cdp,
     runtimeDiagnostic,
     "adjacent-bitmap",
-    () => waitForExpression(
-      cdp,
-      browserExpression(`
-        return globalThis.__lineLightIssue68.workerEvents.find((event) =>
-          event.direction === 'from-worker' &&
-          event.type === 'bitmap' &&
-          event.pageNumber === ${adjacent.page} &&
-          event.jobId === ${modelCompletion.importJobId} &&
-          event.revision === ${JSON.stringify(modelCompletion.revision)} &&
-          event.scale <= 1.2500001
-        ) || false;
-      `),
-      `page ${adjacent.page} adjacent 1.25x worker preview`,
-      SCENARIO_TIMEOUT_MS,
-    ),
+    async () => {
+      initialPreviewTarget = await waitForPdfPreviewTarget(
+        cdp,
+        adjacent.page,
+        runtimeDiagnostic?.modelIdentity ?? {
+          documentKey: importEvent.documentKey,
+          importJobId: importEvent.jobId,
+          revision: importEvent.revision,
+          workerInstanceId: importEvent.workerInstanceId,
+        },
+        { visible: false },
+      );
+      return waitForExpression(
+        cdp,
+        browserExpression(`
+        const select = (${selectPdfRasterCompositionSettlement.toString()});
+        return select({
+          draws: globalThis.__lineLightIssue68.draws,
+          expectedTarget: ${JSON.stringify(initialPreviewTarget)},
+          importEvent: ${JSON.stringify(importEvent)},
+          pageNumber: ${adjacent.page},
+          requireDraw: false,
+          scenarioStart: ${JSON.stringify(scenarioStart)},
+          workerEvents: globalThis.__lineLightIssue68.workerEvents
+        }) || false;
+        `),
+        `page ${adjacent.page} adjacent 1.25x worker preview`,
+        SCENARIO_TIMEOUT_MS,
+      );
+    },
   );
   const beforeViewport = await readViewport(cdp);
   const expectedDpr =
@@ -12529,32 +15332,61 @@ async function collectMatrixRun(
       );
     },
   );
-  await runAppMatrixRuntimeStage(
+  let adjacentScrollProof = null;
+  adjacentScrollProof = await runAppMatrixRuntimeStage(
     cdp,
     runtimeDiagnostic,
     "adjacent-scroll",
     () => scrollPageIntoView(cdp, adjacent.page),
   );
-  const previewComposition = await runAppMatrixRuntimeStage(
-    cdp,
-    runtimeDiagnostic,
-    "preview-composition",
-    () => waitForExpression(
+  let expectedPreviewTarget = null;
+  let previewSettlement = null;
+  let previewComposition = null;
+  let previewCompositionCheckpoint = "target-derivation";
+  try {
+    previewSettlement = await runAppMatrixRuntimeStage(
       cdp,
-      browserExpression(`
-        return globalThis.__lineLightIssue68.draws.find((draw) =>
-          draw.page === ${adjacent.page} &&
-          draw.visible === true &&
-          draw.source === 'worker-bitmap' &&
-          draw.scale > 0 &&
-          draw.scale <= 1.2500001 &&
-          draw.at >= ${scenarioStart.startedAt}
-        ) || false;
-      `),
-      `page ${adjacent.page} connected-canvas preview composition`,
-      SCENARIO_TIMEOUT_MS,
-    ),
-  );
+      runtimeDiagnostic,
+      "preview-composition",
+      async () => {
+        expectedPreviewTarget = await waitForPdfPreviewTarget(
+          cdp,
+          adjacent.page,
+          runtimeDiagnostic?.modelIdentity ?? {
+            documentKey: importEvent.documentKey,
+            importJobId: importEvent.jobId,
+            revision: importEvent.revision,
+            workerInstanceId: importEvent.workerInstanceId,
+          },
+          { visible: true },
+        );
+        previewCompositionCheckpoint = "composition-wait";
+        return waitForPdfPreviewCompositionSettlement(cdp, {
+          expectedTarget: expectedPreviewTarget,
+          importEvent,
+          pageNumber: adjacent.page,
+          runtimeDiagnostic,
+          scenarioStart,
+        });
+      },
+    );
+    previewComposition = previewSettlement.draw;
+  } catch (error) {
+    if (runtimeDiagnostic) {
+      runtimeDiagnostic.previewCompositionDiagnostic =
+        await captureAppMatrixPreviewCompositionFailure(cdp, {
+          adjacentScrollProof,
+          checkpoint: previewCompositionCheckpoint,
+          expectedPreviewTarget,
+          failureCategory: appMatrixPriorityMountFailureCategory(error),
+          importEvent,
+          pageNumber: adjacent.page,
+          scenarioStart,
+          wait: error?.pdfPreviewCompositionWait ?? null,
+        }).catch(() => null);
+    }
+    throw error;
+  }
   let rasterTransition;
   let sharp;
   let sharpComposition;
@@ -12624,7 +15456,10 @@ async function collectMatrixRun(
     () => collectAlignmentEvidence(cdp, configuration.id),
   );
   const intermediatePage = Math.min(6, adjacent.page + 1);
-  const priorityTarget = Math.min(6, adjacent.page + 2);
+  const priorityTarget = Math.min(
+    6,
+    adjacent.page + (configuration.kind === "mobile" ? 3 : 2),
+  );
   if (runtimeDiagnostic) runtimeDiagnostic.priorityTarget = priorityTarget;
   await runAppMatrixRuntimeStage(
     cdp,
@@ -12778,25 +15613,17 @@ async function collectMatrixRun(
           };
         `),
       );
-      const finalized = runtimeDiagnostic
-        ? await evaluate(
-            cdp,
-            browserExpression(`
-              const scenario = globalThis.__lineLightIssue68.finishScenario();
-              const snapshot = globalThis.__lineLightIssue68.snapshot();
-              return { scenario, snapshot };
-            `),
-          )
-        : {
-            scenario: await evaluate(
-              cdp,
-              `globalThis.__lineLightIssue68.finishScenario()`,
-            ),
-            snapshot: await evaluate(
-              cdp,
-              `globalThis.__lineLightIssue68.snapshot()`,
-            ),
-          };
+      const finalized = await evaluate(
+        cdp,
+        `globalThis.__lineLightIssue68.finishScenarioSnapshot()`,
+      );
+      if (runtimeDiagnostic) {
+        rememberAppMatrixRuntimeSnapshot(
+          runtimeDiagnostic,
+          finalized?.snapshot,
+          finalized?.scenario,
+        );
+      }
       return {
         release,
         scenario: finalized?.scenario,
@@ -12817,21 +15644,10 @@ async function collectMatrixRun(
       event.revision === modelCompletion.revision,
   );
   const previewRequestIndex = targetWorkerEvents.findIndex(
-    (event) =>
-      event.direction === "to-worker" &&
-      event.type === "render" &&
-      event.enabled === true &&
-      event.visible === false &&
-      event.distance === 1 &&
-      event.scale <= 1.25 + 1e-7,
+    (event) => event.eventId === previewSettlement.request.eventId,
   );
   const previewBitmapEvent = targetWorkerEvents.find(
-    (event) =>
-      event.direction === "from-worker" &&
-      event.type === "bitmap" &&
-      event.scale <= 1.25 + 1e-7 &&
-      event.width === previewComposition.width &&
-      event.height === previewComposition.height,
+    (event) => event.eventId === previewSettlement.bitmap.eventId,
   );
   const sharpBitmapEvent = targetWorkerEvents.find(
     (event) =>
@@ -13073,7 +15889,9 @@ async function collectMatrixRun(
     },
   };
   } catch (error) {
-    await finalizeFailedAppMatrixRuntimeScenario(cdp, runtimeDiagnostic);
+    if (runtimeDiagnostic?.stageHistory?.includes("scenario-start-started")) {
+      await finalizeFailedAppMatrixRuntimeScenario(cdp, runtimeDiagnostic);
+    }
     throw error;
   }
 }
@@ -14418,14 +17236,18 @@ async function run(options) {
                 currentStage: null,
                 failureStage: null,
                 finalizationErrorPresent: false,
+                modelCompletion: null,
                 modelIdentity: null,
                 networkFailure: null,
                 networkFixedPoint: null,
                 priorityProbe: null,
                 priorityMountDiagnostic: null,
+                previewCompositionDiagnostic: null,
                 priorityTarget: null,
                 releaseSnapshot: null,
                 scenario: null,
+                scenarioFinalized: false,
+                scenarioStart: null,
                 screenshot: null,
                 sequence: appMatrixRuntimeRows.length + 1,
                 sessionIdentityHash: appMatrixRuntimeSessionIdentityHash,

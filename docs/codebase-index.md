@@ -337,7 +337,10 @@ Frame scripts retain only fixed source/invoker classes and function-name
 presence; callback and drained batches are bound by each frame's own half-open
 scenario overlap and sorted before the bounded snapshot, so delayed delivery
 cannot move a prior frame into the next row. Raw URLs and names never enter the
-report. Release proof is anchored
+report. A release snapshot-read failure has a separate exact poll-only variant
+with fixed released/timeout classification and no DOM, geometry, identity, or
+error fields. Scenario finalization caches one idempotent scenario/snapshot
+pair so retry cannot move a previously frozen boundary. Release proof is anchored
 to the polled DOM/geometry/canvas state, so an empty post-boundary worker-event
 list is valid; any retained event must still match the current worker, job,
 revision, page, type, and order. After each navigation, the diagnostic first
@@ -370,11 +373,34 @@ network stage retains the already-built label-bound timeout diagnostic as fixed
 failure classes, derived gates/counts, and bounded ID-free stability samples;
 unexpected failures remain a separate fixed category. Its
 fresh-build/source, external-output, privacy, single-session, and full
-app/server teardown bindings are fail-closed. Noncanonical diagnostic schema 7
+app/server teardown bindings are fail-closed. Noncanonical diagnostic schema 8
 also exposes fixed boolean-only row-identity and network-history conjuncts plus
 their exact aggregates, without document, revision, session, path, URL, or raw
 error values; nonrequired first-row history is explicitly true with
-`required: false`. A priority-mount failure additionally retains one
+`required: false`. Row-owned source, model, adjacent-page, scenario, screenshot,
+priority, release, and network fields are exact nulls before their producer
+assignment boundary and exact producer-shaped values afterward. The schema
+binds model import/page/progress/complete records in producer array order with
+safe event/activity IDs and clocks, one worker/job/revision identity, exact
+revision-suffixed document key, ordered unique pages, and terminal progress
+before completion. It compares page numbers fieldwise so cyclic or non-JSON
+values fail closed without throwing. The schema
+accepts partial scenario-start finalization and terminal completed-stage
+failures without accepting premature or missing later-stage fields.
+
+Adjacent-bitmap and visible-preview stages share a pure selector over the exact
+import occurrence, an ordered worker/job/revision/page/scale-compatible render
+request and later bitmap, and an exact WeakMap-linked bitmap draw. Worker work
+may predate scenario start, while the connected-canvas draw must be post-scenario
+and may occur during adjacent scrolling. Draws are sliced by their actual array
+occurrence and bound to the exact composition index. The selector independently checks the
+canvas-derived target, dimensions, order, distance, visibility, visible-page
+membership, and canvas/reader geometry. The current canonical evidence policy
+still requires an at-most-1.25x preview per row; a legitimate retained sharp
+bitmap is classified by the failure diagnostic but does not masquerade as that
+preview.
+
+A priority-mount failure additionally retains one
 non-polling browser snapshot bound to the exact import and
 `priority-mount-started` worker-event boundaries. Its fixed checkpoint and
 failure class, final page-centering samples, intermediate/target shell and
@@ -391,8 +417,24 @@ parsed into bounded numeric pages/ranges before publication. The report
 publishes no raw event, worker, job, document, revision, URL, path, or exception
 identities, and truncation or a
 malformed snapshot invalidates the partial row. Success and every other failure
-stage require this snapshot to be null. The report is explicitly
-noncanonical and cannot satisfy Issue 68 acceptance.
+stage require this snapshot to be null. A distinct failure-only
+`previewCompositionDiagnostic` is captured before finalization only at a failed
+`preview-composition-started` stage. It records fixed target-derivation or
+composition-wait and timeout/unexpected classes, stable scroll proof, exact
+phase/failure boundaries, sanitized terminal state, optional poll counts, and
+at most sixteen untruncated worker/draw entries. Missing target preconditions
+become a fixed `target-unavailable` projection with exact availability booleans
+and nullable safe measurements, while a fully ready late capture is fixed as
+`target-available-after-failure`; contradictory presence, connection,
+visibility, distance, range, and geometry states fail closed. Otherwise the sanitizer distinguishes preview,
+direct sharp, same-target preview satisfaction, preview-to-sharp upgrade,
+resolution regression across every composition, and no matching composition from one compatible
+request/bitmap prefix and exact bitmap/draw edge. Only local order,
+scenario-relative time, opaque hashes, fixed classes, and recomputed predicates
+are published; raw event/activity/composition, worker/job/revision/document,
+URL, path, and error values are omitted. Success and other failure stages
+require this preview snapshot to be null. The report is explicitly noncanonical
+and cannot satisfy Issue 68 acceptance.
 A third, reference-only diagnostic allowlists the first desktop/page-2 and
 mobile-DPR-3/page-3 native-viewer configurations for the exact public fixture
 and retains two consecutive byte-identical PNG candidates plus the analyzer's

@@ -96,7 +96,12 @@ recomputed reader/layout/visual intersections, mounted range, viewport, and
 bounded import-bound worker/draw activity. The polled DOM, geometry, canvas,
 and viewport state is authoritative for release, so no repeated post-boundary
 worker disable message is required; any event that is present remains bound to
-the current worker, job, revision, page, type, and order. After every navigation,
+the current worker, job, revision, page, type, and order. If only the final
+snapshot read fails, an exact reduced variant publishes fixed poll counts and a
+`released-snapshot-unavailable` or `timeout-snapshot-unavailable` class, with no
+DOM, geometry, identity, or error claim. Scenario finalization retains one
+idempotent scenario/snapshot pair so a lost response or transient snapshot
+failure can be retried without moving the terminal boundary. After every navigation,
 the row first proves the startup library branch has settled: row one has no
 active PDF, open/import request, or selected source; later rows have one `open`
 whose document ID matches the active IndexedDB document and whose exact
@@ -125,12 +130,17 @@ when it is more than two pixels away. It proceeds only after two subsequent
 samples in which the page stays visible and centered, with unchanged reader
 `scrollTop`, full page rectangle, and virtual range.
 Thus inherited CSS smooth scrolling cannot bind a transient page-three view for
-the first four configurations. The schema-7 noncanonical report exposes only
+the first four configurations. The schema-8 noncanonical report exposes only
 boundary counts, derived deltas, restore counts/booleans, and exact boolean-only
 integrity reasons. Those reasons separately report every row configuration,
 sequence, session, adjacent-page, priority-target, and model
 job/document/revision match plus every required current/prior network-history
-and continuity match, with conjunction-bound aggregates. First-row history is
+and continuity match, with conjunction-bound aggregates. Model completion
+itself binds the exact
+revision-suffixed document key and one worker/job/revision chain, with safe
+monotonic import/page/progress/complete event and activity IDs and clocks,
+producer-ordered unique pages, and terminal progress before completion.
+First-row history is
 explicitly not required while all of its vacuous history gates remain true; no
 underlying identity, document, revision, path, URL, or raw error is added.
 Bounded phase, draw-hook, canvas sampler,
@@ -144,7 +154,40 @@ prior-row delivery while retaining a boundary-spanning frame. A failed network
 fixed-point stage retains the label-bound timeout diagnostic as fixed failure
 classes, derived gates/counts, and at most twelve ID-free stability samples;
 unexpected failures use a separate fixed category.
-If `priority-mount-started` fails, schema 7 takes one heavy browser snapshot
+Schema 8 validates each row field at its producer assignment boundary. Source,
+model, adjacent-page, scenario-start, screenshot, priority-target,
+priority-probe, release, and network fields must be exactly null before that
+boundary and have their exact producer shape after it. A failed
+`scenario-start-started` row may retain either the exact finalized scenario or
+the exact absent state, and failures after a completed stage remain valid when
+all fields assigned through that prefix are present. This preserves states the
+runner can actually produce without borrowing a later-stage identity.
+
+The adjacent-bitmap and visible-preview waits share one pure selector. It finds
+the latest preceding import-bound worker/job/revision/page/scale-compatible
+render request, a later compatible bitmap, and—when composition is required—an
+exact WeakMap-linked bitmap draw on the connected canvas. The request and
+bitmap may precede scenario start; the draw must be post-scenario and may occur
+during adjacent scrolling. Scale, dimensions, order, visibility, distance,
+visible-page membership, and canvas/reader intersection are checked
+independently. Request-to-bitmap is an ordered compatibility proof because the
+worker protocol has no request ID on a bitmap; bitmap-to-draw linkage is exact.
+The target is independently derived from the connected canvas CSS rectangle,
+page dimensions, DPR, and visual-viewport scale. Draw selection is bound to its
+actual post-scenario array occurrence and exact composition index; the failure
+sanitizer additionally requires matching compositions at or after the exact
+adjacent-scroll marker. Safe-magnitude clocks and scroll offsets plus
+positive-area reader/page/canvas rectangles prevent overflow or zero-area
+geometry claims.
+
+The current canonical Issue 68 evidence policy still requires an exact
+at-most-1.25x preview composition in every row. A producer-valid retained sharp
+bitmap therefore does not satisfy this diagnostic run's preview wait; schema 8
+classifies it as `direct-sharp` rather than presenting it as a preview. This is
+an explicit evidence policy, not a product invariant that an already-sharp
+cache entry must be downgraded. The priority probe chooses page 6 on the mobile
+rows so its target remains offscreen before the explicit priority action.
+If `priority-mount-started` fails, schema 8 takes one heavy browser snapshot
 after the failure instead of adding another poll. It records the fixed
 `intermediate-scroll`, `target-shell`, or `preview-settle` checkpoint and a
 `timeout` or `unexpected` class; binds the exact current import and phase-marker
@@ -163,8 +206,27 @@ identity-bound bitmap after the strict request. The ledger publishes only local/
 measurements, opaque hashes, match booleans, and bounded counts. Truncation, malformed shape,
 or a forged boundary fails the partial row closed; successful and other-stage
 rows require a null priority snapshot.
+If `preview-composition-started` fails, a separate failure-only snapshot is
+captured before scenario finalization. Its fixed `target-derivation` or
+`composition-wait` checkpoint and `timeout` or `unexpected` category retain the
+stable adjacent-scroll proof, exact scenario/phase/failure boundaries, terminal
+page/canvas/reader/range state, poll counts when available, and at most sixteen
+untruncated worker and draw entries. Target-derivation failures publish exact
+availability booleans and nullable safe terminal measurements as
+`target-unavailable`; synchronously contradictory presence, connection,
+visibility, distance, range, and geometry states fail closed. If every target
+precondition becomes true only after the failure, the fixed class is
+`target-available-after-failure`. Composition-wait failures distinguish `preview`,
+`direct-sharp`, `preview-satisfied-target`, `preview-then-sharp`,
+`resolution-regression`, and `none`. The regression class scans every
+composition and remains set for sharp-to-lower-preview sequences even when a
+later sharp draw recovers. Public ledgers use only local order,
+scenario-relative time, opaque identity hashes, fixed classes, and recomputed
+predicates. Raw event/activity/composition, worker/job/revision/document, path,
+URL, and exception values never enter the report. Successful rows and failures
+at every other stage require this snapshot to be exactly null.
 Raw errors, function names, document identities, URLs, profile paths, and
-arbitrary local output paths are not serialized. Its schema-7 noncanonical
+arbitrary local output paths are not serialized. Its schema-8 noncanonical
 report is `diagnostic: true`, has `completed` rather than `passed`, and cannot
 satisfy canonical acceptance; exact clean source/build/fixture/session bindings
 and app/CDP/process/profile/server teardown remain mandatory.
